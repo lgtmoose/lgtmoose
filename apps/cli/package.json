@@ -1,0 +1,20 @@
+{
+  "name": "lgtmoose",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CLI for LGTMoose: set up, authenticate, deploy and dry-run reviews.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "lgtmoose": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "tsx src/index.ts"
+  }
+}

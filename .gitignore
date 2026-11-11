@@ -1,0 +1,13 @@
+node_modules/
+dist/
+cdk.out/
+coverage/
+.turbo/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Written by `lgtmoose setup`; contains account-specific settings.
+lgtmoose.config.ts

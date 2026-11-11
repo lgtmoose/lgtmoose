@@ -1,0 +1,42 @@
+name: Bug report
+description: Something LGTMoose did wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the review comment or log line if you can. Remove secrets and private code first.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LGTMoose version
+      placeholder: "0.1.0"
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Model provider
+      options:
+        - claude-code
+        - codex
+        - cursor-agent
+        - agent-sdk
+        - bedrock
+        - not sure
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - AWS CDK (lean)
+        - AWS CDK (standard)
+        - docker compose
+        - local dry-run

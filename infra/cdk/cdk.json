@@ -1,0 +1,9 @@
+{
+  "app": "tsx bin/lgtmoose.ts",
+  "watch": {
+    "include": ["bin/**", "lib/**"]
+  },
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true
+  }
+}
