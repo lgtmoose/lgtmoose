@@ -4,7 +4,7 @@ Thanks for helping. LGTMoose is pre-alpha, so expect things to move.
 
 ## Setup
 
-1. Install Node 22 (`nvm use`) and pnpm 10 (`corepack enable`).
+1. Install Node 24 (`nvm use`) and pnpm 10 (`corepack enable`).
 2. `pnpm install`
 3. `pnpm run check` runs format, lint, typecheck, tests, build and `cdk synth`. CI runs the same.
 
