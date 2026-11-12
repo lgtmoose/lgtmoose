@@ -11,6 +11,13 @@ interface HttpError extends Error {
   expose?: boolean;
 }
 
+/** An error's status if it's a real 4xx/5xx integer, else 500; res.status() throws on bad values. */
+function httpStatus(value: unknown): number {
+  return Number.isInteger(value) && (value as number) >= 400 && (value as number) <= 599
+    ? (value as number)
+    : 500;
+}
+
 /**
  * Last-resort error handler. Client errors keep their status and message; anything else becomes a
  * plain 500 so stack traces and internals never reach the caller. Express 5 forwards rejected
@@ -21,7 +28,7 @@ export const errorHandler: ErrorRequestHandler = (err: HttpError, _req, res, nex
     next(err);
     return;
   }
-  const status = err.status ?? err.statusCode ?? 500;
+  const status = httpStatus(err.status ?? err.statusCode);
   if (status >= 500) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });

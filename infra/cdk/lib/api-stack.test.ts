@@ -107,6 +107,12 @@ describe("ApiStack", () => {
     });
   });
 
+  it("has no CORS until the dashboard adds it for its own origin", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      CorsConfiguration: Match.absent(),
+    });
+  });
+
   it("outputs the webhook URL for `lgtmoose deploy`", () => {
     const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
     expect(JSON.stringify(outputs.GithubWebhookUrl?.Value)).toContain(ROUTES.githubWebhook);

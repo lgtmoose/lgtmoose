@@ -12,6 +12,11 @@ export function webhooksRouter(maxBytes: string | number = MAX_WEBHOOK_BYTES): R
   const router = Router();
 
   router.post("/github", express.raw({ type: () => true, limit: maxBytes }), (req, res) => {
+    // No body at all (express.raw leaves req.body unset) or an empty one: a client error.
+    if (req.body === undefined || (Buffer.isBuffer(req.body) && req.body.length === 0)) {
+      res.status(400).json({ error: "Empty body" });
+      return;
+    }
     if (!Buffer.isBuffer(req.body)) {
       throw new Error("webhook body was parsed before signature verification");
     }

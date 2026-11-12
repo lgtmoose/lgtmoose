@@ -1,23 +1,17 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
-import {
-  CorsHttpMethod,
-  HttpApi,
-  HttpMethod,
-  HttpStage,
-  type IHttpApi,
-} from "aws-cdk-lib/aws-apigatewayv2";
+import { HttpApi, HttpMethod, HttpStage, type IHttpApi } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { Alarm, ComparisonOperator, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
-import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
-import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
+import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import { SECRET_NAMES } from "@lgtmoose/config";
 import { ROUTES } from "@lgtmoose/gateway/paths";
+import { lgtmooseFunction } from "./lambda.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const GATEWAY_HANDLER = join(REPO_ROOT, "apps/gateway/src/lambda.ts");
@@ -87,28 +81,15 @@ export class ApiStack extends Stack {
       SECRET_NAMES.githubWebhook,
     );
 
-    this.gatewayFunction = new NodejsFunction(this, "GatewayFunction", {
+    this.gatewayFunction = lgtmooseFunction(this, "GatewayFunction", {
       entry: GATEWAY_HANDLER,
-      handler: "handler",
-      runtime: Runtime.NODEJS_24_X,
-      architecture: Architecture.ARM_64,
       memorySize: 256,
       // API Gateway gives up after 30s; GitHub after 10s. The gateway only verifies and enqueues.
       timeout: Duration.seconds(10),
-      depsLockFilePath: join(REPO_ROOT, "pnpm-lock.yaml"),
-      projectRoot: REPO_ROOT,
       environment: {
         LGTMOOSE_VERSION: props.version,
         JOB_QUEUE_URL: this.jobQueue.queueUrl,
         GITHUB_WEBHOOK_SECRET_ARN: webhookSecret.secretArn,
-      },
-      bundling: {
-        format: OutputFormat.ESM,
-        mainFields: ["module", "main"],
-        // Express is CommonJS and requires Node built-ins; give the ESM bundle a real `require`.
-        banner:
-          "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
-        externalModules: ["@aws-sdk/*"],
       },
       logGroup: new LogGroup(this, "GatewayLogs", {
         retention: RetentionDays.ONE_MONTH,
@@ -119,16 +100,11 @@ export class ApiStack extends Stack {
     this.jobQueue.grantSendMessages(this.gatewayFunction);
     webhookSecret.grantRead(this.gatewayFunction);
 
+    // No CORS: GitHub and the CLI don't need it. The dashboard (NIC-840) adds it, limited to the
+    // dashboard's own origin, when it starts calling the API from the browser.
     const api = new HttpApi(this, "Api", {
       description: "LGTMoose webhooks and REST API",
       createDefaultStage: false,
-      corsPreflight: {
-        // The dashboard (NIC-840) will call the REST API from the browser.
-        allowMethods: [CorsHttpMethod.GET, CorsHttpMethod.POST, CorsHttpMethod.PUT],
-        allowHeaders: ["content-type", "authorization"],
-        allowOrigins: ["*"],
-        maxAge: Duration.hours(1),
-      },
     });
     new HttpStage(this, "DefaultStage", {
       httpApi: api,

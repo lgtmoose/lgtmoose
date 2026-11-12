@@ -10,8 +10,6 @@ export { ROUTES } from "./paths.js";
 export interface GatewayEnv {
   /** Deployed LGTMoose version, reported by the health route. */
   version: string;
-  /** Largest webhook body accepted. Defaults to GitHub's 25 MB cap. */
-  maxWebhookBytes?: string | number;
 }
 
 /**
@@ -24,11 +22,12 @@ export interface GatewayEnv {
 export function createApp(env: GatewayEnv): Express {
   const app = express();
   app.disable("x-powered-by");
-  // API Gateway (or a reverse proxy in docker compose) sits in front; trust its X-Forwarded-*.
-  app.set("trust proxy", true);
+  // Exactly one proxy sits in front (API Gateway, or the reverse proxy in docker compose). Trusting
+  // more hops would let callers choose req.ip with their own X-Forwarded-For header.
+  app.set("trust proxy", 1);
   app.use(helmet());
 
-  app.use("/webhooks", webhooksRouter(env.maxWebhookBytes));
+  app.use("/webhooks", webhooksRouter());
 
   app.use(express.json({ limit: MAX_JSON_BYTES }));
   app.use(ROUTES.health, healthRouter(env.version));
