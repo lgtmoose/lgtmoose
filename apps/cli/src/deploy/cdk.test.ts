@@ -99,8 +99,14 @@ describe("createCdk", () => {
       spawn: spawn as never,
     });
     await cdk.bootstrap("123456789012");
-    const args = (spawn.mock.calls[0] as unknown as [string, string[]])[1];
+    const [, args, spawnOptions] = spawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { cwd: string },
+    ];
     expect(args.slice(1)).toEqual(["bootstrap", "aws://123456789012/eu-west-2"]);
+    // Outside infra/cdk: with cdk.json in reach, the CDK synthesizes the app anyway.
+    expect(spawnOptions.cwd).toBe(tmpdir());
   });
 
   it("fails when the CDK exits non-zero", async () => {

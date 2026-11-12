@@ -89,47 +89,52 @@ export function rdsDatabaseControl(
     return undefined;
   }
 
-  async function waitUntilAvailable(identifier: string): Promise<Found> {
-    for (let waited = 0; ; waited += POLL_MS) {
-      const found = await find(identifier);
-      if (found === undefined) throw new Error(`${identifier} disappeared while waiting for it`);
-      if (found.status === "available") return found;
-      if (waited >= WAIT_MS) {
-        throw new Error(`${identifier} is still ${found.status} after 30 minutes`);
-      }
-      await sleep(POLL_MS);
-    }
-  }
-
   return {
     async setDeletionProtection(identifier, enabled) {
       try {
-        let found = await find(identifier);
-        if (found === undefined) return "missing";
-        if (found.deletionProtection === enabled) return "done";
-        if (found.status === "stopped") {
-          await client.send(
-            found.kind === "instance"
-              ? new StartDBInstanceCommand({ DBInstanceIdentifier: identifier })
-              : new StartDBClusterCommand({ DBClusterIdentifier: identifier }),
-          );
+        let started = false;
+        let modified = false;
+        for (let waited = 0; ; waited += POLL_MS) {
+          const found = await find(identifier);
+          // Being deleted counts as gone: it will never be available again.
+          if (found === undefined || found.status === "deleting") return "missing";
+          if (found.status === "available") {
+            if (found.deletionProtection === enabled) return "done";
+            if (!modified) {
+              await client.send(
+                found.kind === "instance"
+                  ? new ModifyDBInstanceCommand({
+                      DBInstanceIdentifier: identifier,
+                      DeletionProtection: enabled,
+                      ApplyImmediately: true,
+                    })
+                  : new ModifyDBClusterCommand({
+                      DBClusterIdentifier: identifier,
+                      DeletionProtection: enabled,
+                      ApplyImmediately: true,
+                    }),
+              );
+              modified = true;
+              continue;
+            }
+          } else if (found.deletionProtection === enabled && !modified) {
+            // Already as asked: no need to wake a stopped database.
+            return "done";
+          } else if (found.status === "stopped" && !started) {
+            // RDS can't modify a stopped database. A "stopping" one is waited on until it's
+            // stopped, then started.
+            await client.send(
+              found.kind === "instance"
+                ? new StartDBInstanceCommand({ DBInstanceIdentifier: identifier })
+                : new StartDBClusterCommand({ DBClusterIdentifier: identifier }),
+            );
+            started = true;
+          }
+          if (waited >= WAIT_MS) {
+            throw new Error(`${identifier} is still ${found.status} after 30 minutes`);
+          }
+          await sleep(POLL_MS);
         }
-        if (found.status !== "available") found = await waitUntilAvailable(identifier);
-        await client.send(
-          found.kind === "instance"
-            ? new ModifyDBInstanceCommand({
-                DBInstanceIdentifier: identifier,
-                DeletionProtection: enabled,
-                ApplyImmediately: true,
-              })
-            : new ModifyDBClusterCommand({
-                DBClusterIdentifier: identifier,
-                DeletionProtection: enabled,
-                ApplyImmediately: true,
-              }),
-        );
-        await waitUntilAvailable(identifier);
-        return "done";
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(

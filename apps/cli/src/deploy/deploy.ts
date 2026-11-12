@@ -155,9 +155,18 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
 
   // destroy turns protection off outside CloudFormation, so an interrupted destroy would leave
   // it off with a template that still says on. CloudFormation won't notice; put it back here.
+  // Everything is live by now, so a failure here is a warning, not a failed deploy.
   const databaseId = outputs[STACK_NAMES.data]?.[STACK_OUTPUTS.data.databaseIdentifier];
   if (databaseId !== undefined) {
-    await deps.database(config.region).setDeletionProtection(databaseId, true);
+    try {
+      await deps.database(config.region).setDeletionProtection(databaseId, true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.out(
+        `Warning: couldn't check deletion protection on ${databaseId} (${message}). ` +
+          "Turn it on in the RDS console if an earlier destroy was interrupted.\n",
+      );
+    }
   }
 
   return `
@@ -203,28 +212,34 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
     databaseFound = (await database.setDeletionProtection(databaseId, false)) === "done";
   }
   let purgeNote = "";
-  if (flags.purge && data !== undefined) {
-    if (isUpdatable(data.status)) {
-      // Changing what deletion keeps needs a stack update.
-      deps.out("Switching the Data stack to delete its data…\n");
-      await cdk.deploy({
-        stacks: [STACK_NAMES.data],
-        exclusively: true,
-        askToApprove: false,
-        context,
-      });
-    } else {
-      purgeNote = `\n${STACK_NAMES.data} is ${data.status}, so it couldn't be switched to delete its data. Anything listed as kept must be deleted by hand.\n`;
-    }
-  }
   try {
+    if (flags.purge && data !== undefined) {
+      if (isUpdatable(data.status)) {
+        // Changing what deletion keeps needs a stack update.
+        deps.out("Switching the Data stack to delete its data…\n");
+        await cdk.deploy({
+          stacks: [STACK_NAMES.data],
+          exclusively: true,
+          askToApprove: false,
+          context,
+        });
+      } else {
+        purgeNote = `\n${STACK_NAMES.data} is ${data.status}, so it couldn't be switched to delete its data. Anything listed as kept must be deleted by hand.\n`;
+      }
+    }
     await cdk.destroyAll(context);
   } catch (error) {
     // Don't leave a database that's still there without its protection.
-    if (databaseFound && databaseId !== undefined) {
-      await database.setDeletionProtection(databaseId, true).catch(() => undefined);
-    }
-    throw error;
+    if (!databaseFound || databaseId === undefined) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const restored = await database.setDeletionProtection(databaseId, true).then(
+      () => "Turned the database's deletion protection back on.",
+      (restoreError: unknown) =>
+        `Deletion protection is still off on ${databaseId} (${
+          restoreError instanceof Error ? restoreError.message : String(restoreError)
+        }); run pnpm lgtmoose deploy or turn it on in the RDS console.`,
+    );
+    throw new Error(`${message} ${restored}`, { cause: error });
   }
 
   // Point the webhook back at the placeholder so GitHub stops calling a gateway that's gone.

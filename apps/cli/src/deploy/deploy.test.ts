@@ -44,6 +44,8 @@ function harness(
     /** What RDS says about the database: "done" (it exists) or "missing". */
     database?: "done" | "missing";
     failDestroy?: boolean;
+    failDataDeploy?: boolean;
+    failProtect?: boolean;
   } = {},
 ) {
   const secrets = new Map(Object.entries(options.secrets ?? goodSecrets));
@@ -62,6 +64,9 @@ function harness(
     deploy: (deployOptions) => {
       calls.push("deploy");
       deployed.push(deployOptions);
+      if (options.failDataDeploy && deployOptions.stacks !== "all") {
+        return Promise.reject(new Error("Data stack update failed"));
+      }
       return Promise.resolve(
         options.outputs ?? {
           [STACK_NAMES.api]: { GithubWebhookUrl: WEBHOOK_URL },
@@ -129,6 +134,7 @@ function harness(
       setDeletionProtection: (id, enabled) => {
         calls.push(enabled ? "protect" : "unprotect");
         protection.push(`${id}:${enabled}`);
+        if (enabled && options.failProtect) return Promise.reject(new Error("AccessDenied"));
         return Promise.resolve(options.database ?? "done");
       },
     }),
@@ -181,6 +187,14 @@ describe("lgtmoose deploy", () => {
     for (const secret of ["WEBHOOK-SECRET", "CLIENT-SECRET", "PRIVATE KEY"]) {
       expect(result.all).not.toContain(secret);
     }
+  });
+
+  it("only warns when it can't check deletion protection, since everything is live", async () => {
+    const h = harness({ failProtect: true });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toContain("Warning: couldn't check deletion protection on lgtmoose-db-1");
+    expect(result.all).toContain("installations/new");
   });
 
   it("skips the approval prompt with --yes", async () => {
@@ -264,6 +278,24 @@ describe("lgtmoose destroy", () => {
     const result = await run(runDestroy, ["--yes"], h);
     expect(result.exitCode).toBe(1);
     expect(h.calls).toEqual(["unprotect", "destroy", "protect"]);
+  });
+
+  it("turns protection back on when the --purge stack update fails", async () => {
+    const h = harness({ failDataDeploy: true });
+    const result = await run(runDestroy, ["--purge", "--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(h.calls).toEqual(["unprotect", "deploy", "protect"]);
+    expect(result.stderr).toContain("Turned the database's deletion protection back on");
+  });
+
+  it("says so when protection can't be turned back on", async () => {
+    const h = harness({ failDestroy: true, failProtect: true });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("cdk destroy failed");
+    expect(result.stderr).toContain(
+      "Deletion protection is still off on lgtmoose-db-1 (AccessDenied)",
+    );
   });
 
   it("doesn't claim a snapshot of a database that was already gone", async () => {

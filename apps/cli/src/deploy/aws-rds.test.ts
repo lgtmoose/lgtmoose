@@ -16,21 +16,29 @@ function fault(name: string): Error {
 function fakeRds(db: {
   kind: "instance" | "cluster" | "none";
   status?: string;
+  /** Statuses reported on later describes, after the first. */
+  then?: string[];
   protection?: boolean;
   modifyFails?: Error;
 }) {
   let status = db.status ?? "available";
+  const later = [...(db.then ?? [])];
+  const next = () => {
+    const current = status;
+    status = later.shift() ?? status;
+    return current;
+  };
   let protection = db.protection ?? true;
   const send = vi.fn<RdsSender["send"]>((command) => {
     if (command instanceof DescribeDBInstancesCommand) {
       if (db.kind !== "instance") return Promise.reject(fault("DBInstanceNotFoundFault"));
       return Promise.resolve({
-        DBInstances: [{ DBInstanceStatus: status, DeletionProtection: protection }],
+        DBInstances: [{ DBInstanceStatus: next(), DeletionProtection: protection }],
       });
     }
     if (command instanceof DescribeDBClustersCommand) {
       if (db.kind !== "cluster") return Promise.reject(fault("DBClusterNotFoundFault"));
-      return Promise.resolve({ DBClusters: [{ Status: status, DeletionProtection: protection }] });
+      return Promise.resolve({ DBClusters: [{ Status: next(), DeletionProtection: protection }] });
     }
     if (command instanceof ModifyDBInstanceCommand || command instanceof ModifyDBClusterCommand) {
       if (db.modifyFails) return Promise.reject(db.modifyFails);
@@ -68,6 +76,19 @@ describe("rdsDatabaseControl", () => {
       sent.indexOf(ModifyDBInstanceCommand.name),
     );
     expect(rds.protection()).toBe(false);
+  });
+
+  it("waits for a stopping database to stop, then starts it", async () => {
+    const rds = fakeRds({ kind: "instance", status: "stopping", then: ["stopped"] });
+    await expect(rds.control.setDeletionProtection("db-1", false)).resolves.toBe("done");
+    expect(rds.sent()).toContain("StartDBInstanceCommand");
+    expect(rds.protection()).toBe(false);
+  });
+
+  it("treats a database being deleted as gone instead of waiting on it", async () => {
+    const rds = fakeRds({ kind: "instance", status: "deleting", protection: false });
+    await expect(rds.control.setDeletionProtection("db-1", true)).resolves.toBe("missing");
+    expect(rds.sent()).toEqual(["DescribeDBInstancesCommand"]);
   });
 
   it("does nothing when protection is already as asked", async () => {

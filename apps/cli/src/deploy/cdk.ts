@@ -64,7 +64,7 @@ export function createCdk(options: CdkRunnerOptions): Cdk {
   const spawn = options.spawn ?? nodeSpawn;
   const cdkBin = join(cdkDir, "node_modules/aws-cdk/bin/cdk");
 
-  function run(args: string[]): Promise<void> {
+  function run(args: string[], cwd = cdkDir): Promise<void> {
     if (!existsSync(cdkBin)) {
       return Promise.reject(
         new Error(`The CDK CLI isn't installed at ${cdkBin}. Run pnpm install.`),
@@ -81,7 +81,7 @@ export function createCdk(options: CdkRunnerOptions): Cdk {
     };
     return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [cdkBin, ...args], {
-        cwd: cdkDir,
+        cwd,
         env,
         stdio: "inherit",
       });
@@ -94,7 +94,9 @@ export function createCdk(options: CdkRunnerOptions): Cdk {
   }
 
   return {
-    bootstrap: (account) => run(["bootstrap", `aws://${account}/${options.region}`]),
+    // The CDK synthesizes the app whenever cdk.json names one, even with an explicit
+    // environment, so bootstrap from a directory without it.
+    bootstrap: (account) => run(["bootstrap", `aws://${account}/${options.region}`], tmpdir()),
     async deploy(deployOptions) {
       const dir = await mkdtemp(join(tmpdir(), "lgtmoose-"));
       const outputsFile = join(dir, "outputs.json");
