@@ -19,11 +19,16 @@ describe("buildApp", () => {
 
   it("synthesizes every stack in the configured region", () => {
     expect(assembly.stacks.map((s) => s.stackName).sort()).toEqual([
+      "Lgtmoose-Api",
       "Lgtmoose-Data",
       "Lgtmoose-Meta",
       "Lgtmoose-Network",
     ]);
     expect(stacks.network.region).toBe("eu-west-2");
+  });
+
+  it("deploys the Api stack after the Data stack, so migrations run first", () => {
+    expect(stacks.api.dependencies).toContain(stacks.data);
   });
 
   it("records the deployed version", () => {

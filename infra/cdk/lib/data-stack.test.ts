@@ -169,7 +169,8 @@ describe("DataStack", () => {
     const assetDirs = readdirSync(assembly.directory).filter((name) => name.startsWith("asset."));
     const bundle = assetDirs
       .map((name) => join(assembly.directory, name))
-      .find((dir) => existsSync(join(dir, "index.mjs")));
+      // The app bundles several Lambdas; the migration handler is the one with migrations/.
+      .find((dir) => existsSync(join(dir, "index.mjs")) && existsSync(join(dir, "migrations")));
     expect(bundle).toBeDefined();
     const bundled = readdirSync(join(bundle as string, "migrations"));
     expect(bundled).toEqual(expect.arrayContaining(readdirSync(MIGRATIONS_DIR)));

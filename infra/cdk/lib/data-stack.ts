@@ -21,8 +21,6 @@ import {
   type ISecurityGroup,
   type Vpc,
 } from "aws-cdk-lib/aws-ec2";
-import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
-import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import { RetentionDays } from "aws-cdk-lib/aws-logs";
 import {
   AuroraPostgresEngineVersion,
@@ -41,6 +39,7 @@ import { CfnSecret, Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager"
 import { Provider } from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
 import { SECRET_NAMES, providerNeedsSecret, type DeployConfig } from "@lgtmoose/config";
+import { lgtmooseFunction } from "./lambda.js";
 import { POSTGRES_PORT, type Profile } from "./network-stack.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -219,19 +218,13 @@ export class DataStack extends Stack {
     props: DataStackProps,
     appSubnets: { subnetGroupName: string },
   ): CustomResource {
-    const handler = new NodejsFunction(this, "MigrateFunction", {
+    const handler = lgtmooseFunction(this, "MigrateFunction", {
       entry: MIGRATE_HANDLER,
-      runtime: Runtime.NODEJS_24_X,
-      architecture: Architecture.ARM_64,
       memorySize: 512,
       timeout: Duration.minutes(5),
       vpc: props.vpc,
       vpcSubnets: appSubnets,
       securityGroups: [props.controlSecurityGroup],
-      // CDK bundles by running `pnpm exec esbuild` in projectRoot, so esbuild is a devDependency
-      // of the workspace root, not of this package.
-      depsLockFilePath: join(REPO_ROOT, "pnpm-lock.yaml"),
-      projectRoot: REPO_ROOT,
       environment: {
         DATABASE_SECRET_ARN: this.databaseSecret.secretArn,
         // The generated secret has no dbname field, so pass the database name explicitly.
@@ -240,12 +233,7 @@ export class DataStack extends Stack {
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
       bundling: {
-        format: OutputFormat.ESM,
-        mainFields: ["module", "main"],
-        // pg is CommonJS and requires Node built-ins; give the ESM bundle a real `require`.
-        banner:
-          "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
-        externalModules: ["@aws-sdk/*", "pg-native"],
+        externalModules: ["pg-native"],
         commandHooks: {
           beforeBundling: () => [],
           beforeInstall: () => [],

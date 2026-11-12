@@ -13,6 +13,7 @@
   "dependencies": {
     "@lgtmoose/config": "workspace:*",
     "@lgtmoose/db": "workspace:*",
+    "@lgtmoose/gateway": "workspace:*",
     "aws-cdk-lib": "^2.276.0",
     "constructs": "^10.8.1"
   },

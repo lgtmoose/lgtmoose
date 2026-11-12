@@ -1,5 +1,6 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
 import type { DeployConfig } from "@lgtmoose/config";
+import { ApiStack } from "./api-stack.js";
 import { DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
@@ -19,11 +20,12 @@ export interface LgtmooseStacks {
   meta: MetaStack;
   network: NetworkStack;
   data: DataStack;
+  api: ApiStack;
 }
 
 /**
  * Builds the LGTMoose CDK app from a validated config. Stacks still to come:
- * Api (NIC-801), Workflow (NIC-810), Dashboard (NIC-840).
+ * Workflow (NIC-810), Dashboard (NIC-840).
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -43,5 +45,9 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowDatabaseDeletion: isTrue(app.node.tryGetContext(ALLOW_DATABASE_DELETION)),
   });
 
-  return { app, meta, network, data };
+  const api = new ApiStack(app, "Lgtmoose-Api", { env, version: LGTMOOSE_VERSION });
+  // Code that may read the database deploys after the Data stack, so migrations finish first.
+  api.addDependency(data);
+
+  return { app, meta, network, data, api };
 }
