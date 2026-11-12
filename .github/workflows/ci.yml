@@ -43,5 +43,8 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Migrations match the schema
+        run: pnpm --filter @lgtmoose/db check-migrations
+
       - name: CDK synth
         run: pnpm synth

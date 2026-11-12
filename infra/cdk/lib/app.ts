@@ -1,5 +1,6 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
 import type { DeployConfig } from "@lgtmoose/config";
+import { DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
 
@@ -9,11 +10,12 @@ export interface LgtmooseStacks {
   app: App;
   meta: MetaStack;
   network: NetworkStack;
+  data: DataStack;
 }
 
 /**
  * Builds the LGTMoose CDK app from a validated config. Stacks still to come:
- * Data (NIC-800), Api (NIC-801), Workflow (NIC-810), Dashboard (NIC-840).
+ * Api (NIC-801), Workflow (NIC-810), Dashboard (NIC-840).
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -24,6 +26,13 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
 
   const meta = new MetaStack(app, "Lgtmoose-Meta", { env, version: LGTMOOSE_VERSION });
   const network = new NetworkStack(app, "Lgtmoose-Network", { env, profile: config.profile });
+  const data = new DataStack(app, "Lgtmoose-Data", {
+    env,
+    profile: config.profile,
+    providers: config.providers,
+    vpc: network.vpc,
+    controlSecurityGroup: network.controlSecurityGroup,
+  });
 
-  return { app, meta, network };
+  return { app, meta, network, data };
 }

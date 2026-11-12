@@ -33,6 +33,8 @@ export interface NetworkStackProps extends StackProps {
 /** Port the egress proxy (NIC-813) listens on. */
 export const PROXY_PORT = 3128;
 
+export const POSTGRES_PORT = 5432;
+
 /** AWS services sandbox tasks reach through interface endpoints instead of the internet. */
 const SANDBOX_INTERFACE_ENDPOINTS = {
   EcrApi: InterfaceVpcEndpointAwsService.ECR,
@@ -97,6 +99,12 @@ export class NetworkStack extends Stack {
       Peer.anyIpv4(),
       Port.tcp(443),
       "HTTPS to GitHub and AWS",
+    );
+    // Declared here rather than in the Data stack, so the rule doesn't create a cross-stack cycle.
+    this.controlSecurityGroup.addEgressRule(
+      Peer.ipv4(vpc.vpcCidrBlock),
+      Port.tcp(POSTGRES_PORT),
+      "Postgres inside the VPC",
     );
 
     this.proxySecurityGroup = this.securityGroup("ProxySg", "egress proxy");
