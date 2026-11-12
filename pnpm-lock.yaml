@@ -41,6 +41,12 @@ importers:
 
   apps/cli: {}
 
+  apps/gateway:
+    dependencies:
+      hono:
+        specifier: ^4.13.18
+        version: 4.13.18
+
   infra/cdk:
     dependencies:
       '@lgtmoose/config':
@@ -49,6 +55,9 @@ importers:
       '@lgtmoose/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@lgtmoose/gateway':
+        specifier: workspace:*
+        version: link:../../apps/gateway
       aws-cdk-lib:
         specifier: ^2.276.0
         version: 2.276.0(constructs@10.8.1)
@@ -1343,6 +1352,10 @@ packages:
   has-flag@4.0.0:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
     engines: {node: '>=8'}
+
+  hono@4.13.18:
+    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
+    engines: {node: '>=16.9.0'}
 
   ignore@5.3.2:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
@@ -2801,6 +2814,8 @@ snapshots:
   globals@14.0.0: {}
 
   has-flag@4.0.0: {}
+
+  hono@4.13.18: {}
 
   ignore@5.3.2: {}
 

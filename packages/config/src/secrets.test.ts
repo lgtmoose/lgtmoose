@@ -6,6 +6,10 @@ describe("secrets", () => {
     expect(SECRET_NAMES.provider("claude")).toBe("lgtmoose/provider/claude");
   });
 
+  it("keeps the webhook secret apart from the App's private key", () => {
+    expect(SECRET_NAMES.githubWebhook).not.toBe(SECRET_NAMES.githubApp);
+  });
+
   it("needs no stored secret for Bedrock only", () => {
     expect(providerNeedsSecret({ auth: "bedrock" })).toBe(false);
     expect(providerNeedsSecret({ auth: "oauth-token" })).toBe(true);
