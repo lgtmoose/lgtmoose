@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "rulepacks": {
+      "default": [
+        "generic"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "conventions": {
+      "default": [
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".github/copilot-instructions.md",
+        ".cursor/rules/*.mdc"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "tiers": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[1-7]$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "skip": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "gate": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "check_run": {
+          "default": "required",
+          "type": "string",
+          "enum": [
+            "required",
+            "optional",
+            "off"
+          ]
+        },
+        "approve": {
+          "default": true,
+          "type": "boolean"
+        },
+        "nit_cap": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "labels": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "pending": {
+          "default": "Ready for Review",
+          "type": "string",
+          "minLength": 1
+        },
+        "changes": {
+          "default": "Requires Changes",
+          "type": "string",
+          "minLength": 1
+        },
+        "approved": {
+          "default": "Approved",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$id": "https://raw.githubusercontent.com/lgtmoose/lgtmoose/main/packages/config/schema/lgtmoose.repo.schema.json",
+  "title": "LGTMoose repository config (.lgtmoose.yaml)"
+}
