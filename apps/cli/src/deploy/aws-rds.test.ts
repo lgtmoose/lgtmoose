@@ -1,0 +1,90 @@
+import {
+  DescribeDBClustersCommand,
+  DescribeDBInstancesCommand,
+  ModifyDBClusterCommand,
+  ModifyDBInstanceCommand,
+  StartDBInstanceCommand,
+} from "@aws-sdk/client-rds";
+import { describe, expect, it, vi } from "vitest";
+import { rdsDatabaseControl, type RdsSender } from "./aws-rds.js";
+
+function fault(name: string): Error {
+  return Object.assign(new Error(`${name} happened`), { name });
+}
+
+/** A fake RDS holding one instance or cluster, which becomes available after a start. */
+function fakeRds(db: {
+  kind: "instance" | "cluster" | "none";
+  status?: string;
+  protection?: boolean;
+  modifyFails?: Error;
+}) {
+  let status = db.status ?? "available";
+  let protection = db.protection ?? true;
+  const send = vi.fn<RdsSender["send"]>((command) => {
+    if (command instanceof DescribeDBInstancesCommand) {
+      if (db.kind !== "instance") return Promise.reject(fault("DBInstanceNotFoundFault"));
+      return Promise.resolve({
+        DBInstances: [{ DBInstanceStatus: status, DeletionProtection: protection }],
+      });
+    }
+    if (command instanceof DescribeDBClustersCommand) {
+      if (db.kind !== "cluster") return Promise.reject(fault("DBClusterNotFoundFault"));
+      return Promise.resolve({ DBClusters: [{ Status: status, DeletionProtection: protection }] });
+    }
+    if (command instanceof ModifyDBInstanceCommand || command instanceof ModifyDBClusterCommand) {
+      if (db.modifyFails) return Promise.reject(db.modifyFails);
+      protection = command.input.DeletionProtection ?? protection;
+      return Promise.resolve({});
+    }
+    status = "available";
+    return Promise.resolve({});
+  });
+  const control = rdsDatabaseControl({ send }, "eu-west-2", () => Promise.resolve());
+  const sent = () => send.mock.calls.map(([command]) => command.constructor.name);
+  return { control, send, sent, protection: () => protection };
+}
+
+describe("rdsDatabaseControl", () => {
+  it("finds an instance and turns its protection off", async () => {
+    const rds = fakeRds({ kind: "instance" });
+    await expect(rds.control.setDeletionProtection("db-1", false)).resolves.toBe("done");
+    expect(rds.protection()).toBe(false);
+    expect(rds.sent()).toContain("ModifyDBInstanceCommand");
+    expect(rds.sent()).not.toContain("ModifyDBClusterCommand");
+  });
+
+  it("finds a cluster by asking for an instance first", async () => {
+    const rds = fakeRds({ kind: "cluster" });
+    await expect(rds.control.setDeletionProtection("cluster-1", false)).resolves.toBe("done");
+    expect(rds.sent()).toContain("ModifyDBClusterCommand");
+  });
+
+  it("starts a stopped database before modifying it", async () => {
+    const rds = fakeRds({ kind: "instance", status: "stopped" });
+    await rds.control.setDeletionProtection("db-1", false);
+    const sent = rds.sent();
+    expect(sent.indexOf(StartDBInstanceCommand.name)).toBeLessThan(
+      sent.indexOf(ModifyDBInstanceCommand.name),
+    );
+    expect(rds.protection()).toBe(false);
+  });
+
+  it("does nothing when protection is already as asked", async () => {
+    const rds = fakeRds({ kind: "instance", protection: true, status: "stopped" });
+    await rds.control.setDeletionProtection("db-1", true);
+    expect(rds.sent()).toEqual(["DescribeDBInstancesCommand"]);
+  });
+
+  it("reports a database that doesn't exist as either kind", async () => {
+    const rds = fakeRds({ kind: "none" });
+    await expect(rds.control.setDeletionProtection("db-1", false)).resolves.toBe("missing");
+  });
+
+  it("names the database and region when RDS fails", async () => {
+    const rds = fakeRds({ kind: "instance", modifyFails: fault("AccessDenied") });
+    await expect(rds.control.setDeletionProtection("db-1", false)).rejects.toThrow(
+      "AWS RDS (eu-west-2) couldn't turn deletion protection off for db-1",
+    );
+  });
+});

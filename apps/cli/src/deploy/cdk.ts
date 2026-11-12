@@ -20,7 +20,8 @@ export interface DeployOptions {
 
 /** The CDK commands deploy and destroy run. Tests fake it; the real one runs the CDK CLI. */
 export interface Cdk {
-  bootstrap(): Promise<void>;
+  /** `account` and the runner's region name the environment, so the CDK doesn't synthesize. */
+  bootstrap(account: string): Promise<void>;
   deploy(options: DeployOptions): Promise<StackOutputs>;
   destroyAll(context?: Readonly<Record<string, string>>): Promise<void>;
 }
@@ -93,7 +94,7 @@ export function createCdk(options: CdkRunnerOptions): Cdk {
   }
 
   return {
-    bootstrap: () => run(["bootstrap"]),
+    bootstrap: (account) => run(["bootstrap", `aws://${account}/${options.region}`]),
     async deploy(deployOptions) {
       const dir = await mkdtemp(join(tmpdir(), "lgtmoose-"));
       const outputsFile = join(dir, "outputs.json");

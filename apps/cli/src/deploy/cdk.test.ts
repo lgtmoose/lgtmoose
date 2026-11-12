@@ -90,6 +90,19 @@ describe("createCdk", () => {
     expect(options.env.AWS_REGION).toBe("eu-west-2");
   });
 
+  it("bootstraps the named environment, so the CDK doesn't synthesize the app", async () => {
+    const spawn = fakeSpawn(0);
+    const cdk = createCdk({
+      configPath: "/c",
+      region: "eu-west-2",
+      cdkDir: fakeCdkDir(),
+      spawn: spawn as never,
+    });
+    await cdk.bootstrap("123456789012");
+    const args = (spawn.mock.calls[0] as unknown as [string, string[]])[1];
+    expect(args.slice(1)).toEqual(["bootstrap", "aws://123456789012/eu-west-2"]);
+  });
+
   it("fails when the CDK exits non-zero", async () => {
     const cdk = createCdk({
       configPath: "/c",
@@ -97,7 +110,7 @@ describe("createCdk", () => {
       cdkDir: fakeCdkDir(),
       spawn: fakeSpawn(1) as never,
     });
-    await expect(cdk.bootstrap()).rejects.toThrow("cdk bootstrap failed (exit code 1)");
+    await expect(cdk.bootstrap("1")).rejects.toThrow("cdk bootstrap failed (exit code 1)");
   });
 
   it("says to install dependencies when the CDK CLI is missing", async () => {

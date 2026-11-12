@@ -6,8 +6,11 @@ export class GitHubRequestError extends Error {
     method: string,
     path: string,
   ) {
+    // The manifest conversion's path holds a one-time code that can be redeemed for the App's
+    // private key, so it never goes into a message.
+    const shown = path.replace(/^\/app-manifests\/[^/]+/, "/app-manifests/<code>");
     super(
-      `GitHub ${method} ${path} failed (HTTP ${status}${githubMessage ? `: ${githubMessage}` : ""}).`,
+      `GitHub ${method} ${shown} failed (HTTP ${status}${githubMessage ? `: ${githubMessage}` : ""}).`,
     );
     this.name = "GitHubRequestError";
   }

@@ -41,6 +41,9 @@ function harness(
     outputs?: StackOutputs;
     prompter?: Partial<Prompter>;
     failWebhook?: boolean;
+    /** What RDS says about the database: "done" (it exists) or "missing". */
+    database?: "done" | "missing";
+    failDestroy?: boolean;
   } = {},
 ) {
   const secrets = new Map(Object.entries(options.secrets ?? goodSecrets));
@@ -52,8 +55,8 @@ function harness(
   const deployed: DeployOptions[] = [];
   const destroyed: (Readonly<Record<string, string>> | undefined)[] = [];
   const cdk: Cdk = {
-    bootstrap: () => {
-      calls.push("bootstrap");
+    bootstrap: (account) => {
+      calls.push(`bootstrap:${account}`);
       return Promise.resolve();
     },
     deploy: (deployOptions) => {
@@ -73,7 +76,9 @@ function harness(
     destroyAll: (context) => {
       calls.push("destroy");
       destroyed.push(context);
-      return Promise.resolve();
+      return options.failDestroy
+        ? Promise.reject(new Error("cdk destroy failed"))
+        : Promise.resolve();
     },
   };
   const webhooks: WebhookConfig[] = [];
@@ -101,7 +106,7 @@ function harness(
     ArtifactBucketName: "lgtmoose-artifacts-1",
   };
   const dataStatus = options.dataStatus ?? "UPDATE_COMPLETE";
-  const unprotected: string[] = [];
+  const protection: string[] = [];
   const deps: DeployDeps = {
     configPath: CONFIG_PATH,
     files: {
@@ -121,12 +126,13 @@ function harness(
         ),
     }),
     database: () => ({
-      disableDeletionProtection: (kind, id) => {
-        calls.push("unprotect");
-        unprotected.push(`${kind}:${id}`);
-        return Promise.resolve();
+      setDeletionProtection: (id, enabled) => {
+        calls.push(enabled ? "protect" : "unprotect");
+        protection.push(`${id}:${enabled}`);
+        return Promise.resolve(options.database ?? "done");
       },
     }),
+    account: () => Promise.resolve("123456789012"),
     cdk: () => cdk,
     github,
     prompter: {
@@ -145,7 +151,7 @@ function harness(
     destroyed,
     webhooks,
     regions,
-    unprotected,
+    protection,
     output: () => chunks.join(""),
   };
 }
@@ -161,7 +167,10 @@ describe("lgtmoose deploy", () => {
     const result = await run(runDeploy, [], h);
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
-    expect(h.calls).toEqual(["bootstrap", "deploy", "webhook"]);
+    // Bootstrap names the environment, so the CDK doesn't synthesize the app twice; the
+    // database's protection is put back in case an interrupted destroy left it off.
+    expect(h.calls).toEqual(["bootstrap:123456789012", "deploy", "webhook", "protect"]);
+    expect(h.protection).toEqual(["lgtmoose-db-1:true"]);
     expect(h.deployed).toEqual([{ stacks: "all", askToApprove: true }]);
     expect(h.regions).toEqual(["eu-west-2"]);
     expect(h.webhooks).toEqual([
@@ -241,7 +250,7 @@ describe("lgtmoose destroy", () => {
     expect(result.stderr).toBe("");
     expect(confirm).toHaveBeenCalledOnce();
     expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
-    expect(h.unprotected).toEqual(["instance:lgtmoose-db-1"]);
+    expect(h.protection).toEqual(["lgtmoose-db-1:false"]);
     expect(h.deployed).toEqual([]);
     expect(h.destroyed).toEqual([{ [CDK_CONTEXT.allowDatabaseDeletion]: "true" }]);
     expect(h.webhooks).toEqual([{ url: PLACEHOLDER_WEBHOOK_URL }]);
@@ -250,10 +259,25 @@ describe("lgtmoose destroy", () => {
     expect(result.all).toContain("arn:aws:secretsmanager:eu-west-2:1:secret:db");
   });
 
-  it("uses the cluster API for the standard profile", async () => {
-    const h = harness({ config: { ...bedrockConfig, profile: "standard" } });
-    await run(runDestroy, ["--yes"], h);
-    expect(h.unprotected).toEqual(["cluster:lgtmoose-db-1"]);
+  it("turns protection back on when the stacks can't be deleted", async () => {
+    const h = harness({ failDestroy: true });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(h.calls).toEqual(["unprotect", "destroy", "protect"]);
+  });
+
+  it("doesn't claim a snapshot of a database that was already gone", async () => {
+    const h = harness({ dataStatus: "DELETE_FAILED", database: "missing" });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).not.toContain("final snapshot of database");
+    expect(result.all).toContain("artifact bucket: lgtmoose-artifacts-1");
+  });
+
+  it("says the App's webhook now points at the placeholder", async () => {
+    const result = await run(runDestroy, ["--yes"], harness());
+    expect(result.all).toContain("webhook now points at a placeholder");
+    expect(result.all).not.toContain("untouched");
   });
 
   it("recovers from an earlier destroy that left the Data stack in DELETE_FAILED", async () => {
@@ -267,6 +291,7 @@ describe("lgtmoose destroy", () => {
     const h = harness();
     const result = await run(runDestroy, ["--purge", "--yes"], h);
     expect(result.exitCode).toBe(0);
+    expect(h.calls).toEqual(["unprotect", "deploy", "destroy", "webhook"]);
     const context = { [CDK_CONTEXT.allowDatabaseDeletion]: "true", [CDK_CONTEXT.purge]: "true" };
     expect(h.deployed).toEqual([
       { stacks: [STACK_NAMES.data], exclusively: true, askToApprove: false, context },
