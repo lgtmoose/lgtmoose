@@ -61,6 +61,38 @@ export async function readExistingApp(store: SetupSecretStore): Promise<Existing
   };
 }
 
+const credentialsSchema = z.object({
+  appId: z.number().int().positive(),
+  slug: z.string().min(1),
+  privateKey: z.string().min(1),
+  webhookSecretSha256: z.string().optional(),
+});
+
+/** What `deploy` needs to act as the App: its ID, slug and private key. */
+export type AppCredentials = z.infer<typeof credentialsSchema>;
+
+/** The App's credentials, or an error saying to run setup. Never puts the key in a message. */
+export async function readAppCredentials(store: SetupSecretStore): Promise<AppCredentials> {
+  const raw = await store.read(SECRET_NAMES.githubApp);
+  if (raw === undefined) {
+    throw new Error(`${SECRET_NAMES.githubApp} doesn't exist. Run pnpm lgtmoose setup first.`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    json = undefined;
+  }
+  const parsed = credentialsSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(
+      `${SECRET_NAMES.githubApp} isn't the JSON setup writes (appId, slug, privateKey). ` +
+        "Fix it, or run pnpm lgtmoose setup and create a new App.",
+    );
+  }
+  return parsed.data;
+}
+
 /**
  * Why the stored webhook secret can't be used with `existing`, or undefined when it can.
  * Apps stored before the fingerprint existed only get the "missing" check.

@@ -23,7 +23,7 @@ export function awsSecretStore(client: SecretsManagerSender, region: string): Se
   const context = (name: string, error: unknown) => {
     const hint =
       errorName(error) === "CredentialsProviderError"
-        ? " Sign in to AWS first (for example `aws sso login`), then run setup again."
+        ? " Sign in to AWS first (for example `aws sso login`), then try again."
         : "";
     const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
     return new Error(`AWS Secrets Manager (${region}) failed on ${name}: ${message}.${hint}`, {

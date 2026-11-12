@@ -38,7 +38,12 @@ import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aw
 import { CfnSecret, Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
-import { SECRET_NAMES, providerNeedsSecret, type DeployConfig } from "@lgtmoose/config";
+import {
+  SECRET_NAMES,
+  STACK_OUTPUTS,
+  providerNeedsSecret,
+  type DeployConfig,
+} from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 import { POSTGRES_PORT, type Profile } from "./network-stack.js";
 
@@ -62,6 +67,12 @@ export interface DataStackProps extends StackProps {
    * set, then deletes; CloudFormation still takes a final snapshot. Default false.
    */
   allowDatabaseDeletion?: boolean;
+  /**
+   * `lgtmoose destroy --purge`: delete the database without a final snapshot, its retained
+   * credential, and the artifact bucket with everything in it. Implies allowDatabaseDeletion.
+   * Default false.
+   */
+  purge?: boolean;
 }
 
 /**
@@ -91,6 +102,7 @@ export class DataStack extends Stack {
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
     const lean = props.profile === "lean";
+    const purge = props.purge ?? false;
     const appSubnets = { subnetGroupName: "app" };
 
     this.databaseSecurityGroup = new SecurityGroup(this, "DatabaseSg", {
@@ -113,8 +125,8 @@ export class DataStack extends Stack {
       securityGroups: [this.databaseSecurityGroup],
       credentials,
       storageEncrypted: true,
-      deletionProtection: !props.allowDatabaseDeletion,
-      removalPolicy: RemovalPolicy.SNAPSHOT,
+      deletionProtection: !(props.allowDatabaseDeletion || purge),
+      removalPolicy: purge ? RemovalPolicy.DESTROY : RemovalPolicy.SNAPSHOT,
       cloudwatchLogsExports: ["postgresql"],
       cloudwatchLogsRetention: lean ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
     };
@@ -169,7 +181,8 @@ export class DataStack extends Stack {
     // `database.secret` is the target attachment, so retain the generated CfnSecret itself.
     const generatedSecret = this.database.node.findAll().find((c) => c instanceof CfnSecret);
     if (!(generatedSecret instanceof CfnSecret)) throw new Error("generated secret not found");
-    generatedSecret.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    // With --purge there's no snapshot left for it to unlock.
+    generatedSecret.applyRemovalPolicy(purge ? RemovalPolicy.DESTROY : RemovalPolicy.RETAIN);
     Tags.of(generatedSecret).add("lgtmoose:stack", this.stackName);
     // Pair the database, and through copied tags its final snapshot, with the secret that unlocks
     // it. This uses the secret's own ARN: the attachment's ARN and the database identifier both
@@ -190,7 +203,9 @@ export class DataStack extends Stack {
           abortIncompleteMultipartUploadAfter: Duration.days(1),
         },
       ],
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: purge ? RemovalPolicy.DESTROY : RemovalPolicy.RETAIN,
+      // CloudFormation can't delete a bucket with objects in it.
+      autoDeleteObjects: purge,
     });
 
     this.githubAppSecret = Secret.fromSecretNameV2(this, "GithubAppSecret", SECRET_NAMES.githubApp);
@@ -209,9 +224,13 @@ export class DataStack extends Stack {
 
     this.migrations = this.addMigrations(props, appSubnets);
 
-    new CfnOutput(this, "ArtifactBucketName", { value: this.artifactBucket.bucketName });
-    new CfnOutput(this, "DatabaseSecretArn", { value: this.databaseSecret.secretArn });
-    new CfnOutput(this, "DatabaseIdentifier", { value: this.databaseIdentifier });
+    new CfnOutput(this, STACK_OUTPUTS.data.artifactBucketName, {
+      value: this.artifactBucket.bucketName,
+    });
+    new CfnOutput(this, STACK_OUTPUTS.data.databaseSecretArn, {
+      value: this.databaseSecret.secretArn,
+    });
+    new CfnOutput(this, STACK_OUTPUTS.data.databaseIdentifier, { value: this.databaseIdentifier });
   }
 
   private addMigrations(

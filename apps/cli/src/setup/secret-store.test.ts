@@ -7,6 +7,7 @@ import { SECRET_NAMES } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { awsSecretStore, type SecretsManagerSender } from "./aws-secret-store.js";
 import {
+  readAppCredentials,
   readExistingApp,
   storeAppSecrets,
   webhookFingerprint,
@@ -227,5 +228,27 @@ describe("readExistingApp", () => {
       appId: undefined,
       slug: undefined,
     });
+  });
+});
+
+describe("readAppCredentials", () => {
+  it("returns what deploy needs to act as the App", async () => {
+    const aws = fakeAws({ [SECRET_NAMES.githubApp]: JSON.stringify(app) });
+    await expect(readAppCredentials(aws.store)).resolves.toEqual({
+      appId: 42,
+      slug: "lgtmoose-acme",
+      privateKey: app.privateKey,
+    });
+  });
+
+  it("says to run setup when the secret is missing or malformed, without echoing it", async () => {
+    await expect(readAppCredentials(fakeAws().store)).rejects.toThrow("Run pnpm lgtmoose setup");
+    const aws = fakeAws({ [SECRET_NAMES.githubApp]: '{"privateKey":"SECRET-KEY"}' });
+    const error = await readAppCredentials(aws.store).then(
+      () => new Error("expected a rejection"),
+      (caught: unknown) => caught as Error,
+    );
+    expect(error.message).toContain("isn't the JSON setup writes");
+    expect(error.message).not.toContain("SECRET-KEY");
   });
 });

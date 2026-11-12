@@ -1,6 +1,6 @@
 import type { CloudAssembly } from "aws-cdk-lib/cx-api";
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { parseDeployConfig } from "@lgtmoose/config";
+import { STACK_NAMES, STACK_OUTPUTS, parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { LGTMOOSE_VERSION, buildApp, type LgtmooseStacks } from "./app.js";
 import { EXAMPLE_CONFIG } from "./load-config.js";
@@ -20,6 +20,20 @@ describe("buildApp", () => {
     stacks = buildApp(config, appWithoutBundling());
     assembly = stacks.app.synth();
   }, 60_000);
+
+  it("uses the stack and output names the CLI drives", () => {
+    expect(assembly.stacks.map((s) => s.stackName).sort()).toEqual(
+      Object.values(STACK_NAMES).sort(),
+    );
+    const outputs = (stack: { template: unknown }) =>
+      Object.keys((stack.template as { Outputs?: object }).Outputs ?? {});
+    expect(outputs(assembly.getStackByName(STACK_NAMES.api))).toContain(
+      STACK_OUTPUTS.api.githubWebhookUrl,
+    );
+    expect(outputs(assembly.getStackByName(STACK_NAMES.data))).toEqual(
+      expect.arrayContaining(Object.values(STACK_OUTPUTS.data)),
+    );
+  });
 
   it("synthesizes every stack in the configured region", () => {
     expect(assembly.stacks.map((s) => s.stackName).sort()).toEqual([

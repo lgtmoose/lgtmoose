@@ -47,7 +47,7 @@ describe("buildManifest", () => {
       url: "https://github.com/lgtmoose/lgtmoose",
       public: false,
       redirect_url: redirectUrl,
-      hook_attributes: { url: PLACEHOLDER_WEBHOOK_URL, active: false },
+      hook_attributes: { url: PLACEHOLDER_WEBHOOK_URL, active: true },
     });
     expect(PLACEHOLDER_WEBHOOK_URL).toBe("https://example.invalid/webhooks/github");
   });

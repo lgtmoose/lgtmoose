@@ -25,3 +25,4 @@ export {
 } from "./repo.js";
 export { jsonSchemas, serializeSchema } from "./json-schema.js";
 export { SECRET_NAMES, providerNeedsSecret } from "./secrets.js";
+export { CDK_CONTEXT, STACK_NAMES, STACK_OUTPUTS } from "./stacks.js";

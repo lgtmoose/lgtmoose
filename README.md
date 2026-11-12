@@ -17,8 +17,20 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 git clone https://github.com/lgtmoose/lgtmoose && cd lgtmoose && pnpm install
 pnpm lgtmoose setup     # creates the GitHub App, stores its keys in AWS Secrets Manager
 pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
-pnpm lgtmoose deploy    # cdk deploy, then prints the App install link
+pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
+
+`deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`.
+
+### Upgrading
+
+```bash
+git pull && pnpm install && pnpm lgtmoose deploy
+```
+
+### Removing it
+
+`pnpm lgtmoose destroy` deletes the stacks. It keeps a final snapshot of the database, the secret that unlocks it and the artifact bucket. `pnpm lgtmoose destroy --purge` deletes those too. Neither touches the GitHub App or its secrets.
 
 One AWS account and region holds one install for now, because the secret and stack names are fixed. Put a second install, such as staging, in another account or region.
 

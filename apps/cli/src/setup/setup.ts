@@ -262,11 +262,11 @@ function nextSteps(slug: string | undefined): string {
       : `Install the App on the repositories it should review:\n     ${installUrl(slug)}`;
   return `
 Next steps:
-  1. ${install}
-  2. Connect a model provider. Bedrock works with no key; for others run
+  1. Connect a model provider. Bedrock works with no key; for others run
      pnpm lgtmoose auth <claude|codex|cursor|api-key>   (coming in NIC-824)
-  3. Deploy, which also turns on the App's webhook:
-     pnpm lgtmoose deploy   (coming in NIC-803)
+  2. Deploy, which also points the App's webhook at your gateway:
+     pnpm lgtmoose deploy
+  3. ${install}
 `;
 }
 

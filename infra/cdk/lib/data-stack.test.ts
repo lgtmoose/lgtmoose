@@ -5,7 +5,7 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ALLOW_DATABASE_DELETION, buildApp } from "./app.js";
+import { ALLOW_DATABASE_DELETION, PURGE_DATA, buildApp } from "./app.js";
 import { ARTIFACT_RETENTION_DAYS, MIGRATIONS_DIR, hashDirectory } from "./data-stack.js";
 import type { Profile } from "./network-stack.js";
 import { appWithoutBundling, memoizeByProfile } from "./test-utils.js";
@@ -63,6 +63,27 @@ describe("DataStack", () => {
     synth("lean").template.hasResourceProperties("AWS::RDS::DBInstance", {
       DeletionProtection: true,
     });
+  });
+
+  it("keeps the bucket and the database secret by default", () => {
+    const { template } = synth("lean");
+    template.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Retain" });
+    template.hasResource("AWS::SecretsManager::Secret", { DeletionPolicy: "Retain" });
+    template.resourceCountIs("Custom::S3AutoDeleteObjects", 0);
+  });
+
+  it("lets `destroy --purge` delete the database, its secret and the bucket", () => {
+    const purged = build(
+      "lean",
+      new App({ context: { "aws:cdk:bundling-stacks": [], [PURGE_DATA]: "true" } }),
+    );
+    purged.template.hasResource("AWS::RDS::DBInstance", {
+      DeletionPolicy: "Delete",
+      Properties: Match.objectLike({ DeletionProtection: false }),
+    });
+    purged.template.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Delete" });
+    purged.template.hasResource("AWS::SecretsManager::Secret", { DeletionPolicy: "Delete" });
+    purged.template.resourceCountIs("Custom::S3AutoDeleteObjects", 1);
   });
 
   it("standard: Aurora Serverless v2 with a writer and a reader", () => {
