@@ -5,7 +5,7 @@ import type { ProviderConfig } from "./deploy.js";
  * reference them, so a redeploy never overwrites a credential.
  */
 export const SECRET_NAMES = {
-  /** JSON: { appId, privateKey, clientId, clientSecret } */
+  /** JSON: { appId, slug, privateKey, clientId, clientSecret } */
   githubApp: "lgtmoose/github-app",
   /**
    * The webhook HMAC secret, as plain text. Kept apart from the App's private key so the
