@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "region": {
+      "default": "us-east-1",
+      "type": "string",
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$"
+    },
+    "profile": {
+      "default": "lean",
+      "type": "string",
+      "enum": [
+        "lean",
+        "standard"
+      ]
+    },
+    "allowedOrgs": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
+      }
+    },
+    "providers": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,31}$"
+          },
+          "harness": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "cursor-agent",
+              "agent-sdk"
+            ]
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "oauth-token",
+              "api-key",
+              "bedrock",
+              "vertex",
+              "chatgpt-login",
+              "access-token",
+              "service-account"
+            ]
+          },
+          "models": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "fast",
+                "standard",
+                "deep"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "id",
+          "harness",
+          "auth"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "roles": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": [
+          "reviewer",
+          "crossFile",
+          "verifier",
+          "replyJudge",
+          "ticketExtractor"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "maxConcurrency": {
+      "default": 4,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "extraEgressHosts": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
+      }
+    },
+    "tickets": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "linear",
+            "jira",
+            "github-issues"
+          ]
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "dashboard": {
+      "default": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "allowedOrgs",
+    "providers"
+  ],
+  "additionalProperties": false,
+  "$id": "https://raw.githubusercontent.com/lgtmoose/lgtmoose/main/packages/config/schema/lgtmoose.config.schema.json",
+  "title": "LGTMoose deployment config (lgtmoose.config.ts)"
+}
