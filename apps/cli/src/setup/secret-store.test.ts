@@ -6,7 +6,13 @@ import {
 import { SECRET_NAMES } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { awsSecretStore, type SecretsManagerSender } from "./aws-secret-store.js";
-import { readExistingApp, storeAppSecrets, type SecretStore } from "./secret-store.js";
+import {
+  readExistingApp,
+  storeAppSecrets,
+  webhookFingerprint,
+  webhookSecretProblem,
+  type SetupSecretStore,
+} from "./secret-store.js";
 
 function awsError(name: string): Error {
   const error = new Error(`${name} happened`);
@@ -92,7 +98,10 @@ describe("storeAppSecrets", () => {
     expect(result).toEqual({ app: "created", webhook: "created" });
     expect(aws.secrets.get(SECRET_NAMES.githubWebhook)).toBe("whsec-fake");
     const stored = aws.secrets.get(SECRET_NAMES.githubApp) ?? "";
-    expect(JSON.parse(stored)).toEqual(app);
+    expect(JSON.parse(stored)).toEqual({
+      ...app,
+      webhookSecretSha256: webhookFingerprint("whsec-fake"),
+    });
     expect(stored).not.toContain("whsec-fake");
   });
 
@@ -109,7 +118,7 @@ describe("storeAppSecrets", () => {
 
   it("writes the App secret last, so a failed run isn't mistaken for a finished one", async () => {
     const order: string[] = [];
-    const store: SecretStore = {
+    const store: SetupSecretStore = {
       read: () => Promise.resolve(undefined),
       write: (name) => {
         order.push(name);
@@ -118,6 +127,84 @@ describe("storeAppSecrets", () => {
     };
     await storeAppSecrets(store, app, "whsec");
     expect(order).toEqual([SECRET_NAMES.githubWebhook, SECRET_NAMES.githubApp]);
+  });
+
+  /** A memory store whose App-secret write fails, and optionally the restore too. */
+  function failingStore(initial: Record<string, string>, failRestore = false) {
+    const secrets = new Map(Object.entries(initial));
+    let webhookWrites = 0;
+    const store: SetupSecretStore = {
+      read: (name) => Promise.resolve(secrets.get(name)),
+      write: (name, value) => {
+        if (name === SECRET_NAMES.githubApp)
+          return Promise.reject(new Error("ThrottlingException"));
+        webhookWrites += 1;
+        if (failRestore && webhookWrites > 1) return Promise.reject(new Error("AccessDenied"));
+        const existed = secrets.has(name);
+        secrets.set(name, value);
+        return Promise.resolve(existed ? "updated" : "created");
+      },
+    };
+    return { secrets, store };
+  }
+
+  const oldPair = {
+    [SECRET_NAMES.githubApp]: JSON.stringify({ ...app, appId: 1, slug: "old" }),
+    [SECRET_NAMES.githubWebhook]: "whsec-old",
+  };
+
+  it("puts the old webhook secret back when the App secret can't be stored", async () => {
+    const { secrets, store } = failingStore(oldPair);
+    await expect(storeAppSecrets(store, app, "whsec-new")).rejects.toThrow(
+      /Restored the previous lgtmoose\/github-webhook-secret/,
+    );
+    expect(secrets.get(SECRET_NAMES.githubWebhook)).toBe("whsec-old");
+    expect(secrets.get(SECRET_NAMES.githubApp)).toBe(oldPair[SECRET_NAMES.githubApp]);
+  });
+
+  it("says the pair is broken when the restore fails too", async () => {
+    const { store } = failingStore(oldPair, true);
+    await expect(storeAppSecrets(store, app, "whsec-new")).rejects.toThrow(
+      /now belong to different Apps/,
+    );
+  });
+
+  it("has nothing to undo on a first install", async () => {
+    const { secrets, store } = failingStore({});
+    await expect(storeAppSecrets(store, app, "whsec-new")).rejects.toThrow(
+      "Couldn't store lgtmoose/github-app: ThrottlingException",
+    );
+    expect(secrets.has(SECRET_NAMES.githubApp)).toBe(false);
+  });
+});
+
+describe("webhookSecretProblem", () => {
+  const existing = { appId: 42, slug: "lgtmoose-acme" };
+
+  it("accepts a webhook secret that matches the App's fingerprint", async () => {
+    const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
+    await expect(
+      webhookSecretProblem(aws.store, {
+        ...existing,
+        webhookSecretSha256: webhookFingerprint("whsec"),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts any webhook secret for an App stored before fingerprints", async () => {
+    const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
+    await expect(webhookSecretProblem(aws.store, existing)).resolves.toBeUndefined();
+  });
+
+  it("flags a missing or mismatched webhook secret", async () => {
+    await expect(webhookSecretProblem(fakeAws().store, existing)).resolves.toContain("is missing");
+    const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec-other" });
+    await expect(
+      webhookSecretProblem(aws.store, {
+        ...existing,
+        webhookSecretSha256: webhookFingerprint("whsec"),
+      }),
+    ).resolves.toContain("doesn't belong to this App");
   });
 });
 

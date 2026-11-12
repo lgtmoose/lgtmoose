@@ -29,6 +29,8 @@ Each vendor's official CLI runs headless behind a small adapter, restricted to r
 
 Check each vendor's current terms before using plan credentials. `lgtmoose setup` defaults to Bedrock or an API key.
 
+One AWS account and region holds one install. `lgtmoose setup` writes fixed Secrets Manager names (`lgtmoose/github-app`, `lgtmoose/github-webhook-secret`), so a second install there would overwrite the first one's App credentials. Use another account or region for staging until deployment names land.
+
 ## Security controls
 
 - The model can't approve. The decision is a pure function of verified findings.

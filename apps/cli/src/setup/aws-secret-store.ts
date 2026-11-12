@@ -4,7 +4,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
-import type { SecretStore } from "./secret-store.js";
+import type { SetupSecretStore } from "./secret-store.js";
 
 /** The subset of SecretsManagerClient we use, so tests can fake `send`. */
 export interface SecretsManagerSender {
@@ -17,8 +17,8 @@ function errorName(error: unknown): string | undefined {
   return error instanceof Error ? error.name : undefined;
 }
 
-/** SecretStore on AWS Secrets Manager. Kept apart so `setup --help` doesn't load the AWS SDK. */
-export function awsSecretStore(client: SecretsManagerSender, region: string): SecretStore {
+/** SetupSecretStore on AWS Secrets Manager. Kept apart so `setup --help` doesn't load the AWS SDK. */
+export function awsSecretStore(client: SecretsManagerSender, region: string): SetupSecretStore {
   // AWS error messages name the secret but never contain its value, so they're safe to show.
   const context = (name: string, error: unknown) => {
     const hint =
@@ -65,6 +65,6 @@ export function awsSecretStore(client: SecretsManagerSender, region: string): Se
   };
 }
 
-export function createAwsSecretStore(region: string): SecretStore {
+export function createAwsSecretStore(region: string): SetupSecretStore {
   return awsSecretStore(new SecretsManagerClient({ region }), region);
 }

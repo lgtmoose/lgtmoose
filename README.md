@@ -20,6 +20,8 @@ pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
 pnpm lgtmoose deploy    # cdk deploy, then prints the App install link
 ```
 
+One AWS account and region holds one install for now, because the secret and stack names are fixed. Put a second install, such as staging, in another account or region.
+
 ## Repository layout
 
 ```

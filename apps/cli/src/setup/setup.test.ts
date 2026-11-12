@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CALLBACK_PATH } from "./callback-server.js";
 import type { CreatedApp } from "./github.js";
 import type { Prompter } from "./prompter.js";
-import type { SecretStore } from "./secret-store.js";
+import { webhookFingerprint, type SetupSecretStore } from "./secret-store.js";
 import { runSetup, type SetupDeps } from "./setup.js";
 
 const CONFIG_PATH = "/repo/lgtmoose.config.ts";
@@ -27,7 +27,7 @@ const SECRET_VALUES = [
 
 function memoryStore(initial: Record<string, string> = {}) {
   const secrets = new Map(Object.entries(initial));
-  const store: SecretStore = {
+  const store: SetupSecretStore = {
     read: (name) => Promise.resolve(secrets.get(name)),
     write: (name, value) => {
       const existed = secrets.has(name);
@@ -64,6 +64,8 @@ function harness(
   options: {
     secrets?: Record<string, string>;
     files?: Record<string, string>;
+    /** What importing each file returns. Files without an entry fail to import. */
+    configs?: Record<string, unknown>;
     prompter?: Partial<Prompter>;
     app?: CreatedApp;
     tamperState?: boolean;
@@ -101,6 +103,10 @@ function harness(
           files.set(path, content);
           return Promise.resolve();
         },
+        loadConfig: (path) =>
+          options.configs !== undefined && path in options.configs
+            ? Promise.resolve(options.configs[path])
+            : Promise.reject(new SyntaxError("Unexpected token")),
       },
       configPath: CONFIG_PATH,
       out: (text) => chunks.push(text),
@@ -144,6 +150,7 @@ describe("runSetup: first run", () => {
       privateKey: created.pem,
       clientId: created.clientId,
       clientSecret: created.clientSecret,
+      webhookSecretSha256: webhookFingerprint("FAKE-WEBHOOK-SECRET"),
     });
     expect(h.secrets.get(SECRET_NAMES.githubWebhook)).toBe("FAKE-WEBHOOK-SECRET");
 
@@ -234,6 +241,13 @@ describe("runSetup: re-run", () => {
     }),
     [SECRET_NAMES.githubWebhook]: "OLD-WEBHOOK-SECRET",
   };
+  const mine = {
+    [CONFIG_PATH]: {
+      region: "us-east-1",
+      allowedOrgs: ["acme"],
+      providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
+    },
+  };
 
   it("keeps an existing App with --yes and skips the manifest flow", async () => {
     const h = harness({ secrets: existing });
@@ -284,12 +298,47 @@ describe("runSetup: re-run", () => {
     expect(result.all).toContain('The old App "lgtmoose-old" still exists');
   });
 
-  it("warns when a kept App has no webhook secret", async () => {
+  it("won't keep an App whose webhook secret is missing", async () => {
     const h = harness({
       secrets: { [SECRET_NAMES.githubApp]: existing[SECRET_NAMES.githubApp] ?? "" },
     });
     const result = await setup(["--org", "acme", "--yes"], h);
-    expect(result.all).toContain(`Warning: ${SECRET_NAMES.githubWebhook} is missing`);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`${SECRET_NAMES.githubWebhook} is missing`);
+    expect(h.openBrowser).not.toHaveBeenCalled();
+  });
+
+  it("offers only a new App when the webhook secret belongs to another one", async () => {
+    const select = vi.fn();
+    const confirm = vi.fn(() => Promise.resolve(true));
+    const h = harness({
+      secrets: {
+        [SECRET_NAMES.githubApp]: JSON.stringify({
+          ...JSON.parse(existing[SECRET_NAMES.githubApp] ?? ""),
+          webhookSecretSha256: webhookFingerprint("SOME-OTHER-SECRET"),
+        }),
+        [SECRET_NAMES.githubWebhook]: "OLD-WEBHOOK-SECRET",
+      },
+      prompter: { select, confirm },
+    });
+    const result = await setup(
+      [
+        "--org",
+        "acme",
+        "--app-name",
+        "lgtmoose-acme",
+        "--region",
+        "us-east-1",
+        "--profile",
+        "lean",
+      ],
+      h,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toContain("doesn't belong to this App");
+    expect(select).not.toHaveBeenCalled();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(JSON.parse(h.secrets.get(SECRET_NAMES.githubApp) ?? "")).toMatchObject({ appId: 42 });
   });
 
   it("won't silently replace an App secret it can't read", async () => {
@@ -301,7 +350,7 @@ describe("runSetup: re-run", () => {
   });
 
   it("keeps an existing config with --yes", async () => {
-    const h = harness({ secrets: existing, files: { [CONFIG_PATH]: "// mine" } });
+    const h = harness({ secrets: existing, files: { [CONFIG_PATH]: "// mine" }, configs: mine });
     const result = await setup(["--org", "acme", "--yes"], h);
     expect(result.exitCode).toBe(0);
     expect(h.files.get(CONFIG_PATH)).toBe("// mine");
@@ -324,6 +373,7 @@ describe("runSetup: re-run", () => {
     const declined = harness({
       secrets: existing,
       files: { [CONFIG_PATH]: "// mine" },
+      configs: mine,
       prompter: { select, confirm: () => Promise.resolve(false) },
     });
     await setup(flags, declined);
@@ -332,10 +382,76 @@ describe("runSetup: re-run", () => {
     const confirmed = harness({
       secrets: existing,
       files: { [CONFIG_PATH]: "// mine" },
+      configs: mine,
       prompter: { select, confirm: () => Promise.resolve(true) },
     });
     await setup(flags, confirmed);
     expect(confirmed.files.get(CONFIG_PATH)).toContain("defineConfig");
+  });
+});
+
+describe("runSetup: an existing config that points elsewhere", () => {
+  const config = (region: string, allowedOrgs = ["acme"]) => ({
+    files: { [CONFIG_PATH]: "// mine" },
+    configs: {
+      [CONFIG_PATH]: {
+        region,
+        allowedOrgs,
+        providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
+      },
+    },
+  });
+
+  it("uses the config's region by default, so a re-run finds the App it made", async () => {
+    const h = harness(config("eu-west-2"));
+    const result = await setup(["--org", "acme", "--yes"], h);
+    expect(result.exitCode).toBe(0);
+    expect(h.regions).toEqual(["eu-west-2"]);
+    expect(h.files.get(CONFIG_PATH)).toBe("// mine");
+  });
+
+  it("stops with --yes before touching secrets when the region differs", async () => {
+    const h = harness(config("eu-west-2"));
+    const result = await setup(["--org", "acme", "--region", "us-east-1", "--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("it deploys to eu-west-2, but this run uses us-east-1");
+    expect(h.regions).toEqual([]);
+    expect(h.openBrowser).not.toHaveBeenCalled();
+  });
+
+  it("stops when the owner isn't in allowedOrgs, unless the person replaces the config", async () => {
+    const flags = [
+      "--org",
+      "globex",
+      "--app-name",
+      "x",
+      "--region",
+      "us-east-1",
+      "--profile",
+      "lean",
+    ];
+    const declined = harness({
+      ...config("us-east-1"),
+      prompter: { confirm: () => Promise.resolve(false) },
+    });
+    const refused = await setup(flags, declined);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("allowedOrgs doesn't include globex");
+    expect(declined.regions).toEqual([]);
+
+    const confirm = vi.fn(() => Promise.resolve(true));
+    const accepted = harness({ ...config("us-east-1"), prompter: { confirm } });
+    const result = await setup(flags, accepted);
+    expect(result.exitCode).toBe(0);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(writtenConfig(accepted.files.get(CONFIG_PATH) ?? "").allowedOrgs).toEqual(["globex"]);
+  });
+
+  it("won't keep a config it can't load with --yes", async () => {
+    const h = harness({ files: { [CONFIG_PATH]: "// broken" } });
+    const result = await setup(["--org", "acme", "--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("couldn't be loaded");
   });
 });
 

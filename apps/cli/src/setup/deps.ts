@@ -1,6 +1,6 @@
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { openBrowser } from "./browser.js";
 import { createGitHubApi } from "./github.js";
 import { createInquirerPrompter } from "./prompter.js";
@@ -29,6 +29,9 @@ export async function defaultSetupDeps(): Promise<SetupDeps> {
           () => false,
         ),
       write: (path, content) => writeFile(path, content, "utf8"),
+      // Node 24 strips the types from a .ts file on import, the same way `cdk synth` loads it.
+      loadConfig: async (path) =>
+        ((await import(pathToFileURL(path).href)) as { default?: unknown }).default,
     },
     configPath: configPath(),
     out: (text) => process.stdout.write(text),

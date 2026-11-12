@@ -149,7 +149,10 @@ function validator(problemOf: (value: string) => string | undefined) {
 export async function resolveSetupInputs(
   flags: SetupFlags,
   prompter: Prompter,
+  /** The region of an existing lgtmoose.config.ts, so a re-run defaults to the same place. */
+  defaults: { region?: string | undefined } = {},
 ): Promise<SetupInputs> {
+  const defaultRegion = defaults.region ?? DEFAULT_REGION;
   let owner = flags.owner;
   if (owner === undefined) {
     // parseSetupFlags already refuses --yes without an owner.
@@ -183,11 +186,11 @@ export async function resolveSetupInputs(
   const regionValue =
     flags.region ??
     (flags.yes
-      ? DEFAULT_REGION
+      ? defaultRegion
       : (
           await prompter.input({
             message: "AWS region",
-            default: DEFAULT_REGION,
+            default: defaultRegion,
             validate: validator(regionProblem),
           })
         ).trim());
