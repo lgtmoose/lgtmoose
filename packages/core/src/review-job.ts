@@ -167,10 +167,14 @@ export function toReviewJob(
   if (body === undefined) return { ignored: "payload is not an object" };
 
   const action = str(body.action);
-  const kinds = KINDS[event];
+  // Own-property lookups only: `event` comes from a header and `action` from the payload, and
+  // plain indexing would resolve names like "constructor" or "__proto__" to inherited values.
+  const kinds = Object.hasOwn(KINDS, event) ? KINDS[event] : undefined;
   if (kinds === undefined) return { ignored: `unsupported event: ${event}` };
-  const kind = action === undefined ? undefined : kinds[action];
-  if (kind === undefined) return { ignored: `unsupported action: ${event}.${action ?? "none"}` };
+  const kind = action !== undefined && Object.hasOwn(kinds, action) ? kinds[action] : undefined;
+  if (!isReviewJobKind(kind)) {
+    return { ignored: `unsupported action: ${event}.${action ?? "none"}` };
+  }
 
   const pr = pullRequestOf(event, body);
   if (pr === undefined) return { ignored: "not a pull request" };

@@ -5,8 +5,11 @@ import type { ReviewJob } from "@lgtmoose/core";
  * on Lambda (adapters/aws.ts) and as a plain Node server (adapters/local.ts).
  */
 
-/** Where the GitHub webhook secret lives. */
-export interface SecretStore {
+/**
+ * Where the GitHub webhook secret comes from. Read-only on purpose, and named for its one job so
+ * it isn't confused with the CLI's secret writer (apps/cli/src/setup/secret-store.ts).
+ */
+export interface WebhookSecretSource {
   /**
    * The current secret. `refresh` asks for a fresh copy instead of a cached one; the gateway
    * asks once after a signature mismatch, so a rotated secret works without a redeploy.

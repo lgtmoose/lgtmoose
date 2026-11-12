@@ -6,7 +6,7 @@ import { healthRouter } from "./routes/health.js";
 import { webhooksRouter, type WebhookDeps } from "./routes/webhooks.js";
 
 export { ROUTES } from "./paths.js";
-export type { JobQueue, SecretStore, SendOptions } from "./ports.js";
+export type { JobQueue, WebhookSecretSource, SendOptions } from "./ports.js";
 export type { WebhookDeps } from "./routes/webhooks.js";
 
 export interface GatewayEnv {

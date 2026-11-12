@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { errorHandler } from "./middleware/errors.js";
 import { MAX_WEBHOOK_BYTES, ROUTES } from "./paths.js";
-import type { JobQueue, SecretStore } from "./ports.js";
+import type { JobQueue, WebhookSecretSource } from "./ports.js";
 import { githubWebhookHandler, webhooksRouter, type WebhookDeps } from "./routes/webhooks.js";
 import { signBody } from "./signature.js";
 
@@ -12,7 +12,7 @@ const SECRET = "app-test-secret";
 
 /** Webhook deps that verify against SECRET and queue nothing; webhooks.test.ts covers the flow. */
 function testDeps(): WebhookDeps {
-  const secrets: SecretStore = { get: async () => SECRET };
+  const secrets: WebhookSecretSource = { get: async () => SECRET };
   const queue: JobQueue = { send: vi.fn(async () => {}) };
   return { secrets, queue, allowedOrgs: ["acme-corp"] };
 }

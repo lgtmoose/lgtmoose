@@ -7,10 +7,10 @@ import {
   SECRET_MIN_REFRESH_MS,
   SECRET_TTL_MS,
   fifoId,
-  secretsManagerStore,
+  secretsManagerWebhookSecret,
   sqsJobQueue,
 } from "./aws.js";
-import { envSecretStore, logJobQueue } from "./local.js";
+import { envWebhookSecret, logJobQueue } from "./local.js";
 
 const job: ReviewJob = {
   kind: "pr_opened",
@@ -31,7 +31,11 @@ function fakeSecretsManager(initial = "s1") {
     Name: command.input.SecretId,
     SecretString: value,
   }));
-  const store = secretsManagerStore({ client: { send }, secretId: "arn:secret", now: () => clock });
+  const store = secretsManagerWebhookSecret({
+    client: { send },
+    secretId: "arn:secret",
+    now: () => clock,
+  });
   return {
     store,
     send,
@@ -40,7 +44,7 @@ function fakeSecretsManager(initial = "s1") {
   };
 }
 
-describe("secretsManagerStore", () => {
+describe("secretsManagerWebhookSecret", () => {
   it("fetches the named secret and caches it for about five minutes", async () => {
     const sm = fakeSecretsManager();
     expect(await sm.store.get()).toBe("s1");
@@ -126,7 +130,7 @@ describe("fifoId", () => {
 describe("local adapters", () => {
   it("reads the webhook secret from the environment on every call", async () => {
     const env: NodeJS.ProcessEnv = { GITHUB_WEBHOOK_SECRET: "one" };
-    const store = envSecretStore("GITHUB_WEBHOOK_SECRET", env);
+    const store = envWebhookSecret("GITHUB_WEBHOOK_SECRET", env);
     expect(await store.get()).toBe("one");
     env.GITHUB_WEBHOOK_SECRET = "two";
     expect(await store.get({ refresh: true })).toBe("two");

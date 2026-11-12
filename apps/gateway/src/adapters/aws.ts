@@ -4,7 +4,7 @@ import {
   type GetSecretValueCommandOutput,
 } from "@aws-sdk/client-secrets-manager";
 import { SendMessageCommand } from "@aws-sdk/client-sqs";
-import type { JobQueue, SecretStore } from "../ports.js";
+import type { JobQueue, WebhookSecretSource } from "../ports.js";
 
 /** The one call each store makes; the real SDK clients satisfy these, tests pass fakes. */
 export interface SecretsManagerSender {
@@ -14,7 +14,7 @@ export interface SqsSender {
   send(command: SendMessageCommand): Promise<unknown>;
 }
 
-export interface SecretsManagerStoreOptions {
+export interface SecretsManagerWebhookSecretOptions {
   client: SecretsManagerSender;
   /** Name or ARN of a secret whose value is the webhook secret as plain text. */
   secretId: string;
@@ -32,7 +32,9 @@ export const SECRET_TTL_MS = 5 * 60_000;
 export const SECRET_MIN_REFRESH_MS = 30_000;
 
 /** The webhook secret from Secrets Manager, cached per Lambda instance. */
-export function secretsManagerStore(options: SecretsManagerStoreOptions): SecretStore {
+export function secretsManagerWebhookSecret(
+  options: SecretsManagerWebhookSecretOptions,
+): WebhookSecretSource {
   const {
     client,
     secretId,

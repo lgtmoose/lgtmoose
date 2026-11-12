@@ -1,4 +1,4 @@
-import { envSecretStore, logJobQueue } from "./adapters/local.js";
+import { envWebhookSecret, logJobQueue } from "./adapters/local.js";
 import { createApp } from "./app.js";
 import { parseAllowedOrgs, requiredEnv } from "./env.js";
 
@@ -44,7 +44,7 @@ const SHUTDOWN_GRACE_MS = 8_000;
 
 const app = createApp(
   { version: process.env.LGTMOOSE_VERSION ?? "dev", trustProxyHops },
-  { secrets: envSecretStore("GITHUB_WEBHOOK_SECRET"), queue: logJobQueue(), allowedOrgs },
+  { secrets: envWebhookSecret("GITHUB_WEBHOOK_SECRET"), queue: logJobQueue(), allowedOrgs },
 );
 // Express 5 calls this on failure too, with the error, so it reports success only when listening.
 const server = app.listen(port, (error?: NodeJS.ErrnoException) => {

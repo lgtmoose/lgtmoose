@@ -190,6 +190,19 @@ describe("toReviewJob: ignore rules", () => {
     ).toEqual({ ignored: "unsupported action: pull_request.none" });
   });
 
+  it("never resolves event or action names to inherited object properties", () => {
+    for (const event of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(toReviewJob(event, prEvent("opened"), options)).toEqual({
+        ignored: `unsupported event: ${event}`,
+      });
+    }
+    for (const action of ["constructor", "__proto__", "toString", "valueOf"]) {
+      expect(toReviewJob("pull_request", { ...prEvent("opened"), action }, options)).toEqual({
+        ignored: `unsupported action: pull_request.${action}`,
+      });
+    }
+  });
+
   it("ignores payloads that aren't objects", () => {
     for (const payload of [null, [], "x", 3]) {
       expect(toReviewJob("pull_request", payload, options)).toEqual({

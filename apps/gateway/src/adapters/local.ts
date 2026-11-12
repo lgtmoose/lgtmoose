@@ -1,10 +1,10 @@
-import type { JobQueue, SecretStore } from "../ports.js";
+import type { JobQueue, WebhookSecretSource } from "../ports.js";
 
 /** The webhook secret from an environment variable, for server.ts and docker compose. */
-export function envSecretStore(
+export function envWebhookSecret(
   name = "GITHUB_WEBHOOK_SECRET",
   env: NodeJS.ProcessEnv = process.env,
-): SecretStore {
+): WebhookSecretSource {
   return {
     // Read on every call: there's no network round trip to save, and tests can change it.
     async get() {

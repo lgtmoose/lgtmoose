@@ -4,8 +4,8 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { ROUTES } from "./paths.js";
-import type { JobQueue, SecretStore, SendOptions } from "./ports.js";
-import { parsePayload } from "./routes/webhooks.js";
+import type { JobQueue, WebhookSecretSource, SendOptions } from "./ports.js";
+import { parsePayload, verified } from "./routes/webhooks.js";
 import { parseSignature, signBody, signatureMatches } from "./signature.js";
 
 const SECRET = "It's a Secret to Everybody";
@@ -40,11 +40,11 @@ function rotatingSecrets(initial: string) {
     if (options?.refresh === true) cached = current;
     return cached;
   });
-  const store: SecretStore = { get };
+  const store: WebhookSecretSource = { get };
   return { store, get, rotate: (next: string) => void (current = next) };
 }
 
-function setup(options: { secrets?: SecretStore; send?: JobQueue["send"] } = {}) {
+function setup(options: { secrets?: WebhookSecretSource; send?: JobQueue["send"] } = {}) {
   const sent: { job: ReviewJob; options: SendOptions }[] = [];
   const send = vi.fn(
     options.send ??
@@ -406,7 +406,7 @@ describe("POST /webhooks/github: failures", () => {
 
   it("answers 500 when the secret can't be read, without leaking why", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    const secrets: SecretStore = {
+    const secrets: WebhookSecretSource = {
       get: async () => {
         throw new Error("ResourceNotFoundException: lgtmoose/github-webhook-secret");
       },
@@ -418,6 +418,29 @@ describe("POST /webhooks/github: failures", () => {
     expect(response.text).not.toContain("ResourceNotFound");
     expect(send).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalled();
+  });
+});
+
+describe("verified", () => {
+  const body = Buffer.from('{"zen":"x"}');
+  const header = signBody(body, "the-real-secret");
+
+  function source(values: { cached: string; fresh: string }): WebhookSecretSource {
+    return { get: async (opts) => (opts?.refresh ? values.fresh : values.cached) };
+  }
+
+  it("doesn't check the same secret twice when the refresh returns the cached value", async () => {
+    const matches = vi.fn(signatureMatches);
+    const same = source({ cached: "stale", fresh: "stale" });
+    expect(await verified(same, body, header, matches)).toBe(false);
+    expect(matches).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks again when the refresh returns a different (rotated) secret", async () => {
+    const matches = vi.fn(signatureMatches);
+    const rotated = source({ cached: "stale", fresh: "the-real-secret" });
+    expect(await verified(rotated, body, header, matches)).toBe(true);
+    expect(matches).toHaveBeenCalledTimes(2);
   });
 });
 

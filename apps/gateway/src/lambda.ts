@@ -2,7 +2,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { configure } from "@codegenie/serverless-express";
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
-import { secretsManagerStore, sqsJobQueue } from "./adapters/aws.js";
+import { secretsManagerWebhookSecret, sqsJobQueue } from "./adapters/aws.js";
 import { createApp } from "./app.js";
 import { parseAllowedOrgs, requiredEnv } from "./env.js";
 
@@ -20,7 +20,7 @@ const app = createApp(
   {
     // Both SDK clients come from the Lambda runtime (they're external in the bundle) and pick up
     // the region and credentials from the function's environment.
-    secrets: secretsManagerStore({
+    secrets: secretsManagerWebhookSecret({
       client: new SecretsManagerClient({}),
       secretId: requiredEnv("GITHUB_WEBHOOK_SECRET_ARN"),
     }),

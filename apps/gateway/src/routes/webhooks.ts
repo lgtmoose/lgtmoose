@@ -1,11 +1,11 @@
 import express, { Router, type RequestHandler } from "express";
 import { reviewJobGroupId, toReviewJob } from "@lgtmoose/core";
 import { MAX_WEBHOOK_BYTES } from "../paths.js";
-import type { JobQueue, SecretStore } from "../ports.js";
+import type { JobQueue, WebhookSecretSource } from "../ports.js";
 import { parseSignature, signatureMatches } from "../signature.js";
 
 export interface WebhookDeps {
-  secrets: SecretStore;
+  secrets: WebhookSecretSource;
   queue: JobQueue;
   /** GitHub orgs or users whose repositories may be reviewed. */
   allowedOrgs: readonly string[];
@@ -106,19 +106,24 @@ export function githubWebhookHandler(deps: WebhookDeps): RequestHandler {
 }
 
 /**
- * Checks the signature against the cached secret, then once more against a fresh copy: after a
- * rotation the cache holds the old secret until it expires, and GitHub already signs with the
- * new one. A missing or malformed header fails without touching the secret at all.
+ * Checks the signature against the cached secret, then once more against a fresh copy if that
+ * differs: after a rotation the cache holds the old secret until it expires, and GitHub already
+ * signs with the new one. A missing or malformed header fails without touching the secret at all.
  */
-async function verified(
-  secrets: SecretStore,
+export async function verified(
+  secrets: WebhookSecretSource,
   body: Buffer,
   header: string | undefined,
+  matches: typeof signatureMatches = signatureMatches,
 ): Promise<boolean> {
   const signature = parseSignature(header);
   if (signature === undefined) return false;
-  if (signatureMatches(body, signature, await secrets.get())) return true;
-  return signatureMatches(body, signature, await secrets.get({ refresh: true }));
+  const cached = await secrets.get();
+  if (matches(body, signature, cached)) return true;
+  const fresh = await secrets.get({ refresh: true });
+  // The refresh is throttled, so it often hands back the same secret: don't HMAC a (up to 25 MB)
+  // body a second time when the answer can't change.
+  return fresh !== cached && matches(body, signature, fresh);
 }
 
 /**
