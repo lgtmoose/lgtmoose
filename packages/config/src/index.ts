@@ -24,3 +24,4 @@ export {
   type RepoConfigInput,
 } from "./repo.js";
 export { jsonSchemas, serializeSchema } from "./json-schema.js";
+export { SECRET_NAMES, providerNeedsSecret } from "./secrets.js";

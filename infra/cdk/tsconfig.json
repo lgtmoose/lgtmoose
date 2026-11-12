@@ -1,7 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    // aws-cdk-lib's own types don't satisfy this option (e.g. Vpc isn't assignable to IVpc).
+    "exactOptionalPropertyTypes": false
   },
-  "include": ["bin", "lib"]
+  "include": ["bin", "lib", "lambda"]
 }

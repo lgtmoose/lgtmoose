@@ -1,0 +1,17 @@
+import type { ProviderConfig } from "./deploy.js";
+
+/**
+ * Secrets Manager names. `lgtmoose setup` and `lgtmoose auth` write these; the CDK stacks only
+ * reference them, so a redeploy never overwrites a credential.
+ */
+export const SECRET_NAMES = {
+  /** JSON: { appId, privateKey, webhookSecret, clientId, clientSecret } */
+  githubApp: "lgtmoose/github-app",
+  /** One per provider that needs a stored credential. */
+  provider: (providerId: string) => `lgtmoose/provider/${providerId}`,
+} as const;
+
+/** Bedrock uses the task's IAM role; every other auth method needs a stored credential. */
+export function providerNeedsSecret(provider: Pick<ProviderConfig, "auth">): boolean {
+  return provider.auth !== "bedrock";
+}

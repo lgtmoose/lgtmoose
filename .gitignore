@@ -11,3 +11,6 @@ coverage/
 
 # Written by `lgtmoose setup`; contains account-specific settings.
 lgtmoose.config.ts
+
+# Scratch folder for packages/db check-migrations
+.migrations-check/

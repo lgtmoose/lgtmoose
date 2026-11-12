@@ -1,18 +1,35 @@
+import type { CloudAssembly } from "aws-cdk-lib/cx-api";
 import { Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
-import { LGTMOOSE_VERSION, buildApp } from "./app.js";
-import type { MetaStack } from "./meta-stack.js";
+import { parseDeployConfig } from "@lgtmoose/config";
+import { beforeAll, describe, expect, it } from "vitest";
+import { LGTMOOSE_VERSION, buildApp, type LgtmooseStacks } from "./app.js";
+import { EXAMPLE_CONFIG } from "./load-config.js";
+import { appWithoutBundling } from "./test-utils.js";
 
 describe("buildApp", () => {
-  it("synthesizes the meta stack with the deployed version", () => {
-    const app = buildApp();
-    const stack = app.node.findChild("Lgtmoose-Meta") as MetaStack;
-    const template = Template.fromStack(stack);
+  let stacks: LgtmooseStacks;
+  let assembly: CloudAssembly;
 
-    template.hasResourceProperties("AWS::SSM::Parameter", {
+  // One full synth shared by every test; it's the slow part.
+  beforeAll(() => {
+    const config = parseDeployConfig({ ...EXAMPLE_CONFIG, region: "eu-west-2" });
+    stacks = buildApp(config, appWithoutBundling());
+    assembly = stacks.app.synth();
+  }, 60_000);
+
+  it("synthesizes every stack in the configured region", () => {
+    expect(assembly.stacks.map((s) => s.stackName).sort()).toEqual([
+      "Lgtmoose-Data",
+      "Lgtmoose-Meta",
+      "Lgtmoose-Network",
+    ]);
+    expect(stacks.network.region).toBe("eu-west-2");
+  });
+
+  it("records the deployed version", () => {
+    Template.fromStack(stacks.meta).hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/lgtmoose/version",
       Value: LGTMOOSE_VERSION,
     });
-    expect(app.synth().stacks.map((s) => s.stackName)).toEqual(["Lgtmoose-Meta"]);
   });
 });
