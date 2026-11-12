@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { parseDeployConfig, SECRET_NAMES } from "@lgtmoose/config";
+import { SECRET_NAMES } from "@lgtmoose/config";
+import { loadDeployConfig } from "../paths.js";
 import { newState, startCallbackServer, DEFAULT_TIMEOUT_MS } from "./callback-server.js";
 import { renderConfigFile } from "./config-file.js";
 import type { CreatedApp, GitHubApi } from "./github.js";
@@ -180,9 +181,9 @@ type ExistingConfig =
   | { kind: "unreadable"; reason: string };
 
 async function readExistingConfig(deps: SetupDeps): Promise<ExistingConfig> {
-  if (!(await deps.files.exists(deps.configPath))) return { kind: "none" };
   try {
-    const config = parseDeployConfig(await deps.files.loadConfig(deps.configPath), deps.configPath);
+    const config = await loadDeployConfig(deps.files, deps.configPath);
+    if (config === undefined) return { kind: "none" };
     return { kind: "parsed", region: config.region, allowedOrgs: config.allowedOrgs };
   } catch (error) {
     return { kind: "unreadable", reason: error instanceof Error ? error.message : String(error) };
@@ -264,7 +265,8 @@ function nextSteps(slug: string | undefined): string {
 Next steps:
   1. Connect a model provider. Bedrock works with no key; for others run
      pnpm lgtmoose auth <claude|codex|cursor|api-key>   (coming in NIC-824)
-  2. Deploy, which also points the App's webhook at your gateway:
+  2. Deploy, which also points the App's webhook at your gateway. Until then the webhook
+     aims at a placeholder and GitHub's deliveries are lost, so install after deploying:
      pnpm lgtmoose deploy
   3. ${install}
 `;

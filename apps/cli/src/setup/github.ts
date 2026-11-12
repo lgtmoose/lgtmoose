@@ -1,3 +1,4 @@
+import { GitHubRequestError, githubRequest } from "../github-request.js";
 import { z } from "zod";
 
 /** What GitHub hands back once, when the manifest code is converted. Holds secrets. */
@@ -40,24 +41,19 @@ export function createGitHubApi(
     async convertManifest(code) {
       if (!MANIFEST_CODE.test(code)) throw new Error("GitHub sent a malformed manifest code.");
       // No auth: the one-time code is the credential for this call.
-      const response = await fetchFn(`${apiUrl}/app-manifests/${code}/conversions`, {
-        method: "POST",
-        headers: {
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-          "user-agent": "lgtmoose-cli",
-        },
-      });
-      if (!response.ok) {
-        // The error body never holds credentials, but keep only GitHub's short message.
-        const body = (await response.json().catch(() => ({}))) as { message?: unknown };
-        const detail = typeof body.message === "string" ? `: ${body.message}` : "";
+      let reply: unknown;
+      try {
+        reply = await githubRequest(fetchFn, apiUrl, "POST", `/app-manifests/${code}/conversions`);
+      } catch (error) {
+        if (!(error instanceof GitHubRequestError)) throw error;
+        const detail = error.githubMessage ? `: ${error.githubMessage}` : "";
         throw new Error(
-          `GitHub couldn't finish creating the App (HTTP ${response.status}${detail}). ` +
+          `GitHub couldn't finish creating the App (HTTP ${error.status}${detail}). ` +
             "The code from GitHub works once and expires after an hour, so run setup again.",
+          { cause: error },
         );
       }
-      const parsed = conversionSchema.safeParse(await response.json());
+      const parsed = conversionSchema.safeParse(reply);
       if (!parsed.success) {
         // Don't echo the body: it holds the private key.
         throw new Error("GitHub's reply to the manifest conversion was missing expected fields.");

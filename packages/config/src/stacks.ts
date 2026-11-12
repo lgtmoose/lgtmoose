@@ -21,10 +21,14 @@ export const STACK_OUTPUTS = {
 
 export const CDK_CONTEXT = {
   /**
-   * Turns off the database's deletion protection. `lgtmoose destroy` deploys the Data stack
-   * with this set, then deletes; CloudFormation still takes a final snapshot.
+   * Synthesizes the database without deletion protection. `lgtmoose destroy` turns protection
+   * off through the RDS API and passes this so the template agrees; CloudFormation still takes a
+   * final snapshot.
    */
   allowDatabaseDeletion: "lgtmoose:allowDatabaseDeletion",
-  /** `lgtmoose destroy --purge`: no final snapshot, and the bucket and its objects go too. */
+  /**
+   * `lgtmoose destroy --purge` deploys the Data stack with this: no final snapshot, and the
+   * database secret, the bucket and its objects go too. RDS's CloudWatch logs expire on their own.
+   */
   purge: "lgtmoose:purge",
 } as const;

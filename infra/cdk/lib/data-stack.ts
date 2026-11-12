@@ -63,8 +63,9 @@ export interface DataStackProps extends StackProps {
   controlSecurityGroup: ISecurityGroup;
   /**
    * Turns off deletion protection so the stack can be deleted (RDS refuses to delete a protected
-   * database, which would leave the stack in DELETE_FAILED). `lgtmoose destroy` deploys with this
-   * set, then deletes; CloudFormation still takes a final snapshot. Default false.
+   * database, which would leave the stack in DELETE_FAILED). `lgtmoose destroy` turns protection off
+   * through the RDS API instead, and passes this so the template it synthesizes agrees; CloudFormation
+   * still takes a final snapshot. Default false.
    */
   allowDatabaseDeletion?: boolean;
   /**

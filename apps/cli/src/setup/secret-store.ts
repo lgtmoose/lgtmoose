@@ -94,24 +94,36 @@ export async function readAppCredentials(store: SetupSecretStore): Promise<AppCr
 }
 
 /**
- * Why the stored webhook secret can't be used with `existing`, or undefined when it can.
+ * The stored webhook secret if it belongs to `existing`, otherwise why it can't be used.
  * Apps stored before the fingerprint existed only get the "missing" check.
  */
-export async function webhookSecretProblem(
+export async function readWebhookSecret(
   store: SetupSecretStore,
   existing: ExistingApp,
-): Promise<string | undefined> {
+): Promise<{ secret: string; problem?: undefined } | { secret?: undefined; problem: string }> {
   const webhook = await store.read(SECRET_NAMES.githubWebhook);
   if (webhook === undefined) {
-    return `${SECRET_NAMES.githubWebhook} is missing, so the gateway can't verify webhooks.`;
+    return {
+      problem: `${SECRET_NAMES.githubWebhook} is missing, so the gateway can't verify webhooks.`,
+    };
   }
   if (
     existing.webhookSecretSha256 !== undefined &&
     existing.webhookSecretSha256 !== webhookFingerprint(webhook)
   ) {
-    return `${SECRET_NAMES.githubWebhook} doesn't belong to this App, so the gateway would reject its webhooks.`;
+    return {
+      problem: `${SECRET_NAMES.githubWebhook} doesn't belong to this App, so the gateway would reject its webhooks.`,
+    };
   }
-  return undefined;
+  return { secret: webhook };
+}
+
+/** Why the stored webhook secret can't be used with `existing`, or undefined when it can. */
+export async function webhookSecretProblem(
+  store: SetupSecretStore,
+  existing: ExistingApp,
+): Promise<string | undefined> {
+  return (await readWebhookSecret(store, existing)).problem;
 }
 
 export interface StoredSecrets {

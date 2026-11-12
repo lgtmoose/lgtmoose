@@ -36,9 +36,9 @@ function harness(
   options: {
     config?: unknown;
     secrets?: Record<string, string>;
-    stacks?: Record<string, string>;
+    /** Data stack status; "" for no stack. */
+    dataStatus?: string;
     outputs?: StackOutputs;
-    previousWebhookUrl?: string;
     prompter?: Partial<Prompter>;
     failWebhook?: boolean;
   } = {},
@@ -84,7 +84,6 @@ function harness(
         slug: "lgtmoose-acme",
         owner: { login: "acme", type: "Organization" },
       }),
-    getWebhookUrl: () => Promise.resolve(options.previousWebhookUrl),
     setWebhook: (_jwt, config) => {
       if (options.failWebhook) return Promise.reject(new Error("GitHub is down"));
       calls.push("webhook");
@@ -96,11 +95,13 @@ function harness(
     Promise.reject(new Error(`unexpected prompt: ${message}`));
   const chunks: string[] = [];
   const regions: string[] = [];
-  const stackStatus: Record<string, string> = {
-    CDKToolkit: "UPDATE_COMPLETE",
-    [STACK_NAMES.data]: "CREATE_COMPLETE",
-    ...options.stacks,
+  const dataOutputs = {
+    DatabaseIdentifier: "lgtmoose-db-1",
+    DatabaseSecretArn: "arn:aws:secretsmanager:eu-west-2:1:secret:db",
+    ArtifactBucketName: "lgtmoose-artifacts-1",
   };
+  const dataStatus = options.dataStatus ?? "UPDATE_COMPLETE";
+  const unprotected: string[] = [];
   const deps: DeployDeps = {
     configPath: CONFIG_PATH,
     files: {
@@ -111,7 +112,21 @@ function harness(
       regions.push(region);
       return store;
     },
-    stacks: () => ({ status: (name) => Promise.resolve(stackStatus[name] || undefined) }),
+    stacks: () => ({
+      describe: (name) =>
+        Promise.resolve(
+          name === STACK_NAMES.data && dataStatus !== ""
+            ? { status: dataStatus, outputs: dataOutputs }
+            : undefined,
+        ),
+    }),
+    database: () => ({
+      disableDeletionProtection: (kind, id) => {
+        calls.push("unprotect");
+        unprotected.push(`${kind}:${id}`);
+        return Promise.resolve();
+      },
+    }),
     cdk: () => cdk,
     github,
     prompter: {
@@ -123,7 +138,16 @@ function harness(
     out: (text) => chunks.push(text),
     now: () => new Date("2026-11-12T12:00:00Z"),
   };
-  return { deps, calls, deployed, destroyed, webhooks, regions, output: () => chunks.join("") };
+  return {
+    deps,
+    calls,
+    deployed,
+    destroyed,
+    webhooks,
+    regions,
+    unprotected,
+    output: () => chunks.join(""),
+  };
 }
 
 async function run(command: typeof runDeploy, argv: string[], h: ReturnType<typeof harness>) {
@@ -137,7 +161,7 @@ describe("lgtmoose deploy", () => {
     const result = await run(runDeploy, [], h);
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
-    expect(h.calls).toEqual(["deploy", "webhook"]);
+    expect(h.calls).toEqual(["bootstrap", "deploy", "webhook"]);
     expect(h.deployed).toEqual([{ stacks: "all", askToApprove: true }]);
     expect(h.regions).toEqual(["eu-west-2"]);
     expect(h.webhooks).toEqual([
@@ -150,27 +174,10 @@ describe("lgtmoose deploy", () => {
     }
   });
 
-  it("bootstraps the CDK the first time only", async () => {
-    const first = harness({ stacks: { CDKToolkit: "" } });
-    await run(runDeploy, [], first);
-    expect(first.calls).toEqual(["bootstrap", "deploy", "webhook"]);
-    const failed = harness({ stacks: { CDKToolkit: "ROLLBACK_COMPLETE" } });
-    await run(runDeploy, [], failed);
-    expect(failed.calls[0]).toBe("bootstrap");
-  });
-
   it("skips the approval prompt with --yes", async () => {
     const h = harness();
     await run(runDeploy, ["--yes"], h);
     expect(h.deployed[0]?.askToApprove).toBe(false);
-  });
-
-  it("points out the Active switch for an App still on the placeholder URL", async () => {
-    const h = harness({ previousWebhookUrl: PLACEHOLDER_WEBHOOK_URL });
-    const result = await run(runDeploy, [], h);
-    expect(result.all).toContain(
-      "https://github.com/organizations/acme/settings/apps/lgtmoose-acme",
-    );
   });
 
   it("stops before CloudFormation when setup hasn't run", async () => {
@@ -227,32 +234,55 @@ describe("lgtmoose deploy", () => {
 });
 
 describe("lgtmoose destroy", () => {
-  it("turns off deletion protection, deletes the stacks and says what it kept", async () => {
+  it("turns off deletion protection through RDS, deletes the stacks and says what it kept", async () => {
     const confirm = vi.fn(() => Promise.resolve(true));
     const h = harness({ prompter: { confirm } });
     const result = await run(runDestroy, [], h);
     expect(result.stderr).toBe("");
     expect(confirm).toHaveBeenCalledOnce();
-    expect(h.calls).toEqual(["deploy", "destroy", "webhook"]);
-    const context = { [CDK_CONTEXT.allowDatabaseDeletion]: "true" };
-    expect(h.deployed).toEqual([
-      { stacks: [STACK_NAMES.data], exclusively: true, askToApprove: false, context },
-    ]);
-    expect(h.destroyed).toEqual([context]);
-    expect(h.webhooks[0]?.url).toBe(PLACEHOLDER_WEBHOOK_URL);
+    expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
+    expect(h.unprotected).toEqual(["instance:lgtmoose-db-1"]);
+    expect(h.deployed).toEqual([]);
+    expect(h.destroyed).toEqual([{ [CDK_CONTEXT.allowDatabaseDeletion]: "true" }]);
+    expect(h.webhooks).toEqual([{ url: PLACEHOLDER_WEBHOOK_URL }]);
     expect(result.all).toContain("final snapshot of database lgtmoose-db-1");
     expect(result.all).toContain("artifact bucket: lgtmoose-artifacts-1");
     expect(result.all).toContain("arn:aws:secretsmanager:eu-west-2:1:secret:db");
   });
 
-  it("deletes the data too with --purge", async () => {
+  it("uses the cluster API for the standard profile", async () => {
+    const h = harness({ config: { ...bedrockConfig, profile: "standard" } });
+    await run(runDestroy, ["--yes"], h);
+    expect(h.unprotected).toEqual(["cluster:lgtmoose-db-1"]);
+  });
+
+  it("recovers from an earlier destroy that left the Data stack in DELETE_FAILED", async () => {
+    const h = harness({ dataStatus: "DELETE_FAILED" });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.exitCode).toBe(0);
+    expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
+  });
+
+  it("switches the Data stack to delete its data with --purge", async () => {
     const h = harness();
     const result = await run(runDestroy, ["--purge", "--yes"], h);
     expect(result.exitCode).toBe(0);
     const context = { [CDK_CONTEXT.allowDatabaseDeletion]: "true", [CDK_CONTEXT.purge]: "true" };
-    expect(h.deployed[0]?.context).toEqual(context);
+    expect(h.deployed).toEqual([
+      { stacks: [STACK_NAMES.data], exclusively: true, askToApprove: false, context },
+    ]);
     expect(h.destroyed).toEqual([context]);
+    expect(result.all).toContain("redeployed from this checkout");
+    expect(result.all).toContain("expire on their own");
     expect(result.all).not.toContain("Kept:");
+  });
+
+  it("says what --purge couldn't delete when the Data stack can't be updated", async () => {
+    const h = harness({ dataStatus: "DELETE_FAILED" });
+    const result = await run(runDestroy, ["--purge", "--yes"], h);
+    expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
+    expect(result.all).toContain("couldn't be switched to delete its data");
+    expect(result.all).toContain("Kept:");
   });
 
   it("deletes nothing unless the person confirms", async () => {
@@ -264,8 +294,8 @@ describe("lgtmoose destroy", () => {
   });
 
   it("never creates the Data stack just to delete it", async () => {
-    const h = harness({ stacks: { [STACK_NAMES.data]: "" } });
-    await run(runDestroy, ["--yes"], h);
+    const h = harness({ dataStatus: "" });
+    await run(runDestroy, ["--purge", "--yes"], h);
     expect(h.calls).toEqual(["destroy", "webhook"]);
   });
 

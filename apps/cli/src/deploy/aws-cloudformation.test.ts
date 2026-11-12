@@ -1,13 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { cloudFormationLookup, isUsable } from "./aws-cloudformation.js";
+import { cloudFormationLookup, isUpdatable } from "./aws-cloudformation.js";
 
 describe("cloudFormationLookup", () => {
-  it("returns a stack's status", async () => {
+  it("returns a stack's status and outputs", async () => {
     const lookup = cloudFormationLookup(
-      { send: () => Promise.resolve({ Stacks: [{ StackStatus: "UPDATE_COMPLETE" }] }) },
+      {
+        send: () =>
+          Promise.resolve({
+            Stacks: [
+              {
+                StackStatus: "UPDATE_COMPLETE",
+                Outputs: [{ OutputKey: "DatabaseIdentifier", OutputValue: "db-1" }],
+              },
+            ],
+          }),
+      },
       "us-east-1",
     );
-    await expect(lookup.status("CDKToolkit")).resolves.toBe("UPDATE_COMPLETE");
+    await expect(lookup.describe("Lgtmoose-Data")).resolves.toEqual({
+      status: "UPDATE_COMPLETE",
+      outputs: { DatabaseIdentifier: "db-1" },
+    });
   });
 
   it("treats a missing stack as undefined and anything else as an error", async () => {
@@ -15,26 +28,32 @@ describe("cloudFormationLookup", () => {
       { send: () => Promise.reject(new Error("Stack with id CDKToolkit does not exist")) },
       "us-east-1",
     );
-    await expect(missing.status("CDKToolkit")).resolves.toBeUndefined();
+    await expect(missing.describe("CDKToolkit")).resolves.toBeUndefined();
     const denied = cloudFormationLookup(
       { send: () => Promise.reject(new Error("AccessDenied")) },
       "eu-west-1",
     );
-    await expect(denied.status("CDKToolkit")).rejects.toThrow("CloudFormation (eu-west-1)");
+    await expect(denied.describe("CDKToolkit")).rejects.toThrow("CloudFormation (eu-west-1)");
   });
 });
 
-describe("isUsable", () => {
-  it("rejects stacks that are gone or never finished creating", () => {
-    expect(isUsable("CREATE_COMPLETE")).toBe(true);
-    expect(isUsable("UPDATE_ROLLBACK_COMPLETE")).toBe(true);
+describe("isUpdatable", () => {
+  it("accepts only stacks that finished and still have resources", () => {
+    for (const status of ["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"]) {
+      expect(isUpdatable(status)).toBe(true);
+    }
     for (const status of [
       undefined,
       "DELETE_COMPLETE",
       "ROLLBACK_COMPLETE",
       "REVIEW_IN_PROGRESS",
+      "CREATE_FAILED",
+      "DELETE_FAILED",
+      "DELETE_IN_PROGRESS",
+      "UPDATE_ROLLBACK_FAILED",
+      "UPDATE_IN_PROGRESS",
     ]) {
-      expect(isUsable(status)).toBe(false);
+      expect(isUpdatable(status)).toBe(false);
     }
   });
 });

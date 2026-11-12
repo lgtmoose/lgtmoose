@@ -1,6 +1,6 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { appJwt, appSettingsUrl, createGitHubAppApi } from "./github-app.js";
+import { appJwt, createGitHubAppApi } from "./github-app.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const PEM = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
@@ -49,12 +49,18 @@ describe("createGitHubAppApi", () => {
     });
   });
 
-  it("reads the App and its current webhook URL", async () => {
+  it("reads the App", async () => {
     const app = { id: 42, slug: "lgtmoose-acme", owner: { login: "acme", type: "Organization" } };
     await expect(createGitHubAppApi(fakeFetch(200, app)).getApp("JWT")).resolves.toEqual(app);
-    await expect(
-      createGitHubAppApi(fakeFetch(200, { url: "https://x.test/h" })).getWebhookUrl("JWT"),
-    ).resolves.toBe("https://x.test/h");
+  });
+
+  it("leaves the secret alone when only the URL changes", async () => {
+    const fetchFn = fakeFetch(200, {});
+    await createGitHubAppApi(fetchFn).setWebhook("JWT", { url: "https://x.test" });
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({
+      url: "https://x.test",
+      insecure_ssl: "0",
+    });
   });
 
   it("explains a rejected key without echoing the request", async () => {
@@ -65,16 +71,5 @@ describe("createGitHubAppApi", () => {
     await expect(
       api.setWebhook("JWT", { url: "https://x.test", secret: "whsec-value", contentType: "json" }),
     ).rejects.not.toThrow(/whsec-value/);
-  });
-});
-
-describe("appSettingsUrl", () => {
-  it("points at the org's or the user's App settings", () => {
-    expect(
-      appSettingsUrl({ id: 1, slug: "a", owner: { login: "acme", type: "Organization" } }),
-    ).toBe("https://github.com/organizations/acme/settings/apps/a");
-    expect(appSettingsUrl({ id: 1, slug: "a", owner: { login: "octo", type: "User" } })).toBe(
-      "https://github.com/settings/apps/a",
-    );
   });
 });

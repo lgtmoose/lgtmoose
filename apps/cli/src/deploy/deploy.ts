@@ -4,22 +4,23 @@ import {
   SECRET_NAMES,
   STACK_NAMES,
   STACK_OUTPUTS,
-  parseDeployConfig,
   providerNeedsSecret,
   type DeployConfig,
 } from "@lgtmoose/config";
+import { loadDeployConfig } from "../paths.js";
 import { PLACEHOLDER_WEBHOOK_URL, installUrl } from "../setup/manifest.js";
 import { isPromptCancel, type Prompter } from "../setup/prompter.js";
 import {
   readAppCredentials,
-  webhookSecretProblem,
+  readWebhookSecret,
   type AppCredentials,
   type SetupSecretStore,
 } from "../setup/secret-store.js";
 import type { SetupFiles } from "../setup/setup.js";
-import { BOOTSTRAP_STACK, isUsable, type StackLookup } from "./aws-cloudformation.js";
+import { isUpdatable, type StackLookup } from "./aws-cloudformation.js";
+import type { DatabaseControl } from "./aws-rds.js";
 import type { Cdk } from "./cdk.js";
-import { appJwt, appSettingsUrl, type GitHubAppApi } from "./github-app.js";
+import { appJwt, type GitHubAppApi } from "./github-app.js";
 
 /** Everything deploy and destroy touch outside their own process. */
 export interface DeployDeps {
@@ -27,6 +28,7 @@ export interface DeployDeps {
   files: Pick<SetupFiles, "exists" | "loadConfig">;
   secrets: (region: string) => SetupSecretStore;
   stacks: (region: string) => StackLookup;
+  database: (region: string) => DatabaseControl;
   cdk: (config: { configPath: string; region: string }) => Cdk;
   github: GitHubAppApi;
   prompter: Prompter;
@@ -58,7 +60,8 @@ Deletes the LGTMoose stacks. By default the database is kept as a final snapshot
 secret that unlocks it, and the artifact bucket is kept. The GitHub App and its secrets stay.
 
 Options:
-  --purge  Also delete the database without a snapshot, its secret and the bucket
+  --purge  Also delete the database without a snapshot, its secret and the bucket. Redeploys
+           the Data stack from this checkout first; CloudWatch logs expire on their own
   --yes    Don't ask for confirmation
   -h, --help
 `;
@@ -88,27 +91,21 @@ function parseFlags(argv: readonly string[], withPurge: boolean) {
 }
 
 async function loadConfig(deps: DeployDeps): Promise<DeployConfig> {
-  if (!(await deps.files.exists(deps.configPath))) {
+  const config = await loadDeployConfig(deps.files, deps.configPath);
+  if (config === undefined) {
     throw new Error(`No config at ${deps.configPath}. Run pnpm lgtmoose setup first.`);
   }
-  let module: unknown;
-  try {
-    module = await deps.files.loadConfig(deps.configPath);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Couldn't load ${deps.configPath}: ${message}`, { cause: error });
-  }
-  return parseDeployConfig(module, deps.configPath);
+  return config;
 }
 
 /** Everything deploy needs from Secrets Manager, checked before CloudFormation is touched. */
 async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
   const app = await readAppCredentials(store);
-  const problem = await webhookSecretProblem(store, app);
-  if (problem !== undefined) {
-    throw new Error(`${problem} Run pnpm lgtmoose setup and create a new App to fix it.`);
+  const webhook = await readWebhookSecret(store, app);
+  if (webhook.problem !== undefined) {
+    throw new Error(`${webhook.problem} Run pnpm lgtmoose setup and create a new App to fix it.`);
   }
-  const webhookSecret = (await store.read(SECRET_NAMES.githubWebhook)) ?? "";
+  const webhookSecret = webhook.secret;
   for (const provider of config.providers.filter(providerNeedsSecret)) {
     if ((await store.read(SECRET_NAMES.provider(provider.id))) === undefined) {
       throw new Error(
@@ -129,10 +126,10 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
   const { app, webhookSecret } = await checkSecrets(config, deps.secrets(config.region));
   const cdk = deps.cdk({ configPath: deps.configPath, region: config.region });
 
-  if (!isUsable(await deps.stacks(config.region).status(BOOTSTRAP_STACK))) {
-    deps.out(`Bootstrapping the CDK in ${config.region} (first deploy only)…\n`);
-    await cdk.bootstrap();
-  }
+  // Every time, not just the first: it's a no-op when current, and a newer aws-cdk after
+  // `git pull` can need a newer bootstrap stack.
+  deps.out(`Bootstrapping the CDK in ${config.region} (quick when it's already done)…\n`);
+  await cdk.bootstrap();
   deps.out(`Deploying LGTMoose to ${config.region}…\n`);
   const outputs = await cdk.deploy({ stacks: "all", askToApprove: !flags.yes });
   const webhookUrl = outputs[STACK_NAMES.api]?.[STACK_OUTPUTS.api.githubWebhookUrl];
@@ -147,20 +144,12 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
   if (info.id !== app.appId) {
     throw new Error(`GitHub says this key belongs to App ${info.id}, not ${app.appId}.`);
   }
-  const previousUrl = await deps.github.getWebhookUrl(jwt);
   await deps.github.setWebhook(jwt, {
     url: webhookUrl,
     secret: webhookSecret,
     contentType: "json",
   });
   deps.out(`Pointed the webhook of GitHub App "${info.slug}" at ${webhookUrl}.\n`);
-  if (previousUrl === PLACEHOLDER_WEBHOOK_URL) {
-    // GitHub's API can set the URL but not the Active switch. Setup turns it on now, but Apps
-    // made by earlier versions had it off.
-    deps.out(
-      `If no deliveries arrive, check that "Active" is ticked under Webhook in ${appSettingsUrl(info)}.\n`,
-    );
-  }
 
   return `
 LGTMoose is deployed.
@@ -175,7 +164,9 @@ To upgrade later: git pull && pnpm lgtmoose deploy
 async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps): Promise<string> {
   const config = await loadConfig(deps);
   const kept = flags.purge
-    ? "The database, its secret and the artifact bucket will be deleted for good."
+    ? "The database, its secret and the artifact bucket will be deleted for good. First the " +
+      "Data stack is redeployed from this checkout, to change what deletion keeps. Postgres " +
+      "logs in CloudWatch expire on their own retention schedule."
     : "The database is kept as a final snapshot, and the artifact bucket is kept.";
   deps.out(`This deletes the LGTMoose stacks in ${config.region}. ${kept}\n`);
   if (!flags.yes) {
@@ -191,17 +182,33 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   if (flags.purge) context[CDK_CONTEXT.purge] = "true";
 
   // RDS refuses to delete a protected database, which would leave the Data stack in
-  // DELETE_FAILED. Turn protection off first (and, with --purge, the retention policies).
-  let data: Record<string, string> | undefined;
-  if (isUsable(await deps.stacks(config.region).status(STACK_NAMES.data))) {
-    deps.out("Turning off the database's deletion protection…\n");
-    const outputs = await cdk.deploy({
-      stacks: [STACK_NAMES.data],
-      exclusively: true,
-      askToApprove: false,
-      context,
-    });
-    data = outputs[STACK_NAMES.data];
+  // DELETE_FAILED. Turn protection off first.
+  const data = await deps.stacks(config.region).describe(STACK_NAMES.data);
+  let purgeNote = "";
+  if (data !== undefined && data.status !== "DELETE_COMPLETE") {
+    if (flags.purge && isUpdatable(data.status)) {
+      // Changing what deletion keeps needs a stack update; this also turns protection off.
+      deps.out("Switching the Data stack to delete its data…\n");
+      await cdk.deploy({
+        stacks: [STACK_NAMES.data],
+        exclusively: true,
+        askToApprove: false,
+        context,
+      });
+    } else {
+      // Straight through RDS: works whatever state the stack is in (DELETE_FAILED after an
+      // earlier attempt, say) and applies nothing else from the checked-out code.
+      const id = data.outputs[STACK_OUTPUTS.data.databaseIdentifier];
+      if (id !== undefined) {
+        deps.out("Turning off the database's deletion protection…\n");
+        await deps
+          .database(config.region)
+          .disableDeletionProtection(config.profile === "lean" ? "instance" : "cluster", id);
+      }
+      if (flags.purge) {
+        purgeNote = `\n${STACK_NAMES.data} is ${data.status}, so it couldn't be switched to delete its data. The final snapshot, its secret and the bucket are kept: delete them by hand.\n`;
+      }
+    }
   }
   await cdk.destroyAll(context);
 
@@ -210,22 +217,17 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   let webhookNote = "";
   try {
     const app = await readAppCredentials(deps.secrets(config.region));
-    const secret = (await deps.secrets(config.region).read(SECRET_NAMES.githubWebhook)) ?? "";
-    await deps.github.setWebhook(jwtFor(app, deps), {
-      url: PLACEHOLDER_WEBHOOK_URL,
-      secret,
-      contentType: "json",
-    });
+    await deps.github.setWebhook(jwtFor(app, deps), { url: PLACEHOLDER_WEBHOOK_URL });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     webhookNote = `\nCouldn't reset the App's webhook URL (${message}). GitHub will keep trying the old one until the next deploy.\n`;
   }
 
   const lines = ["", `Deleted the LGTMoose stacks in ${config.region}.`];
-  if (!flags.purge && data !== undefined) {
-    const id = data[STACK_OUTPUTS.data.databaseIdentifier];
-    const secretArn = data[STACK_OUTPUTS.data.databaseSecretArn];
-    const bucket = data[STACK_OUTPUTS.data.artifactBucketName];
+  if ((!flags.purge || purgeNote) && data !== undefined) {
+    const id = data.outputs[STACK_OUTPUTS.data.databaseIdentifier];
+    const secretArn = data.outputs[STACK_OUTPUTS.data.databaseSecretArn];
+    const bucket = data.outputs[STACK_OUTPUTS.data.artifactBucketName];
     lines.push("Kept:");
     if (id) lines.push(`  final snapshot of database ${id} (in the RDS console under Snapshots)`);
     if (secretArn) lines.push(`  its credentials: ${secretArn}`);
@@ -234,7 +236,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   lines.push(
     `The GitHub App and ${SECRET_NAMES.githubApp} are untouched. pnpm lgtmoose deploy starts again with a new, empty database.`,
   );
-  return `${lines.join("\n")}\n${webhookNote}`;
+  return `${lines.join("\n")}\n${purgeNote}${webhookNote}`;
 }
 
 async function runCommand(

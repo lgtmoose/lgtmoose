@@ -1,6 +1,7 @@
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parseDeployConfig, type DeployConfig } from "@lgtmoose/config";
 import type { SetupFiles } from "./setup/setup.js";
 
 // apps/cli/{src,dist}/ → repo root, the same place infra/cdk/lib/load-config.ts looks.
@@ -23,3 +24,22 @@ export const nodeFiles: SetupFiles = {
   loadConfig: async (path) =>
     ((await import(pathToFileURL(path).href)) as { default?: unknown }).default,
 };
+
+/**
+ * Loads and validates lgtmoose.config.ts, or undefined when there is none. Throws when it can't
+ * be imported or fails validation; each command decides what that means for it.
+ */
+export async function loadDeployConfig(
+  files: Pick<SetupFiles, "exists" | "loadConfig">,
+  path: string,
+): Promise<DeployConfig | undefined> {
+  if (!(await files.exists(path))) return undefined;
+  let module: unknown;
+  try {
+    module = await files.loadConfig(path);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Couldn't load ${path}: ${message}`, { cause: error });
+  }
+  return parseDeployConfig(module, path);
+}
