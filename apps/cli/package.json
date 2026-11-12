@@ -15,7 +15,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudformation": "^3.1167.0",

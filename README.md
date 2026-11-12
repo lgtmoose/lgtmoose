@@ -55,7 +55,14 @@ Requires Node 24 and pnpm 10.
 
 ```bash
 pnpm install
-pnpm run check   # format, lint, typecheck, test, build, cdk synth
+pnpm run check   # format, lint, typecheck, test, build, run the built CLI, cdk synth
+```
+
+The migration runner also has a test against a real Postgres with pgvector. CI always runs it; locally it runs when `LGTMOOSE_TEST_DATABASE_URL` points at an admin connection:
+
+```bash
+docker run -d --name lgtmoose-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 pgvector/pgvector:pg18
+LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres pnpm test
 ```
 
 ## Roadmap
