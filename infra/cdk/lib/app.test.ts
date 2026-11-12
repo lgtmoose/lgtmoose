@@ -1,5 +1,5 @@
 import type { CloudAssembly } from "aws-cdk-lib/cx-api";
-import { Template } from "aws-cdk-lib/assertions";
+import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { LGTMOOSE_VERSION, buildApp, type LgtmooseStacks } from "./app.js";
@@ -12,7 +12,11 @@ describe("buildApp", () => {
 
   // One full synth shared by every test; it's the slow part.
   beforeAll(() => {
-    const config = parseDeployConfig({ ...EXAMPLE_CONFIG, region: "eu-west-2" });
+    const config = parseDeployConfig({
+      ...EXAMPLE_CONFIG,
+      region: "eu-west-2",
+      allowedOrgs: ["example-org", "second-org"],
+    });
     stacks = buildApp(config, appWithoutBundling());
     assembly = stacks.app.synth();
   }, 60_000);
@@ -29,6 +33,12 @@ describe("buildApp", () => {
 
   it("deploys the Api stack after the Data stack, so migrations run first", () => {
     expect(stacks.api.dependencies).toContain(stacks.data);
+  });
+
+  it("passes the config's allowed orgs to the gateway", () => {
+    Template.fromStack(stacks.api).hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ ALLOWED_ORGS: "example-org,second-org" }) },
+    });
   });
 
   it("records the deployed version", () => {

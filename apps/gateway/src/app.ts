@@ -3,9 +3,11 @@ import helmet from "helmet";
 import { errorHandler, notFound } from "./middleware/errors.js";
 import { MAX_JSON_BYTES, ROUTES } from "./paths.js";
 import { healthRouter } from "./routes/health.js";
-import { webhooksRouter } from "./routes/webhooks.js";
+import { webhooksRouter, type WebhookDeps } from "./routes/webhooks.js";
 
 export { ROUTES } from "./paths.js";
+export type { JobQueue, SecretStore, SendOptions } from "./ports.js";
+export type { WebhookDeps } from "./routes/webhooks.js";
 
 export interface GatewayEnv {
   /** Deployed LGTMoose version, reported by the health route. */
@@ -24,8 +26,11 @@ export interface GatewayEnv {
  *
  * Order matters: the webhook router is mounted before the JSON parser, so webhook bodies reach
  * signature verification as the exact bytes GitHub sent.
+ *
+ * `deps` holds everything host-specific (where the secret lives, where jobs go), so this file
+ * never touches a cloud SDK: lambda.ts passes the AWS adapters, server.ts the local ones.
  */
-export function createApp(env: GatewayEnv): Express {
+export function createApp(env: GatewayEnv, deps: WebhookDeps): Express {
   const app = express();
   app.disable("x-powered-by");
   if (!Number.isInteger(env.trustProxyHops) || env.trustProxyHops < 0) {
@@ -34,7 +39,7 @@ export function createApp(env: GatewayEnv): Express {
   app.set("trust proxy", env.trustProxyHops);
   app.use(helmet());
 
-  app.use("/webhooks", webhooksRouter());
+  app.use("/webhooks", webhooksRouter(deps));
 
   app.use(express.json({ limit: MAX_JSON_BYTES }));
   app.use(ROUTES.health, healthRouter(env.version));

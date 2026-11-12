@@ -4,9 +4,20 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { errorHandler } from "./middleware/errors.js";
 import { MAX_WEBHOOK_BYTES, ROUTES } from "./paths.js";
-import { handleGithubWebhook, webhooksRouter } from "./routes/webhooks.js";
+import type { JobQueue, SecretStore } from "./ports.js";
+import { githubWebhookHandler, webhooksRouter, type WebhookDeps } from "./routes/webhooks.js";
+import { signBody } from "./signature.js";
 
-const app = createApp({ version: "1.2.3", trustProxyHops: 1 });
+const SECRET = "app-test-secret";
+
+/** Webhook deps that verify against SECRET and queue nothing; webhooks.test.ts covers the flow. */
+function testDeps(): WebhookDeps {
+  const secrets: SecretStore = { get: async () => SECRET };
+  const queue: JobQueue = { send: vi.fn(async () => {}) };
+  return { secrets, queue, allowedOrgs: ["acme-corp"] };
+}
+
+const app = createApp({ version: "1.2.3", trustProxyHops: 1 }, testDeps());
 
 describe("gateway app", () => {
   it("reports health and version", async () => {
@@ -22,21 +33,24 @@ describe("gateway app", () => {
     expect(response.headers["strict-transport-security"]).toBeDefined();
   });
 
-  it("answers webhooks with 501 until NIC-804 lands", async () => {
-    const response = await request(app)
-      .post(ROUTES.githubWebhook)
-      .set("content-type", "application/json")
-      .send('{"action":"opened"}');
-    expect(response.status).toBe(501);
-  });
-
   it("doesn't JSON-parse webhook bodies, so signatures can be checked against the raw bytes", async () => {
-    // Malformed JSON would be a 400 from express.json(); reaching the handler proves it's raw.
-    const response = await request(app)
+    // express.json() would answer malformed JSON with its own 400 before any signature check.
+    // A 401 for an unsigned body, and the handler's own 400 for a signed one, prove it's raw.
+    const unsigned = await request(app)
       .post(ROUTES.githubWebhook)
       .set("content-type", "application/json")
       .send("{not json");
-    expect(response.status).toBe(501);
+    expect(unsigned.status).toBe(401);
+
+    const signed = await request(app)
+      .post(ROUTES.githubWebhook)
+      .set("content-type", "application/json")
+      .set("x-hub-signature-256", signBody("{not json", SECRET))
+      .set("x-github-event", "pull_request")
+      .set("x-github-delivery", "d1")
+      .send("{not json");
+    expect(signed.status).toBe(400);
+    expect(signed.body).toEqual({ error: "Invalid payload" });
   });
 
   it("caps webhook payloads at GitHub's 25 MB limit by default", () => {
@@ -45,7 +59,7 @@ describe("gateway app", () => {
 
   it("rejects webhook payloads over the limit with a JSON 413", async () => {
     // A small limit keeps the test fast; createApp always uses GitHub's 25 MB.
-    const small = express().use("/webhooks", webhooksRouter(1024)).use(errorHandler);
+    const small = express().use("/webhooks", webhooksRouter(testDeps(), 1024)).use(errorHandler);
     const response = await request(small)
       .post(ROUTES.githubWebhook)
       .set("content-type", "application/json")
@@ -66,12 +80,12 @@ describe("gateway app", () => {
     log.mockRestore();
   });
 
-  it("answers a webhook with no body at all (req.body unset) with 400", () => {
+  it("answers a webhook with no body at all (req.body unset) with 400", async () => {
     // express.raw leaves req.body unset when a request has neither Content-Length nor
     // Transfer-Encoding; call the handler directly to cover that case for certain.
     const json = vi.fn();
     const res = { status: vi.fn(() => ({ json })) } as unknown as Response;
-    handleGithubWebhook({ body: undefined } as Request, res);
+    await githubWebhookHandler(testDeps())({ body: undefined } as Request, res, () => {});
     expect(res.status).toHaveBeenCalledWith(400);
     expect(json).toHaveBeenCalledWith({ error: "Empty body" });
   });
@@ -90,7 +104,7 @@ describe("gateway app", () => {
 describe("client IP", () => {
   /** The real app's trust setting on a probe app that reports req.ip. */
   async function ipSeen(trustProxyHops: number, forwardedFor: string) {
-    const trust = createApp({ version: "x", trustProxyHops }).get("trust proxy");
+    const trust = createApp({ version: "x", trustProxyHops }, testDeps()).get("trust proxy");
     const probe = express().set("trust proxy", trust);
     probe.get("/ip", (req, res) => {
       res.json({ ip: req.ip });
@@ -111,7 +125,9 @@ describe("client IP", () => {
 
   it("rejects an invalid hop count", () => {
     for (const trustProxyHops of [-1, 1.5, Number.NaN]) {
-      expect(() => createApp({ version: "x", trustProxyHops })).toThrow(/trustProxyHops/);
+      expect(() => createApp({ version: "x", trustProxyHops }, testDeps())).toThrow(
+        /trustProxyHops/,
+      );
     }
   });
 });

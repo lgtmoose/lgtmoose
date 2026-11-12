@@ -15,3 +15,15 @@ export function severityRank(severity: Severity): number {
 export function isSeverity(value: unknown): value is Severity {
   return typeof value === "string" && (SEVERITIES as readonly string[]).includes(value);
 }
+
+export {
+  REVIEW_JOB_KINDS,
+  SKIP_LABEL,
+  isReviewJobKind,
+  reviewJobGroupId,
+  toReviewJob,
+  type Ignored,
+  type ReviewJob,
+  type ReviewJobKind,
+  type ToReviewJobOptions,
+} from "./review-job.js";

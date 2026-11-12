@@ -1,0 +1,24 @@
+{
+  "zen": "Keep it logically awesome.",
+  "hook_id": 501234567,
+  "hook": {
+    "type": "App",
+    "id": 501234567,
+    "name": "web",
+    "active": true,
+    "events": ["pull_request", "issue_comment"],
+    "config": {
+      "content_type": "json",
+      "insecure_ssl": "0",
+      "url": "https://example.execute-api.us-east-1.amazonaws.com/webhooks/github"
+    },
+    "app_id": 987654
+  },
+  "sender": {
+    "login": "octo-dev",
+    "id": 1234567,
+    "node_id": "U_kgDOABLWhw",
+    "type": "User",
+    "site_admin": false
+  }
+}
