@@ -10,6 +10,12 @@ export { ROUTES } from "./paths.js";
 export interface GatewayEnv {
   /** Deployed LGTMoose version, reported by the health route. */
   version: string;
+  /**
+   * How many proxies sit in front of the app and append to X-Forwarded-For. 1 behind API Gateway
+   * or a reverse proxy; 0 when callers reach the server directly. Trusting more hops than really
+   * exist lets callers choose req.ip with their own header.
+   */
+  trustProxyHops: number;
 }
 
 /**
@@ -22,9 +28,10 @@ export interface GatewayEnv {
 export function createApp(env: GatewayEnv): Express {
   const app = express();
   app.disable("x-powered-by");
-  // Exactly one proxy sits in front (API Gateway, or the reverse proxy in docker compose). Trusting
-  // more hops would let callers choose req.ip with their own X-Forwarded-For header.
-  app.set("trust proxy", 1);
+  if (!Number.isInteger(env.trustProxyHops) || env.trustProxyHops < 0) {
+    throw new Error(`trustProxyHops must be a whole number 0 or more, got ${env.trustProxyHops}`);
+  }
+  app.set("trust proxy", env.trustProxyHops);
   app.use(helmet());
 
   app.use("/webhooks", webhooksRouter());

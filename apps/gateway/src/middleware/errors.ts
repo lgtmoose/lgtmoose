@@ -1,3 +1,4 @@
+import { STATUS_CODES } from "node:http";
 import type { ErrorRequestHandler, RequestHandler } from "express";
 
 export const notFound: RequestHandler = (_req, res) => {
@@ -13,14 +14,14 @@ interface HttpError extends Error {
 
 /** An error's status if it's a real 4xx/5xx integer, else 500; res.status() throws on bad values. */
 function httpStatus(value: unknown): number {
-  return Number.isInteger(value) && (value as number) >= 400 && (value as number) <= 599
-    ? (value as number)
+  return typeof value === "number" && Number.isInteger(value) && value >= 400 && value <= 599
+    ? value
     : 500;
 }
 
 /**
- * Last-resort error handler. Client errors keep their status and message; anything else becomes a
- * plain 500 so stack traces and internals never reach the caller. Express 5 forwards rejected
+ * Last-resort error handler. Client errors keep their status, and their message only when it is
+ * marked safe to show; anything else becomes a plain 500 so internals never reach the caller. Express 5 forwards rejected
  * promises from async handlers here automatically.
  */
 export const errorHandler: ErrorRequestHandler = (err: HttpError, _req, res, next) => {
@@ -34,5 +35,9 @@ export const errorHandler: ErrorRequestHandler = (err: HttpError, _req, res, nex
     res.status(500).json({ error: "Internal server error" });
     return;
   }
-  res.status(status).json({ error: err.expose === false ? "Bad request" : err.message });
+  // Only messages marked safe to show (http-errors and body-parser set `expose` on 4xx errors)
+  // reach the caller; anything else gets the standard status text, e.g. "Not Found".
+  res
+    .status(status)
+    .json({ error: err.expose === true ? err.message : (STATUS_CODES[status] ?? "Error") });
 };

@@ -1,12 +1,12 @@
-import express from "express";
+import express, { type Request, type Response } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { errorHandler } from "./middleware/errors.js";
 import { MAX_WEBHOOK_BYTES, ROUTES } from "./paths.js";
-import { webhooksRouter } from "./routes/webhooks.js";
+import { handleGithubWebhook, webhooksRouter } from "./routes/webhooks.js";
 
-const app = createApp({ version: "1.2.3" });
+const app = createApp({ version: "1.2.3", trustProxyHops: 1 });
 
 describe("gateway app", () => {
   it("reports health and version", async () => {
@@ -54,34 +54,26 @@ describe("gateway app", () => {
     expect(response.body).toEqual({ error: "request entity too large" });
   });
 
-  it("answers an empty or missing webhook body with 400, not a logged 500", async () => {
+  it("answers an empty webhook body with 400, not a logged 500", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    const missing = await request(app).post(ROUTES.githubWebhook);
-    const empty = await request(app)
+    const response = await request(app)
       .post(ROUTES.githubWebhook)
       .set("content-type", "application/json")
       .set("content-length", "0");
-    for (const response of [missing, empty]) {
-      expect(response.status).toBe(400);
-      expect(response.body).toEqual({ error: "Empty body" });
-    }
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: "Empty body" });
     expect(log).not.toHaveBeenCalled();
     log.mockRestore();
   });
 
-  it("trusts exactly one proxy hop for the client IP", async () => {
-    const trust = createApp({ version: "x" }).get("trust proxy");
-    expect(trust).toBe(1);
-    // Same setting on a probe app: of a client-supplied address and the one the proxy appended,
-    // only the proxy's counts.
-    const probe = express().set("trust proxy", trust);
-    probe.get("/ip", (req, res) => {
-      res.json({ ip: req.ip });
-    });
-    const response = await request(probe)
-      .get("/ip")
-      .set("x-forwarded-for", "140.82.112.1, 203.0.113.9");
-    expect(response.body).toEqual({ ip: "203.0.113.9" });
+  it("answers a webhook with no body at all (req.body unset) with 400", () => {
+    // express.raw leaves req.body unset when a request has neither Content-Length nor
+    // Transfer-Encoding; call the handler directly to cover that case for certain.
+    const json = vi.fn();
+    const res = { status: vi.fn(() => ({ json })) } as unknown as Response;
+    handleGithubWebhook({ body: undefined } as Request, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({ error: "Empty body" });
   });
 
   it("returns JSON 404 for unknown paths and methods", async () => {
@@ -91,6 +83,35 @@ describe("gateway app", () => {
     ]) {
       expect(response.status).toBe(404);
       expect(response.body).toEqual({ error: "Not found" });
+    }
+  });
+});
+
+describe("client IP", () => {
+  /** The real app's trust setting on a probe app that reports req.ip. */
+  async function ipSeen(trustProxyHops: number, forwardedFor: string) {
+    const trust = createApp({ version: "x", trustProxyHops }).get("trust proxy");
+    const probe = express().set("trust proxy", trust);
+    probe.get("/ip", (req, res) => {
+      res.json({ ip: req.ip });
+    });
+    const response = await request(probe).get("/ip").set("x-forwarded-for", forwardedFor);
+    return (response.body as { ip: string }).ip;
+  }
+
+  it("behind one proxy, uses the address the proxy appended, not the caller's own", async () => {
+    expect(await ipSeen(1, "140.82.112.1, 203.0.113.9")).toBe("203.0.113.9");
+  });
+
+  it("with no proxy, ignores X-Forwarded-For entirely", async () => {
+    const ip = await ipSeen(0, "140.82.112.1");
+    expect(ip).not.toBe("140.82.112.1");
+    expect(ip).toMatch(/127\.0\.0\.1|::1/);
+  });
+
+  it("rejects an invalid hop count", () => {
+    for (const trustProxyHops of [-1, 1.5, Number.NaN]) {
+      expect(() => createApp({ version: "x", trustProxyHops })).toThrow(/trustProxyHops/);
     }
   });
 });
@@ -126,10 +147,15 @@ describe("errorHandler", () => {
     log.mockRestore();
   });
 
-  it("keeps the status and message of client errors", async () => {
-    const error = Object.assign(new Error("bad thing"), { status: 422 });
-    const response = await request(appThatThrows(error)).get("/boom");
-    expect(response.status).toBe(422);
-    expect(response.body).toEqual({ error: "bad thing" });
+  it("shows a client error's message only when it's marked safe to show", async () => {
+    const safe = Object.assign(new Error("bad thing"), { status: 422, expose: true });
+    expect((await request(appThatThrows(safe)).get("/boom")).body).toEqual({ error: "bad thing" });
+
+    const internal = Object.assign(new Error("Secret arn:aws:secretsmanager:x not found"), {
+      status: 404,
+    });
+    const response = await request(appThatThrows(internal)).get("/boom");
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "Not Found" });
   });
 });
