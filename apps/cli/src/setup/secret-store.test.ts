@@ -11,7 +11,7 @@ import {
   readExistingApp,
   storeAppSecrets,
   webhookFingerprint,
-  webhookSecretProblem,
+  readWebhookSecret,
   type SetupSecretStore,
 } from "./secret-store.js";
 
@@ -179,13 +179,16 @@ describe("storeAppSecrets", () => {
   });
 });
 
-describe("webhookSecretProblem", () => {
+describe("readWebhookSecret", () => {
+  const problemOf = async (...args: Parameters<typeof readWebhookSecret>) =>
+    (await readWebhookSecret(...args)).problem;
+
   const existing = { appId: 42, slug: "lgtmoose-acme" };
 
   it("accepts a webhook secret that matches the App's fingerprint", async () => {
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
     await expect(
-      webhookSecretProblem(aws.store, {
+      problemOf(aws.store, {
         ...existing,
         webhookSecretSha256: webhookFingerprint("whsec"),
       }),
@@ -194,14 +197,14 @@ describe("webhookSecretProblem", () => {
 
   it("accepts any webhook secret for an App stored before fingerprints", async () => {
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
-    await expect(webhookSecretProblem(aws.store, existing)).resolves.toBeUndefined();
+    await expect(problemOf(aws.store, existing)).resolves.toBeUndefined();
   });
 
   it("flags a missing or mismatched webhook secret", async () => {
-    await expect(webhookSecretProblem(fakeAws().store, existing)).resolves.toContain("is missing");
+    await expect(problemOf(fakeAws().store, existing)).resolves.toContain("is missing");
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec-other" });
     await expect(
-      webhookSecretProblem(aws.store, {
+      problemOf(aws.store, {
         ...existing,
         webhookSecretSha256: webhookFingerprint("whsec"),
       }),

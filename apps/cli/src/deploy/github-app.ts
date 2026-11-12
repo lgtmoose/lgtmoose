@@ -45,6 +45,14 @@ const appSchema = z.object({
   owner: z.object({ login: z.string().min(1), type: z.string().min(1) }),
 });
 
+/** Where the App's settings live, for what the API can't change. */
+export function appSettingsUrl(app: AppInfo): string {
+  const slug = encodeURIComponent(app.slug);
+  return app.owner.type === "Organization"
+    ? `https://github.com/organizations/${encodeURIComponent(app.owner.login)}/settings/apps/${slug}`
+    : `https://github.com/settings/apps/${slug}`;
+}
+
 export function createGitHubAppApi(
   fetchFn: typeof fetch = fetch,
   apiUrl = "https://api.github.com",

@@ -45,7 +45,7 @@ function fakeRds(db: {
       protection = command.input.DeletionProtection ?? protection;
       return Promise.resolve({});
     }
-    status = "available";
+    status = command.constructor.name.startsWith("Stop") ? "stopped" : "available";
     return Promise.resolve({});
   });
   const control = rdsDatabaseControl({ send }, "eu-west-2", () => Promise.resolve());
@@ -91,6 +91,25 @@ describe("rdsDatabaseControl", () => {
     expect(rds.sent()).toEqual(["DescribeDBInstancesCommand"]);
   });
 
+  it("modifies during a long storage optimization instead of waiting it out", async () => {
+    const rds = fakeRds({ kind: "instance", status: "storage-optimization" });
+    await expect(rds.control.setDeletionProtection("db-1", false)).resolves.toBe("done");
+    expect(rds.protection()).toBe(false);
+  });
+
+  it("stops a database again after starting it to turn protection on", async () => {
+    const rds = fakeRds({ kind: "instance", status: "stopped", protection: false });
+    await expect(rds.control.setDeletionProtection("db-1", true)).resolves.toBe("done");
+    expect(rds.protection()).toBe(true);
+    expect(rds.sent()).toContain("StopDBInstanceCommand");
+  });
+
+  it("leaves it running after turning protection off, since destroy deletes it next", async () => {
+    const rds = fakeRds({ kind: "instance", status: "stopped" });
+    await rds.control.setDeletionProtection("db-1", false);
+    expect(rds.sent()).not.toContain("StopDBInstanceCommand");
+  });
+
   it("does nothing when protection is already as asked", async () => {
     const rds = fakeRds({ kind: "instance", protection: true, status: "stopped" });
     await rds.control.setDeletionProtection("db-1", true);
@@ -105,7 +124,7 @@ describe("rdsDatabaseControl", () => {
   it("names the database and region when RDS fails", async () => {
     const rds = fakeRds({ kind: "instance", modifyFails: fault("AccessDenied") });
     await expect(rds.control.setDeletionProtection("db-1", false)).rejects.toThrow(
-      "AWS RDS (eu-west-2) couldn't turn deletion protection off for db-1",
+      "AWS RDS (eu-west-2) failed on turning deletion protection off for db-1",
     );
   });
 });

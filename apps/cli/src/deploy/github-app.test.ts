@@ -1,6 +1,6 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { appJwt, createGitHubAppApi } from "./github-app.js";
+import { appJwt, appSettingsUrl, createGitHubAppApi } from "./github-app.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const PEM = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
@@ -71,5 +71,16 @@ describe("createGitHubAppApi", () => {
     await expect(
       api.setWebhook("JWT", { url: "https://x.test", secret: "whsec-value", contentType: "json" }),
     ).rejects.not.toThrow(/whsec-value/);
+  });
+});
+
+describe("appSettingsUrl", () => {
+  it("points at the org's or the user's App settings", () => {
+    expect(
+      appSettingsUrl({ id: 1, slug: "a", owner: { login: "acme", type: "Organization" } }),
+    ).toBe("https://github.com/organizations/acme/settings/apps/a");
+    expect(appSettingsUrl({ id: 1, slug: "a", owner: { login: "octo", type: "User" } })).toBe(
+      "https://github.com/settings/apps/a",
+    );
   });
 });

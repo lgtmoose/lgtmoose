@@ -20,7 +20,7 @@ import type { SetupFiles } from "../setup/setup.js";
 import { isUpdatable, type StackLookup } from "./aws-cloudformation.js";
 import type { DatabaseControl } from "./aws-rds.js";
 import type { Cdk } from "./cdk.js";
-import { appJwt, type GitHubAppApi } from "./github-app.js";
+import { appJwt, appSettingsUrl, type GitHubAppApi } from "./github-app.js";
 
 /** Everything deploy and destroy touch outside their own process. */
 export interface DeployDeps {
@@ -152,6 +152,13 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
     contentType: "json",
   });
   deps.out(`Pointed the webhook of GitHub App "${info.slug}" at ${webhookUrl}.\n`);
+  if (app.webhookCreatedActive !== true) {
+    // Setup before this version created the webhook inactive, and GitHub's API can't turn it on.
+    deps.out(
+      `This App was made by an earlier setup, with its webhook switched off. Tick "Active" ` +
+        `under Webhook in ${appSettingsUrl(info)}, or GitHub won't send anything.\n`,
+    );
+  }
 
   // destroy turns protection off outside CloudFormation, so an interrupted destroy would leave
   // it off with a template that still says on. CloudFormation won't notice; put it back here.
@@ -207,12 +214,16 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   const databaseId = outputs[STACK_OUTPUTS.data.databaseIdentifier];
   const database = deps.database(config.region);
   let databaseFound = false;
-  if (data !== undefined && databaseId !== undefined) {
-    deps.out("Turning off the database's deletion protection…\n");
-    databaseFound = (await database.setDeletionProtection(databaseId, false)) === "done";
-  }
+  let protectionTouched = false;
+  let purgeDeployed = false;
   let purgeNote = "";
   try {
+    if (data !== undefined && databaseId !== undefined) {
+      deps.out("Turning off the database's deletion protection…\n");
+      // Set first: a failure partway through (after the modify) must still be undone.
+      protectionTouched = true;
+      databaseFound = (await database.setDeletionProtection(databaseId, false)) === "done";
+    }
     if (flags.purge && data !== undefined) {
       if (isUpdatable(data.status)) {
         // Changing what deletion keeps needs a stack update.
@@ -223,23 +234,42 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
           askToApprove: false,
           context,
         });
+        purgeDeployed = true;
       } else {
         purgeNote = `\n${STACK_NAMES.data} is ${data.status}, so it couldn't be switched to delete its data. Anything listed as kept must be deleted by hand.\n`;
       }
     }
     await cdk.destroyAll(context);
   } catch (error) {
-    // Don't leave a database that's still there without its protection.
-    if (!databaseFound || databaseId === undefined) throw error;
+    // Leave what's still there as it was: a stack that keeps its data, a protected database.
     const message = error instanceof Error ? error.message : String(error);
-    const restored = await database.setDeletionProtection(databaseId, true).then(
-      () => "Turned the database's deletion protection back on.",
-      (restoreError: unknown) =>
-        `Deletion protection is still off on ${databaseId} (${
-          restoreError instanceof Error ? restoreError.message : String(restoreError)
-        }); run pnpm lgtmoose deploy or turn it on in the RDS console.`,
-    );
-    throw new Error(`${message} ${restored}`, { cause: error });
+    const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    const notes: string[] = [];
+    if (purgeDeployed) {
+      notes.push(
+        await cdk
+          .deploy({ stacks: [STACK_NAMES.data], exclusively: true, askToApprove: false })
+          .then(
+            () => "Switched the Data stack back to keeping its data.",
+            (restoreError: unknown) =>
+              `The Data stack is still set to delete its data, with no snapshot (${describe(restoreError)}). Run pnpm lgtmoose deploy before anything deletes it.`,
+          ),
+      );
+    }
+    if (protectionTouched && databaseId !== undefined) {
+      notes.push(
+        await database.setDeletionProtection(databaseId, true).then(
+          (result) =>
+            result === "done"
+              ? "Turned the database's deletion protection back on."
+              : `Database ${databaseId} is already gone or being deleted.`,
+          (restoreError: unknown) =>
+            `Deletion protection is still off on ${databaseId} (${describe(restoreError)}); run pnpm lgtmoose deploy or turn it on in the RDS console.`,
+        ),
+      );
+    }
+    if (notes.length === 0) throw error;
+    throw new Error(`${message} ${notes.join(" ")}`, { cause: error });
   }
 
   // Point the webhook back at the placeholder so GitHub stops calling a gateway that's gone.

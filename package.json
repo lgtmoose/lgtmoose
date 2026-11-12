@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "synth": "pnpm --filter @lgtmoose/cdk synth",
-    "lgtmoose": "pnpm --silent --filter lgtmoose... build && node apps/cli/dist/index.js",
+    "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm --filter lgtmoose smoke && pnpm --filter @lgtmoose/db check-migrations && pnpm synth"
   },
   "devDependencies": {

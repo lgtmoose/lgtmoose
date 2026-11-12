@@ -1,4 +1,5 @@
 import { CloudFormationClient, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
+import { awsError } from "../aws-errors.js";
 
 /** A stack's status and outputs. */
 export interface StackInfo {
@@ -40,10 +41,7 @@ export function cloudFormationLookup(client: CloudFormationSender, region: strin
       } catch (error) {
         // DescribeStacks reports a missing stack as a ValidationError.
         if (error instanceof Error && /does not exist/.test(error.message)) return undefined;
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`AWS CloudFormation (${region}) failed on ${stackName}: ${message}`, {
-          cause: error,
-        });
+        throw awsError("CloudFormation", region, stackName, error);
       }
     },
   };

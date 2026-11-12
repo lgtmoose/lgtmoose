@@ -22,6 +22,7 @@ const goodSecrets = {
     clientId: "Iv1.x",
     clientSecret: "CLIENT-SECRET",
     webhookSecretSha256: webhookFingerprint("WEBHOOK-SECRET"),
+    webhookCreatedActive: true,
   }),
   [SECRET_NAMES.githubWebhook]: "WEBHOOK-SECRET",
 };
@@ -46,6 +47,7 @@ function harness(
     failDestroy?: boolean;
     failDataDeploy?: boolean;
     failProtect?: boolean;
+    failUnprotect?: boolean;
   } = {},
 ) {
   const secrets = new Map(Object.entries(options.secrets ?? goodSecrets));
@@ -135,6 +137,9 @@ function harness(
         calls.push(enabled ? "protect" : "unprotect");
         protection.push(`${id}:${enabled}`);
         if (enabled && options.failProtect) return Promise.reject(new Error("AccessDenied"));
+        if (!enabled && options.failUnprotect) {
+          return Promise.reject(new Error("still modifying after 30 minutes"));
+        }
         return Promise.resolve(options.database ?? "done");
       },
     }),
@@ -195,6 +200,21 @@ describe("lgtmoose deploy", () => {
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("Warning: couldn't check deletion protection on lgtmoose-db-1");
     expect(result.all).toContain("installations/new");
+  });
+
+  it("tells owners of Apps from an earlier setup to switch the webhook on", async () => {
+    const old = JSON.parse(goodSecrets[SECRET_NAMES.githubApp] ?? "") as Record<string, unknown>;
+    delete old.webhookCreatedActive;
+    const h = harness({
+      secrets: { ...goodSecrets, [SECRET_NAMES.githubApp]: JSON.stringify(old) },
+    });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toContain('Tick "Active"');
+    expect(result.all).toContain(
+      "https://github.com/organizations/acme/settings/apps/lgtmoose-acme",
+    );
+    expect((await run(runDeploy, [], harness())).all).not.toContain('Tick "Active"');
   });
 
   it("skips the approval prompt with --yes", async () => {
@@ -286,6 +306,34 @@ describe("lgtmoose destroy", () => {
     expect(result.exitCode).toBe(1);
     expect(h.calls).toEqual(["unprotect", "deploy", "protect"]);
     expect(result.stderr).toContain("Turned the database's deletion protection back on");
+  });
+
+  it("switches the Data stack back to keeping its data when destroy --purge fails later", async () => {
+    const h = harness({ failDestroy: true });
+    const result = await run(runDestroy, ["--purge", "--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(h.calls).toEqual(["unprotect", "deploy", "destroy", "deploy", "protect"]);
+    expect(h.deployed[1]).toEqual({
+      stacks: [STACK_NAMES.data],
+      exclusively: true,
+      askToApprove: false,
+    });
+    expect(result.stderr).toContain("Switched the Data stack back to keeping its data");
+  });
+
+  it("restores protection when turning it off fails partway", async () => {
+    const h = harness({ failUnprotect: true });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.exitCode).toBe(1);
+    expect(h.calls).toEqual(["unprotect", "protect"]);
+    expect(result.stderr).toContain("Turned the database's deletion protection back on");
+  });
+
+  it("doesn't claim protection is back on for a database that's gone", async () => {
+    const h = harness({ failDestroy: true, database: "missing" });
+    const result = await run(runDestroy, ["--yes"], h);
+    expect(result.stderr).toContain("Database lgtmoose-db-1 is already gone or being deleted");
+    expect(result.stderr).not.toContain("back on");
   });
 
   it("says so when protection can't be turned back on", async () => {

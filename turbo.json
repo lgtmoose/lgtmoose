@@ -10,8 +10,7 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "env": ["LGTMOOSE_TEST_DATABASE_URL"],
-      "passThroughEnv": ["CI"]
+      "env": ["LGTMOOSE_TEST_DATABASE_URL", "CI"]
     }
   }
 }

@@ -16,7 +16,7 @@ import { isPromptCancel, type Prompter } from "./prompter.js";
 import {
   readExistingApp,
   storeAppSecrets,
-  webhookSecretProblem,
+  readWebhookSecret,
   type ExistingApp,
   type SetupSecretStore,
 } from "./secret-store.js";
@@ -94,7 +94,7 @@ async function chooseApp(
     `${SECRET_NAMES.githubApp} in ${inputs.region} already holds GitHub App ${describeApp(existing)}.\n`,
   );
   const problem =
-    existing.slug === undefined ? undefined : await webhookSecretProblem(store, existing);
+    existing.slug === undefined ? undefined : (await readWebhookSecret(store, existing)).problem;
   if (problem !== undefined) {
     // Keeping it would deploy a gateway that rejects every delivery, so only offer a new App.
     deps.out(`${problem}\n`);
@@ -156,6 +156,7 @@ async function setUpApp(
       privateKey: app.pem,
       clientId: app.clientId,
       clientSecret: app.clientSecret,
+      webhookCreatedActive: true,
     },
     webhookSecret,
   );

@@ -1,3 +1,4 @@
+import { awsError, errorName } from "../aws-errors.js";
 import {
   DescribeDBClustersCommand,
   DescribeDBInstancesCommand,
@@ -6,6 +7,8 @@ import {
   RDSClient,
   StartDBClusterCommand,
   StartDBInstanceCommand,
+  StopDBClusterCommand,
+  StopDBInstanceCommand,
 } from "@aws-sdk/client-rds";
 
 /** lean runs an RDS instance, standard an Aurora cluster. */
@@ -27,7 +30,9 @@ type RdsCommand =
   | ModifyDBInstanceCommand
   | ModifyDBClusterCommand
   | StartDBInstanceCommand
-  | StartDBClusterCommand;
+  | StartDBClusterCommand
+  | StopDBInstanceCommand
+  | StopDBClusterCommand;
 
 /** The subset of RDSClient we use, so tests can fake `send`. */
 export interface RdsSender {
@@ -46,9 +51,22 @@ interface Found {
 const POLL_MS = 15_000;
 const WAIT_MS = 30 * 60_000;
 
-function errorName(error: unknown): string | undefined {
-  return error instanceof Error ? error.name : undefined;
-}
+/**
+ * States in which RDS refuses ModifyDB* until the database settles. Anything else (available,
+ * storage-optimization, backing-up, maintenance, configuring-…) accepts a DeletionProtection
+ * change, so there's no need to wait out a storage optimization that can take hours.
+ */
+const BUSY = new Set([
+  "creating",
+  "starting",
+  "stopping",
+  "stopped",
+  "rebooting",
+  "modifying",
+  "renaming",
+  "resetting-master-credentials",
+  "upgrading",
+]);
 
 export function rdsDatabaseControl(
   client: RdsSender,
@@ -91,35 +109,26 @@ export function rdsDatabaseControl(
 
   return {
     async setDeletionProtection(identifier, enabled) {
+      let started = false;
+      let modified = false;
       try {
-        let started = false;
-        let modified = false;
         for (let waited = 0; ; waited += POLL_MS) {
           const found = await find(identifier);
           // Being deleted counts as gone: it will never be available again.
           if (found === undefined || found.status === "deleting") return "missing";
-          if (found.status === "available") {
-            if (found.deletionProtection === enabled) return "done";
-            if (!modified) {
+          if (found.deletionProtection === enabled) {
+            // A database this call started to change it goes back to stopped, so turning
+            // protection on doesn't leave it running and billing. (Turning it off is for
+            // destroy, which deletes it next.)
+            if (!started || !enabled) return "done";
+            if (found.status === "available") {
               await client.send(
                 found.kind === "instance"
-                  ? new ModifyDBInstanceCommand({
-                      DBInstanceIdentifier: identifier,
-                      DeletionProtection: enabled,
-                      ApplyImmediately: true,
-                    })
-                  : new ModifyDBClusterCommand({
-                      DBClusterIdentifier: identifier,
-                      DeletionProtection: enabled,
-                      ApplyImmediately: true,
-                    }),
+                  ? new StopDBInstanceCommand({ DBInstanceIdentifier: identifier })
+                  : new StopDBClusterCommand({ DBClusterIdentifier: identifier }),
               );
-              modified = true;
-              continue;
+              return "done";
             }
-          } else if (found.deletionProtection === enabled && !modified) {
-            // Already as asked: no need to wake a stopped database.
-            return "done";
           } else if (found.status === "stopped" && !started) {
             // RDS can't modify a stopped database. A "stopping" one is waited on until it's
             // stopped, then started.
@@ -129,6 +138,22 @@ export function rdsDatabaseControl(
                 : new StartDBClusterCommand({ DBClusterIdentifier: identifier }),
             );
             started = true;
+          } else if (!BUSY.has(found.status) && !modified) {
+            await client.send(
+              found.kind === "instance"
+                ? new ModifyDBInstanceCommand({
+                    DBInstanceIdentifier: identifier,
+                    DeletionProtection: enabled,
+                    ApplyImmediately: true,
+                  })
+                : new ModifyDBClusterCommand({
+                    DBClusterIdentifier: identifier,
+                    DeletionProtection: enabled,
+                    ApplyImmediately: true,
+                  }),
+            );
+            modified = true;
+            continue;
           }
           if (waited >= WAIT_MS) {
             throw new Error(`${identifier} is still ${found.status} after 30 minutes`);
@@ -136,10 +161,11 @@ export function rdsDatabaseControl(
           await sleep(POLL_MS);
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `AWS RDS (${region}) couldn't turn deletion protection ${enabled ? "on" : "off"} for ${identifier}: ${message}`,
-          { cause: error },
+        throw awsError(
+          "RDS",
+          region,
+          `turning deletion protection ${enabled ? "on" : "off"} for ${identifier}`,
+          error,
         );
       }
     },
