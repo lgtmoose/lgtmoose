@@ -40,6 +40,9 @@ importers:
 
   infra/cdk:
     dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       aws-cdk-lib:
         specifier: ^2.276.0
         version: 2.276.0(constructs@10.8.1)
