@@ -1,10 +1,11 @@
 import { parseArgs } from "node:util";
+import type { SetupDeps } from "./setup/setup.js";
 
 export const VERSION = "0.0.0";
 
 /** Commands planned for M1–M3. Each one is a stub until its ticket lands. */
 export const COMMANDS = {
-  setup: "Create the GitHub App and write lgtmoose.config.ts (NIC-802)",
+  setup: "Create the GitHub App and write lgtmoose.config.ts",
   auth: "Connect a model provider: claude, codex, cursor, bedrock, api-key (NIC-824)",
   deploy: "Deploy every CDK stack and point the App's webhook at it (NIC-803)",
   destroy: "Remove the stacks; keeps data unless --purge (NIC-803)",
@@ -27,7 +28,21 @@ export interface RunResult {
   stderr: string;
 }
 
-export function run(argv: readonly string[]): RunResult {
+export interface RunOptions {
+  /** Builds setup's I/O. Tests pass fakes; by default it's AWS, GitHub and a real terminal. */
+  setupDeps?: () => Promise<SetupDeps>;
+}
+
+export async function run(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
+  // Commands own their flags, so hand them everything after the command name. Imported lazily
+  // so `--help` doesn't load the AWS SDK.
+  if (argv[0] === "setup") {
+    const { runSetup } = await import("./setup/setup.js");
+    const getDeps =
+      options.setupDeps ?? (async () => (await import("./setup/deps.js")).defaultSetupDeps());
+    return runSetup(argv.slice(1), getDeps);
+  }
+
   const { values, positionals } = parseArgs({
     args: [...argv],
     allowPositionals: true,

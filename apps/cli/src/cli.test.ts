@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { COMMANDS, VERSION, run } from "./cli.js";
 
 describe("lgtmoose CLI", () => {
-  it("prints help with no arguments", () => {
-    const result = run([]);
+  it("prints help with no arguments", async () => {
+    const result = await run([]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: lgtmoose <command>");
     for (const name of Object.keys(COMMANDS)) {
@@ -11,19 +11,35 @@ describe("lgtmoose CLI", () => {
     }
   });
 
-  it("prints the version", () => {
-    expect(run(["--version"]).stdout).toBe(`${VERSION}\n`);
+  it("prints the version", async () => {
+    expect((await run(["--version"])).stdout).toBe(`${VERSION}\n`);
   });
 
-  it("rejects unknown commands with help on stderr", () => {
-    const result = run(["frobnicate"]);
+  it("rejects unknown commands with help on stderr", async () => {
+    const result = await run(["frobnicate"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain('Unknown command "frobnicate"');
   });
 
-  it("says which ticket builds a planned command", () => {
-    const result = run(["setup"]);
+  it("says which ticket builds a planned command", async () => {
+    const result = await run(["auth"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("NIC-802");
+    expect(result.stderr).toContain("NIC-824");
+  });
+
+  it("hands setup its own flags and help", async () => {
+    const setupDeps = vi.fn();
+    const result = await run(["setup", "--help"], { setupDeps });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: lgtmoose setup");
+    expect(setupDeps).not.toHaveBeenCalled();
+  });
+
+  it("rejects bad setup flags before touching GitHub or AWS", async () => {
+    const setupDeps = vi.fn();
+    const result = await run(["setup", "--profile", "huge"], { setupDeps });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('--profile "huge"');
+    expect(setupDeps).not.toHaveBeenCalled();
   });
 });
