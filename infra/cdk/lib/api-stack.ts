@@ -24,6 +24,11 @@ export const JOB_VISIBILITY_TIMEOUT = Duration.minutes(5);
 export interface ApiStackProps extends StackProps {
   /** Reported by the gateway's health route. */
   version: string;
+  /**
+   * GitHub orgs or users whose repositories the gateway accepts webhooks for (the deploy
+   * config's `allowedOrgs`). Deliveries for any other owner are ignored.
+   */
+  allowedOrgs: readonly string[];
   /** Steady-state requests per second the API accepts before returning 429. */
   rateLimit?: number;
   /** Requests the API accepts in a burst above the rate limit. */
@@ -34,7 +39,7 @@ export interface ApiStackProps extends StackProps {
  * The internet-facing entry point: an HTTP API in front of the gateway Lambda, and the FIFO job
  * queue the gateway writes to.
  *
- * The queue's message group is `owner/repo#pr` (set by the gateway, NIC-804), so jobs for one PR
+ * The queue's message group is `owner/repo#pr` (set by the gateway), so jobs for one PR
  * are handled in order while different PRs run in parallel. The gateway runs outside the VPC: it
  * needs only SQS and its one secret, and it can't reach the database or the sandbox.
  */
@@ -46,6 +51,8 @@ export class ApiStack extends Stack {
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
+    // The gateway refuses to start without at least one; fail at synth, not on the first webhook.
+    if (props.allowedOrgs.length === 0) throw new Error("ApiStack needs at least one allowed org");
 
     this.deadLetterQueue = new Queue(this, "JobDeadLetterQueue", {
       fifo: true,
@@ -90,6 +97,8 @@ export class ApiStack extends Stack {
         LGTMOOSE_VERSION: props.version,
         JOB_QUEUE_URL: this.jobQueue.queueUrl,
         GITHUB_WEBHOOK_SECRET_ARN: webhookSecret.secretArn,
+        // Org names can't contain commas (the config schema allows letters, digits and hyphens).
+        ALLOWED_ORGS: props.allowedOrgs.join(","),
       },
       logGroup: new LogGroup(this, "GatewayLogs", {
         retention: RetentionDays.ONE_MONTH,

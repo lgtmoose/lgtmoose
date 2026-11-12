@@ -1,0 +1,82 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "url": "https://api.github.com/repos/acme-corp/widgets/pulls/42",
+    "id": 2010203040,
+    "node_id": "PR_kwDOMFxyzc53z0Yg",
+    "html_url": "https://github.com/acme-corp/widgets/pull/42",
+    "number": 42,
+    "state": "open",
+    "locked": false,
+    "title": "Add retry to the widget fetcher",
+    "user": {
+      "login": "octo-dev",
+      "id": 1234567,
+      "type": "User"
+    },
+    "body": "Retries transient 5xx errors with backoff.",
+    "labels": [
+      {
+        "id": 7001,
+        "node_id": "LA_kwDOMFxyzc8AAAABb",
+        "name": "enhancement",
+        "color": "a2eeef",
+        "default": true
+      }
+    ],
+    "draft": false,
+    "head": {
+      "label": "acme-corp:retry-fetcher",
+      "ref": "retry-fetcher",
+      "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+      "user": {
+        "login": "acme-corp"
+      }
+    },
+    "base": {
+      "label": "acme-corp:main",
+      "ref": "main",
+      "sha": "0b1f4c9e2d8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c"
+    },
+    "merged": false,
+    "commits": 3,
+    "additions": 120,
+    "deletions": 14,
+    "changed_files": 4,
+    "created_at": "2026-11-12T09:58:11Z",
+    "updated_at": "2026-11-12T09:58:11Z"
+  },
+  "repository": {
+    "id": 812345678,
+    "node_id": "R_kgDOMFxyzQ",
+    "name": "widgets",
+    "full_name": "acme-corp/widgets",
+    "private": true,
+    "owner": {
+      "login": "acme-corp",
+      "id": 9919001,
+      "node_id": "O_kgDOAJdZ2Q",
+      "type": "Organization",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/acme-corp/widgets",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "acme-corp",
+    "id": 9919001,
+    "node_id": "O_kgDOAJdZ2Q"
+  },
+  "sender": {
+    "login": "octo-dev",
+    "id": 1234567,
+    "node_id": "U_kgDOABLWhw",
+    "type": "User",
+    "site_admin": false
+  },
+  "installation": {
+    "id": 55667788,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNTU2Njc3ODg="
+  }
+}

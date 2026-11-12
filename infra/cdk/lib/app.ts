@@ -45,7 +45,11 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowDatabaseDeletion: isTrue(app.node.tryGetContext(ALLOW_DATABASE_DELETION)),
   });
 
-  const api = new ApiStack(app, "Lgtmoose-Api", { env, version: LGTMOOSE_VERSION });
+  const api = new ApiStack(app, "Lgtmoose-Api", {
+    env,
+    version: LGTMOOSE_VERSION,
+    allowedOrgs: config.allowedOrgs,
+  });
   // Code that may read the database deploys after the Data stack, so migrations finish first.
   api.addDependency(data);
 

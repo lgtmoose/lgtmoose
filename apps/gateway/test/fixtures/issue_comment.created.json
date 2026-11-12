@@ -1,0 +1,67 @@
+{
+  "action": "created",
+  "issue": {
+    "url": "https://api.github.com/repos/acme-corp/widgets/issues/42",
+    "number": 42,
+    "title": "Add retry to the widget fetcher",
+    "user": {
+      "login": "octo-dev",
+      "type": "User"
+    },
+    "labels": [
+      {
+        "id": 7001,
+        "name": "enhancement"
+      }
+    ],
+    "state": "open",
+    "draft": false,
+    "pull_request": {
+      "url": "https://api.github.com/repos/acme-corp/widgets/pulls/42",
+      "html_url": "https://github.com/acme-corp/widgets/pull/42"
+    }
+  },
+  "comment": {
+    "id": 2501234567,
+    "node_id": "IC_kwDOMFxyzc6VFmXH",
+    "body": "@lgtmoose review",
+    "user": {
+      "login": "octo-dev",
+      "type": "User"
+    },
+    "created_at": "2026-11-12T10:05:00Z",
+    "author_association": "MEMBER"
+  },
+  "repository": {
+    "id": 812345678,
+    "node_id": "R_kgDOMFxyzQ",
+    "name": "widgets",
+    "full_name": "acme-corp/widgets",
+    "private": true,
+    "owner": {
+      "login": "acme-corp",
+      "id": 9919001,
+      "node_id": "O_kgDOAJdZ2Q",
+      "type": "Organization",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/acme-corp/widgets",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "acme-corp",
+    "id": 9919001,
+    "node_id": "O_kgDOAJdZ2Q"
+  },
+  "sender": {
+    "login": "octo-dev",
+    "id": 1234567,
+    "node_id": "U_kgDOABLWhw",
+    "type": "User",
+    "site_admin": false
+  },
+  "installation": {
+    "id": 55667788,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNTU2Njc3ODg="
+  }
+}

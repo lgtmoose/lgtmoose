@@ -15,7 +15,10 @@ let template: Template;
 let resources: Record<string, Resource>;
 
 beforeAll(() => {
-  stack = new ApiStack(appWithoutBundling(), "Api", { version: "1.2.3" });
+  stack = new ApiStack(appWithoutBundling(), "Api", {
+    version: "1.2.3",
+    allowedOrgs: ["acme-corp", "octo-dev"],
+  });
   template = Template.fromStack(stack);
   resources = template.toJSON().Resources as Record<string, Resource>;
 }, 60_000);
@@ -68,9 +71,16 @@ describe("ApiStack", () => {
           LGTMOOSE_VERSION: "1.2.3",
           JOB_QUEUE_URL: Match.anyValue(),
           GITHUB_WEBHOOK_SECRET_ARN: Match.anyValue(),
+          ALLOWED_ORGS: "acme-corp,octo-dev",
         },
       },
     });
+  });
+
+  it("refuses an empty allowed-org list", () => {
+    expect(
+      () => new ApiStack(appWithoutBundling(), "Api", { version: "1.2.3", allowedOrgs: [] }),
+    ).toThrow(/allowed org/);
   });
 
   it("lets the gateway send jobs and read only the webhook secret", () => {
@@ -92,6 +102,19 @@ describe("ApiStack", () => {
     expect(text).not.toContain("lgtmoose/github-app");
     expect(text).not.toContain("sqs:ReceiveMessage");
     expect(text).not.toContain("sqs:DeleteMessage");
+
+    // Nothing beyond what sending a job and reading one secret take, now that the gateway does
+    // real work.
+    const actions = statements.flatMap((s) => [s.Action].flat() as string[]);
+    expect(new Set(actions)).toEqual(
+      new Set([
+        "sqs:SendMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret",
+      ]),
+    );
   });
 
   it("routes only the health and webhook paths to the gateway, with throttling", () => {
@@ -120,7 +143,7 @@ describe("ApiStack", () => {
 
   it("bundles the gateway handler", () => {
     const app = new App({ outdir: mkdtempSync(join(tmpdir(), "lgtmoose-api-")) });
-    new ApiStack(app, "Api", { version: "1.2.3" });
+    new ApiStack(app, "Api", { version: "1.2.3", allowedOrgs: ["acme-corp"] });
     const synthesized = app.synth();
     const bundle = readdirSync(synthesized.directory)
       .filter((name) => name.startsWith("asset."))
