@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseDeployConfig } from "@lgtmoose/config";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { ARTIFACT_RETENTION_DAYS, MIGRATIONS_DIR, hashDirectory } from "./data-stack.js";
 import type { Profile } from "./network-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
 
-function synth(profile: Profile, app: App = appWithoutBundling()) {
+function build(profile: Profile, app: App) {
   const config = parseDeployConfig({
     profile,
     allowedOrgs: ["lgtmoose"],
@@ -22,6 +22,22 @@ function synth(profile: Profile, app: App = appWithoutBundling()) {
   const stacks = buildApp(config, app);
   return { ...stacks, template: Template.fromStack(stacks.data) };
 }
+
+/** Synthesizing is the slow part, so each profile is built once and shared by every test. */
+const built = new Map<Profile, ReturnType<typeof build>>();
+function synth(profile: Profile) {
+  let result = built.get(profile);
+  if (result === undefined) {
+    result = build(profile, appWithoutBundling());
+    built.set(profile, result);
+  }
+  return result;
+}
+
+beforeAll(() => {
+  synth("lean");
+  synth("standard");
+}, 60_000);
 
 describe("DataStack", () => {
   it("lean: an encrypted, private db.t4g.micro PostgreSQL 18 instance with TLS forced", () => {
@@ -104,12 +120,13 @@ describe("DataStack", () => {
   it("references provider secrets for every provider except Bedrock, and never creates them", () => {
     const { data, template } = synth("lean");
     expect([...data.providerSecrets.keys()]).toEqual(["claude"]);
-    // The only secret this stack owns is the generated database credential.
+    // The only secret this stack owns is the generated database credential, named by CDK.
     template.resourceCountIs("AWS::SecretsManager::Secret", 1);
-    template.hasResourceProperties("AWS::SecretsManager::Secret", { Name: "lgtmoose/database" });
+    const [secret] = Object.values(template.findResources("AWS::SecretsManager::Secret"));
+    expect(secret?.Properties.Name).toBeUndefined();
   });
 
-  it("runs migrations through a Node 24 Lambda in the VPC, keyed on the migrations hash", () => {
+  it("runs migrations through a Node 24 Lambda, keyed on the migrations and the database", () => {
     const { template } = synth("lean");
     template.hasResourceProperties("AWS::Lambda::Function", {
       Runtime: "nodejs24.x",
@@ -121,12 +138,14 @@ describe("DataStack", () => {
     });
     template.hasResourceProperties("AWS::CloudFormation::CustomResource", {
       migrationsHash: hashDirectory(MIGRATIONS_DIR),
+      // A replaced database has a new endpoint, which re-runs the migrations on it.
+      databaseEndpoint: { "Fn::GetAtt": [Match.stringLikeRegexp("^Database"), "Endpoint.Address"] },
     });
   });
 
   it("bundles the migration handler with the SQL migrations next to it", () => {
     const outdir = mkdtempSync(join(tmpdir(), "lgtmoose-cdk-"));
-    const { app } = synth("lean", new App({ outdir }));
+    const { app } = build("lean", new App({ outdir }));
     const assembly = app.synth();
     const assetDirs = readdirSync(assembly.directory).filter((name) => name.startsWith("asset."));
     const bundle = assetDirs

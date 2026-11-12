@@ -111,6 +111,37 @@ describe("schema", () => {
     expect(open[0]?.source).toBe("self");
   });
 
+  it("stores GitHub comment IDs above 2^31", async () => {
+    const [pr] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "lgtmoose/big-ids",
+        number: 1,
+        author: "someone",
+        headSha: "abc",
+        baseSha: "def",
+        summaryCommentId: 2_512_345_678,
+      })
+      .returning();
+    expect(pr?.summaryCommentId).toBe(2_512_345_678);
+
+    const [finding] = await db
+      .insert(findings)
+      .values({
+        pullRequestId: pr?.id as string,
+        fingerprint: "fp-big",
+        ruleCategory: "correctness",
+        severity: "nit",
+        title: "t",
+        body: "b",
+        raisedAtSha: "abc",
+        githubCommentId: 3_000_000_001,
+      })
+      .returning();
+    expect(finding?.githubCommentId).toBe(3_000_000_001);
+  });
+
   it("ranks learnings by embedding similarity", async () => {
     const base = {
       org: "lgtmoose",

@@ -69,6 +69,8 @@ export interface DataStackProps extends StackProps {
  */
 export class DataStack extends Stack {
   readonly database: DatabaseInstance | DatabaseCluster;
+  /** Writer endpoint hostname. Changes when CloudFormation replaces the database. */
+  readonly databaseEndpoint: string;
   readonly databaseSecret: ISecret;
   readonly databaseSecurityGroup: ISecurityGroup;
   readonly artifactBucket: Bucket;
@@ -93,9 +95,9 @@ export class DataStack extends Stack {
       "Control tasks and Lambdas",
     );
 
-    const credentials = Credentials.fromGeneratedSecret("lgtmoose", {
-      secretName: SECRET_NAMES.database,
-    });
+    // CDK names this secret, so redeploying after `destroy` (while the old secret is still in its
+    // recovery window) or running a second deployment in the same account doesn't collide.
+    const credentials = Credentials.fromGeneratedSecret("lgtmoose");
     const common = {
       vpc: props.vpc,
       vpcSubnets: appSubnets,
@@ -127,6 +129,7 @@ export class DataStack extends Stack {
         }),
       });
       this.database = instance;
+      this.databaseEndpoint = instance.instanceEndpoint.hostname;
     } else {
       const engine = DatabaseClusterEngine.auroraPostgres({
         version: AuroraPostgresEngineVersion.VER_18_6,
@@ -146,6 +149,7 @@ export class DataStack extends Stack {
         }),
       });
       this.database = cluster;
+      this.databaseEndpoint = cluster.clusterEndpoint.hostname;
     }
     const secret = this.database.secret;
     if (!secret) throw new Error("database has no generated secret");
@@ -198,10 +202,14 @@ export class DataStack extends Stack {
       vpc: props.vpc,
       vpcSubnets: appSubnets,
       securityGroups: [props.controlSecurityGroup],
+      // CDK bundles by running `pnpm exec esbuild` in projectRoot, so esbuild is a devDependency
+      // of the workspace root, not of this package.
       depsLockFilePath: join(REPO_ROOT, "pnpm-lock.yaml"),
       projectRoot: REPO_ROOT,
       environment: {
         DATABASE_SECRET_ARN: this.databaseSecret.secretArn,
+        // The generated secret has no dbname field, so pass the database name explicitly.
+        DATABASE_NAME,
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
@@ -226,7 +234,11 @@ export class DataStack extends Stack {
     const provider = new Provider(this, "MigrateProvider", { onEventHandler: handler });
     const migrations = new CustomResource(this, "Migrations", {
       serviceToken: provider.serviceToken,
-      properties: { migrationsHash: hashDirectory(MIGRATIONS_DIR) },
+      // Either value changing sends an Update event: new migrations, or a replaced (empty) database.
+      properties: {
+        migrationsHash: hashDirectory(MIGRATIONS_DIR),
+        databaseEndpoint: this.databaseEndpoint,
+      },
     });
     migrations.node.addDependency(this.database);
     return migrations;

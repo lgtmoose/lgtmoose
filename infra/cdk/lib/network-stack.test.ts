@@ -1,11 +1,11 @@
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { NetworkStack, PROXY_PORT, type Profile } from "./network-stack.js";
 
 type Resource = { Type: string; Properties?: Record<string, unknown> };
 
-function synth(profile: Profile) {
+function build(profile: Profile) {
   const stack = new NetworkStack(new App(), "Network", { profile });
   const template = Template.fromStack(stack);
   const resources = template.toJSON().Resources as Record<string, Resource>;
@@ -18,6 +18,22 @@ function synth(profile: Profile) {
     sandboxSgId: logicalId(stack.sandboxSecurityGroup.securityGroupId),
   };
 }
+
+const built = new Map<Profile, ReturnType<typeof build>>();
+/** Each profile is synthesized once and shared by every test. */
+function synth(profile: Profile) {
+  let result = built.get(profile);
+  if (result === undefined) {
+    result = build(profile);
+    built.set(profile, result);
+  }
+  return result;
+}
+
+beforeAll(() => {
+  synth("lean");
+  synth("standard");
+}, 60_000);
 
 function ofType(resources: Record<string, Resource>, type: string) {
   return Object.entries(resources).filter(([, resource]) => resource.Type === type);

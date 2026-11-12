@@ -32,7 +32,7 @@ CREATE TABLE "finding_events" (
 	"type" "finding_event_type" NOT NULL,
 	"actor" text NOT NULL,
 	"sha" text,
-	"github_comment_id" integer,
+	"github_comment_id" bigint,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -53,7 +53,7 @@ CREATE TABLE "findings" (
 	"source" "finding_source" DEFAULT 'self' NOT NULL,
 	"source_login" text,
 	"status" "finding_status" DEFAULT 'open' NOT NULL,
-	"github_comment_id" integer,
+	"github_comment_id" bigint,
 	"github_thread_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
@@ -70,7 +70,7 @@ CREATE TABLE "learnings" (
 	"status" "learning_status" DEFAULT 'pending' NOT NULL,
 	"source_repo" text,
 	"source_pr" integer,
-	"source_comment_id" integer,
+	"source_comment_id" bigint,
 	"author" text NOT NULL,
 	"author_permission" text NOT NULL,
 	"hits" integer DEFAULT 0 NOT NULL,
@@ -105,7 +105,7 @@ CREATE TABLE "pull_requests" (
 	"last_reviewed_sha" text,
 	"comments_through" timestamp with time zone,
 	"status_label" text,
-	"summary_comment_id" integer,
+	"summary_comment_id" bigint,
 	"paused" boolean DEFAULT false NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL

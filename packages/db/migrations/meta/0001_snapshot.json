@@ -1,5 +1,5 @@
 {
-  "id": "25ef82fd-258e-4b31-9d0c-b5bd0e7e6df3",
+  "id": "383fc37d-9b8e-4c46-9529-7f39b689686e",
   "prevId": "95c3007f-36f1-4bb4-b917-c93aafc9748e",
   "version": "7",
   "dialect": "postgresql",
@@ -210,7 +210,7 @@
         },
         "github_comment_id": {
           "name": "github_comment_id",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
@@ -371,7 +371,7 @@
         },
         "github_comment_id": {
           "name": "github_comment_id",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
@@ -531,7 +531,7 @@
         },
         "source_comment_id": {
           "name": "source_comment_id",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },
@@ -814,7 +814,7 @@
         },
         "summary_comment_id": {
           "name": "summary_comment_id",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },

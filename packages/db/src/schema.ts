@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -19,6 +20,9 @@ import {
  * OpenAI text-embedding-3 with `dimensions: 1024`.
  */
 export const EMBEDDING_DIMENSIONS = 1024;
+
+// GitHub comment IDs are already above 2^31, so they are stored as bigint. `mode: "number"` is
+// safe: JavaScript numbers are exact up to 2^53.
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () =>
@@ -79,7 +83,7 @@ export const pullRequests = pgTable(
     lastReviewedSha: text("last_reviewed_sha"),
     commentsThrough: timestamp("comments_through", { withTimezone: true }),
     statusLabel: text("status_label"),
-    summaryCommentId: integer("summary_comment_id"),
+    summaryCommentId: bigint("summary_comment_id", { mode: "number" }),
     paused: boolean("paused").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -147,7 +151,7 @@ export const findings = pgTable(
     /** Login of the other reviewer, for findings with source bot or human. */
     sourceLogin: text("source_login"),
     status: findingStatus("status").notNull().default("open"),
-    githubCommentId: integer("github_comment_id"),
+    githubCommentId: bigint("github_comment_id", { mode: "number" }),
     githubThreadId: text("github_thread_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -170,7 +174,7 @@ export const findingEvents = pgTable(
     type: findingEventType("type").notNull(),
     actor: text("actor").notNull(),
     sha: text("sha"),
-    githubCommentId: integer("github_comment_id"),
+    githubCommentId: bigint("github_comment_id", { mode: "number" }),
     createdAt: createdAt(),
   },
   (t) => [index("finding_events_finding_idx").on(t.findingId, t.createdAt)],
@@ -192,7 +196,7 @@ export const learnings = pgTable(
     status: learningStatus("status").notNull().default("pending"),
     sourceRepo: text("source_repo"),
     sourcePr: integer("source_pr"),
-    sourceCommentId: integer("source_comment_id"),
+    sourceCommentId: bigint("source_comment_id", { mode: "number" }),
     author: text("author").notNull(),
     /** The author's repo permission when they proposed it: admin, maintain, write, triage, read. */
     authorPermission: text("author_permission").notNull(),
