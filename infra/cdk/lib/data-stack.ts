@@ -35,7 +35,7 @@ import {
   StorageType,
 } from "aws-cdk-lib/aws-rds";
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
-import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
+import { CfnSecret, Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import type { Construct } from "constructs";
 import { SECRET_NAMES, providerNeedsSecret, type DeployConfig } from "@lgtmoose/config";
@@ -154,6 +154,11 @@ export class DataStack extends Stack {
     const secret = this.database.secret;
     if (!secret) throw new Error("database has no generated secret");
     this.databaseSecret = secret;
+    // The database outlives the stack as a snapshot, so its credential must outlive it too.
+    // `database.secret` is the target attachment, so retain the generated CfnSecret itself.
+    for (const child of this.database.node.findAll()) {
+      if (child instanceof CfnSecret) child.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    }
 
     this.artifactBucket = new Bucket(this, "Artifacts", {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,

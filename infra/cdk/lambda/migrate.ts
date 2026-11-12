@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type {
   CloudFormationCustomResourceEvent,
@@ -6,7 +7,7 @@ import type {
 import { runMigrations } from "@lgtmoose/db/migrate";
 
 /** The bundler copies packages/db/migrations next to this handler. */
-const MIGRATIONS_FOLDER = new URL("./migrations", import.meta.url).pathname;
+const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 
 /** The fields CDK's generated RDS secret and its target attachment provide. */
 interface DatabaseSecret {

@@ -2,6 +2,7 @@ import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { NetworkStack, PROXY_PORT, type Profile } from "./network-stack.js";
+import { memoizeByProfile } from "./test-utils.js";
 
 type Resource = { Type: string; Properties?: Record<string, unknown> };
 
@@ -19,16 +20,7 @@ function build(profile: Profile) {
   };
 }
 
-const built = new Map<Profile, ReturnType<typeof build>>();
-/** Each profile is synthesized once and shared by every test. */
-function synth(profile: Profile) {
-  let result = built.get(profile);
-  if (result === undefined) {
-    result = build(profile);
-    built.set(profile, result);
-  }
-  return result;
-}
+const synth = memoizeByProfile(build);
 
 beforeAll(() => {
   synth("lean");

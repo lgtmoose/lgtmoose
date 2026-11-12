@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "generate": "drizzle-kit generate",
-    "check-migrations": "drizzle-kit generate && git diff --exit-code -- migrations"
+    "check-migrations": "tsx scripts/check-migrations.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.4",

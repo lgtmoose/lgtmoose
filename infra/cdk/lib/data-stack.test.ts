@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { ARTIFACT_RETENTION_DAYS, MIGRATIONS_DIR, hashDirectory } from "./data-stack.js";
 import type { Profile } from "./network-stack.js";
-import { appWithoutBundling } from "./test-utils.js";
+import { appWithoutBundling, memoizeByProfile } from "./test-utils.js";
 
 function build(profile: Profile, app: App) {
   const config = parseDeployConfig({
@@ -23,16 +23,7 @@ function build(profile: Profile, app: App) {
   return { ...stacks, template: Template.fromStack(stacks.data) };
 }
 
-/** Synthesizing is the slow part, so each profile is built once and shared by every test. */
-const built = new Map<Profile, ReturnType<typeof build>>();
-function synth(profile: Profile) {
-  let result = built.get(profile);
-  if (result === undefined) {
-    result = build(profile, appWithoutBundling());
-    built.set(profile, result);
-  }
-  return result;
-}
+const synth = memoizeByProfile((profile) => build(profile, appWithoutBundling()));
 
 beforeAll(() => {
   synth("lean");
@@ -124,6 +115,9 @@ describe("DataStack", () => {
     template.resourceCountIs("AWS::SecretsManager::Secret", 1);
     const [secret] = Object.values(template.findResources("AWS::SecretsManager::Secret"));
     expect(secret?.Properties.Name).toBeUndefined();
+    // Kept on stack deletion, like the database snapshot it unlocks.
+    expect(secret?.DeletionPolicy).toBe("Retain");
+    expect(secret?.UpdateReplacePolicy).toBe("Retain");
   });
 
   it("runs migrations through a Node 24 Lambda, keyed on the migrations and the database", () => {

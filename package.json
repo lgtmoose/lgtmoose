@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "synth": "pnpm --filter @lgtmoose/cdk synth",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm synth"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm --filter @lgtmoose/db check-migrations && pnpm synth"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
