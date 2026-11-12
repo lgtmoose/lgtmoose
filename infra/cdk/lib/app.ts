@@ -6,6 +6,14 @@ import { NetworkStack } from "./network-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
 
+/** CDK context flag (`-c lgtmoose:allowDatabaseDeletion=true`) that `lgtmoose destroy` sets. */
+export const ALLOW_DATABASE_DELETION = "lgtmoose:allowDatabaseDeletion";
+
+/** Context values from `-c` arrive as strings; from cdk.json or tests they may be booleans. */
+function isTrue(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
 export interface LgtmooseStacks {
   app: App;
   meta: MetaStack;
@@ -32,6 +40,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     providers: config.providers,
     vpc: network.vpc,
     controlSecurityGroup: network.controlSecurityGroup,
+    allowDatabaseDeletion: isTrue(app.node.tryGetContext(ALLOW_DATABASE_DELETION)),
   });
 
   return { app, meta, network, data };

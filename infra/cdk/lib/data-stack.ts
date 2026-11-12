@@ -7,7 +7,9 @@ import {
   CustomResource,
   Duration,
   RemovalPolicy,
+  CfnResource,
   Stack,
+  Tags,
   type StackProps,
 } from "aws-cdk-lib";
 import {
@@ -55,6 +57,12 @@ export interface DataStackProps extends StackProps {
   vpc: Vpc;
   /** Control tasks and Lambdas; the only callers allowed to reach Postgres. */
   controlSecurityGroup: ISecurityGroup;
+  /**
+   * Turns off deletion protection so the stack can be deleted (RDS refuses to delete a protected
+   * database, which would leave the stack in DELETE_FAILED). `lgtmoose destroy` deploys with this
+   * set, then deletes; CloudFormation still takes a final snapshot. Default false.
+   */
+  allowDatabaseDeletion?: boolean;
 }
 
 /**
@@ -71,6 +79,8 @@ export class DataStack extends Stack {
   readonly database: DatabaseInstance | DatabaseCluster;
   /** Writer endpoint hostname. Changes when CloudFormation replaces the database. */
   readonly databaseEndpoint: string;
+  /** RDS instance or cluster identifier; final snapshots and the retained secret refer to it. */
+  readonly databaseIdentifier: string;
   readonly databaseSecret: ISecret;
   readonly databaseSecurityGroup: ISecurityGroup;
   readonly artifactBucket: Bucket;
@@ -104,7 +114,7 @@ export class DataStack extends Stack {
       securityGroups: [this.databaseSecurityGroup],
       credentials,
       storageEncrypted: true,
-      deletionProtection: true,
+      deletionProtection: !props.allowDatabaseDeletion,
       removalPolicy: RemovalPolicy.SNAPSHOT,
       cloudwatchLogsExports: ["postgresql"],
       cloudwatchLogsRetention: lean ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
@@ -130,6 +140,7 @@ export class DataStack extends Stack {
       });
       this.database = instance;
       this.databaseEndpoint = instance.instanceEndpoint.hostname;
+      this.databaseIdentifier = instance.instanceIdentifier;
     } else {
       const engine = DatabaseClusterEngine.auroraPostgres({
         version: AuroraPostgresEngineVersion.VER_18_6,
@@ -150,14 +161,23 @@ export class DataStack extends Stack {
       });
       this.database = cluster;
       this.databaseEndpoint = cluster.clusterEndpoint.hostname;
+      this.databaseIdentifier = cluster.clusterIdentifier;
     }
     const secret = this.database.secret;
     if (!secret) throw new Error("database has no generated secret");
     this.databaseSecret = secret;
     // The database outlives the stack as a snapshot, so its credential must outlive it too.
     // `database.secret` is the target attachment, so retain the generated CfnSecret itself.
-    for (const child of this.database.node.findAll()) {
-      if (child instanceof CfnSecret) child.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const generatedSecret = this.database.node.findAll().find((c) => c instanceof CfnSecret);
+    if (!(generatedSecret instanceof CfnSecret)) throw new Error("generated secret not found");
+    generatedSecret.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    Tags.of(generatedSecret).add("lgtmoose:stack", this.stackName);
+    // Pair the database, and through copied tags its final snapshot, with the secret that unlocks
+    // it. This uses the secret's own ARN: the attachment's ARN and the database identifier both
+    // depend on the database, so either would make a dependency cycle.
+    const databaseResource = this.database.node.defaultChild;
+    if (databaseResource instanceof CfnResource) {
+      Tags.of(databaseResource).add("lgtmoose:credentials-secret", generatedSecret.ref);
     }
 
     this.artifactBucket = new Bucket(this, "Artifacts", {
@@ -192,6 +212,7 @@ export class DataStack extends Stack {
 
     new CfnOutput(this, "ArtifactBucketName", { value: this.artifactBucket.bucketName });
     new CfnOutput(this, "DatabaseSecretArn", { value: this.databaseSecret.secretArn });
+    new CfnOutput(this, "DatabaseIdentifier", { value: this.databaseIdentifier });
   }
 
   private addMigrations(

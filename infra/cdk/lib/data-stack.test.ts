@@ -5,7 +5,7 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
-import { buildApp } from "./app.js";
+import { ALLOW_DATABASE_DELETION, buildApp } from "./app.js";
 import { ARTIFACT_RETENTION_DAYS, MIGRATIONS_DIR, hashDirectory } from "./data-stack.js";
 import type { Profile } from "./network-stack.js";
 import { appWithoutBundling, memoizeByProfile } from "./test-utils.js";
@@ -47,6 +47,21 @@ describe("DataStack", () => {
     template.hasResource("AWS::RDS::DBInstance", { DeletionPolicy: "Snapshot" });
     template.hasResourceProperties("AWS::RDS::DBParameterGroup", {
       Parameters: { "rds.force_ssl": "1" },
+    });
+  });
+
+  it("lets `destroy` turn deletion protection off, and only then", () => {
+    const allowed = build(
+      "lean",
+      new App({
+        context: { "aws:cdk:bundling-stacks": [], [ALLOW_DATABASE_DELETION]: "true" },
+      }),
+    );
+    allowed.template.hasResourceProperties("AWS::RDS::DBInstance", { DeletionProtection: false });
+    // Still snapshotted on delete.
+    allowed.template.hasResource("AWS::RDS::DBInstance", { DeletionPolicy: "Snapshot" });
+    synth("lean").template.hasResourceProperties("AWS::RDS::DBInstance", {
+      DeletionProtection: true,
     });
   });
 
@@ -118,6 +133,16 @@ describe("DataStack", () => {
     // Kept on stack deletion, like the database snapshot it unlocks.
     expect(secret?.DeletionPolicy).toBe("Retain");
     expect(secret?.UpdateReplacePolicy).toBe("Retain");
+    expect(secret?.Properties.Tags).toEqual(
+      expect.arrayContaining([{ Key: "lgtmoose:stack", Value: "Lgtmoose-Data" }]),
+    );
+    // The database (and so its snapshots, which copy its tags) names the secret that unlocks it.
+    template.hasResourceProperties("AWS::RDS::DBInstance", {
+      CopyTagsToSnapshot: true,
+      Tags: Match.arrayWith([
+        Match.objectLike({ Key: "lgtmoose:credentials-secret", Value: Match.anyValue() }),
+      ]),
+    });
   });
 
   it("runs migrations through a Node 24 Lambda, keyed on the migrations and the database", () => {
