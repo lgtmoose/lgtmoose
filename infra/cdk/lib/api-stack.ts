@@ -17,7 +17,7 @@ import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import { SECRET_NAMES } from "@lgtmoose/config";
-import { ROUTES } from "@lgtmoose/gateway";
+import { ROUTES } from "@lgtmoose/gateway/paths";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const GATEWAY_HANDLER = join(REPO_ROOT, "apps/gateway/src/lambda.ts");
@@ -105,6 +105,9 @@ export class ApiStack extends Stack {
       bundling: {
         format: OutputFormat.ESM,
         mainFields: ["module", "main"],
+        // Express is CommonJS and requires Node built-ins; give the ESM bundle a real `require`.
+        banner:
+          "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
         externalModules: ["@aws-sdk/*"],
       },
       logGroup: new LogGroup(this, "GatewayLogs", {

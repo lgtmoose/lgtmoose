@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { ROUTES } from "@lgtmoose/gateway";
+import { ROUTES } from "@lgtmoose/gateway/paths";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiStack, JOB_VISIBILITY_TIMEOUT, MAX_JOB_ATTEMPTS } from "./api-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
