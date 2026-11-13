@@ -37,11 +37,20 @@ export interface ReviewPayload {
   intro?: string;
 }
 
-const EVENT_TEXT: Record<ReviewEvent, string> = {
-  APPROVE: "LGTMoose found nothing that needs changing.",
-  COMMENT: "LGTMoose left comments; none of them block the merge.",
-  REQUEST_CHANGES: "LGTMoose found problems that should be fixed before merging.",
-};
+/**
+ * The body's first line when the caller gives no intro. A COMMENT review isn't always about
+ * comments: decide() also posts one with no findings when the review didn't finish, approvals
+ * are off or the head moved, so without findings it only says the PR wasn't approved.
+ */
+function defaultIntro(event: ReviewEvent, findings: number): string {
+  if (event === "APPROVE") return "LGTMoose found nothing that needs changing.";
+  if (event === "REQUEST_CHANGES") {
+    return "LGTMoose found problems that should be fixed before merging.";
+  }
+  return findings > 0
+    ? "LGTMoose left comments; none of them block the merge."
+    : "LGTMoose reviewed this pull request and didn't approve it; the summary comment says why.";
+}
 
 /**
  * Keeps at most `cap` nits, in order, and every other finding. The cap counts nits across the
@@ -94,8 +103,9 @@ export function reviewBody(
   inBody: readonly Finding[],
   nitsLeftOut: number,
   intro?: string,
+  inlineCount = 0,
 ): string {
-  const head = clip(intro?.trim() || EVENT_TEXT[event], 2_000);
+  const head = clip(intro?.trim() || defaultIntro(event, inBody.length + inlineCount), 2_000);
   const parts = [head];
   let length = head.length;
   if (inBody.length > 0) {
@@ -157,7 +167,7 @@ export function buildReview(input: ReviewInput): ReviewPayload {
   }
   return {
     event: input.event,
-    body: reviewBody(input.event, inBody, capped.left, input.intro),
+    body: reviewBody(input.event, inBody, capped.left, input.intro, comments.length),
     comments,
     commented,
     inBody,

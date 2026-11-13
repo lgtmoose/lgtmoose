@@ -28,6 +28,21 @@ describe("formatComment", () => {
 describe("buildReview", () => {
   const files = [fileDiff()];
 
+  it("doesn't claim comments on a COMMENT review with no findings", () => {
+    const empty = buildReview({ event: "COMMENT", inline: [], outsideDiff: [], files, nitCap: 10 });
+    expect(empty.body).toBe(
+      "LGTMoose reviewed this pull request and didn't approve it; the summary comment says why.",
+    );
+    const withFinding = buildReview({
+      event: "COMMENT",
+      inline: [finding({ severity: "should_fix" })],
+      outsideDiff: [],
+      files,
+      nitCap: 10,
+    });
+    expect(withFinding.body).toBe("LGTMoose left comments; none of them block the merge.");
+  });
+
   it("puts findings in hunks inline and the rest in the body as path:line", () => {
     const review = buildReview({
       event: "REQUEST_CHANGES",
