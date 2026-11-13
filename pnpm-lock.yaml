@@ -88,6 +88,12 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  apps/egress-proxy:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
   apps/gateway:
     dependencies:
       '@aws-sdk/client-secrets-manager':
@@ -133,6 +139,9 @@ importers:
       '@lgtmoose/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@lgtmoose/egress-proxy':
+        specifier: workspace:*
+        version: link:../../apps/egress-proxy
       '@lgtmoose/gateway':
         specifier: workspace:*
         version: link:../../apps/gateway

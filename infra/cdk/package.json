@@ -2,7 +2,7 @@
   "name": "@lgtmoose/cdk",
   "version": "0.0.0",
   "private": true,
-  "description": "AWS CDK app for LGTMoose. Stacks: network, data, api, workflow, dashboard.",
+  "description": "AWS CDK app for LGTMoose. Stacks: network, data, api, proxy, workflow, dashboard.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
   "dependencies": {
     "@lgtmoose/config": "workspace:*",
     "@lgtmoose/db": "workspace:*",
+    "@lgtmoose/egress-proxy": "workspace:*",
     "@lgtmoose/gateway": "workspace:*",
     "aws-cdk-lib": "^2.276.0",
     "constructs": "^10.8.1"

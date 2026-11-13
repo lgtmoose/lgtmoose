@@ -20,3 +20,8 @@ updates:
     directory: /tools/test-postgres
     schedule:
       interval: weekly
+  # The egress proxy's Node base image.
+  - package-ecosystem: docker
+    directory: /apps/egress-proxy
+    schedule:
+      interval: weekly
