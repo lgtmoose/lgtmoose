@@ -60,10 +60,7 @@ export class ProxyStack extends Stack {
       }
     }
 
-    const cluster = new Cluster(this, "Cluster", {
-      vpc: props.vpc,
-      enableFargateCapacityProviders: true,
-    });
+    const cluster = new Cluster(this, "Cluster", { vpc: props.vpc });
     this.namespace = new PrivateDnsNamespace(this, "Namespace", {
       name: SERVICE_NAMESPACE,
       vpc: props.vpc,
