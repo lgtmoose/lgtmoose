@@ -20,6 +20,20 @@ export const repoConfigSchema = z
       .record(z.string().regex(/^[1-7]$/, "tier keys are numbers 1 to 7"), z.array(glob))
       .default({}),
     skip: z.array(glob).default([]),
+    /**
+     * Extra package hosts to trust in lockfiles, such as a private registry, on top of the
+     * public ones. Packages resolved from them aren't flagged in the review summary.
+     */
+    registries: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/,
+            "registries are lowercase host names",
+          ),
+      )
+      .default([]),
     gate: z
       .object({
         check_run: z.enum(["required", "optional", "off"]).default("required"),

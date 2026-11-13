@@ -194,6 +194,25 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/planner:
+    dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      picomatch:
+        specifier: ^4.0.3
+        version: 4.0.7
+    devDependencies:
+      '@types/picomatch':
+        specifier: ^4.0.3
+        version: 4.0.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
 packages:
 
   '@aws-cdk/asset-awscli-v1@2.2.292':
@@ -1274,6 +1293,9 @@ packages:
 
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
+
+  '@types/picomatch@4.0.3':
+    resolution: {integrity: sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==}
 
   '@types/qs@6.15.1':
     resolution: {integrity: sha512-GZHUBZR9hckSUhrxmp1nG6NwdpM9fCunJwyThLW1X3AyHgd9IlHb6VANpQQqDr2o/qQp6McZ3y/IA2rVzKzSbw==}
@@ -3093,6 +3115,8 @@ snapshots:
       '@types/node': 24.19.2
       pg-protocol: 1.16.1
       pg-types: 2.2.0
+
+  '@types/picomatch@4.0.3': {}
 
   '@types/qs@6.15.1': {}
 
