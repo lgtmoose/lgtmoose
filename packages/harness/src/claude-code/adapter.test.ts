@@ -280,6 +280,16 @@ describe("ClaudeCodeHarness", () => {
     expect(store.objects.get("transcripts/run-1/1.jsonl")).not.toContain(API_KEY);
   });
 
+  it("refuses output with the credential split over lines", async () => {
+    const split = `${API_KEY.slice(0, 8)}\n${API_KEY.slice(8)}`;
+    const harness = await harnessFor([
+      {
+        lines: [resultLine({ structured_output: { findings: [{ ...finding, message: split }] } })],
+      },
+    ]);
+    expect((await failure(run(harness))).kind).toBe("invalid_output");
+  });
+
   it("redacts the credential from transcripts and errors", async () => {
     const harness = await harnessFor([
       {

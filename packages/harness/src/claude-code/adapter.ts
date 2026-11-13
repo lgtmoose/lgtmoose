@@ -11,7 +11,7 @@ import {
   type HarnessUsage,
 } from "../harness.js";
 import { runProcess, type ProcessResult } from "../process.js";
-import { containsSecret, redact } from "../redact.js";
+import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv, networkEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
@@ -133,7 +133,7 @@ export class ClaudeCodeHarness implements Harness {
           return { kind: "invalid", problems: z.prettifyError(checked.error), usage, key };
         }
         // A prompt-injected model could try to post the credential in a finding.
-        if (containsSecret(JSON.stringify(checked.data), secrets)) {
+        if (valueContainsSecret(checked.data, secrets)) {
           throw new HarnessError("invalid_output", "The output contained a model credential.", {
             transcriptKeys: keys,
           });

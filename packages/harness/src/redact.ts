@@ -28,6 +28,33 @@ export function containsSecret(text: string, secrets: readonly string[]): boolea
   });
 }
 
+/**
+ * Whether any string in a parsed value (an object from the model's JSON output, say) contains a
+ * secret. Strings are checked as they are, not as JSON text, where a newline becomes `\n` and
+ * would split the key. All strings are also checked joined together, so a key spread over two
+ * fields is found too.
+ */
+export function valueContainsSecret(value: unknown, secrets: readonly string[]): boolean {
+  const keys: string[] = [];
+  const values: string[] = [];
+  collect(value, keys, values);
+  return (
+    [...keys, ...values].some((text) => containsSecret(text, secrets)) ||
+    containsSecret(values.join(""), secrets)
+  );
+}
+
+function collect(value: unknown, keys: string[], values: string[]): void {
+  if (typeof value === "string") values.push(value);
+  else if (Array.isArray(value)) for (const item of value) collect(item, keys, values);
+  else if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      keys.push(key);
+      collect(item, keys, values);
+    }
+  }
+}
+
 const MIN_SECRET_LENGTH = 8;
 
 function usable(secrets: readonly string[]): string[] {

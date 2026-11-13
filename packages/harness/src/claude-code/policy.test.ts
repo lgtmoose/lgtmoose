@@ -110,6 +110,18 @@ describe("guardScript", () => {
     expect(result.status).toBe(0);
   });
 
+  it.each([
+    ["git diff HEAD~1 -- src/a.ts", 0],
+    ["git log main..feature/x", 0],
+    ["git diff /dev/null /etc/passwd", 2],
+    ["git diff ../outside a.txt", 2],
+    ["git diff -O/etc/passwd", 2],
+  ])("decides %j with exit code %i, as the function does", async (command, status) => {
+    // The hook embeds isAllowedGitCommand's source; this catches it depending on outside names.
+    const result = await runGuard({ tool_name: "Bash", tool_input: { command } });
+    expect(result.status).toBe(status);
+  });
+
   it("blocks other Bash commands with exit code 2 and a reason", async () => {
     const result = await runGuard({ tool_name: "Bash", tool_input: { command: "cat .env" } });
     expect(result.status).toBe(2);

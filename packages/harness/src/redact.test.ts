@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { containsSecret, redact } from "./redact.js";
+import { containsSecret, redact, valueContainsSecret } from "./redact.js";
 
 const KEY = "sk-ant-api03-AbCdEf123456";
 
@@ -29,5 +29,21 @@ describe("redact", () => {
   it("replaces literal and encoded forms", () => {
     const b64 = Buffer.from(KEY).toString("base64");
     expect(redact(`${KEY} ${b64}`, [KEY])).toBe("*** ***");
+  });
+});
+
+describe("valueContainsSecret", () => {
+  it.each([
+    ["split by a newline", { body: `${KEY.slice(0, 10)}\n${KEY.slice(10)}` }],
+    ["split by a tab", { body: `${KEY.slice(0, 10)}\t${KEY.slice(10)}` }],
+    ["spread over two fields", { findings: [{ title: KEY.slice(0, 10), body: KEY.slice(10) }] }],
+    ["in an object key", { [KEY]: 1 }],
+  ])("finds the secret %s", (_, value) => {
+    expect(valueContainsSecret(value, [KEY])).toBe(true);
+    // The JSON text alone misses the split ones: that's why values are checked.
+  });
+
+  it("ignores output without it", () => {
+    expect(valueContainsSecret({ findings: [{ title: "ok", line: 3 }] }, [KEY])).toBe(false);
   });
 });
