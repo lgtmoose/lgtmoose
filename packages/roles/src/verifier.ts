@@ -1,5 +1,6 @@
 import {
   isProtectedCategory,
+  severityRank,
   MAX_FINDINGS_PER_VERIFIER_RUN,
   verifierOutputSchema,
   type Finding,
@@ -237,6 +238,17 @@ export interface AppliedVerdicts {
    */
   protectedRejections: DroppedFinding[];
   /**
+   * Confirmed findings in protected categories whose severity the verifier lowered. Also in
+   * `kept`, with the lower severity; log them for eval review like rejections, since a
+   * blocking finding lowered to a nit lets the review approve.
+   */
+  protectedDowngrades: {
+    id: string;
+    finding: Finding;
+    from: Finding["severity"];
+    reason: string;
+  }[];
+  /**
    * Findings the verifier gave no verdict for (its run failed, or it skipped one). Not posted
    * as verified; the caller decides whether to post them or retry.
    */
@@ -248,7 +260,7 @@ export interface AppliedVerdicts {
 /**
  * Applies verdicts to the findings they're for. Confirmed findings are kept, with
  * `adjusted_severity` applied; rejected ones are dropped with the verifier's reason, and
- * protected-category rejections are listed again for eval review. The first verdict for an id
+ * protected-category rejections and lowered severities are listed again for eval review. The first verdict for an id
  * counts; later ones and unknown ids are ignored.
  */
 export function applyVerdicts(
@@ -266,6 +278,7 @@ export function applyVerdicts(
     kept: [],
     dropped: [],
     protectedRejections: [],
+    protectedDowngrades: [],
     unverified: [],
     ignored,
   };
@@ -275,7 +288,12 @@ export function applyVerdicts(
       result.unverified.push({ id, finding });
     } else if (verdict.confirmed) {
       const severity = verdict.adjusted_severity ?? finding.severity;
-      result.kept.push({ id, finding: { ...finding, severity }, reason: verdict.reason });
+      const kept = { id, finding: { ...finding, severity }, reason: verdict.reason };
+      result.kept.push(kept);
+      const lowered = severityRank(severity) > severityRank(finding.severity);
+      if (lowered && isProtectedCategory(finding.rule_category)) {
+        result.protectedDowngrades.push({ ...kept, from: finding.severity });
+      }
     } else {
       const dropped = { id, finding, reason: verdict.reason };
       result.dropped.push(dropped);

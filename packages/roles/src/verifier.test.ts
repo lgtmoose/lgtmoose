@@ -177,6 +177,25 @@ describe("applyVerdicts", () => {
     expect(result.ignored.map((v) => v.id)).toEqual(["F9", "F1"]);
   });
 
+  it("lists a protected finding's lowered severity for eval review", () => {
+    const result = applyVerdicts(
+      [
+        { id: "F1", finding: finding({ rule_category: "secrets" }) },
+        { id: "F2", finding: finding({ rule_category: "money", severity: "nit" }) },
+        { id: "F3", finding: finding() },
+      ],
+      [
+        { id: "F1", confirmed: true, reason: "Only a test key.", adjusted_severity: "nit" },
+        { id: "F2", confirmed: true, reason: "Worse.", adjusted_severity: "blocking" },
+        { id: "F3", confirmed: true, reason: "Minor.", adjusted_severity: "nit" },
+      ],
+    );
+    expect(result.protectedDowngrades.map((d) => [d.id, d.from, d.finding.severity])).toEqual([
+      ["F1", "blocking", "nit"],
+    ]);
+    expect(result.kept.map((k) => k.finding.severity)).toEqual(["nit", "blocking", "nit"]);
+  });
+
   it("ignores a severity change on a rejected finding", () => {
     const result = applyVerdicts(targets.slice(0, 1), [
       { id: "F1", confirmed: false, reason: "Guarded.", adjusted_severity: "nit" },
