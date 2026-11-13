@@ -3,18 +3,11 @@ import picomatch from "picomatch";
 
 /** Why a file is left out of the review. "config" means a `skip` glob in `.lgtmoose.yaml`. */
 export type SkipReason =
-  | "binary"
-  | "submodule"
-  | "lockfile"
-  | "minified"
-  | "generated"
-  | "build-output"
-  | "vendored"
-  | "config";
+  "binary" | "lockfile" | "minified" | "generated" | "build-output" | "vendored" | "config";
 
 /** Default skip globs by reason. Each is matched against the whole path, at any depth. */
 export const DEFAULT_SKIP: Readonly<
-  Record<Exclude<SkipReason, "binary" | "submodule" | "config">, readonly string[]>
+  Record<Exclude<SkipReason, "binary" | "config">, readonly string[]>
 > = {
   lockfile: [
     "**/package-lock.json",
@@ -158,7 +151,6 @@ export function skipClassifier(
   const byGlob = [...defaults, configured];
   return (file) => {
     if (file.binary) return { reason: "binary" };
-    if (file.submodule) return { reason: "submodule" };
     for (const { reason, match } of byGlob) {
       const glob = match(file.path);
       if (glob !== undefined) return { reason, glob };

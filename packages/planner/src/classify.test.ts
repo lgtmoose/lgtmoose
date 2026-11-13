@@ -80,9 +80,12 @@ describe("skipClassifier", () => {
     expect(skip(diff("a/b/yarn.lock"))).toEqual({ reason: "lockfile", glob: "**/yarn.lock" });
   });
 
-  it("skips binaries and submodules whatever their path", () => {
+  it("skips binaries whatever their path", () => {
     expect(skip(diff("src/logo.png", { binary: true }))).toEqual({ reason: "binary" });
-    expect(skip(diff("libs/shared", { submodule: true }))).toEqual({ reason: "submodule" });
+  });
+
+  it("keeps submodule bumps, so a surprising one can be flagged", () => {
+    expect(skip(diff("libs/shared", { submodule: true }))).toBeUndefined();
   });
 
   it("adds the repo's skip globs to the defaults", () => {

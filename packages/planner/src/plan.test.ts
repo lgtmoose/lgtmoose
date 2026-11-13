@@ -165,6 +165,15 @@ describe("planReview", () => {
     ]);
   });
 
+  it("plans submodule bumps as full-depth files", () => {
+    const bump = diff("libs/shared", { submodule: true, hunks: [hunk(1, 1)] });
+    const plan = planReview([bump], noConfig);
+    expect(plan.skipped).toEqual([]);
+    expect(plan.files.map((f) => [f.file.path, f.depth, f.tier])).toEqual([
+      ["libs/shared", "full", OTHER_TIER],
+    ]);
+  });
+
   it("keeps deleted files, which can remove something that mattered", () => {
     const plan = planReview(
       [diff("src/guard.ts", { status: "deleted", newBlob: undefined })],
