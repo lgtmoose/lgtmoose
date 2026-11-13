@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
 import type { FileDiff } from "@lgtmoose/git";
-import { TEST_GLOBS, globMatcher, skipClassifier, type SkipReason } from "./classify.js";
+import {
+  TEST_GLOBS,
+  globMatcher,
+  skipClassifier,
+  type FileHeaders,
+  type SkipReason,
+} from "./classify.js";
 
 /** How closely to read a file. "move" and "mechanical" files only need a glance. */
 export type ReadingDepth = "full" | "move" | "mechanical";
@@ -21,7 +27,10 @@ export interface PlannedFile {
   file: FileDiff;
   depth: ReadingDepth;
   tier: Tier;
-  /** Added plus deleted lines in the file's hunks. */
+  /**
+   * Lines to review: added plus deleted lines in the file's hunks, or on an incremental review,
+   * the lines changed or taken out since the last review.
+   */
   changedLines: number;
   /** Position in the plan's fixed order, from 0. */
   index: number;
@@ -56,6 +65,8 @@ export interface PlanOptions {
   maxFiles?: number;
   /** Most changed lines in one batch. A file this big or bigger is a batch of its own. */
   maxLines?: number;
+  /** File headers by blob ID, from `readHeaders`, for generated detection. */
+  headers?: FileHeaders;
 }
 
 /** Where a later run picks up: the next batch to review in the plan with this fingerprint. */
@@ -77,7 +88,14 @@ export function readingDepth(file: FileDiff): ReadingDepth {
   return "full";
 }
 
+/**
+ * How many lines of a file need reading. On an incremental review that's what changed since
+ * the last review, not the whole PR's diff of the file, so a one-line follow-up stays small.
+ */
 export function changedLines(file: FileDiff): number {
+  if (file.changedSinceLastReview !== undefined) {
+    return file.changedSinceLastReview.length + (file.removedSinceLastReview?.length ?? 0);
+  }
   let count = 0;
   for (const hunk of file.hunks) {
     for (const line of hunk.lines) if (line.kind !== "context") count += 1;
@@ -150,6 +168,9 @@ function fingerprintOf(files: PlannedFile[], maxFiles: number, maxLines: number)
 /**
  * Works out what to review and in what order, without a model call. Skips files nobody should
  * read, sorts the rest by tier then path, and cuts them into batches.
+ *
+ * `config` must be read from the base commit, not the PR's head: the PR could otherwise edit
+ * `.lgtmoose.yaml` to skip its own files. Skipped files are returned so the review can list them.
  */
 export function planReview(
   diff: readonly FileDiff[],
@@ -158,7 +179,7 @@ export function planReview(
 ): Plan {
   const maxFiles = positiveInteger("maxFiles", options.maxFiles ?? DEFAULT_MAX_FILES);
   const maxLines = positiveInteger("maxLines", options.maxLines ?? DEFAULT_MAX_LINES);
-  const skipOf = skipClassifier(config.skip);
+  const skipOf = skipClassifier(config.skip, options.headers);
   const tierOf = tierClassifier(config.tiers);
 
   const skipped: SkippedFile[] = [];

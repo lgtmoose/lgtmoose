@@ -6,10 +6,14 @@ export {
   TEST_GLOBS,
   globMatcher,
   hasGeneratedMarker,
+  headerHasMarker,
+  isMarkedGenerated,
   skipClassifier,
+  type FileHeaders,
   type Skip,
   type SkipReason,
 } from "./classify.js";
+export { readHeaders } from "./headers.js";
 export {
   DEFAULT_MAX_FILES,
   DEFAULT_MAX_LINES,

@@ -67,6 +67,15 @@ describe("changedLines", () => {
     expect(changedLines(diff("a.ts", { hunks: [hunk(3, 2), hunk(1)] }))).toBe(6);
     expect(changedLines(diff("a.ts", { hunks: [] }))).toBe(0);
   });
+
+  it("counts only lines changed since the last review on an incremental review", () => {
+    const file = diff("a.ts", {
+      hunks: [hunk(300)],
+      changedSinceLastReview: [12],
+      removedSinceLastReview: ["check(x);"],
+    });
+    expect(changedLines(file)).toBe(2);
+  });
 });
 
 describe("tierClassifier", () => {
