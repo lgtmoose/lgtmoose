@@ -175,4 +175,19 @@ describe("countFindings", () => {
       nit: 2,
     });
   });
+
+  it("throws on a severity it doesn't know, so it can't approve by leaving it out", () => {
+    const bad = [{ severity: "critical" }] as unknown as OpenFinding[];
+    expect(() => countFindings(bad)).toThrow("Unknown finding severity: critical");
+    expect(() => decide(bad, CLEAN)).toThrow(TypeError);
+  });
+});
+
+describe("DEFAULT_DECISION_CONFIG", () => {
+  it("is what an empty .lgtmoose.yaml gives", () => {
+    expect(DEFAULT_DECISION_CONFIG).toEqual({
+      gate: { check_run: "required", approve: true, nit_cap: 10 },
+      labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
+    });
+  });
 });

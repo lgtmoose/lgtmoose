@@ -1,5 +1,5 @@
-import type { RepoConfig } from "@lgtmoose/config";
-import type { Severity } from "./severity.js";
+import { parseRepoConfig, type RepoConfig } from "@lgtmoose/config";
+import { isSeverity, type Severity } from "./severity.js";
 
 /** The review event posted to GitHub. */
 export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
@@ -64,15 +64,23 @@ export interface ReviewDecision {
   counts: FindingCounts;
 }
 
-/** Defaults, the same as `.lgtmoose.yaml`'s, for callers without a repo config. */
-export const DEFAULT_DECISION_CONFIG: DecisionConfig = {
-  gate: { check_run: "required", approve: true, nit_cap: 10 },
-  labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
-};
+/** The gate and labels of an empty `.lgtmoose.yaml`, for callers without a repo config. */
+export const DEFAULT_DECISION_CONFIG: DecisionConfig = (() => {
+  const { gate, labels } = parseRepoConfig({});
+  return { gate, labels };
+})();
 
+/**
+ * Counts open findings by severity. A severity it doesn't know (a bad row, a new source) throws
+ * rather than being left out, which could let the review approve.
+ */
 export function countFindings(findings: readonly OpenFinding[]): FindingCounts {
   const counts: FindingCounts = { blocking: 0, should_fix: 0, nit: 0 };
-  for (const finding of findings) counts[finding.severity] += 1;
+  for (const finding of findings) {
+    const severity: unknown = finding.severity;
+    if (!isSeverity(severity)) throw new TypeError(`Unknown finding severity: ${String(severity)}`);
+    counts[severity] += 1;
+  }
   return counts;
 }
 
