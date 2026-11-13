@@ -1,0 +1,11 @@
+{
+  "title": "Raise the upload size limit to 25 MB",
+  "body": "Support asked for larger attachments. Raises the limit from 10 MB to 25 MB, in the one place it's set.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "config/default.json",
+      "note": "25 MB is 26214400 bytes; nothing else reads a copy of the limit"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "title": "Let users download their exports",
+  "body": "Exports are written to EXPORT_DIR; GET /exports?file=<name> serves one.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": "security",
+      "path": "src/server.ts",
+      "lines": [
+        13,
+        15
+      ],
+      "severity": "blocking",
+      "note": "file=../../etc/passwd reads any file the server can: path traversal"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/server.ts",
+      "lines": [
+        8,
+        10
+      ],
+      "note": "unchanged health check"
+    }
+  ]
+}

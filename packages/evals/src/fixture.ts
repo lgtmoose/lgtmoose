@@ -67,6 +67,11 @@ export const fixtureSpecSchema = z
     mustNotFlag: z.array(mustNotFlagSchema).default([]),
     /** Files the PR deletes. */
     deleted: z.array(repoPath).default([]),
+    /**
+     * Labels for the report, such as `cross-file` for bugs only a pass over the whole PR can
+     * see (an unused export, a setting nothing defines). Recall is also shown per tag.
+     */
+    tags: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "tags are lowercase words")).default([]),
   })
   .strict()
   .refine((spec) => spec.kind === "clean" || spec.expected.length > 0, {
@@ -90,21 +95,101 @@ async function isDir(path: string): Promise<boolean> {
   return (await stat(path).catch(() => undefined))?.isDirectory() ?? false;
 }
 
-/** Loads every fixture under `root` (one directory each), sorted by name. */
-export async function loadFixtures(root: string): Promise<Fixture[]> {
-  const fixtures: Fixture[] = [];
-  for (const name of (await readdir(root)).sort()) {
-    const dir = join(root, name);
-    if (!(await isDir(dir))) continue;
-    const text = await readFile(join(dir, "fixture.json"), "utf8");
-    const parsed = fixtureSpecSchema.safeParse(JSON.parse(text));
-    if (!parsed.success) throw new Error(`Fixture ${name}: ${z.prettifyError(parsed.error)}`);
-    if (!(await isDir(join(dir, "base")))) {
-      throw new Error(`Fixture ${name} has no base/ directory.`);
+async function isFile(path: string): Promise<boolean> {
+  return (await stat(path).catch(() => undefined))?.isFile() ?? false;
+}
+
+/** A file's text in the fixture: the head's version (`head/`, else `base/`), or the base's. */
+async function fixtureFile(
+  fixture: Pick<Fixture, "dir" | "deleted">,
+  path: string,
+  side: "LEFT" | "RIGHT",
+): Promise<string | undefined> {
+  const read = (dir: string) =>
+    readFile(join(fixture.dir, dir, path), "utf8").catch(() => undefined);
+  if (side === "LEFT") return read("base");
+  if (fixture.deleted.includes(path)) return undefined;
+  return (await read("head")) ?? (await read("base"));
+}
+
+function lineCount(text: string): number {
+  // A trailing newline ends the last line rather than starting another.
+  const lines = text.split("\n").length;
+  return text.endsWith("\n") ? lines - 1 : lines;
+}
+
+/**
+ * Mistakes that would make a fixture score wrongly, as messages; empty when there are none:
+ * - an expected bug or protected range on a file or lines the fixture doesn't have;
+ * - an expected bug in a file the PR doesn't change: findings can only be posted on its diff;
+ * - a deleted file that isn't in the base.
+ */
+export async function fixtureProblems(fixture: Fixture): Promise<string[]> {
+  const problems: string[] = [];
+  const check = async (
+    what: string,
+    path: string,
+    side: "LEFT" | "RIGHT",
+    lines: readonly [number, number] | undefined,
+  ) => {
+    const text = await fixtureFile(fixture, path, side);
+    if (text === undefined) {
+      problems.push(`${what} ${path} isn't in the ${side === "LEFT" ? "base" : "head"}`);
+      return;
     }
-    fixtures.push({ ...parsed.data, name, dir });
+    if (lines !== undefined && lines[1] > lineCount(text)) {
+      problems.push(`${what} ${path}:${lines.join("-")} is past the file's last line`);
+    }
+  };
+  for (const expected of fixture.expected) {
+    await check("expected", expected.path, expected.side, expected.lines);
+    const changed =
+      (await isFile(join(fixture.dir, "head", expected.path))) ||
+      (expected.side === "LEFT" && fixture.deleted.includes(expected.path));
+    if (!changed) problems.push(`expected ${expected.path} isn't changed by the PR`);
   }
-  return fixtures;
+  for (const rule of fixture.mustNotFlag) {
+    await check("mustNotFlag", rule.path, "RIGHT", rule.lines);
+  }
+  for (const path of fixture.deleted) {
+    if ((await fixtureFile(fixture, path, "LEFT")) === undefined) {
+      problems.push(`deleted ${path} isn't in the base`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Loads every fixture under each root (one directory per fixture), sorted by name. Several
+ * roots let a fork run private fixtures, kept outside this repository, with the public ones;
+ * names must be unique across them. Each fixture is checked with `fixtureProblems`.
+ */
+export async function loadFixtures(roots: string | readonly string[]): Promise<Fixture[]> {
+  const fixtures: Fixture[] = [];
+  const seen = new Map<string, string>();
+  for (const root of typeof roots === "string" ? [roots] : roots) {
+    if (!(await isDir(root))) throw new Error(`Fixture directory ${root} doesn't exist.`);
+    for (const name of (await readdir(root)).sort()) {
+      const dir = join(root, name);
+      if (!(await isDir(dir))) continue;
+      const other = seen.get(name);
+      if (other !== undefined) {
+        throw new Error(`Fixture ${name} is in both ${other} and ${root}; names must be unique.`);
+      }
+      seen.set(name, root);
+      const text = await readFile(join(dir, "fixture.json"), "utf8");
+      const parsed = fixtureSpecSchema.safeParse(JSON.parse(text));
+      if (!parsed.success) throw new Error(`Fixture ${name}: ${z.prettifyError(parsed.error)}`);
+      if (!(await isDir(join(dir, "base")))) {
+        throw new Error(`Fixture ${name} has no base/ directory.`);
+      }
+      const fixture = { ...parsed.data, name, dir };
+      const problems = await fixtureProblems(fixture);
+      if (problems.length > 0) throw new Error(`Fixture ${name}: ${problems.join("; ")}.`);
+      fixtures.push(fixture);
+    }
+  }
+  return fixtures.sort((a, b) => Number(a.name > b.name) - Number(a.name < b.name));
 }
 
 export interface FixtureRepo {

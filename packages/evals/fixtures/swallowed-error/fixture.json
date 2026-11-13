@@ -1,0 +1,30 @@
+{
+  "title": "Don't fail invoice sending on email errors",
+  "body": "An email outage was failing the whole send job. Keep going when one email fails.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "error_handling",
+        "correctness"
+      ],
+      "path": "src/send.ts",
+      "lines": [
+        12,
+        15
+      ],
+      "severity": "should_fix",
+      "note": "a failed email is ignored and the invoice is still marked sent, so it's never retried and nobody knows"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/send.ts",
+      "lines": [
+        19,
+        21
+      ],
+      "note": "render is unchanged"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+name: payments-webhooks
+env:
+  - name: DATABASE_URL
+    secret: payments/database-url
+  - name: PAYMENTS_API_KEY
+    secret: payments/api-key

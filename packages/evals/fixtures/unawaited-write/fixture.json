@@ -1,0 +1,30 @@
+{
+  "title": "Save notification settings",
+  "body": "PUT /settings/notifications stores the user's email and push preferences.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "correctness",
+        "error_handling"
+      ],
+      "path": "src/routes.ts",
+      "lines": [
+        11,
+        11
+      ],
+      "severity": "should_fix",
+      "note": "save isn't awaited: the response says it worked before it did, and a failed write is an unhandled rejection"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/routes.ts",
+      "lines": [
+        10,
+        10
+      ],
+      "note": "coercing to booleans is a deliberate safe default"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "@acme/format",
+  "type": "module",
+  "exports": "./src/index.ts"
+}

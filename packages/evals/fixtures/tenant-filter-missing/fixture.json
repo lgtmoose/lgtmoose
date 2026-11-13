@@ -1,0 +1,38 @@
+{
+  "title": "Add an endpoint to fetch one invoice",
+  "body": "The billing page needs a single invoice by id. Adds `getInvoice` next to `listInvoices` and a route for it.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "authz",
+        "security"
+      ],
+      "path": "src/invoices.ts",
+      "lines": [
+        15,
+        16
+      ],
+      "severity": "blocking",
+      "note": "getInvoice ignores tenantId: any tenant can read another tenant's invoice by id"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/invoices.ts",
+      "lines": [
+        6,
+        6
+      ],
+      "note": "listInvoices filters by tenant and is unchanged"
+    },
+    {
+      "path": "src/routes.ts",
+      "lines": [
+        9,
+        15
+      ],
+      "note": "the route passes the caller's tenant; the bug is in the query"
+    }
+  ]
+}

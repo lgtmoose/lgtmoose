@@ -1,0 +1,15 @@
+{
+  "title": "Store an optional display name",
+  "body": "Adds a nullable display_name column and falls back to the email when it's empty.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "migrations/0002_display_name.sql",
+      "note": "a nullable column with no default is a safe online change"
+    },
+    {
+      "path": "src/users.ts",
+      "note": "null and blank names fall back to the email"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "title": "Document the retry settings",
+  "body": "Explains the queue's retry settings in the README and fixes a stale comment. No code changes.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "README.md",
+      "note": "the docs match the code"
+    },
+    {
+      "path": "src/retry.ts",
+      "note": "only a comment changed"
+    }
+  ]
+}

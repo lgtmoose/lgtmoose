@@ -1,0 +1,23 @@
+{
+  "title": "Charge shipping on orders",
+  "body": "Adds a shipping fee to the order total: 4.99 standard, 12.50 express.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": "correctness",
+      "path": "src/checkout.ts",
+      "lines": [
+        6,
+        10
+      ],
+      "severity": "blocking",
+      "note": "shippingFee is in dollars but is added to a cents amount: shipping is charged as 4.99 cents (and the amount isn't an integer)"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/order.ts",
+      "note": "subtotalCents is correct and unchanged"
+    }
+  ]
+}

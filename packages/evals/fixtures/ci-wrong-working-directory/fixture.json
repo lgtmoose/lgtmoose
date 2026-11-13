@@ -1,0 +1,33 @@
+{
+  "title": "Run the web app's tests in CI",
+  "body": "CI built the web app but never ran its tests. Adds a test step.",
+  "kind": "seeded",
+  "tags": [
+    "cross-file"
+  ],
+  "expected": [
+    {
+      "category": [
+        "wiring",
+        "correctness"
+      ],
+      "path": ".github/workflows/ci.yml",
+      "lines": [
+        20,
+        21
+      ],
+      "severity": "blocking",
+      "note": "the test step runs at the repo root, which has no package.json: `npm test` fails (the other steps set working-directory: web)"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "lines": [
+        17,
+        19
+      ],
+      "note": "the build step is unchanged and correct"
+    }
+  ]
+}
