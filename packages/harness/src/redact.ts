@@ -1,14 +1,72 @@
-/** Replaces every secret in the text with `***`. Short values are skipped, so a flag like "1" isn't. */
+/**
+ * Replaces every secret in the text with `***`, in its literal form and its common encodings
+ * (base64, base64url, hex, URL-encoded). Short values are skipped, so a flag like "1" isn't.
+ */
 export function redact(text: string, secrets: readonly string[]): string {
-  return secrets.reduce(
-    (out, secret) => (secret.length >= MIN_SECRET_LENGTH ? out.split(secret).join("***") : out),
-    text,
-  );
+  return usable(secrets)
+    .flatMap(encodings)
+    .reduce((out, form) => out.split(form).join("***"), text);
 }
 
-/** Whether the text contains any of the secrets. */
+/**
+ * Whether the text contains any of the secrets: literally, in a common encoding, reversed, or
+ * split up by spaces, punctuation or line breaks. The model can be told to disguise a key it
+ * has seen, so a literal match alone isn't enough.
+ */
 export function containsSecret(text: string, secrets: readonly string[]): boolean {
-  return secrets.some((secret) => secret.length >= MIN_SECRET_LENGTH && text.includes(secret));
+  const candidates = usable(secrets);
+  if (candidates.length === 0) return false;
+  const views = textViews(text);
+  return candidates.some((secret) => {
+    const forms = [...encodings(secret), reverse(secret)];
+    const bare = alphanumeric(secret);
+    return views.some(
+      (view) =>
+        forms.some((form) => view.includes(form)) ||
+        (bare.length >= MIN_SECRET_LENGTH && alphanumeric(view).includes(bare)),
+    );
+  });
 }
 
 const MIN_SECRET_LENGTH = 8;
+
+function usable(secrets: readonly string[]): string[] {
+  return secrets.filter((secret) => secret.length >= MIN_SECRET_LENGTH);
+}
+
+function encodings(secret: string): string[] {
+  const bytes = Buffer.from(secret, "utf8");
+  return [
+    secret,
+    bytes.toString("base64"),
+    bytes.toString("base64url"),
+    bytes.toString("hex"),
+    bytes.toString("hex").toUpperCase(),
+    encodeURIComponent(secret),
+  ].filter((form, i, all) => all.indexOf(form) === i);
+}
+
+/** The text itself, plus the decoded form of every base64 or hex run in it. */
+function textViews(text: string): string[] {
+  const views = [text];
+  for (const run of text.match(/[A-Za-z0-9+/_-]{12,}={0,2}/g) ?? []) {
+    views.push(Buffer.from(run.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("latin1"));
+  }
+  for (const run of text.match(/(?:[0-9a-fA-F]{2}){6,}/g) ?? []) {
+    views.push(Buffer.from(run, "hex").toString("latin1"));
+  }
+  try {
+    views.push(decodeURIComponent(text));
+  } catch {
+    // Not valid URL encoding; the literal view still applies.
+  }
+  return views;
+}
+
+function alphanumeric(text: string): string {
+  return text.replace(/[^A-Za-z0-9]/g, "");
+}
+
+function reverse(text: string): string {
+  return Array.from(text).reverse().join("");
+}

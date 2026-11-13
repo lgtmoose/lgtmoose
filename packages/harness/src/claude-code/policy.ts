@@ -27,13 +27,17 @@ export const ALLOWED_TOOLS = [
 
 /**
  * Refused even when an allow rule matches. `--output` writes a file, `--no-index` compares files
- * outside the repository, and `--ext-diff` and `--textconv` run programs.
+ * outside the repository, and `--ext-diff` and `--textconv` run programs. Paths outside the
+ * checkout (which also compare files outside the repository) are refused by the guard hook.
  */
 export const DISALLOWED_TOOLS = [
   "Bash(git *--output*)",
   "Bash(git *--no-index*)",
   "Bash(git *--ext-diff*)",
   "Bash(git *--textconv*)",
+  "Bash(git *--orderfile*)",
+  "Bash(git * /*)",
+  "Bash(git *../*)",
   "Bash(env *)",
   "Bash(printenv *)",
   "WebFetch",
@@ -48,7 +52,14 @@ export const DISALLOWED_TOOLS = [
  */
 export function isAllowedGitCommand(command: string): boolean {
   const subcommands = ["diff", "log", "show"];
-  const refusedOptions = ["--output", "--no-index", "--ext-diff", "--textconv"];
+  const refusedOptions = [
+    "--output",
+    "--no-index",
+    "--ext-diff",
+    "--textconv",
+    "--orderfile",
+    "-O",
+  ];
   const words: string[] = [];
   let word = "";
   let inWord = false;
@@ -90,12 +101,22 @@ export function isAllowedGitCommand(command: string): boolean {
   if (words[0] !== "git") return false;
   const sub = words[1] === "--no-pager" ? words[2] : words[1];
   if (sub === undefined || !subcommands.includes(sub)) return false;
-  return !words.some((w) => refusedOptions.some((option) => w.startsWith(option)));
+  const rest = words.slice(sub === words[1] ? 2 : 3);
+  if (rest.some((w) => refusedOptions.some((option) => w.startsWith(option)))) return false;
+  // A path outside the working tree makes `git diff` compare files with no repository (as if
+  // --no-index were given), so `git diff /dev/null /etc/passwd` would print any file. Refuse
+  // absolute paths and `..` segments, in plain words and in option values (`--foo=/x`).
+  const escapes = (value: string) => value.startsWith("/") || value.split("/").includes("..");
+  return !rest.some((w) => {
+    const value = w.startsWith("--") && w.includes("=") ? w.slice(w.indexOf("=") + 1) : w;
+    return escapes(value) || (w.includes(":") && escapes(w.slice(w.indexOf(":") + 1)));
+  });
 }
 
 const REFUSAL =
   "Refused: only plain `git diff`, `git log` and `git show` commands may run, without pipes, " +
-  "redirects or other shell syntax. Use the Read, Grep and Glob tools for files.";
+  "redirects, other shell syntax or paths outside the checkout. Use the Read, Grep and Glob " +
+  "tools for files.";
 
 /** The PreToolUse hook script, for Node. It exits 2 to block a Bash call. */
 export function guardScript(): string {

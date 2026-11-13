@@ -39,6 +39,8 @@ describe("isAllowedGitCommand", () => {
     'git log --format="%h %an"',
     "git show HEAD~1:src/a.ts",
     "git --no-pager show --stat abc123",
+    "git log main..feature/x",
+    "git diff base...head -- src/a.ts",
   ])("allows %s", (command) => {
     expect(isAllowedGitCommand(command)).toBe(true);
   });
@@ -51,6 +53,15 @@ describe("isAllowedGitCommand", () => {
     "git diff --output=out.txt",
     "git show --output out.txt HEAD",
     "git diff --no-index /etc/passwd a.txt",
+    "git diff /dev/null /etc/passwd",
+    "git diff --stat /dev/null /etc/passwd",
+    "git diff -- /etc/hostname a.txt",
+    "git diff ../outside a.txt",
+    "git diff src/../../outside a.txt",
+    "git diff --relative=/etc",
+    "git diff -O/etc/passwd",
+    "git diff --orderfile=order.txt",
+    "git show HEAD:../x",
     "git diff --ext-diff",
     "git log --textconv",
     "git log | head",
