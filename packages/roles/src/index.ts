@@ -5,6 +5,7 @@
  */
 export {
   readConventionFiles,
+  readConventionFilesAt,
   type ConventionFile,
   type ConventionFiles,
   type ReadConventionsOptions,
