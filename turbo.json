@@ -1,15 +1,27 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": [
+    "package.json",
     "tsconfig.base.json",
     ".nvmrc",
     "pnpm-workspace.yaml",
+    ".oxlintrc.json",
+    "tools/test-postgres/Dockerfile",
     ".github/workflows/ci.yml",
     ".github/actions/**"
   ],
   "tasks": {
     "//#format:check": {
       "inputs": ["**/*", "!**/node_modules/**", "!**/dist/**", "!**/cdk.out/**", "!.turbo/**"]
+    },
+    "//#lint:root": {
+      "inputs": [
+        "**/*.{js,mjs,cjs,ts,mts,cts,tsx}",
+        "!apps/**",
+        "!packages/**",
+        "!infra/**",
+        "!**/node_modules/**"
+      ]
     },
     "build": {
       "dependsOn": ["^build"],

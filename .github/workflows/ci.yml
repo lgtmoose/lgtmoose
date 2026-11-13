@@ -18,14 +18,14 @@ concurrency:
 #
 # On pull requests, turbo runs only the packages the PR changes and the packages that depend on
 # them (`--affected`, compared with the base branch, so those jobs check out full history).
-# Changing turbo.json or a file in its globalDependencies (the root tsconfig, .nvmrc,
-# pnpm-workspace.yaml, this workflow) counts as changing everything. Pushes to main always run
-# every task.
+# Changing turbo.json or a file in its globalDependencies (the root package.json, tsconfig, .nvmrc,
+# pnpm-workspace.yaml, lint config, test Postgres image, this workflow) counts as changing
+# everything. Pushes to main always run every task, from a shallow checkout.
 env:
   AFFECTED: ${{ github.event_name == 'pull_request' && '--affected' || '' }}
 jobs:
   static:
-    name: format, migrations
+    name: format, root lint, migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,6 +39,8 @@ jobs:
           restore-keys: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-
       - name: Format
         run: pnpm turbo run format:check
+      - name: Lint files outside the packages
+        run: pnpm turbo run lint:root
       - name: Migrations match the schema
         run: pnpm turbo run check-migrations
 
@@ -50,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: ./.github/actions/setup
       - run: pnpm turbo run typecheck lint $AFFECTED
 
@@ -60,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: ./.github/actions/setup
       - run: pnpm turbo run test $AFFECTED
 
@@ -72,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       # Started in the background, so pulling and booting it overlaps with setup instead of
       # holding the job up the way a `services:` container does.
       # The image is pinned in tools/test-postgres/Dockerfile, where Dependabot updates it.
@@ -99,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: ./.github/actions/setup
       - run: pnpm turbo run build smoke $AFFECTED
 
@@ -109,6 +111,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: ./.github/actions/setup
       - run: pnpm turbo run synth $AFFECTED

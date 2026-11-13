@@ -12,13 +12,14 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "lint": "turbo run lint",
+    "lint": "turbo run lint lint:root",
     "format": "prettier --write . --cache",
     "format:check": "prettier --check . --cache",
     "synth": "turbo run synth",
     "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
-    "check": "turbo run format:check lint typecheck test test:integration build smoke check-migrations synth",
-    "db:test:start": "docker run -d --name lgtmoose-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 \"$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)\""
+    "check": "turbo run format:check lint:root lint typecheck test test:integration build smoke check-migrations synth",
+    "db:test:start": "docker run -d --name lgtmoose-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 \"$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)\"",
+    "lint:root": "oxlint --deny-warnings --no-error-on-unmatched-pattern -c .oxlintrc.json --ignore-pattern \"apps/**\" --ignore-pattern \"packages/**\" --ignore-pattern \"infra/**\" ."
   },
   "devDependencies": {
     "@lgtmoose/config": "workspace:*",
