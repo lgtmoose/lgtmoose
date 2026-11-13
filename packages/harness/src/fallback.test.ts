@@ -141,6 +141,27 @@ describe("FallbackHarness", () => {
     expect(error.message).toContain("a (plan limit), b (rate limit)");
   });
 
+  it("carries on when the cooldown store fails, reporting the error", async () => {
+    const broken = {
+      cooledUntil: () => Promise.reject(new Error("db down")),
+      coolDown: () => Promise.reject(new Error("db down")),
+    };
+    const errors: unknown[] = [];
+    const harness = new FallbackHarness({
+      providers: [
+        { providerId: "a", harness: scripted("a", [new HarnessError("rate_limit", "429")]) },
+        { providerId: "b", harness: scripted("b", []) },
+      ],
+      cooldowns: broken,
+      now: () => NOW,
+      onStoreError: (error) => errors.push(error),
+    });
+    const result = await harness.run(RUN);
+    expect(result.providerId).toBe("b");
+    expect(result.attempts.map((a) => a.outcome)).toEqual(["rate_limit", "ok"]);
+    expect(errors).toHaveLength(2);
+  });
+
   it("refuses an empty chain or repeated provider ids", () => {
     expect(() => new FallbackHarness({ providers: [] })).toThrow();
     const h = scripted("a", []);

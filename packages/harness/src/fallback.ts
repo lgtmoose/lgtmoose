@@ -78,6 +78,11 @@ export interface FallbackHarnessOptions {
   defaultCooldownMs?: Partial<Record<CooldownReason, number>>;
   /** Called after each attempt, in order, whether the run ends well or not. */
   onAttempt?: (attempt: ProviderAttempt) => void;
+  /**
+   * Called when the cooldown store fails. The run carries on without it (a limited provider may
+   * be called once more), so log it rather than fail the batch.
+   */
+  onStoreError?: (error: unknown) => void;
 }
 
 /** What a run through the chain returns: the result, the provider that produced it, every try. */
@@ -139,10 +144,17 @@ export class FallbackHarness implements Harness {
     const tier = options.tier ?? "standard";
     const runId = options.runId ?? randomUUID();
     const providers = this.options.providers;
-    const cooling = await this.cooldowns.cooledUntil(
-      providers.map((p) => p.providerId),
-      this.now(),
-    );
+    // Cooldowns are an optimisation: a store that's down mustn't fail the batch, it only means
+    // a limited provider may be called once more.
+    const cooling = await this.cooldowns
+      .cooledUntil(
+        providers.map((p) => p.providerId),
+        this.now(),
+      )
+      .catch((error: unknown) => {
+        this.options.onStoreError?.(error);
+        return new Map<string, Date>();
+      });
     const attempts: ProviderAttempt[] = [];
     const record = (attempt: ProviderAttempt) => {
       attempts.push(attempt);
@@ -203,7 +215,9 @@ export class FallbackHarness implements Harness {
           now,
           this.options.defaultCooldownMs?.[reason] ?? DEFAULT_COOLDOWN_MS[reason],
         );
-        await this.cooldowns.coolDown(provider.providerId, end, reason);
+        await this.cooldowns
+          .coolDown(provider.providerId, end, reason)
+          .catch((storeError: unknown) => this.options.onStoreError?.(storeError));
         record({
           providerId: provider.providerId,
           tier,
