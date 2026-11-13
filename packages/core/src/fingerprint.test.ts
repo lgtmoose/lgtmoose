@@ -82,6 +82,10 @@ describe("titleNouns", () => {
       "refund",
     ]);
     expect(titleNouns("account may be null", ["return account.name;"])).toEqual(["null"]);
+    expect(titleNouns("Missing null check", ["if (user === null) return;"])).toEqual([
+      "check",
+      "null",
+    ]);
   });
 
   it("keeps non-ASCII words whole", () => {

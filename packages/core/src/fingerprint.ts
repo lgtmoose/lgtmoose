@@ -95,10 +95,13 @@ export function normalizeCode(lines: readonly string[]): string[] {
   );
 }
 
-/** The identifiers in some code, lowercased: title words that name them aren't key nouns. */
+/**
+ * The identifiers in some code, lowercased: title words that name them aren't key nouns, since
+ * a rename would change them. Keywords aren't renamed, so `null` in "missing null check" stays.
+ */
 function identifiersIn(lines: readonly string[]): Set<string> {
   const names = lines.flatMap((line) => line.match(/[A-Za-z_$][\w$]*/g) ?? []);
-  return new Set(names.map((name) => name.toLowerCase()));
+  return new Set(names.map((name) => name.toLowerCase()).filter((name) => !KEYWORDS.has(name)));
 }
 
 const STOPWORDS = new Set(
