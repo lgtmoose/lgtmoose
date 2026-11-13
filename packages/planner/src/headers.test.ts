@@ -82,9 +82,16 @@ describe("readHeaders", () => {
     expect((await readHeaders(fakeRepo({}), files)).size).toBe(300);
   });
 
+  it("reads no header for included files, whose header check is off", async () => {
+    await writeFile(join(dir, "api.ts"), "// @generated");
+    const repo = fakeRepo({});
+    expect((await readHeaders(repo, [diff("api.ts")], { include: ["api.ts"] })).size).toBe(0);
+    expect((await readHeaders(repo, [diff("api.ts")])).size).toBeGreaterThan(0);
+  });
+
   it("reads nothing when no file needs a header", async () => {
     const repo = fakeRepo({});
-    expect((await readHeaders(repo, [diff("docs/a.md")], ["docs/**"])).size).toBe(0);
+    expect((await readHeaders(repo, [diff("docs/a.md")], { skip: ["docs/**"] })).size).toBe(0);
     expect(repo.calls).toEqual([]);
   });
 });

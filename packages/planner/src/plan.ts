@@ -241,12 +241,12 @@ function fingerprintOf(files: PlannedFile[], maxFiles: number, maxLines: number)
  */
 export function planReview(
   diff: readonly FileDiff[],
-  config: Pick<RepoConfig, "skip" | "tiers"> & Partial<Pick<RepoConfig, "registries">>,
+  config: Pick<RepoConfig, "skip" | "tiers"> & Partial<Pick<RepoConfig, "registries" | "include">>,
   options: PlanOptions = {},
 ): Plan {
   const maxFiles = positiveInteger("maxFiles", options.maxFiles ?? DEFAULT_MAX_FILES);
   const maxLines = positiveInteger("maxLines", options.maxLines ?? DEFAULT_MAX_LINES);
-  const skipOf = skipClassifier(config.skip, options.headers);
+  const skipOf = skipClassifier(config.skip, options.headers, config.include ?? []);
   const trustedHosts = config.registries ?? [];
   // bun.lockb and the like: skipped as binary first, but still a lockfile change to mention.
   const isLockfilePath = globMatcher(DEFAULT_SKIP.lockfile);
