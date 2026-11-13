@@ -1,7 +1,7 @@
 /**
  * @lgtmoose/core holds the deterministic parts of a review: no model calls, no I/O.
- * The finding schema (NIC-808) and the review decision (NIC-815) are here; fingerprints
- * (NIC-814) land here next.
+ * The finding schema (NIC-808), finding fingerprints with convergence dedupe (NIC-814) and the
+ * review decision (NIC-815) are here.
  */
 
 export { SEVERITIES, isSeverity, severityRank, type Severity } from "./severity.js";
@@ -29,6 +29,28 @@ export {
   type FindingSide,
   type ReviewerOutput,
 } from "./finding.js";
+export {
+  FINGERPRINT_VERSION,
+  FUZZY_CODE_SIMILARITY,
+  FUZZY_NOUN_SIMILARITY,
+  PROTECTED_CATEGORIES,
+  citedCode,
+  codeOccurrence,
+  commentTitle,
+  dedupeFindings,
+  fingerprint,
+  fingerprintParts,
+  isProtectedCategory,
+  isSimilar,
+  normalizeCode,
+  titleNouns,
+  type Candidate,
+  type DedupeResult,
+  type DroppedFinding,
+  type FingerprintParts,
+  type FingerprintSubject,
+  type KnownFinding,
+} from "./fingerprint.js";
 export {
   REVIEW_JOB_KINDS,
   SKIP_LABEL,
