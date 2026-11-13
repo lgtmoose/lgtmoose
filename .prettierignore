@@ -4,3 +4,5 @@ coverage
 pnpm-lock.yaml
 LICENSE
 packages/config/schema
+# Fixture sources: their line numbers are in fixture.json, so formatting must not move them.
+packages/evals/fixtures

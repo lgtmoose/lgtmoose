@@ -1,0 +1,35 @@
+{
+  "name": "@lgtmoose/pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "description": "One whole review of a PR in this process, without posting: clone, plan, review, dedupe, decide and summarise.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lgtmoose/config": "workspace:*",
+    "@lgtmoose/core": "workspace:*",
+    "@lgtmoose/git": "workspace:*",
+    "@lgtmoose/harness": "workspace:*",
+    "@lgtmoose/planner": "workspace:*",
+    "@lgtmoose/roles": "workspace:*",
+    "@lgtmoose/summary": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

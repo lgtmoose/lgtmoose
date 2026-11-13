@@ -1,0 +1,21 @@
+{
+  "title": "Let customers cancel an order",
+  "body": "Adds a cancel endpoint next to the existing order lookup.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": ["authz", "security"],
+      "path": "src/routes/orders.ts",
+      "lines": [15, 20],
+      "severity": "blocking",
+      "note": "cancelOrder never checks that the user owns the order"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/routes/orders.ts",
+      "lines": [8, 13],
+      "note": "getOrder already checks ownership and is unchanged"
+    }
+  ]
+}

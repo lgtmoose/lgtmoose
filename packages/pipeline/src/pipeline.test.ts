@@ -8,7 +8,7 @@ import type { Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessRunOptions } from "@lgtmoose/harness";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { PullComment, PullReader, PullRequest } from "./github.js";
+import type { PullComment, PullReader, PullRequest } from "./pull.js";
 import { runReview, type ReviewDeps } from "./pipeline.js";
 
 const exec = promisify(execFile);

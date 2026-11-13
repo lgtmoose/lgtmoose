@@ -74,15 +74,9 @@ importers:
       '@lgtmoose/harness':
         specifier: workspace:*
         version: link:../../packages/harness
-      '@lgtmoose/planner':
+      '@lgtmoose/pipeline':
         specifier: workspace:*
-        version: link:../../packages/planner
-      '@lgtmoose/roles':
-        specifier: workspace:*
-        version: link:../../packages/roles
-      '@lgtmoose/summary':
-        specifier: workspace:*
-        version: link:../../packages/summary
+        version: link:../../packages/pipeline
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -213,6 +207,31 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/evals:
+    dependencies:
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      '@lgtmoose/harness':
+        specifier: workspace:*
+        version: link:../harness
+      '@lgtmoose/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+      '@lgtmoose/summary':
+        specifier: workspace:*
+        version: link:../summary
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
   packages/git:
     devDependencies:
       typescript:
@@ -227,6 +246,34 @@ importers:
       zod:
         specifier: ^4.6.7
         version: 4.6.7
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/pipeline:
+    dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      '@lgtmoose/harness':
+        specifier: workspace:*
+        version: link:../harness
+      '@lgtmoose/planner':
+        specifier: workspace:*
+        version: link:../planner
+      '@lgtmoose/roles':
+        specifier: workspace:*
+        version: link:../roles
+      '@lgtmoose/summary':
+        specifier: workspace:*
+        version: link:../summary
     devDependencies:
       typescript:
         specifier: 'catalog:'

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { run } from "../cli.js";
 import { terminalSafe } from "./output.js";
-import type { ReviewDeps } from "./pipeline.js";
+import type { ReviewDeps } from "@lgtmoose/pipeline";
 import type { ReviewEnvironmentFactory } from "./review.js";
 import { parseTarget } from "./target.js";
 import { resolveGitHubToken } from "./token.js";

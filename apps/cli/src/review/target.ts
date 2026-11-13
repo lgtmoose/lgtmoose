@@ -1,9 +1,6 @@
-/** One pull request to review. */
-export interface PullTarget {
-  owner: string;
-  repo: string;
-  number: number;
-}
+import type { PullTarget } from "@lgtmoose/pipeline";
+
+export type { PullTarget };
 
 const NAME = /^[A-Za-z0-9_.-]+$/;
 
