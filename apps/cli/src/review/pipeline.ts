@@ -302,12 +302,13 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
         : []),
     ];
     const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
+    const complete = failedBatches === 0 && unreviewed.length === 0;
 
     const latest = await deps.github.pull(target);
     const decision = decide(
       open,
       {
-        complete: failedBatches === 0 && unreviewed.length === 0,
+        complete,
         // No prompt-injection detector yet: the prompt tells the model to report attempts as
         // security findings instead.
         injectionFlagged: false,
@@ -353,7 +354,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
       ],
       overLimit,
       decision,
-      complete: failedBatches === 0 && unreviewed.length === 0,
+      complete,
       batches,
       plan: { reviewed: plan.files.length, skipped: plan.skipped.length },
       summary,
