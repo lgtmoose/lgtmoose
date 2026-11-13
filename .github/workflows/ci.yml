@@ -12,36 +12,31 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# One job per concern, all running side by side, so each shows up as its own check and a failure
-# says what broke. Jobs that run turbo replay any task whose inputs haven't changed from their
-# cache, and prune it afterwards to what the run used (a restored cache is saved again under a
-# new key, so it would otherwise only grow).
+# One job per concern, all running side by side, so a failure says what broke. The checks that
+# take a few seconds share one job, since GitHub bills every job as at least a minute. Every job
+# replays unchanged turbo tasks from the shared remote cache.
 jobs:
-  format:
+  static:
+    name: format, lint, migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
+      # ESLint and Prettier only re-check files whose contents changed since the cached run.
       - uses: actions/cache@v6
         with:
-          path: node_modules/.cache/prettier
-          key: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-${{ github.sha }}
-          restore-keys: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-
-      - run: pnpm format:check
-
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup
-      - uses: actions/cache@v6
-        with:
-          path: node_modules/.cache/eslint
-          key: eslint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js') }}-${{ github.sha }}
-          restore-keys: eslint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js') }}-
-      - run: pnpm lint
+          path: |
+            node_modules/.cache/eslint
+            node_modules/.cache/prettier
+          key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
+          restore-keys: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
+      - name: Format
+        run: pnpm format:check
+      - name: Lint
+        run: pnpm lint
+      - name: Migrations match the schema
+        run: pnpm turbo run check-migrations
 
   typecheck:
     runs-on: ubuntu-latest
@@ -49,10 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-        with:
-          turbo-cache: typecheck
-      - run: pnpm turbo run typecheck --summarize
-      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+      - run: pnpm turbo run typecheck
 
   test:
     runs-on: ubuntu-latest
@@ -60,36 +52,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-        with:
-          turbo-cache: test
-      - run: pnpm turbo run test --summarize
-      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+      - run: pnpm turbo run test
 
   test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Postgres with pgvector, so migrations also run through the real runner on a real server.
-    services:
-      postgres:
-        image: pgvector/pgvector:pg18
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    env:
+      # Pinned, so a new Postgres or pgvector release is a deliberate change here rather than a
+      # surprise. PostgreSQL 18.6 with pgvector 0.8.7, matching Aurora's 18.6.
+      POSTGRES_IMAGE: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
+      LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
+      # Started in the background, so pulling and booting it overlaps with setup instead of
+      # holding the job up the way a `services:` container does.
+      - name: Start Postgres
+        run: |
+          docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres \
+            "$POSTGRES_IMAGE" > /tmp/postgres.log 2>&1 &
       - uses: ./.github/actions/setup
-        with:
-          turbo-cache: test-integration
-      - run: pnpm turbo run test:integration --summarize
-        env:
-          LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+      - name: Wait for Postgres
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec postgres pg_isready -U postgres >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat /tmp/postgres.log
+          exit 1
+      - run: pnpm turbo run test:integration
 
   # Builds every package, then runs the built CLI the way a user does.
   build:
@@ -98,10 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-        with:
-          turbo-cache: build
-      - run: pnpm turbo run build smoke --summarize
-      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+      - run: pnpm turbo run build smoke
 
   synth:
     runs-on: ubuntu-latest
@@ -109,16 +96,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-        with:
-          turbo-cache: synth
-      - run: pnpm turbo run synth --summarize
-      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
-
-  migrations:
-    name: migrations match the schema
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup
-      - run: pnpm turbo run check-migrations
+      - run: pnpm turbo run synth

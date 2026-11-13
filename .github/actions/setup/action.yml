@@ -1,11 +1,6 @@
 name: Set up the workspace
 description: >-
-  Node from .nvmrc, pnpm, dependencies from the cached pnpm store, and optionally the job's turbo
-  task cache.
-inputs:
-  turbo-cache:
-    description: Name of the job's turbo cache. Leave empty for jobs that don't run turbo.
-    default: ""
+  Node from .nvmrc, pnpm, dependencies from the cached pnpm store, and turbo's remote cache.
 runs:
   using: composite
   steps:
@@ -20,13 +15,8 @@ runs:
     - run: pnpm install --frozen-lockfile
       shell: bash
 
-    # One cache per job, keyed by branch (a PR's head branch, not its NN/merge ref), so jobs
-    # don't race to save the same key. A new branch falls back to the newest cache from main.
-    - if: inputs.turbo-cache != ''
-      uses: actions/cache@v6
-      with:
-        path: .turbo/cache
-        key: turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-        restore-keys: |
-          turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-
-          turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-main-
+    # A turbo remote cache server backed by the Actions cache: one entry per task hash, shared by
+    # every job and branch, so a package is built once per change rather than once per job.
+    # Entries never change, and GitHub evicts unused ones, so nothing needs pruning. Pinned by
+    # commit because it runs with the job's token.
+    - uses: rharkor/caching-for-turbo@760158c05c47e7a764f78e9a22ca3b5a6ed8c52e # v2.5.2

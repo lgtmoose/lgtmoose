@@ -13,6 +13,7 @@
     },
     "test:integration": {
       "dependsOn": ["^build"],
+      "cache": false,
       "env": ["LGTMOOSE_TEST_DATABASE_URL", "CI"]
     },
     "smoke": {
