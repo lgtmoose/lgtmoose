@@ -21,6 +21,7 @@ export {
   FUZZY_NOUN_SIMILARITY,
   PROTECTED_CATEGORIES,
   citedCode,
+  codeOccurrence,
   commentTitle,
   dedupeFindings,
   fingerprint,

@@ -10,7 +10,10 @@ import { createHash } from "node:crypto";
  * - the path,
  * - the cited code, normalised so whitespace, identifier names and line numbers don't matter
  *   (moved lines and renamed variables keep their fingerprint),
- * - the key nouns of the title (lowercase, no stopwords, no identifiers).
+ * - the key nouns of the title (lowercase, no stopwords, no identifiers),
+ * - which occurrence of that normalised code in the file it is (see `codeOccurrence`), so two
+ *   separate problems on same-shaped lines (`const user = await loadUser(id)` and
+ *   `const order = await loadOrder(orderId)`) don't collapse into one.
  *
  * The hash is versioned (`fp1:`): if the recipe changes, bump the version so old and new
  * fingerprints never match by accident.
@@ -42,6 +45,11 @@ export interface FingerprintSubject {
   title: string;
   /** The cited lines' text (see `citedCode`), not normalised. */
   code: readonly string[];
+  /**
+   * Which occurrence of this normalised code in the file the cited lines are, from 0 (see
+   * `codeOccurrence`). Leave out for 0.
+   */
+  occurrence?: number;
 }
 
 /** The normalised parts a fingerprint hashes; kept so findings can also be compared fuzzily. */
@@ -52,6 +60,8 @@ export interface FingerprintParts {
   code: readonly string[];
   /** Key nouns of the title, sorted and unique. */
   nouns: readonly string[];
+  /** Which occurrence of `code` in the file this is, from 0. */
+  occurrence: number;
 }
 
 /** Words common across languages that stay as they are; any other identifier becomes `$id`. */
@@ -142,6 +152,7 @@ export function fingerprintParts(subject: FingerprintSubject): FingerprintParts 
     path: subject.path,
     code: normalizeCode(subject.code),
     nouns: titleNouns(subject.title, subject.code),
+    occurrence: subject.occurrence ?? 0,
   };
 }
 
@@ -154,6 +165,7 @@ export function fingerprint(subject: FingerprintSubject | FingerprintParts): str
     parts.path,
     parts.code.join(" "),
     parts.nouns.join(" "),
+    parts.occurrence,
   ]);
   return `${FINGERPRINT_VERSION}:${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
 }
@@ -202,6 +214,29 @@ function nextNonBlank(lines: readonly string[], to: number): number {
   return Math.min(lines.length, at);
 }
 
+/**
+ * Which occurrence the cited lines' normalised code is in the file, from 0: how many earlier
+ * places (by starting line) cite the same normalised code over the same span. It tells apart
+ * separate problems on same-shaped lines, and stays the same when lines move or names change,
+ * unless same-shaped code is added or removed above the site.
+ */
+export function codeOccurrence(
+  fileLines: readonly string[],
+  line: number,
+  startLine: number = line,
+): number {
+  const first = Math.min(startLine, line);
+  const span = Math.abs(line - startLine);
+  const target = normalizeCode(citedCode(fileLines, line, startLine)).join(" ");
+  if (target === "") return 0;
+  let count = 0;
+  for (let start = 1; start < first; start++) {
+    const other = normalizeCode(citedCode(fileLines, start + span, start)).join(" ");
+    if (other === target) count++;
+  }
+  return count;
+}
+
 /** A comment from another source as a fingerprint title: its first sentence, without markdown. */
 export function commentTitle(body: string): string {
   const text = body
@@ -239,7 +274,8 @@ export const FUZZY_NOUN_SIMILARITY = 0.5;
 /**
  * Whether two findings are about the same problem though their fingerprints differ: same path,
  * the same category when both have one, very similar code and overlapping title nouns. A
- * comment with no key nouns only matches on identical code.
+ * comment with no key nouns only matches on identical code, and identical code at a different
+ * occurrence in the file is a different site.
  */
 export function isSimilar(a: FingerprintParts, b: FingerprintParts): boolean {
   if (a.path !== b.path) return false;
@@ -248,6 +284,8 @@ export function isSimilar(a: FingerprintParts, b: FingerprintParts): boolean {
   }
   if (a.code.length === 0 || b.code.length === 0) return false;
   const sameCode = a.code.join(" ") === b.code.join(" ");
+  // The same code at another occurrence in the file is another site, not the same problem.
+  if (sameCode && a.occurrence !== b.occurrence) return false;
   if (!sameCode && jaccard(bigrams(a.code), bigrams(b.code)) < FUZZY_CODE_SIMILARITY) return false;
   if (a.nouns.length === 0 || b.nouns.length === 0) return sameCode;
   return jaccard(a.nouns, b.nouns) >= FUZZY_NOUN_SIMILARITY;

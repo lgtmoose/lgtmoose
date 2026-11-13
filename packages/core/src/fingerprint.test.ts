@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FINGERPRINT_VERSION,
   citedCode,
+  codeOccurrence,
   commentTitle,
   dedupeFindings,
   fingerprint,
@@ -313,5 +314,67 @@ describe("dedupeFindings", () => {
 
   it("keeps everything when nothing is known", () => {
     expect(dedupeFindings([candidate()], []).dropped).toEqual([]);
+  });
+});
+
+describe("codeOccurrence", () => {
+  const FILE = [
+    "export async function getUser(id: string) {",
+    "  const user = await loadUser(id);",
+    "  return user;",
+    "}",
+    "",
+    "export async function getOrder(orderId: string) {",
+    "  const order = await loadOrder(orderId);",
+    "  return order;",
+    "}",
+  ];
+  const TITLE = "Missing authorization check before loading the record";
+
+  it("counts earlier same-shaped sites", () => {
+    expect(codeOccurrence(FILE, 2)).toBe(0);
+    expect(codeOccurrence(FILE, 7)).toBe(1);
+  });
+
+  it("keeps two problems on same-shaped lines apart, even in a protected category", () => {
+    const at = (line: number) =>
+      fingerprintParts({
+        ruleCategory: "authz",
+        path: "src/api.ts",
+        title: TITLE,
+        code: citedCode(FILE, line),
+        occurrence: codeOccurrence(FILE, line),
+      });
+    const result = dedupeFindings(
+      [
+        { finding: "getUser", parts: at(2) },
+        { finding: "getOrder", parts: at(7) },
+      ],
+      [],
+    );
+    expect(result.kept.map((k) => k.finding)).toEqual(["getUser", "getOrder"]);
+    expect(isSimilar({ ...at(2), ruleCategory: "" }, { ...at(7), ruleCategory: "" })).toBe(false);
+  });
+
+  it("stays the same when lines move or names change", () => {
+    const moved = ["// header", "", ...FILE.map((line) => line.replace(/order/gi, "invoice"))];
+    expect(codeOccurrence(moved, 9)).toBe(1);
+    const before = fingerprint({
+      path: "a.ts",
+      title: TITLE,
+      code: citedCode(FILE, 7),
+      occurrence: 1,
+    });
+    const after = fingerprint({
+      path: "a.ts",
+      title: TITLE,
+      code: citedCode(moved, 9),
+      occurrence: 1,
+    });
+    expect(after).toBe(before);
+  });
+
+  it("is 0 for code outside the file", () => {
+    expect(codeOccurrence(FILE, 99)).toBe(0);
   });
 });
