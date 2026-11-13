@@ -1,9 +1,10 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
-import { CDK_CONTEXT, STACK_NAMES, type DeployConfig } from "@lgtmoose/config";
+import { CDK_CONTEXT, STACK_NAMES, egressAllowlist, type DeployConfig } from "@lgtmoose/config";
 import { ApiStack } from "./api-stack.js";
 import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
-import { NetworkStack, PROXY_URL } from "./network-stack.js";
+import { NetworkStack } from "./network-stack.js";
+import { ProxyStack } from "./proxy-stack.js";
 import { WorkflowStack } from "./workflow-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
@@ -24,12 +25,12 @@ export interface LgtmooseStacks {
   network: NetworkStack;
   data: DataStack;
   api: ApiStack;
+  proxy: ProxyStack;
   workflow: WorkflowStack;
 }
 
 /**
- * Builds the LGTMoose CDK app from a validated config. Stacks still to come: the egress proxy
- * (NIC-813) and Dashboard (NIC-840).
+ * Builds the LGTMoose CDK app from a validated config. Stack still to come: Dashboard (NIC-840).
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -58,6 +59,14 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
   // Code that may read the database deploys after the Data stack, so migrations finish first.
   api.addDependency(data);
 
+  const proxy = new ProxyStack(app, STACK_NAMES.proxy, {
+    env,
+    profile: config.profile,
+    vpc: network.vpc,
+    proxySecurityGroup: network.proxySecurityGroup,
+    allowedHosts: egressAllowlist(config),
+  });
+
   const workflow = new WorkflowStack(app, STACK_NAMES.workflow, {
     env,
     profile: config.profile,
@@ -67,7 +76,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     controlSecurityGroup: network.controlSecurityGroup,
     sandboxSubnets: network.sandboxSubnets,
     sandboxSecurityGroup: network.sandboxSecurityGroup,
-    proxyUrl: PROXY_URL,
+    proxyUrl: proxy.proxyUrl,
     artifactBucket: data.artifactBucket,
     databaseSecret: data.databaseSecret,
     databaseName: DATABASE_NAME,
@@ -75,6 +84,8 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     providerSecrets: data.providerSecrets,
   });
   workflow.addDependency(data);
+  // Sandbox tasks can only reach model APIs once the proxy runs.
+  workflow.addDependency(proxy);
 
-  return { app, meta, network, data, api, workflow };
+  return { app, meta, network, data, api, proxy, workflow };
 }

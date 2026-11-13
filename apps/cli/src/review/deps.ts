@@ -6,7 +6,7 @@ import { ClaudeCodeHarness } from "@lgtmoose/harness";
 import { githubPullReader } from "./github.js";
 import type { ReviewEnvironmentFactory } from "./review.js";
 import { resolveGitHubToken } from "./token.js";
-import { FileTranscriptStore } from "./transcripts.js";
+import { FileTranscriptStore } from "@lgtmoose/pipeline";
 
 const GITHUB_API = "https://api.github.com";
 

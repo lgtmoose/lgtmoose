@@ -1,5 +1,5 @@
 import type { Finding } from "@lgtmoose/core";
-import type { ReviewReport } from "./pipeline.js";
+import type { ReviewReport } from "@lgtmoose/pipeline";
 import { targetText } from "./target.js";
 
 /**

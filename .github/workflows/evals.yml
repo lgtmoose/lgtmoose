@@ -1,0 +1,115 @@
+name: Evals
+
+# Runs the review pipeline with a real model on packages/evals' fixtures when a PR changes what
+# the model sees or how it runs: prompts and rule packs (packages/roles), harnesses
+# (packages/harness), the pipeline itself, or the evals. It posts the report on the PR (one
+# comment, edited on each run) and fails when recall drops below packages/evals/baseline.json.
+#
+# Model runs cost money and need a credential: set the ANTHROPIC_API_KEY or
+# CLAUDE_CODE_OAUTH_TOKEN repository secret to turn the job on. Without one (and on PRs from
+# forks, which get no secrets) the job skips and says so in its summary. The evals' own code is
+# tested without a model by the normal CI test job.
+on:
+  pull_request:
+    paths:
+      - packages/roles/**
+      # The finding schema's descriptions are part of the reviewer prompt.
+      - packages/core/src/finding.ts
+      - packages/harness/**
+      - packages/pipeline/**
+      - packages/evals/**
+      - .github/workflows/evals.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      HAS_CREDENTIAL: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - name: Skip without a model credential
+        if: env.HAS_CREDENTIAL != 'true'
+        run: |
+          {
+            echo "## LGTMoose evals skipped"
+            echo
+            echo "No model credential: set the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+            echo "repository secret to run the evals. PRs from forks get no secrets, so they skip too."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v7
+        if: env.HAS_CREDENTIAL == 'true'
+        with:
+          # The job runs the PR's code and a model on it: don't leave a token in .git/config
+          # that it could read. The report step passes its own GH_TOKEN.
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        if: env.HAS_CREDENTIAL == 'true'
+
+      - name: Install Claude Code at the pinned version
+        if: env.HAS_CREDENTIAL == 'true'
+        run: |
+          version=$(sed -n 's/^export const CLAUDE_CODE_VERSION = "\([^"]*\)";$/\1/p' packages/harness/src/version.ts)
+          test -n "$version"
+          npm install --global "@anthropic-ai/claude-code@${version}"
+          claude --version
+
+      - name: Build
+        if: env.HAS_CREDENTIAL == 'true'
+        run: pnpm turbo run build --filter @lgtmoose/evals...
+
+      - name: Run the evals
+        id: run
+        if: env.HAS_CREDENTIAL == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set +e
+          pnpm --filter @lgtmoose/evals run eval --out "$RUNNER_TEMP/evals"
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        if: env.HAS_CREDENTIAL == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          report="$RUNNER_TEMP/evals/report.md"
+          # No report when the evals couldn't start (bad fixtures or options); the last step fails.
+          if [ ! -f "$report" ]; then exit 0; fi
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          # One comment per PR, found by the marker the report starts with, and edited in place.
+          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- lgtmoose-evals -->"))) | .id' | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$report" > /dev/null
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" -F "body=@$report" > /dev/null
+          fi
+
+      - name: Keep the transcripts
+        if: env.HAS_CREDENTIAL == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-transcripts
+          path: ${{ runner.temp }}/evals
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail when recall dropped or the evals couldn't run
+        if: env.HAS_CREDENTIAL == 'true' && steps.run.outputs.code != '0'
+        run: |
+          echo "The evals exited with ${{ steps.run.outputs.code }}: 1 means recall fell below the baseline, 2 that some fixture runs failed (see the report) so recall wasn't compared."
+          exit 1

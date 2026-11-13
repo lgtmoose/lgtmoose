@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The container runs the TypeScript sources with Node's type stripping, so there's no build
+    // step: imports name the .ts files and only erasable syntax is used.
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}

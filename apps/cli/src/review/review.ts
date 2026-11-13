@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { ConfigError } from "@lgtmoose/config";
 import { GitHubRequestError } from "../github-request.js";
 import { formatJson, formatText, terminalSafe } from "./output.js";
-import { runReview, type ReviewDeps } from "./pipeline.js";
+import { runReview, type ReviewDeps } from "@lgtmoose/pipeline";
 import { parseTarget, type PullTarget } from "./target.js";
 
 export const REVIEW_HELP = `Usage: lgtmoose review <owner/repo#123 | PR URL> --dry-run [options]

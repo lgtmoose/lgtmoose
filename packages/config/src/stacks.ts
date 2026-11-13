@@ -7,12 +7,15 @@ export const STACK_NAMES = {
   network: "Lgtmoose-Network",
   data: "Lgtmoose-Data",
   api: "Lgtmoose-Api",
+  proxy: "Lgtmoose-Proxy",
   workflow: "Lgtmoose-Workflow",
 } as const;
 
 /** Stack outputs the CLI reads from `cdk deploy --outputs-file`. */
 export const STACK_OUTPUTS = {
   api: { githubWebhookUrl: "GithubWebhookUrl" },
+  /** The egress proxy's URL for sandbox tasks' HTTPS_PROXY, e.g. http://egress-proxy.lgtmoose.internal:3128. */
+  proxy: { proxyUrl: "ProxyUrl" },
   data: {
     artifactBucketName: "ArtifactBucketName",
     databaseSecretArn: "DatabaseSecretArn",

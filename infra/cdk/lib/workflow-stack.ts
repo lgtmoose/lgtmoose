@@ -58,7 +58,7 @@ export interface WorkflowStackProps extends StackProps {
   /** Where sandbox tasks run: isolated subnets whose only way out is the proxy. */
   sandboxSubnets: SubnetSelection;
   sandboxSecurityGroup: ISecurityGroup;
-  /** The egress proxy, as sandbox tasks reach it (see `PROXY_URL` in the network stack). */
+  /** The egress proxy, as sandbox tasks reach it (`proxyUrl` of the proxy stack). */
   proxyUrl: string;
   artifactBucket: IBucket;
   /**

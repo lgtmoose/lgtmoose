@@ -4,11 +4,13 @@
  */
 export {
   HarnessError,
+  MODEL_TIERS,
   type Harness,
   type HarnessErrorKind,
   type HarnessResult,
   type HarnessRunOptions,
   type HarnessUsage,
+  type ModelTier,
 } from "./harness.js";
 export {
   MemoryTranscriptStore,
@@ -31,4 +33,14 @@ export {
   isAllowedGitCommand,
   TOOLS,
 } from "./claude-code/policy.js";
-export { CLAUDE_CODE_VERSION } from "./version.js";
+export {
+  CODEX_DISABLED_FEATURES,
+  CODEX_REASONING_EFFORT,
+  CodexHarness,
+  codexArgs,
+  type CodexArgsOptions,
+  type CodexHarnessOptions,
+} from "./codex/adapter.js";
+export { authJsonSecrets, codexAuth, type CodexAuth, type CodexAuthMethod } from "./codex/auth.js";
+export { classifyFailure, type LimitFailure } from "./codex/stream.js";
+export { CLAUDE_CODE_VERSION, CODEX_VERSION } from "./version.js";

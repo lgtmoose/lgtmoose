@@ -11,7 +11,7 @@ import {
   type HarnessUsage,
 } from "../harness.js";
 import { runProcess, type ProcessResult } from "../process.js";
-import { containsSecret, redact, valueContainsSecret } from "../redact.js";
+import { redact, valueContainsSecret, withheldLines } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv, networkEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
@@ -350,50 +350,4 @@ function repairPrompt(problems: string): string {
     "",
     "Reply again with only the corrected JSON. Keep everything that was right. Don't explain.",
   ].join("\n");
-}
-
-const JSON_ESCAPES: Record<string, string> = {
-  n: "\n",
-  r: "\r",
-  t: "\t",
-  b: "\b",
-  f: "\f",
-  '"': '"',
-  "\\": "\\",
-  "/": "/",
-};
-
-/** Decodes the JSON string escapes in text that isn't valid JSON as a whole. */
-function unescapeJson(text: string): string {
-  return text.replace(/\\(?:u([0-9a-fA-F]{4})|(.))/g, (match, hex?: string, ch?: string) => {
-    if (hex !== undefined) return String.fromCharCode(Number.parseInt(hex, 16));
-    return JSON_ESCAPES[ch ?? ""] ?? match;
-  });
-}
-
-/**
- * Replaces transcript lines that still hold a credential after `redact` with a stub. redact only
- * finds the literal and whole-value encodings; a key the model split over lines or wrote with a
- * JSON escape inside it is only found in the parsed event.
- */
-function withheldLines(body: string, secrets: readonly string[]): string {
-  const stub = JSON.stringify({
-    type: "lgtmoose_withheld",
-    reason: "contained a model credential",
-  });
-  return body
-    .split("\n")
-    .map((line) => {
-      if (line === "") return line;
-      let leaks: boolean;
-      try {
-        leaks = valueContainsSecret(JSON.parse(line), secrets);
-      } catch {
-        // Not whole JSON (stderr, or a line cut off when the run was killed): decode its JSON
-        // escapes, or a `\n` inside the key would still split it.
-        leaks = containsSecret(line, secrets) || containsSecret(unescapeJson(line), secrets);
-      }
-      return leaks ? stub : line;
-    })
-    .join("\n");
 }

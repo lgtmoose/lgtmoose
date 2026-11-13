@@ -13,11 +13,17 @@ const lineNumber = z.number().int().positive();
  * a pull request or exceed GitHub's comment limits. `findingsPerRun` is a soft limit: the model
  * is asked to stay under it and `keepMostSevere` trims the rest, so a batch with many real
  * findings isn't lost. Past `findingsHardMax`, and over the text limits, output fails
- * validation and gets the harness's repair retry.
+ * validation and gets the harness's repair retry. `notesPerRun` and `note` are soft too (the
+ * cross-file pass trims notes to them); notes only fail validation past the hard limits, so an
+ * optional, over-long note can't lose a batch's findings.
  */
 export const FINDING_LIMITS = {
   findingsPerRun: 50,
   findingsHardMax: 500,
+  notesPerRun: 30,
+  notesHardMax: 200,
+  note: 500,
+  noteHardMax: 4000,
   body: 4000,
   evidence: 2000,
   suggestion: 4000,
@@ -76,15 +82,32 @@ export const findingSchema = z
 
 export type Finding = z.infer<typeof findingSchema>;
 
-/** What a reviewer run returns. An empty list means there was nothing worth reporting. */
+const findingsField = z
+  .array(findingSchema)
+  .max(FINDING_LIMITS.findingsHardMax)
+  .describe(
+    `Every finding, or an empty list. At most ${FINDING_LIMITS.findingsPerRun}: keep the most important.`,
+  );
+
+/**
+ * What a reviewer run returns. `notes` are short facts for the cross-file pass (new exports,
+ * env vars read, new required props, flows touched), which sees only these, not the batches.
+ */
 export const reviewerOutputSchema = z.object({
-  findings: z
-    .array(findingSchema)
-    .max(FINDING_LIMITS.findingsHardMax)
+  findings: findingsField,
+  notes: z
+    .array(z.string().min(1).max(FINDING_LIMITS.noteHardMax))
+    .max(FINDING_LIMITS.notesHardMax)
+    .optional()
     .describe(
-      `Every finding, or an empty list. At most ${FINDING_LIMITS.findingsPerRun}: keep the most important.`,
+      `Short facts for the cross-file pass, one sentence each, at most ${FINDING_LIMITS.notesPerRun}: exports, env vars, secrets and config keys, required props and flows this batch adds, changes or relies on. Leave out when there are none.`,
     ),
 });
+
+/** What the cross-file pass returns: findings only. */
+export const crossFileOutputSchema = z.object({ findings: findingsField });
+
+export type CrossFileOutput = z.infer<typeof crossFileOutputSchema>;
 
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
 

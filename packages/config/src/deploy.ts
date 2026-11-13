@@ -73,7 +73,17 @@ export const deployConfigSchema = z
     providers: z.array(providerSchema).min(1, "configure at least one model provider"),
     roles: z.partialRecord(z.enum(ROLES), z.string()).default({}),
     maxConcurrency: z.number().int().min(1).max(64).default(4),
-    extraEgressHosts: z.array(hostname).default([]),
+    /**
+     * Hosts sandbox tasks may reach through the egress proxy on top of the enabled providers'
+     * model APIs (see `egressAllowlist`), such as a regional Vertex AI endpoint or a model
+     * gateway. Exact hostnames only; everything else, GitHub included, is refused.
+     */
+    extraEgressHosts: z
+      .array(hostname)
+      .default([])
+      .describe(
+        "Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only.",
+      ),
     tickets: z
       .object({ provider: z.enum(["linear", "jira", "github-issues"]) })
       .strict()

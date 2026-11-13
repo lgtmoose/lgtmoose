@@ -35,13 +35,6 @@ export const PROXY_PORT = 3128;
 
 export const POSTGRES_PORT = 5432;
 
-/**
- * Where sandbox tasks send model API traffic: the egress proxy's private DNS name. The proxy
- * stack (NIC-813) owns the `lgtmoose.internal` Cloud Map namespace and registers the proxy in it
- * as `egress-proxy`; keep this in step with its `PROXY_URL`.
- */
-export const PROXY_URL = `http://egress-proxy.lgtmoose.internal:${PROXY_PORT}`;
-
 /** AWS services sandbox tasks reach through interface endpoints instead of the internet. */
 const SANDBOX_INTERFACE_ENDPOINTS = {
   EcrApi: InterfaceVpcEndpointAwsService.ECR,

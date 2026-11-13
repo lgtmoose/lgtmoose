@@ -2,7 +2,7 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { SECRET_NAMES, STACK_OUTPUTS, parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type LgtmooseStacks } from "./app.js";
-import { PROXY_URL } from "./network-stack.js";
+import { PROXY_URL } from "./proxy-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
 
 type Resources = Record<string, { Type: string; Properties: Record<string, unknown> }>;

@@ -103,6 +103,7 @@
     },
     "extraEgressHosts": {
       "default": [],
+      "description": "Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only.",
       "type": "array",
       "items": {
         "type": "string",

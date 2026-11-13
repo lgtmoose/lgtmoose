@@ -47,9 +47,12 @@ One AWS account and region holds one install for now, because the secret and sta
 apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dry-run)
 apps/control/    control task: prepares batches and posts results; holds the GitHub App
 apps/sandbox/    sandbox task: runs a model on one batch; one model credential, no GitHub token
+apps/egress-proxy/ the sandbox's only way out: CONNECT proxy with an exact-host allowlist
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
+packages/evals/   eval fixtures, scores and the recall gate for prompt and harness changes
+packages/pipeline/ one whole review in-process, without posting (review --dry-run, evals)
 packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth
 packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrapping
 packages/poster/  posts a run: one review, inline comments, check run, summary, labels
