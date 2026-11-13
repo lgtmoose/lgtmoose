@@ -22,11 +22,48 @@ export const TEST_TIER = 9;
 
 export const DEFAULT_MAX_FILES = 10;
 
-/** Fewer added files than this in vendored or build-output folders are reviewed, not skipped. */
+/**
+ * Fewer added files than this in one vendored or build-output folder are reviewed, not skipped.
+ * Source maps and licence files don't count, so they can't pad a folder past the limit.
+ */
 export const BULK_ADDED_FILES = 5;
 
 function isFolderSkip(reason: SkipReason | undefined): boolean {
   return reason === "vendored" || reason === "build-output";
+}
+
+/** Folder names the vendored and build-output globs skip. */
+const SKIPPED_FOLDERS = new Set([
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "vendor",
+  "third_party",
+  "third-party",
+  "node_modules",
+  "bower_components",
+  "Pods",
+  ".yarn",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  "cdk.out",
+  "__pycache__",
+]);
+
+/** The vendored or build folder a path is in (`vendor`, `packages/x/dist`), else its folder. */
+function skippedFolderOf(path: string): string {
+  const parts = path.split("/");
+  const at = parts.findIndex((part, i) => i < parts.length - 1 && SKIPPED_FOLDERS.has(part));
+  return parts.slice(0, at === -1 ? parts.length - 1 : at + 1).join("/");
+}
+
+/** Files that come with vendored code and can't run: they don't count towards a bulk add. */
+function isFiller(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return name.endsWith(".map") || /^(licen[cs]e|copying|notice|authors|readme)(\.|$)/i.test(name);
 }
 export const DEFAULT_MAX_LINES = 1500;
 
@@ -47,6 +84,11 @@ export interface PlannedFile {
 export interface SkippedFile {
   file: FileDiff;
   reason: SkipReason;
+  /**
+   * Added by this PR to a vendored or build-output folder, and skipped only because the PR adds
+   * many files there. It's new code nobody reviewed; say so in the review summary.
+   */
+  newCode?: true;
   /** The glob that matched, for glob-based reasons. */
   glob?: string;
 }
@@ -191,19 +233,25 @@ export function planReview(
   const skips = diff.map((file) => skipOf(file));
   // Real vendoring or committed build output adds many files at once. A handful of new files in
   // vendor/ or build/ could be hand-written code hidden there, so those are reviewed.
-  const addedByFolder = diff.filter(
-    (file, i) => file.status === "added" && isFolderSkip(skips[i]?.reason),
-  ).length;
-  const reviewAdded = addedByFolder < BULK_ADDED_FILES;
+  const addedPerFolder = new Map<string, number>();
+  for (const [i, file] of diff.entries()) {
+    if (file.status !== "added" || !isFolderSkip(skips[i]?.reason) || isFiller(file.path)) continue;
+    const folder = skippedFolderOf(file.path);
+    addedPerFolder.set(folder, (addedPerFolder.get(folder) ?? 0) + 1);
+  }
+  const isNewFolderCode = (file: FileDiff, reason: SkipReason | undefined) =>
+    file.status === "added" && isFolderSkip(reason);
+  const isBulk = (file: FileDiff) =>
+    (addedPerFolder.get(skippedFolderOf(file.path)) ?? 0) >= BULK_ADDED_FILES;
 
   const skipped: SkippedFile[] = [];
   const kept: Omit<PlannedFile, "index">[] = [];
   for (const [i, file] of diff.entries()) {
     const found = skips[i];
-    const skip =
-      reviewAdded && file.status === "added" && isFolderSkip(found?.reason) ? undefined : found;
+    const newCode = isNewFolderCode(file, found?.reason);
+    const skip = newCode && !isBulk(file) ? undefined : found;
     if (skip !== undefined) {
-      skipped.push({ file, ...skip });
+      skipped.push(newCode ? { file, ...skip, newCode: true } : { file, ...skip });
       continue;
     }
     kept.push({

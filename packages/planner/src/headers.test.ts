@@ -32,17 +32,11 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function fakeRepo(contents: Record<string, string>, fullCheckout = true) {
+function fakeRepo(contents: Record<string, string>) {
   const calls: string[][] = [];
-  const checkedOut: string[][] = [];
   return {
     calls,
-    checkedOut,
     dir,
-    fullCheckout,
-    checkoutPaths: async (paths: readonly string[]) => {
-      checkedOut.push([...paths]);
-    },
     readBlobs: async (shas: Iterable<string>) => {
       const list = [...shas];
       calls.push(list);
@@ -67,23 +61,30 @@ describe("readHeaders", () => {
     ];
     const headers = await readHeaders(repo, files);
     expect(repo.calls).toEqual([[sha("a")]]);
-    expect(repo.checkedOut).toEqual([]);
     expect(headers.get(sha("b"))).toHaveLength(2048);
     expect(headers.get(sha("d"))).toBe("plain");
     expect(headers.has(sha("f"))).toBe(false);
     expect(headers.get(sha("a"))).toBe("// @generated");
   });
 
-  it("checks the paths out first without a full checkout", async () => {
-    const repo = fakeRepo({}, false);
-    await readHeaders(repo, [diff("a.ts")]);
-    expect(repo.checkedOut).toEqual([["a.ts"]]);
+  it("gives no header for a file that isn't checked out", async () => {
+    const headers = await readHeaders(fakeRepo({}), [diff("missing/a.ts")]);
+    expect(headers.size).toBe(0);
+  });
+
+  it("reads many files without running out of file descriptors", async () => {
+    const files = await Promise.all(
+      Array.from({ length: 300 }, async (_, i) => {
+        await writeFile(join(dir, `f${i}.ts`), "x");
+        return diff(`f${i}.ts`, { newBlob: i.toString(16).padStart(40, "0") });
+      }),
+    );
+    expect((await readHeaders(fakeRepo({}), files)).size).toBe(300);
   });
 
   it("reads nothing when no file needs a header", async () => {
-    const repo = fakeRepo({}, false);
+    const repo = fakeRepo({});
     expect((await readHeaders(repo, [diff("docs/a.md")], ["docs/**"])).size).toBe(0);
     expect(repo.calls).toEqual([]);
-    expect(repo.checkedOut).toEqual([]);
   });
 });

@@ -165,7 +165,28 @@ describe("planReview", () => {
     expect(few.skipped.map((s) => s.file.path)).toEqual(["vendor/old.js"]);
 
     const bulk = Array.from({ length: 5 }, (_, i) => added(`vendor/lib/f${i}.js`));
-    expect(planReview(bulk, noConfig).files).toEqual([]);
+    const plan = planReview(bulk, noConfig);
+    expect(plan.files).toEqual([]);
+    expect(plan.skipped.every((s) => s.newCode === true)).toBe(true);
+  });
+
+  it("can't be padded past the bulk limit with maps, licences or other folders", () => {
+    const added = (path: string) => diff(path, { status: "added", oldBlob: undefined });
+    const padded = [
+      added("vendor/analytics.js"),
+      added("vendor/LICENSE"),
+      added("vendor/NOTICE.md"),
+      added("vendor/analytics.js.map"),
+      added("vendor/a.min.css.map"),
+      added("third_party/x.c"),
+      added("third_party/y.c"),
+      added("packages/web/dist/a.js"),
+      added("packages/web/dist/b.js"),
+    ];
+    const plan = planReview(padded, noConfig);
+    expect(paths(plan.files)).toContain("vendor/analytics.js");
+    expect(paths(plan.files)).toContain("third_party/x.c");
+    expect(paths(plan.files)).toContain("packages/web/dist/a.js");
   });
 
   it("orders paths by code unit, not locale", () => {
