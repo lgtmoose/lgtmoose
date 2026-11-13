@@ -53,6 +53,12 @@ export const CODEX_REASONING_EFFORT: Readonly<Record<ModelTier, string>> = {
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** Stop after this many error events that say the credential was refused. */
 const MAX_AUTH_ERRORS = 2;
+/**
+ * A proxy that refuses the model API's host (an egress allowlist without it) won't change its
+ * mind: stop after this many refusals instead of reconnecting until the timeout.
+ */
+const MAX_BLOCKED_CONNECTS = 4;
+const BLOCKED_CONNECT = /Proxy connection failed|HTTP CONNECT failed/;
 const MAX_MESSAGE = 2000;
 
 type Attempt<T> =
@@ -83,10 +89,44 @@ const CONFIG = [
   'sandbox_mode="read-only"',
   'web_search="disabled"',
   "project_doc_max_bytes=0",
+  // Skills in the checkout (.agents/skills) are PR content too.
+  "skills.include_instructions=false",
   'shell_environment_policy.inherit="core"',
   "check_for_update_on_startup=false",
   'cli_auth_credentials_store="file"',
 ];
+
+/**
+ * Features Codex 0.166 turns on by default that a read-only reviewer must not have: connectors,
+ * browsers and computer use, image generation, sub-agents, hooks, plugins and skill installs,
+ * tool suggestions, worktrees and background daemons. Also `unbounded_connection_retries`, so a
+ * blocked network fails instead of retrying until the timeout.
+ */
+export const CODEX_DISABLED_FEATURES = [
+  "apps",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+  "image_generation",
+  "in_app_browser",
+  "in_app_local_automation",
+  "multi_agent",
+  "hooks",
+  "plugins",
+  "remote_plugin",
+  "plugin_discovery_prefetch",
+  "plugin_sharing",
+  "skill_mcp_dependency_install",
+  "skill_search",
+  "tool_suggest",
+  "workspace_dependencies",
+  "worktrees",
+  "daemon_auto_start",
+  "goals",
+  "realtime_conversation",
+  "unbounded_connection_retries",
+] as const;
 
 /** The command line. The prompt goes on stdin (`-`). */
 export function codexArgs(options: CodexArgsOptions): string[] {
@@ -94,10 +134,13 @@ export function codexArgs(options: CodexArgsOptions): string[] {
     "--json",
     // The checkout is a git repository; this only skips the check for one.
     "--skip-git-repo-check",
-    // Only the -c overrides below apply: no config.toml, no execpolicy rules.
+    // Only the -c overrides below apply: no config.toml, no execpolicy rules. An override
+    // this version doesn't know is an error rather than silently ignored.
     "--ignore-user-config",
     "--ignore-rules",
+    "--strict-config",
     ...CONFIG.flatMap((setting) => ["-c", setting]),
+    ...CODEX_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
     "-c",
     `model_reasoning_effort="${options.reasoningEffort}"`,
     ...(options.model === undefined ? [] : ["-m", options.model]),
@@ -174,6 +217,8 @@ export class CodexHarness implements Harness {
         }
         const lastMessagePath = join(home, `last-${n}.txt`);
         let authErrors = 0;
+        let blockedConnects = 0;
+        let stopReason: "auth" | "blocked" | undefined;
         const proc = await runProcess({
           command: this.options.binaryPath ?? "codex",
           args: codexArgs({
@@ -191,7 +236,10 @@ export class CodexHarness implements Harness {
           maxOutputBytes: MAX_OUTPUT_BYTES,
           onLine: (line) => {
             if (isAuthError(line)) authErrors++;
-            return authErrors >= MAX_AUTH_ERRORS ? "kill" : undefined;
+            if (BLOCKED_CONNECT.test(line)) blockedConnects++;
+            if (authErrors >= MAX_AUTH_ERRORS) stopReason = "auth";
+            else if (blockedConnects >= MAX_BLOCKED_CONNECTS) stopReason = "blocked";
+            return stopReason === undefined ? undefined : "kill";
           },
         });
         await readAuth();
@@ -199,9 +247,9 @@ export class CodexHarness implements Harness {
         await this.saveTranscript(key, proc, n, secrets, keys);
         const run = parseCodexEvents(proc.stdout);
         threadId = run.threadId ?? threadId;
-        failIfUnusable(proc, run, secrets, keys, options.timeoutMs);
-        const answer =
-          (await readFile(lastMessagePath, "utf8").catch(() => undefined)) ?? run.lastMessage;
+        failIfUnusable(proc, run, secrets, keys, options.timeoutMs, stopReason);
+        const written = await readFile(lastMessagePath, "utf8").catch(() => "");
+        const answer = written.trim() === "" ? run.lastMessage : written;
         const parsed = parseAnswer(answer);
         if (!parsed.ok) return { kind: "invalid", problems: parsed.error, usage: run.usage, key };
         // Only the strict schema sent to Codex adds nulls for optional fields.
@@ -346,6 +394,7 @@ function failIfUnusable(
   secrets: readonly string[],
   keys: readonly string[],
   timeoutMs: number,
+  stopReason?: "auth" | "blocked",
 ): void {
   const fail = (
     kind: HarnessError["kind"],
@@ -355,6 +404,9 @@ function failIfUnusable(
     new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys, ...extra });
   if (proc.spawnError) throw fail("process", `Could not start codex: ${proc.spawnError.message}`);
   if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
+  if (proc.stopped === "requested" && stopReason === "blocked") {
+    throw fail("process", "The network proxy refused the connection to the model API.");
+  }
   if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
   if (proc.stopped === "output_limit")
     throw fail("process", "codex wrote more output than allowed.");

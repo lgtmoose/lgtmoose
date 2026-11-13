@@ -34,6 +34,7 @@ export {
   TOOLS,
 } from "./claude-code/policy.js";
 export {
+  CODEX_DISABLED_FEATURES,
   CODEX_REASONING_EFFORT,
   CodexHarness,
   codexArgs,

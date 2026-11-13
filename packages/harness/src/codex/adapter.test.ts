@@ -7,7 +7,12 @@ import { z } from "zod";
 import { HarnessError } from "../harness.js";
 import { codexTurn, FakeCodex, type FakeCodexResponse } from "../testing/fake-codex.js";
 import { MemoryTranscriptStore } from "../transcript.js";
-import { CodexHarness, codexArgs, type CodexHarnessOptions } from "./adapter.js";
+import {
+  CODEX_DISABLED_FEATURES,
+  CodexHarness,
+  codexArgs,
+  type CodexHarnessOptions,
+} from "./adapter.js";
 
 const API_KEY = "sk-proj-test-key-0123456789abcdef";
 
@@ -193,6 +198,25 @@ describe("CodexHarness", () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
+  it("stops early when the network proxy refuses the model API", async () => {
+    const blocked = {
+      type: "error",
+      message:
+        "Reconnecting... 2/5 (URL error: Proxy connection failed: HTTP CONNECT failed with status 403)",
+    };
+    const harness = await harnessFor([{ lines: [blocked, blocked, blocked, blocked], hang: true }]);
+    const started = Date.now();
+    const error = await failure(run(harness));
+    expect(error.kind).toBe("process");
+    expect(error.message).toContain("proxy refused");
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it("falls back to the last agent message when the -o file is empty", async () => {
+    const harness = await harnessFor([{ lines: codexTurn(ANSWER), lastMessage: "" }]);
+    expect((await run(harness)).output.findings).toHaveLength(1);
+  });
+
   it("fails with timeout and kills the process", async () => {
     const harness = await harnessFor([{ hang: true }]);
     const error = await failure(
@@ -267,41 +291,40 @@ describe("CodexHarness", () => {
 });
 
 describe("codexArgs", () => {
-  it("starts a read-only exec with strict settings", () => {
-    expect(
-      codexArgs({ reasoningEffort: "medium", lastMessagePath: "/t/last.txt", model: "m" }),
-    ).toEqual([
-      "exec",
-      "--sandbox",
-      "read-only",
-      "--color",
-      "never",
+  it("starts a read-only exec with strict settings and risky features off", () => {
+    const args = codexArgs({
+      reasoningEffort: "medium",
+      lastMessagePath: "/t/last.txt",
+      model: "m",
+    });
+    expect(args.slice(0, 5)).toEqual(["exec", "--sandbox", "read-only", "--color", "never"]);
+    for (const flag of [
       "--json",
       "--skip-git-repo-check",
       "--ignore-user-config",
       "--ignore-rules",
-      "-c",
+      "--strict-config",
+    ]) {
+      expect(args).toContain(flag);
+    }
+    const config = args.flatMap((arg, i) => (args[i - 1] === "-c" ? [arg] : []));
+    expect(config).toEqual([
       'approval_policy="never"',
-      "-c",
       'sandbox_mode="read-only"',
-      "-c",
       'web_search="disabled"',
-      "-c",
       "project_doc_max_bytes=0",
-      "-c",
+      "skills.include_instructions=false",
       'shell_environment_policy.inherit="core"',
-      "-c",
       "check_for_update_on_startup=false",
-      "-c",
       'cli_auth_credentials_store="file"',
-      "-c",
       'model_reasoning_effort="medium"',
-      "-m",
-      "m",
-      "-o",
-      "/t/last.txt",
-      "-",
     ]);
+    const disabled = args.flatMap((arg, i) => (args[i - 1] === "--disable" ? [arg] : []));
+    expect(disabled).toEqual([...CODEX_DISABLED_FEATURES]);
+    expect(disabled).toEqual(
+      expect.arrayContaining(["apps", "computer_use", "multi_agent", "hooks"]),
+    );
+    expect(args.slice(-5)).toEqual(["-m", "m", "-o", "/t/last.txt", "-"]);
   });
 
   it("resumes with the sandbox set through config", () => {
@@ -314,6 +337,7 @@ describe("codexArgs", () => {
     expect(args.slice(0, 2)).toEqual(["exec", "resume"]);
     expect(args).not.toContain("--sandbox");
     expect(args).toContain('sandbox_mode="read-only"');
+    expect(args).toContain("--strict-config");
     expect(args.slice(-2)).toEqual(["thread-1", "-"]);
     expect(args[args.indexOf("--output-schema") + 1]).toBe("/t/s.json");
   });
