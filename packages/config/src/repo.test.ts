@@ -9,6 +9,7 @@ describe("parseRepoConfigYaml", () => {
       conventions: [...DEFAULT_CONVENTIONS],
       tiers: {},
       skip: [],
+      registries: [],
       gate: { check_run: "required", approve: true, nit_cap: 10 },
       labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
     };

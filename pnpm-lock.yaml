@@ -158,6 +158,10 @@ importers:
         version: 7.0.2
 
   packages/core:
+    dependencies:
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -198,7 +202,45 @@ importers:
     dependencies:
       '@aws-sdk/client-s3':
         specifier: ^3.1167.0
-        version: 3.1168.0
+        version: 3.1169.0
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/planner:
+    dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      picomatch:
+        specifier: ^4.0.3
+        version: 4.0.7
+    devDependencies:
+      '@types/picomatch':
+        specifier: ^4.0.3
+        version: 4.0.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/roles:
+    dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -234,8 +276,8 @@ packages:
     resolution: {integrity: sha512-kuGTuuE4EjhTZqX7/5otLyzOIFRkSRr28NFnY46BoILUkVmkD9BQW3BzUNPcfhkE03hq/9ByDVWGefwbAt52jw==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/client-s3@3.1168.0':
-    resolution: {integrity: sha512-7NcVxqy7Vc6I8A3KOZFORGh+zfMCd4S5aje55tBNBfshddz+F1NZwxLXblt44TC6nw0Hgx5os3AM2d/P0McELQ==}
+  '@aws-sdk/client-s3@3.1169.0':
+    resolution: {integrity: sha512-5IjQ2R1TM5lMuUvCvCfGNG9q6g3nxdputC9FY7YQJf1ygVUwsOruEYxQqpjik1nZdl8mNvV57Mhivtp2JbgBtg==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-secrets-manager@3.1167.0':
@@ -1300,6 +1342,9 @@ packages:
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
 
+  '@types/picomatch@4.0.3':
+    resolution: {integrity: sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==}
+
   '@types/qs@6.15.1':
     resolution: {integrity: sha512-GZHUBZR9hckSUhrxmp1nG6NwdpM9fCunJwyThLW1X3AyHgd9IlHb6VANpQQqDr2o/qQp6McZ3y/IA2rVzKzSbw==}
 
@@ -2320,7 +2365,7 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
-  '@aws-sdk/client-s3@3.1168.0':
+  '@aws-sdk/client-s3@3.1169.0':
     dependencies:
       '@aws-sdk/checksums': 3.1002.5
       '@aws-sdk/core': 3.981.0
@@ -3149,6 +3194,8 @@ snapshots:
       '@types/node': 24.19.2
       pg-protocol: 1.16.1
       pg-types: 2.2.0
+
+  '@types/picomatch@4.0.3': {}
 
   '@types/qs@6.15.1': {}
 

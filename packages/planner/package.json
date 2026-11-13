@@ -1,0 +1,32 @@
+{
+  "name": "@lgtmoose/planner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Plans a review without a model call: files to skip, risk tiers, a fixed order, batches and reading depth.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lgtmoose/config": "workspace:*",
+    "@lgtmoose/git": "workspace:*",
+    "picomatch": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/picomatch": "^4.0.3",
+    "typescript": "catalog:"
+  }
+}

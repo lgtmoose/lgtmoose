@@ -46,6 +46,8 @@ apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dr
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
+packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth
+packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrapping
 infra/cdk/       AWS CDK app
 deploy/compose/  docker compose deployment for hosts other than AWS
 docs/            architecture and design notes
