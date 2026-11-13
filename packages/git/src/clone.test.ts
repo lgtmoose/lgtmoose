@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cloneAtSha, githubCloneUrl } from "./clone.js";
+import { cloneAtSha, githubCloneUrl, isMissingObjectError } from "./clone.js";
+import { reviewDiff } from "./diff.js";
+import { serveOverHttp } from "./testing/http-server.js";
 import { runGit } from "./exec.js";
 import { FixtureRepo } from "./testing/fixture.js";
 
@@ -76,6 +78,15 @@ describe("cloneAtSha", () => {
     expect(await repo.hasCommit(second)).toBe(true);
   });
 
+  it("recognises a missing commit, and only that, as missing", async () => {
+    const head = await fixture.commit("first");
+    const dir = await fixture.cloneDir();
+    const repo = await cloneAtSha({ url: fixture.url, dir, headSha: head });
+    const missing = await repo.git(["fetch", "origin", "f".repeat(40)]).catch((e: unknown) => e);
+    expect(isMissingObjectError(missing)).toBe(true);
+    expect(isMissingObjectError(new Error("not our ref"))).toBe(false);
+  });
+
   it("skips a commit the remote no longer has instead of failing", async () => {
     const head = await fixture.commit("first");
     const gone = "f".repeat(40);
@@ -121,6 +132,101 @@ describe("cloneAtSha", () => {
     await expect(
       cloneAtSha({ url: fixture.url, dir, headSha: head, otherShas: ["--upload-pack=evil"] }),
     ).rejects.toThrow("Not a full commit SHA");
+  });
+
+  it("sends the token on every fetch over HTTP: clone, prefetch and checkoutPaths", async () => {
+    await fixture.write({ "a.ts": 'import a from "a";\n', "b.ts": "export const b = 1;\n" });
+    const base = await fixture.commit("base");
+    await fixture.write({ "a.ts": 'import a from "z";\n', "b.ts": "export const b = 2;\n" });
+    const head = await fixture.commit("head");
+    const token = "ghs_FAKEINSTALLATIONTOKEN123";
+    const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+    const server = await serveOverHttp(fixture.remote, auth);
+    try {
+      const repo = await cloneAtSha({
+        url: server.url,
+        dir: await fixture.cloneDir(),
+        headSha: head,
+        otherShas: [base],
+        token,
+        checkout: "none",
+      });
+      const diff = await reviewDiff(repo, { baseSha: base });
+      expect(diff.files.find((f) => f.path === "a.ts")?.mechanical).toBe(true);
+      await repo.checkoutPaths(["b.ts"]);
+      expect(await readFile(join(repo.dir, "b.ts"), "utf8")).toBe("export const b = 2;\n");
+      expect(server.authorizations.length).toBeGreaterThan(3);
+      expect(server.authorizations.every((a) => a === auth)).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("refuses a wrong token, without printing it", async () => {
+    const head = await fixture.commit("first");
+    const server = await serveOverHttp(fixture.remote, "Basic expected");
+    try {
+      const error = await cloneAtSha({
+        url: server.url,
+        dir: await fixture.cloneDir(),
+        headSha: head,
+        token: "ghs_WRONGTOKEN",
+      }).then(
+        () => new Error("expected a failure"),
+        (e: unknown) => e as Error,
+      );
+      expect(error.message).toMatch(/401|Authentication failed|could not read/i);
+      expect(error.message).not.toContain("ghs_WRONGTOKEN");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("treats a server error as a failure, not as a force-pushed-away commit", async () => {
+    await fixture.commit("first");
+    // On another branch, so head's history doesn't already contain it.
+    await fixture.checkout("other", true);
+    await fixture.write({ "b.txt": "y\n" });
+    const first = await fixture.commit("other branch");
+    await fixture.checkout("main");
+    await fixture.write({ "a.txt": "x\n" });
+    const head = await fixture.commit("second");
+    const token = "ghs_FAKE";
+    const server = await serveOverHttp(
+      fixture.remote,
+      `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+    );
+    try {
+      // Count the requests a head-only clone makes, then fail the one after them: the fetch
+      // of the other commit.
+      // No working tree, so no lazy file fetches muddy the count.
+      await cloneAtSha({
+        url: server.url,
+        dir: await fixture.cloneDir(),
+        headSha: head,
+        token,
+        checkout: "none",
+      });
+      const headOnly = server.authorizations.length;
+      server.authorizations.length = 0;
+      server.failAfter(headOnly, 503);
+      const error = await cloneAtSha({
+        url: server.url,
+        dir: await fixture.cloneDir(),
+        headSha: head,
+        otherShas: [first],
+        token,
+        checkout: "none",
+      }).then(
+        () => new Error("expected a failure"),
+        (e: unknown) => e,
+      );
+      expect(server.authorizations.length).toBeGreaterThan(headOnly);
+      expect(String(error)).not.toContain("expected a failure");
+      expect(isMissingObjectError(error)).toBe(false);
+    } finally {
+      await server.close();
+    }
   });
 
   it("names the clone URL for a GitHub repository", () => {

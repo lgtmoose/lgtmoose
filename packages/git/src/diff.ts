@@ -89,7 +89,8 @@ function parseRaw(text: string): RawEntry[] {
       .split(" ");
     const letter = code[0] ?? "M";
     const oldPath = fields[i++] ?? "";
-    const newPath = letter === "R" || letter === "C" ? (fields[i++] ?? "") : oldPath;
+    // Copies aren't detected (no --find-copies), so only renames carry a second path.
+    const newPath = letter === "R" ? (fields[i++] ?? "") : oldPath;
     entries.push({
       status: STATUS[letter] ?? "modified",
       oldMode,
@@ -226,10 +227,36 @@ function addedTexts(file: FileDiff | undefined): Map<string, number> {
   return counts;
 }
 
-function removedTexts(before: FileDiff | undefined, after: FileDiff | undefined): string[] {
+/** Lines that say nothing on their own: blank, or only brackets and punctuation. */
+const TRIVIAL = /^[\s{}()[\];,.]*$/;
+
+/**
+ * Texts of lines replaced in place since the last review (a hunk that removes some lines and
+ * adds others): rewordings, whose new form is already in `changedSinceLastReview`.
+ */
+function replacedTexts(changed: FileDiff | undefined): Set<string> {
+  const texts = new Set<string>();
+  for (const hunk of changed?.hunks ?? []) {
+    if (!hunk.lines.some((l) => l.kind === "add")) continue;
+    for (const line of hunk.lines) if (line.kind === "del") texts.add(line.text);
+  }
+  return texts;
+}
+
+/**
+ * Lines the PR added at the last review but no longer adds, leaving out trivial lines and
+ * rewordings, so what's left is worth a reader's attention (a removed check, say).
+ */
+function removedTexts(
+  before: FileDiff | undefined,
+  after: FileDiff | undefined,
+  changed?: FileDiff,
+): string[] {
   const now = addedTexts(after);
+  const replaced = replacedTexts(changed);
   const removed: string[] = [];
   for (const [text, count] of addedTexts(before)) {
+    if (TRIVIAL.test(text) || replaced.has(text)) continue;
     for (let i = now.get(text) ?? 0; i < count; i++) removed.push(text);
   }
   return removed;
@@ -275,11 +302,16 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
 
   const incremental: FileDiff[] = [];
   const seen = new Set<string>();
+  // Renamed since the last review: the previous diff has the file under its old path, even when
+  // the current PR diff shows it as a plain addition under the new one.
+  for (const moved of sinceFiles) if (moved.oldPath !== undefined) seen.add(moved.oldPath);
   for (const file of files) {
     seen.add(file.path);
+    // A file renamed since the last review is under its old path in the previous diff.
+    if (file.oldPath !== undefined) seen.add(file.oldPath);
     const changed = since.get(file.path);
     const before = previous.get(file.oldPath ?? file.path) ?? previous.get(file.path);
-    const removed = file.status === "deleted" ? [] : removedTexts(before, file);
+    const removed = file.status === "deleted" ? [] : removedTexts(before, file, changed);
     if (file.status === "deleted") {
       // Deleted since the last review (it still existed then).
       if (changed?.status === "deleted")

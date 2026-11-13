@@ -111,10 +111,6 @@ export function parsePatch(text: string): FilePatch[] {
       file.oldPath = unquotePath(line.slice("rename from ".length));
     } else if (line.startsWith("rename to ")) {
       file.newPath = unquotePath(line.slice("rename to ".length));
-    } else if (line.startsWith("copy from ")) {
-      file.oldPath = unquotePath(line.slice("copy from ".length));
-    } else if (line.startsWith("copy to ")) {
-      file.newPath = unquotePath(line.slice("copy to ".length));
     } else if (line.startsWith("new file mode")) {
       file.oldPath = undefined;
     } else if (line.startsWith("deleted file mode")) {

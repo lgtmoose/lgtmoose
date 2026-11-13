@@ -46,6 +46,20 @@ export interface CloneOptions {
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/**
+ * The remote doesn't have this object (force-pushed away and collected). Anything else, such as
+ * an expired token, a network error or a rate limit, is a real failure and mustn't be mistaken
+ * for a missing commit.
+ */
+export function isMissingObjectError(error: unknown): boolean {
+  return (
+    error instanceof GitError &&
+    /not our ref|unadvertised object|couldn't find remote ref|no such remote ref/i.test(
+      error.stderr,
+    )
+  );
+}
 /** Blob IDs per prefetch request, to keep the command line a sensible length. */
 const PREFETCH_BATCH = 500;
 
@@ -125,7 +139,7 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
       await fetch([sha]);
       fetched.add(sha);
     } catch (error) {
-      if (!(error instanceof GitError)) throw error;
+      if (!isMissingObjectError(error)) throw error;
     }
   }
   if (options.checkout === "none") {
@@ -136,21 +150,40 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     await run(["checkout", "--quiet", "--detach", options.headSha]);
   }
 
+  // Blobs known to be local, so a prefetch can leave them out: head's tree after a full
+  // checkout, plus whatever this clone has already prefetched.
+  const local = new Set<string>();
+  if (partial && options.checkout !== "none") {
+    const tree = await run(["ls-tree", "-r", "-z", "--full-tree", options.headSha]);
+    for (const entry of tree.stdout.split("\0")) {
+      const [mode, type, sha] = entry.split(/\s/);
+      if (type === "blob" && mode !== "160000" && sha !== undefined) local.add(sha);
+    }
+  }
+
+  /**
+   * One request for every listed blob that isn't local yet, rather than git's lazy fetch, which
+   * asks for each blob separately. If it fails, git falls back to fetching lazily.
+   */
+  const prefetch = async (shas: Iterable<string>): Promise<void> => {
+    if (!partial) return;
+    const missing = [...new Set(shas)].filter((sha) => SHA.test(sha) && !local.has(sha));
+    for (let i = 0; i < missing.length; i += PREFETCH_BATCH) {
+      const batch = missing.slice(i, i + PREFETCH_BATCH);
+      try {
+        // Without the blob filter, which would leave out the very blobs asked for.
+        await fetch(batch, false);
+        for (const sha of batch) local.add(sha);
+      } catch (error) {
+        if (!(error instanceof GitError)) throw error;
+      }
+    }
+  };
+
   const readBlobs = async (shas: Iterable<string>): Promise<Map<string, Buffer>> => {
     const wanted = [...new Set(shas)].filter((sha) => SHA.test(sha));
     if (wanted.length === 0) return new Map();
-    // One request for all of them, rather than git's lazy fetch, which asks for each blob
-    // separately. Blobs already here cost a little transfer; git has no cheap way to list which
-    // of a set are missing in a partial clone. If the prefetch fails, cat-file falls back to
-    // fetching lazily.
-    if (partial) {
-      for (let i = 0; i < wanted.length; i += PREFETCH_BATCH) {
-        // Without the blob filter, which would leave out the very blobs asked for.
-        await fetch(wanted.slice(i, i + PREFETCH_BATCH), false).catch((error: unknown) => {
-          if (!(error instanceof GitError)) throw error;
-        });
-      }
-    }
+    await prefetch(wanted);
     const { stdout } = await runGitBytes(options.dir, ["cat-file", "--batch"], {
       ...base,
       input: wanted.join("\n") + "\n",
@@ -176,10 +209,20 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     readBlobs,
     checkoutPaths: async (paths) => {
       if (paths.length === 0) return;
+      const literal = { env: { GIT_LITERAL_PATHSPECS: "1" } };
+      // Find the files' blobs and fetch them in one request before checking out.
+      const tree = await run(["ls-tree", "-z", options.headSha, "--", ...paths], literal);
+      await prefetch(
+        tree.stdout
+          .split("\0")
+          .map((entry) => entry.split(/\s/))
+          .filter(([, type]) => type === "blob")
+          .map(([, , sha]) => sha ?? ""),
+      );
       // NUL-separated and literal, so no path is read as pathspec magic or split on a newline.
       await run(["checkout", options.headSha, "--pathspec-from-file=-", "--pathspec-file-nul"], {
         input: paths.join("\0") + "\0",
-        env: { GIT_LITERAL_PATHSPECS: "1" },
+        ...literal,
       });
     },
   };

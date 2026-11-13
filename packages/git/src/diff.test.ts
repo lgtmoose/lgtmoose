@@ -339,6 +339,44 @@ describe("reviewDiff: incremental review", () => {
     expect(files["other.ts"]).toMatchObject({ hunks: [], removedSinceLastReview: ["temporary"] });
   });
 
+  it("doesn't call a file renamed since the last review reverted", async () => {
+    const base = await setUp({ "keep.txt": "k\n" });
+    await fixture.write({ "src/auth.ts": lines(8, "auth") });
+    const reviewed = await fixture.commit("add auth");
+    await fixture.move("src/auth.ts", "src/security/auth.ts");
+    const head = await fixture.commit("move it");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      lastReviewed: reviewed,
+    });
+    expect(diff.files.find((f) => f.path === "src/auth.ts")).toBeUndefined();
+    expect(diff.files.flatMap((f) => f.removedSinceLastReview ?? [])).toEqual([]);
+  });
+
+  it("leaves blank lines, braces and rewordings out of the removed lines", async () => {
+    const base = await setUp({ "a.ts": lines(30) });
+    const draft = lines(30)
+      .replace("line 5\n", "line 5\nfunction f() {\n  log('old wording');\n\n}\n")
+      .replace("line 25\n", "line 25\nassertOwner(user);\n");
+    await fixture.write({ "a.ts": draft });
+    const reviewed = await fixture.commit("draft");
+    await fixture.write({
+      "a.ts": draft
+        .replace("  log('old wording');\n\n}", "  log('new wording');")
+        .replace("assertOwner(user);\n", ""),
+    });
+    const head = await fixture.commit("tidy");
+
+    const [file] = (
+      await reviewDiff(await clone(head, [base, reviewed]), {
+        baseSha: base,
+        lastReviewed: reviewed,
+      })
+    ).files;
+    expect(file?.removedSinceLastReview).toEqual(["assertOwner(user);"]);
+  });
+
   it("includes files renamed or deleted since the last review, and nothing when head is unchanged", async () => {
     const base = await setUp({ "a.txt": lines(10), "b.txt": lines(10, "b") });
     await fixture.write({
