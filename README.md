@@ -45,6 +45,7 @@ One AWS account and region holds one install for now, because the secret and sta
 apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dry-run)
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
+packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
 infra/cdk/       AWS CDK app
 deploy/compose/  docker compose deployment for hosts other than AWS
 docs/            architecture and design notes
