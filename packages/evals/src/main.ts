@@ -13,6 +13,9 @@ import {
   checkBaseline,
   readBaseline,
   renderMarkdown,
+  type Baseline,
+  type EvalReport,
+  type GateResult,
 } from "./report.js";
 import { runFixtures } from "./run.js";
 
@@ -28,7 +31,7 @@ model credential).
 
 Options:
   --fixtures <dir>     Fixture directory (default: this package's fixtures/)
-  --only <name>        Run only this fixture (repeatable)
+  --only <name>        Run only this fixture (repeatable); the baseline isn't checked
   --out <dir>          Where to write the report and transcripts (default: ./eval-report)
   --baseline <file>    Baseline to compare with (default: this package's baseline.json)
   --update-baseline    Write this run's numbers to the baseline file instead of gating
@@ -37,6 +40,22 @@ Options:
   --claude <path>      The claude binary (default: claude on PATH)
   -h, --help
 `;
+
+/**
+ * Whether the run passes: updating the baseline always does, and a subset (--only) isn't
+ * compared, since its recall isn't comparable with the whole set's baseline.
+ */
+function gateFor(
+  report: EvalReport,
+  baseline: Baseline | undefined,
+  run: { updating: boolean; subset: boolean; baselinePath: string },
+): GateResult {
+  if (run.updating) return { ok: true, message: `Baseline updated in ${run.baselinePath}.` };
+  if (run.subset) {
+    return { ok: true, message: "Ran a subset (--only): not compared with the baseline." };
+  }
+  return checkBaseline(report, baseline);
+}
 
 async function main(argv: readonly string[]): Promise<number> {
   const { values } = parseArgs({
@@ -64,6 +83,9 @@ async function main(argv: readonly string[]): Promise<number> {
   const out = resolve(values.out ?? "eval-report");
   const baselinePath = resolve(values.baseline ?? join(PACKAGE_DIR, "baseline.json"));
 
+  if (values["update-baseline"] && values.only !== undefined) {
+    throw new Error("--update-baseline needs every fixture: leave out --only.");
+  }
   let fixtures = await loadFixtures(resolve(values.fixtures ?? join(PACKAGE_DIR, "fixtures")));
   if (values.only !== undefined) {
     const only = new Set(values.only);
@@ -89,9 +111,11 @@ async function main(argv: readonly string[]): Promise<number> {
     });
     const report = buildReport(scores, model, startedAt);
     const baseline = await readBaseline(baselinePath);
-    const gate = values["update-baseline"]
-      ? { ok: true, message: `Baseline updated in ${baselinePath}.` }
-      : checkBaseline(report, baseline);
+    const gate = gateFor(report, baseline, {
+      updating: values["update-baseline"] === true,
+      subset: values.only !== undefined,
+      baselinePath,
+    });
     await writeFile(join(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(join(out, "report.md"), renderMarkdown(report, baseline, gate));
     if (values["update-baseline"]) {

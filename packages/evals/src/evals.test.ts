@@ -41,7 +41,13 @@ function fixture(overrides: Partial<Fixture> = {}): Fixture {
     body: "",
     kind: "seeded",
     expected: [
-      { category: "correctness", path: "src/cart.ts", lines: [10, 10], severity: "blocking" },
+      {
+        category: "correctness",
+        path: "src/cart.ts",
+        lines: [10, 10],
+        side: "RIGHT",
+        severity: "blocking",
+      },
     ],
     mustNotFlag: [],
     deleted: [],
@@ -101,6 +107,12 @@ describe("matching", () => {
     ).toBe(true);
   });
 
+  it("matches a removed line on the base side", () => {
+    const removed = { ...expected, side: "LEFT" as const, lines: [12, 12] as [number, number] };
+    expect(matchesExpected(finding({ side: "LEFT", line: 12 }), removed)).toBe(true);
+    expect(matchesExpected(finding({ line: 12 }), removed)).toBe(false);
+  });
+
   it("flags must-not-flag hits, but never nits", () => {
     const rule = { path: "src/cart.ts", lines: [15, 15] as [number, number] };
     expect(hitsMustNotFlag(finding({ line: 15 }), rule)).toBe(true);
@@ -140,8 +152,20 @@ describe("scoring", () => {
     const seeded = scoreFixture(
       fixture({
         expected: [
-          { category: "correctness", path: "src/cart.ts", lines: [10, 10], severity: "blocking" },
-          { category: "correctness", path: "src/cart.ts", lines: [20, 20], severity: "blocking" },
+          {
+            category: "correctness",
+            path: "src/cart.ts",
+            lines: [10, 10],
+            side: "RIGHT",
+            severity: "blocking",
+          },
+          {
+            category: "correctness",
+            path: "src/cart.ts",
+            lines: [20, 20],
+            side: "RIGHT",
+            severity: "blocking",
+          },
         ],
       }),
       {

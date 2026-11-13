@@ -1,7 +1,7 @@
 import type { Finding } from "@lgtmoose/core";
 import type { ExpectedFinding, Fixture, MustNotFlag } from "./fixture.js";
 
-/** The lines a finding cites on the head side: [start, end], both included. */
+/** The lines a finding cites, on its side: [start, end], both included. */
 function findingRange(finding: Finding): [number, number] {
   const start = finding.start_line ?? finding.line;
   return [Math.min(start, finding.line), Math.max(start, finding.line)];
@@ -16,12 +16,12 @@ function categories(expected: ExpectedFinding): readonly string[] {
 }
 
 /**
- * Whether a finding reports an expected problem: same path, a cited range on the head side that
- * overlaps the expected lines, and one of its categories. Severity is scored separately.
+ * Whether a finding reports an expected problem: same path and side, a cited range that overlaps
+ * the expected lines, and one of its categories. Severity is scored separately.
  */
 export function matchesExpected(finding: Finding, expected: ExpectedFinding): boolean {
   return (
-    finding.side === "RIGHT" &&
+    finding.side === expected.side &&
     finding.path === expected.path &&
     overlaps(findingRange(finding), expected.lines) &&
     categories(expected).includes(finding.rule_category)

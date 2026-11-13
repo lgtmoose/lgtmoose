@@ -122,6 +122,8 @@ export function renderMarkdown(
   gate: GateResult,
 ): string {
   const t = report.totals;
+  // Severity accuracy is over matched findings; with none matched there's nothing to show.
+  const matchedAny = report.fixtures.some((score) => score.matched.length > 0);
   const lines = [
     REPORT_MARKER,
     "## LGTMoose evals",
@@ -130,7 +132,7 @@ export function renderMarkdown(
     "",
     "| Recall | False-positive rate | Severity accuracy | Cost | Time |",
     "| --- | --- | --- | --- | --- |",
-    `| ${percent(t.recall)}${delta(t.recall, baseline?.recall)} | ${percent(t.falsePositiveRate)}${delta(t.falsePositiveRate, baseline?.falsePositiveRate)} | ${percent(t.severityAccuracy)} | ${money(t.costUsd)} | ${seconds(t.durationMs)} |`,
+    `| ${percent(t.recall)}${delta(t.recall, baseline?.recall)} | ${percent(t.falsePositiveRate)}${delta(t.falsePositiveRate, baseline?.falsePositiveRate)} | ${matchedAny ? percent(t.severityAccuracy) : "n/a"} | ${money(t.costUsd)} | ${seconds(t.durationMs)} |`,
     "",
     `${t.found} of ${t.expected} seeded problems found, ${t.falsePositives} false positives, ${report.fixtures.length} fixtures, model ${inline(report.model)}.`,
   ];

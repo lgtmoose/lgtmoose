@@ -24,14 +24,16 @@ const repoPath = z
   );
 
 /**
- * A problem the reviewer should report: on `path`, overlapping `lines` (head side, both ends
- * included), in `category` (a rule category, or a list of them that would all be right).
+ * A problem the reviewer should report: on `path`, overlapping `lines` (both ends included) on
+ * `side` (RIGHT, the head, by default; LEFT for a removed line, numbered as in the base), in
+ * `category` (a rule category, or a list of them that would all be right).
  */
 export const expectedFindingSchema = z
   .object({
     category: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
     path: repoPath,
     lines: lineRange,
+    side: z.enum(["LEFT", "RIGHT"]).default("RIGHT"),
     severity: z.enum(SEVERITIES),
     /** What the seeded bug is, for the report. */
     note: z.string().optional(),

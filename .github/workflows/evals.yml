@@ -13,6 +13,8 @@ on:
   pull_request:
     paths:
       - packages/roles/**
+      # The finding schema's descriptions are part of the reviewer prompt.
+      - packages/core/src/finding.ts
       - packages/harness/**
       - packages/pipeline/**
       - packages/evals/**
