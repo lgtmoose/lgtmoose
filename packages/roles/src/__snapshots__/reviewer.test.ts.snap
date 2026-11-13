@@ -49,7 +49,7 @@ Return only a JSON object that matches this JSON Schema, with no other text:
   "type": "object",
   "properties": {
     "findings": {
-      "maxItems": 50,
+      "maxItems": 500,
       "type": "array",
       "items": {
         "type": "object",

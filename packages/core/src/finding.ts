@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SEVERITIES } from "./severity.js";
+import { SEVERITIES, severityRank } from "./severity.js";
 
 /** Which version of the file a line number refers to. Matches `Side` in @lgtmoose/git. */
 export const SIDES = ["LEFT", "RIGHT"] as const;
@@ -10,11 +10,14 @@ const lineNumber = z.number().int().positive();
 
 /**
  * Limits on what one reviewer run may return, so a runaway or prompt-injected model can't flood
- * a pull request or exceed GitHub's comment limits. Output over them fails validation, which
- * gets the harness's repair retry.
+ * a pull request or exceed GitHub's comment limits. `findingsPerRun` is a soft limit: the model
+ * is asked to stay under it and `keepMostSevere` trims the rest, so a batch with many real
+ * findings isn't lost. Past `findingsHardMax`, and over the text limits, output fails
+ * validation and gets the harness's repair retry.
  */
 export const FINDING_LIMITS = {
   findingsPerRun: 50,
+  findingsHardMax: 500,
   body: 4000,
   evidence: 2000,
   suggestion: 4000,
@@ -77,10 +80,32 @@ export type Finding = z.infer<typeof findingSchema>;
 export const reviewerOutputSchema = z.object({
   findings: z
     .array(findingSchema)
-    .max(FINDING_LIMITS.findingsPerRun)
+    .max(FINDING_LIMITS.findingsHardMax)
     .describe(
       `Every finding, or an empty list. At most ${FINDING_LIMITS.findingsPerRun}: keep the most important.`,
     ),
 });
 
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
+
+/**
+ * The `limit` most severe findings, in their original order, and how many were dropped. Ties
+ * keep the earlier finding.
+ */
+export function keepMostSevere(
+  findings: readonly Finding[],
+  limit: number = FINDING_LIMITS.findingsPerRun,
+): { kept: Finding[]; dropped: number } {
+  if (findings.length <= limit) return { kept: [...findings], dropped: 0 };
+  const chosen = new Set(
+    findings
+      .map((finding, index) => ({ rank: severityRank(finding.severity), index }))
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .slice(0, limit)
+      .map(({ index }) => index),
+  );
+  return {
+    kept: findings.filter((_, index) => chosen.has(index)),
+    dropped: findings.length - limit,
+  };
+}

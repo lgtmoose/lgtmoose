@@ -9,6 +9,7 @@ export {
   FINDING_LIMITS,
   SIDES,
   findingSchema,
+  keepMostSevere,
   reviewerOutputSchema,
   type Finding,
   type FindingSide,

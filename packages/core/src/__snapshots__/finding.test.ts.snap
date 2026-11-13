@@ -85,7 +85,7 @@ exports[`reviewerOutputSchema > converts to JSON Schema for the harness 1`] = `
         ],
         "type": "object",
       },
-      "maxItems": 50,
+      "maxItems": 500,
       "type": "array",
     },
   },

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { FINDING_LIMITS, findingSchema, reviewerOutputSchema, type Finding } from "./index.js";
+import {
+  FINDING_LIMITS,
+  findingSchema,
+  keepMostSevere,
+  reviewerOutputSchema,
+  type Finding,
+} from "./index.js";
 
 const finding: Finding = {
   rule_category: "correctness",
@@ -69,10 +75,22 @@ describe("finding limits", () => {
     evidence: "e",
   };
 
-  it("refuses more findings than one run may return", () => {
-    const findings = Array.from({ length: FINDING_LIMITS.findingsPerRun + 1 }, () => base);
-    expect(reviewerOutputSchema.safeParse({ findings }).success).toBe(false);
-    expect(reviewerOutputSchema.safeParse({ findings: findings.slice(1) }).success).toBe(true);
+  it("accepts more than the soft limit but refuses a flood", () => {
+    const many = Array.from({ length: FINDING_LIMITS.findingsPerRun + 5 }, () => base);
+    expect(reviewerOutputSchema.safeParse({ findings: many }).success).toBe(true);
+    const flood = Array.from({ length: FINDING_LIMITS.findingsHardMax + 1 }, () => base);
+    expect(reviewerOutputSchema.safeParse({ findings: flood }).success).toBe(false);
+  });
+
+  it("keeps the most severe findings, in order", () => {
+    const at = (severity: Finding["severity"], line: number) =>
+      ({ ...base, severity, line }) as Finding;
+    const findings = [at("nit", 1), at("blocking", 2), at("should_fix", 3), at("blocking", 4)];
+    expect(keepMostSevere(findings, 3)).toEqual({
+      kept: [at("blocking", 2), at("should_fix", 3), at("blocking", 4)],
+      dropped: 1,
+    });
+    expect(keepMostSevere(findings).dropped).toBe(0);
   });
 
   it.each(["body", "evidence", "suggestion"] as const)("refuses an overlong %s", (field) => {

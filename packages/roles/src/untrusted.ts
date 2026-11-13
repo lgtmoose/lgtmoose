@@ -25,6 +25,31 @@ const OPENERS = new Set([
 /** Invisible characters that could split the tag name: zero-width spaces, joiners, BOM. */
 const INVISIBLE = /\u034F|[\u00AD\u180E\u200B-\u200F\u2060-\u2064\uFEFF]/g;
 
+/**
+ * Letters from other scripts that look like the letters of "untrusted", which NFKC doesn't
+ * fold: Cyrillic, Greek and Armenian lookalikes, upper and lower case.
+ */
+const LOOKALIKES: Record<string, string> = {
+  "\u03C5": "u", // Greek upsilon
+  "\u057D": "u", // Armenian seh
+  "\u0578": "n", // Armenian vo
+  "\u03B7": "n", // Greek eta
+  "\u0442": "t", // Cyrillic te
+  "\u03C4": "t", // Greek tau
+  "\u0422": "t",
+  "\u03A4": "t",
+  "\u0433": "r", // Cyrillic ghe
+  "\u0455": "s", // Cyrillic dze
+  "\u0405": "s",
+  "\u0435": "e", // Cyrillic ie
+  "\u0415": "e",
+  "\u0395": "e",
+  "\u0501": "d", // Cyrillic komi de
+  "\u039D": "n", // Greek capital nu
+  "\u0397": "n",
+  "\u054D": "u", // Armenian capital seh
+};
+
 /** How far after an opener to look for the tag name, allowing for spaces and invisibles. */
 const WINDOW = 64;
 
@@ -34,10 +59,9 @@ const WINDOW = 64;
  * invisible characters, spaces and slashes removed, in any case.
  */
 function startsTagName(after: string): boolean {
-  const folded = after
-    .slice(0, WINDOW)
-    .normalize("NFKC")
-    .replace(INVISIBLE, "")
+  const folded = Array.from(after.slice(0, WINDOW).normalize("NFKC").replace(INVISIBLE, ""))
+    .map((ch) => LOOKALIKES[ch] ?? ch)
+    .join("")
     .replace(/^[\s/]*/, "")
     .toLowerCase();
   return folded.startsWith(UNTRUSTED_TAG);
