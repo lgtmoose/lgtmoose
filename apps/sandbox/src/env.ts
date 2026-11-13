@@ -1,9 +1,9 @@
-/** What the sandbox task reads from its environment, set by the Workflow stack. */
+/**
+ * What the sandbox task reads from its environment, set by the Workflow stack. Its batch input
+ * and output come as presigned URLs from the workflow (NIC-811), added when that lands: the task
+ * role has no S3 access of its own.
+ */
 export interface SandboxEnv {
-  /** The artifact bucket; the task may read and write only under `prefix`. */
-  artifactBucket: string;
-  /** The key prefix this task may use, such as `sandbox/`. */
-  prefix: string;
   /** The model provider this task definition was built for. */
   providerId: string;
   /** Where HTTPS to model APIs goes: the egress proxy. */
@@ -11,8 +11,6 @@ export interface SandboxEnv {
 }
 
 const VARIABLES = {
-  artifactBucket: "ARTIFACT_BUCKET",
-  prefix: "ARTIFACT_PREFIX",
   providerId: "LGTMOOSE_PROVIDER",
   httpsProxy: "HTTPS_PROXY",
 } as const satisfies Record<keyof SandboxEnv, string>;
@@ -25,8 +23,6 @@ export function readSandboxEnv(
   if (missing.length > 0) return { missing };
   const read = (name: string) => env[name]?.trim() ?? "";
   return {
-    artifactBucket: read(VARIABLES.artifactBucket),
-    prefix: read(VARIABLES.prefix),
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
   };

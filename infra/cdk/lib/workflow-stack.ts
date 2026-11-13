@@ -25,7 +25,6 @@ import type { Profile } from "./network-stack.js";
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
 /** The S3 prefix sandbox tasks may read and write. Everything else in the bucket is control's. */
-export const SANDBOX_PREFIX = "sandbox/";
 
 /** Where tasks may write: the root filesystem is read-only. */
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
@@ -78,9 +77,11 @@ export interface WorkflowStackProps extends StackProps {
  * provider. The Step Functions workflow that runs them comes with NIC-811.
  *
  * - The control task holds the GitHub App credentials and the database, and never runs a model.
- * - A sandbox task holds one provider's credential and no GitHub token. Its role can only read
- *   and write under `SANDBOX_PREFIX` in the artifact bucket, and call Bedrock when the provider
- *   uses it. One task definition per provider means a task can only ever see its own credential.
+ * - A sandbox task holds one provider's credential and no GitHub token. Its role has no S3
+ *   access at all: one role is shared by every run, so it couldn't be limited to a run's own
+ *   files. The workflow (NIC-811) passes each task presigned URLs for its batch input and its
+ *   output instead. It can call Bedrock when the provider uses it. One task definition per
+ *   provider means a task can only ever see its own credential.
  *
  * Both run as a non-root user with a read-only root filesystem, all Linux capabilities dropped,
  * and writable volumes only at /work and /tmp. Networking is set when a task is started
@@ -136,8 +137,6 @@ export class WorkflowStack extends Stack {
         image: sandboxImage,
         retention,
         environment: {
-          ARTIFACT_BUCKET: props.artifactBucket.bucketName,
-          ARTIFACT_PREFIX: SANDBOX_PREFIX,
           LGTMOOSE_PROVIDER: provider.id,
           LGTMOOSE_HARNESS: provider.harness,
           LGTMOOSE_AUTH: provider.auth,
@@ -151,7 +150,6 @@ export class WorkflowStack extends Stack {
           ? {}
           : { secrets: { LGTMOOSE_PROVIDER_CREDENTIAL: EcsSecret.fromSecretsManager(secret) } }),
       });
-      this.grantSandboxStorage(definition, props.artifactBucket);
       if (provider.auth === "bedrock") this.grantBedrock(definition);
       sandboxes.set(provider.id, definition);
     }
@@ -233,18 +231,6 @@ export class WorkflowStack extends Stack {
     return container;
   }
 
-  /** Read and write under `SANDBOX_PREFIX` only: no listing, nothing else in the bucket. */
-  private grantSandboxStorage(definition: FargateTaskDefinition, bucket: IBucket): void {
-    definition.taskRole.addToPrincipalPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
-        resources: [bucket.arnForObjects(`${SANDBOX_PREFIX}*`)],
-      }),
-    );
-  }
-
-  /** Bedrock providers use the task role instead of a stored credential. */
   private grantBedrock(definition: FargateTaskDefinition): void {
     definition.taskRole.addToPrincipalPolicy(
       new PolicyStatement({

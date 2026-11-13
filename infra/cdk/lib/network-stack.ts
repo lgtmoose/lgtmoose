@@ -22,7 +22,6 @@ import {
   AwsCustomResourcePolicy,
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
-import { PrivateDnsNamespace } from "aws-cdk-lib/aws-servicediscovery";
 import type { Construct } from "constructs";
 
 export type Profile = "lean" | "standard";
@@ -36,15 +35,12 @@ export const PROXY_PORT = 3128;
 
 export const POSTGRES_PORT = 5432;
 
-/** Private DNS namespace for services inside the VPC (Cloud Map). */
-export const PRIVATE_NAMESPACE = "lgtmoose.internal";
-
 /**
- * The egress proxy's name. The proxy service (NIC-813) registers in the private namespace as
- * `proxy`, and sandbox tasks send model API traffic to `PROXY_URL`.
+ * Where sandbox tasks send model API traffic: the egress proxy's private DNS name. The proxy
+ * stack (NIC-813) owns the `lgtmoose.internal` Cloud Map namespace and registers the proxy in it
+ * as `egress-proxy`; keep this in step with its `PROXY_URL`.
  */
-export const PROXY_HOSTNAME = `proxy.${PRIVATE_NAMESPACE}`;
-export const PROXY_URL = `http://${PROXY_HOSTNAME}:${PROXY_PORT}`;
+export const PROXY_URL = `http://egress-proxy.lgtmoose.internal:${PROXY_PORT}`;
 
 /** AWS services sandbox tasks reach through interface endpoints instead of the internet. */
 const SANDBOX_INTERFACE_ENDPOINTS = {
@@ -77,11 +73,6 @@ export class NetworkStack extends Stack {
   readonly proxySecurityGroup: ISecurityGroup;
   /** Where sandbox tasks run. */
   readonly sandboxSubnets: SubnetSelection;
-  /**
-   * Cloud Map namespace `PRIVATE_NAMESPACE`. The egress proxy registers here as `proxy`, so
-   * sandbox tasks reach it at `PROXY_URL` wherever its tasks run.
-   */
-  readonly namespace: PrivateDnsNamespace;
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
@@ -165,12 +156,6 @@ export class NetworkStack extends Stack {
       Port.tcp(443),
       "S3 through the gateway endpoint",
     );
-
-    this.namespace = new PrivateDnsNamespace(this, "Namespace", {
-      name: PRIVATE_NAMESPACE,
-      vpc,
-      description: "LGTMoose services inside the VPC",
-    });
 
     new CfnOutput(this, "VpcId", { value: vpc.vpcId });
     new CfnOutput(this, "SandboxSecurityGroupId", {

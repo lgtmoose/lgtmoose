@@ -4,7 +4,6 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type LgtmooseStacks } from "./app.js";
 import { PROXY_URL } from "./network-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
-import { SANDBOX_PREFIX } from "./workflow-stack.js";
 
 type Resources = Record<string, { Type: string; Properties: Record<string, unknown> }>;
 
@@ -115,18 +114,13 @@ describe("WorkflowStack", () => {
     expect(JSON.stringify(template.toJSON())).not.toMatch(/Endpoint\.?Address/);
   });
 
-  it("gives sandbox task roles no secrets, only their S3 prefix, and Bedrock only when used", () => {
+  it("gives sandbox task roles no secrets, no S3, and Bedrock only when used", () => {
     for (const provider of ["claude", "bedrock"]) {
       const role = getAttId(taskDefinition(provider).TaskRoleArn);
       const granted = statements(role);
       expect(actions(granted).filter((a) => a.startsWith("secretsmanager:"))).toEqual([]);
-      const s3 = granted.filter((s) => actions([s]).some((a) => a.startsWith("s3:")));
-      expect(actions(s3).sort()).toEqual([
-        "s3:AbortMultipartUpload",
-        "s3:GetObject",
-        "s3:PutObject",
-      ]);
-      expect(JSON.stringify(s3.map((s) => s.Resource))).toContain(`/${SANDBOX_PREFIX}*`);
+      // One role serves every run, so S3 access couldn't be scoped to a run: presigned URLs.
+      expect(actions(granted).filter((a) => a.startsWith("s3:"))).toEqual([]);
       const bedrock = actions(granted).filter((a) => a.startsWith("bedrock:"));
       expect(bedrock.length > 0).toBe(provider === "bedrock");
     }
@@ -154,7 +148,7 @@ describe("WorkflowStack", () => {
     }[];
     const env = Object.fromEntries((container?.Environment ?? []).map((e) => [e.Name, e.Value]));
     expect(env.HTTPS_PROXY).toBe(PROXY_URL);
-    expect(env.ARTIFACT_PREFIX).toBe(SANDBOX_PREFIX);
+    expect(env.ARTIFACT_BUCKET).toBeUndefined();
     expect(JSON.stringify(env.NO_PROXY)).toContain("169.254.170.2");
     expect(JSON.stringify(env.NO_PROXY)).toContain("127.0.0.1");
     expect(JSON.stringify(env.NO_PROXY)).not.toContain("bedrock");
