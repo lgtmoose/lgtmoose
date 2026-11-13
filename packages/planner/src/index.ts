@@ -14,7 +14,12 @@ export {
   type SkipReason,
 } from "./classify.js";
 export { readHeaders } from "./headers.js";
-export { KNOWN_PACKAGE_HOSTS, lockfileNotes } from "./lockfile.js";
+export {
+  BINARY_LOCKFILE_NOTE,
+  KNOWN_PACKAGE_HOSTS,
+  lockfileNotes,
+  type LockfileNoteOptions,
+} from "./lockfile.js";
 export {
   DEFAULT_MAX_FILES,
   DEFAULT_MAX_LINES,

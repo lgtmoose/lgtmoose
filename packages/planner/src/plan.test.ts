@@ -1,5 +1,6 @@
 import type { FileDiff, Hunk } from "@lgtmoose/git";
 import { describe, expect, it } from "vitest";
+import { BINARY_LOCKFILE_NOTE } from "./lockfile.js";
 import {
   OTHER_TIER,
   TEST_TIER,
@@ -200,8 +201,19 @@ describe("planReview", () => {
       ],
     });
     expect(planReview([lock], noConfig).skipped[0]?.notes).toEqual([
-      "line 1: resolves from evil.example.com, not a known registry",
+      "1 package resolves from evil.example.com, not a known registry (first at line 1)",
     ]);
+    expect(
+      planReview([lock], { ...noConfig, registries: ["evil.example.com"] }).skipped[0]?.notes,
+    ).toBe(undefined);
+  });
+
+  it("notes a changed binary lockfile, which can't be scanned", () => {
+    const lockb = diff("bun.lockb", { binary: true, hunks: [] });
+    expect(planReview([lockb], noConfig).skipped[0]).toMatchObject({
+      reason: "binary",
+      notes: [BINARY_LOCKFILE_NOTE],
+    });
   });
 
   it("can't be padded past the bulk limit with maps, licences or other folders", () => {

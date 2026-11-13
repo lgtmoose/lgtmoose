@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
 import type { FileDiff } from "@lgtmoose/git";
 import {
+  DEFAULT_SKIP,
   TEST_GLOBS,
   globMatcher,
   skipClassifier,
@@ -9,7 +10,7 @@ import {
   type Skip,
   type SkipReason,
 } from "./classify.js";
-import { lockfileNotes } from "./lockfile.js";
+import { BINARY_LOCKFILE_NOTE, lockfileNotes } from "./lockfile.js";
 
 /** How closely to read a file. "move" and "mechanical" files only need a glance. */
 export type ReadingDepth = "full" | "move" | "mechanical";
@@ -240,12 +241,22 @@ function fingerprintOf(files: PlannedFile[], maxFiles: number, maxLines: number)
  */
 export function planReview(
   diff: readonly FileDiff[],
-  config: Pick<RepoConfig, "skip" | "tiers">,
+  config: Pick<RepoConfig, "skip" | "tiers"> & Partial<Pick<RepoConfig, "registries">>,
   options: PlanOptions = {},
 ): Plan {
   const maxFiles = positiveInteger("maxFiles", options.maxFiles ?? DEFAULT_MAX_FILES);
   const maxLines = positiveInteger("maxLines", options.maxLines ?? DEFAULT_MAX_LINES);
   const skipOf = skipClassifier(config.skip, options.headers);
+  const trustedHosts = config.registries ?? [];
+  // bun.lockb and the like: skipped as binary first, but still a lockfile change to mention.
+  const isLockfilePath = globMatcher(DEFAULT_SKIP.lockfile);
+  const notesFor = (file: FileDiff, skip: Skip): string[] => {
+    if (skip.reason === "lockfile") return lockfileNotes(file, { trustedHosts });
+    if (skip.reason === "binary" && isLockfilePath(file.path) !== undefined) {
+      return [BINARY_LOCKFILE_NOTE];
+    }
+    return [];
+  };
   const tierOf = tierClassifier(config.tiers);
 
   const skips = diff.map((file) => skipOf(file));
@@ -269,7 +280,7 @@ export function planReview(
     const newCode = isNewFolderCode(file, found);
     const skip = newCode && !isBulk(file) ? undefined : found;
     if (skip !== undefined) {
-      const notes = skip.reason === "lockfile" ? lockfileNotes(file) : [];
+      const notes = notesFor(file, skip);
       skipped.push({
         file,
         ...skip,
