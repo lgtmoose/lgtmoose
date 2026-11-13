@@ -17,8 +17,8 @@
     "format:check": "prettier --check . --cache",
     "synth": "turbo run synth",
     "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
-    "check": "pnpm format:check && pnpm lint && pnpm verify",
-    "verify": "turbo run typecheck test test:integration build smoke check-migrations synth"
+    "check": "turbo run format:check lint typecheck test test:integration build smoke check-migrations synth",
+    "db:test:start": "docker run -d --name lgtmoose-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 \"$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)\""
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

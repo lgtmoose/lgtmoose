@@ -32,9 +32,9 @@ jobs:
           key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
           restore-keys: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
       - name: Format
-        run: pnpm format:check
+        run: pnpm turbo run format:check
       - name: Lint
-        run: pnpm lint
+        run: pnpm turbo run lint
       - name: Migrations match the schema
         run: pnpm turbo run check-migrations
 
@@ -58,18 +58,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # Pinned, so a new Postgres or pgvector release is a deliberate change here rather than a
-      # surprise. PostgreSQL 18.6 with pgvector 0.8.7, matching Aurora's 18.6.
-      POSTGRES_IMAGE: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
       LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
       # Started in the background, so pulling and booting it overlaps with setup instead of
       # holding the job up the way a `services:` container does.
+      # The image is pinned in tools/test-postgres/Dockerfile, where Dependabot updates it.
       - name: Start Postgres
         run: |
+          image=$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)
           docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres \
-            "$POSTGRES_IMAGE" > /tmp/postgres.log 2>&1 &
+            "$image" > /tmp/postgres.log 2>&1 &
       - uses: ./.github/actions/setup
       - name: Wait for Postgres
         run: |

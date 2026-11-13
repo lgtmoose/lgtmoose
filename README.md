@@ -61,7 +61,7 @@ pnpm run check   # format, lint, typecheck, test, build, run the built CLI, cdk 
 The migration runner also has an integration test against a real Postgres with pgvector (`test:integration`). CI always runs it; locally it runs when `LGTMOOSE_TEST_DATABASE_URL` points at an admin connection:
 
 ```bash
-docker run -d --name lgtmoose-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 pgvector/pgvector:pg18
+pnpm db:test:start   # the same pinned image as CI, from tools/test-postgres/Dockerfile
 LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres pnpm turbo run test:integration
 ```
 

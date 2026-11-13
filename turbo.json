@@ -1,6 +1,19 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["tsconfig.base.json", ".nvmrc"],
   "tasks": {
+    "//#format:check": {
+      "inputs": ["**/*", "!**/node_modules/**", "!**/dist/**", "!**/cdk.out/**", "!.turbo/**"]
+    },
+    "//#lint": {
+      "inputs": [
+        "**/*.{js,mjs,cjs,ts,mts,cts,tsx}",
+        "eslint.config.js",
+        "!**/node_modules/**",
+        "!**/dist/**",
+        "!**/cdk.out/**"
+      ]
+    },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
