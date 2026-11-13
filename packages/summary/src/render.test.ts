@@ -125,6 +125,13 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).toMatchSnapshot();
   });
 
+  it("says the label is unchanged when the decision was skipped for an older commit", () => {
+    const text = renderSummary(
+      input({ decision: { event: "COMMENT", reasons: ["the head moved during the run"] } }),
+    );
+    expect(text).toContain("- **Label:** unchanged (the review is for an older commit)");
+  });
+
   it("is the same for the same data, with no hidden markers", () => {
     const text = renderSummary(input());
     expect(renderSummary(input())).toBe(text);

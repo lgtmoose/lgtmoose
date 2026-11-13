@@ -11,8 +11,11 @@ export type ReviewEvent = "APPROVE" | "COMMENT" | "REQUEST_CHANGES";
 
 export interface SummaryDecision {
   event: ReviewEvent;
-  /** The status label the PR should carry, from `labels` in .lgtmoose.yaml. */
-  label: string;
+  /**
+   * The status label the PR should carry, from `labels` in .lgtmoose.yaml. Leave out when the
+   * decision was skipped because the head moved during the run: labels are left alone then.
+   */
+  label?: string;
   /**
    * Why the decision is weaker than the findings alone would give, such as "the review didn't
    * finish" or "the head moved during the run". Shown as written: plain code text, not PR text.
@@ -176,7 +179,12 @@ function renderStatus(input: SummaryInput): string {
   // The outcome first: if anything below is ever cut, these lines survive.
   lines.push(`- **Decision:** ${EVENT_TEXT[input.decision.event]}`);
   lines.push(...bullets(input.decision.reasons ?? [], REASON_LIMIT));
-  lines.push(`- **Label:** ${inline(clip(input.decision.label, ITEM_LENGTH))}`);
+  const label = input.decision.label;
+  lines.push(
+    label === undefined
+      ? "- **Label:** unchanged (the review is for an older commit)"
+      : `- **Label:** ${inline(clip(label, ITEM_LENGTH))}`,
+  );
   const missing = input.missingLabels ?? [];
   if (missing.length > 0) {
     lines.push(
