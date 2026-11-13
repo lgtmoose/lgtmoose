@@ -88,6 +88,16 @@ exports[`reviewerOutputSchema > converts to JSON Schema for the harness 1`] = `
       "maxItems": 500,
       "type": "array",
     },
+    "notes": {
+      "description": "Short facts for the cross-file pass, one sentence each, at most 30: exports, env vars, secrets and config keys, required props and flows this batch adds, changes or relies on. Leave out when there are none.",
+      "items": {
+        "maxLength": 4000,
+        "minLength": 1,
+        "type": "string",
+      },
+      "maxItems": 200,
+      "type": "array",
+    },
   },
   "required": [
     "findings",
