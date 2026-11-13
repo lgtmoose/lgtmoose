@@ -94,6 +94,12 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  apps/control:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
   apps/gateway:
     dependencies:
       '@aws-sdk/client-secrets-manager':
@@ -127,6 +133,12 @@ importers:
       supertest:
         specifier: ^7.3.2
         version: 7.3.2
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  apps/sandbox:
+    devDependencies:
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

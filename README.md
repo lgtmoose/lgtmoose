@@ -43,6 +43,8 @@ One AWS account and region holds one install for now, because the secret and sta
 
 ```
 apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dry-run)
+apps/control/    control task: prepares batches and posts results; holds the GitHub App
+apps/sandbox/    sandbox task: runs a model on one batch; one model credential, no GitHub token
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
@@ -51,6 +53,7 @@ packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrappi
 packages/poster/  posts a run: one review, inline comments, check run, summary, labels
 packages/summary/ the PR summary comment and status label sync
 infra/cdk/       AWS CDK app
+infra/sandbox/   the sandbox image: pinned agent CLIs
 deploy/compose/  docker compose deployment for hosts other than AWS
 docs/            architecture and design notes
 ```

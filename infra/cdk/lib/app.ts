@@ -1,9 +1,10 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
 import { CDK_CONTEXT, STACK_NAMES, type DeployConfig } from "@lgtmoose/config";
 import { ApiStack } from "./api-stack.js";
-import { DataStack } from "./data-stack.js";
+import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
-import { NetworkStack } from "./network-stack.js";
+import { NetworkStack, PROXY_URL } from "./network-stack.js";
+import { WorkflowStack } from "./workflow-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
 
@@ -23,11 +24,12 @@ export interface LgtmooseStacks {
   network: NetworkStack;
   data: DataStack;
   api: ApiStack;
+  workflow: WorkflowStack;
 }
 
 /**
- * Builds the LGTMoose CDK app from a validated config. Stacks still to come:
- * Workflow (NIC-810), Dashboard (NIC-840).
+ * Builds the LGTMoose CDK app from a validated config. Stacks still to come: the egress proxy
+ * (NIC-813) and Dashboard (NIC-840).
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -56,5 +58,24 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
   // Code that may read the database deploys after the Data stack, so migrations finish first.
   api.addDependency(data);
 
-  return { app, meta, network, data, api };
+  const workflow = new WorkflowStack(app, STACK_NAMES.workflow, {
+    env,
+    profile: config.profile,
+    providers: config.providers,
+    vpc: network.vpc,
+    controlSubnets: { subnetGroupName: "app" },
+    controlSecurityGroup: network.controlSecurityGroup,
+    sandboxSubnets: network.sandboxSubnets,
+    sandboxSecurityGroup: network.sandboxSecurityGroup,
+    proxyUrl: PROXY_URL,
+    artifactBucket: data.artifactBucket,
+    databaseSecret: data.databaseSecret,
+    databaseEndpoint: data.databaseEndpoint,
+    databaseName: DATABASE_NAME,
+    githubAppSecret: data.githubAppSecret,
+    providerSecrets: data.providerSecrets,
+  });
+  workflow.addDependency(data);
+
+  return { app, meta, network, data, api, workflow };
 }

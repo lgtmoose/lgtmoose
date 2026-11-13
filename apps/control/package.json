@@ -1,0 +1,21 @@
+{
+  "name": "@lgtmoose/control",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Control task for the review workflow: prepares batches and posts results. Holds the GitHub App credentials; never runs a model.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
