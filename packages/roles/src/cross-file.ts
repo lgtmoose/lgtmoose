@@ -43,20 +43,26 @@ export const CROSS_FILE_LIMITS = {
 /**
  * Collects the reviewer's notes from each batch, in batch order, for `buildCrossFilePrompt`.
  * Failed batches and batches without notes are left out, and blank or repeated notes within a
- * batch are dropped. At most `CROSS_FILE_LIMITS.notes` notes are kept, from the first batches.
+ * batch are dropped. The schema's note limits are soft, so each note is cut to
+ * `FINDING_LIMITS.note` characters and each batch to `FINDING_LIMITS.notesPerRun` notes; at most
+ * `CROSS_FILE_LIMITS.notes` notes are kept in all, from the first batches.
  */
 export function collectBatchNotes(batches: readonly ReviewedBatch[]): BatchNotes[] {
   let room: number = CROSS_FILE_LIMITS.notes;
   const collected: BatchNotes[] = [];
   for (const batch of [...batches].sort((a, b) => a.index - b.index)) {
-    const notes = [...new Set((batch.output?.notes ?? []).map((note) => note.trim()))]
+    const notes = [...new Set((batch.output?.notes ?? []).map((note) => clipNote(note.trim())))]
       .filter((note) => note !== "")
-      .slice(0, room);
+      .slice(0, Math.min(room, FINDING_LIMITS.notesPerRun));
     if (notes.length === 0) continue;
     room -= notes.length;
     collected.push({ batch: batch.index, files: batch.files, notes });
   }
   return collected;
+}
+
+function clipNote(note: string): string {
+  return note.length <= FINDING_LIMITS.note ? note : `${note.slice(0, FINDING_LIMITS.note - 1)}…`;
 }
 
 /** A file the planner skipped, for the changed-files list. */

@@ -144,13 +144,13 @@ Return only a JSON object that matches this JSON Schema, with no other text:
       "description": "Every finding, or an empty list. At most 50: keep the most important."
     },
     "notes": {
-      "description": "Short facts for the cross-file pass, one per entry: exports, env vars, secrets and config keys, required props and flows this batch adds, changes or relies on. Leave out when there are none.",
-      "maxItems": 30,
+      "description": "Short facts for the cross-file pass, one sentence each, at most 30: exports, env vars, secrets and config keys, required props and flows this batch adds, changes or relies on. Leave out when there are none.",
+      "maxItems": 200,
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 500
+        "maxLength": 4000
       }
     }
   },

@@ -1,4 +1,4 @@
-import { crossFileOutputSchema, reviewerOutputSchema } from "@lgtmoose/core";
+import { FINDING_LIMITS, crossFileOutputSchema, reviewerOutputSchema } from "@lgtmoose/core";
 import { describe, expect, it } from "vitest";
 import {
   CROSS_FILE_LIMITS,
@@ -98,12 +98,21 @@ describe("collectBatchNotes", () => {
     ]);
   });
 
+  it("trims notes and batches to the soft limits", () => {
+    const notes = [
+      "x".repeat(FINDING_LIMITS.note + 50),
+      ...Array.from({ length: 40 }, (_, i) => `n${i}`),
+    ];
+    const [batch] = collectBatchNotes([{ index: 0, files: ["a.ts"], output: { notes } }]);
+    expect(batch?.notes).toHaveLength(FINDING_LIMITS.notesPerRun);
+    expect(batch?.notes[0]).toHaveLength(FINDING_LIMITS.note);
+  });
+
   it("caps the total number of notes", () => {
-    const notes = Array.from({ length: 200 }, (_, i) => `note ${i}`);
-    const collected = collectBatchNotes([
-      { index: 0, files: ["a.ts"], output: { notes } },
-      { index: 1, files: ["b.ts"], output: { notes } },
-    ]);
+    const notes = Array.from({ length: FINDING_LIMITS.notesPerRun }, (_, i) => `note ${i}`);
+    const collected = collectBatchNotes(
+      Array.from({ length: 20 }, (_, i) => ({ index: i, files: [`f${i}.ts`], output: { notes } })),
+    );
     expect(collected.flatMap((batch) => batch.notes)).toHaveLength(CROSS_FILE_LIMITS.notes);
   });
 });
@@ -115,6 +124,9 @@ describe("output schemas", () => {
       true,
     );
     expect(reviewerOutputSchema.safeParse({ findings: [], notes: [""] }).success).toBe(false);
+    // Over the soft limits still validates, so a long note can't fail the batch.
+    const long = { findings: [], notes: Array.from({ length: 40 }, () => "y".repeat(600)) };
+    expect(reviewerOutputSchema.safeParse(long).success).toBe(true);
   });
 
   it("takes only findings from the cross-file pass", () => {
