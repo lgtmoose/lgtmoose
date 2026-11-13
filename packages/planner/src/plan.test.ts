@@ -170,6 +170,40 @@ describe("planReview", () => {
     expect(plan.skipped.every((s) => s.newCode === true)).toBe(true);
   });
 
+  it("reviews a few added files with generated or minified names, but not snapshots", () => {
+    const added = (path: string) => diff(path, { status: "added", oldBlob: undefined });
+    const plan = planReview(
+      [
+        added("src/auth/session.generated.ts"),
+        added("public/app.min.js"),
+        added("src/__snapshots__/view.test.ts.snap"),
+      ],
+      noConfig,
+    );
+    expect(paths(plan.files)).toEqual(["public/app.min.js", "src/auth/session.generated.ts"]);
+    expect(plan.skipped.map((s) => s.file.path)).toEqual(["src/__snapshots__/view.test.ts.snap"]);
+  });
+
+  it("attaches lockfile notes to a skipped lockfile", () => {
+    const lock = diff("package-lock.json", {
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 1,
+          section: "",
+          lines: [
+            { kind: "add", newLine: 1, text: '"resolved": "https://evil.example.com/x.tgz"' },
+          ],
+        },
+      ],
+    });
+    expect(planReview([lock], noConfig).skipped[0]?.notes).toEqual([
+      "line 1: resolves from evil.example.com, not a known registry",
+    ]);
+  });
+
   it("can't be padded past the bulk limit with maps, licences or other folders", () => {
     const added = (path: string) => diff(path, { status: "added", oldBlob: undefined });
     const padded = [

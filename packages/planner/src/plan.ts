@@ -6,8 +6,10 @@ import {
   globMatcher,
   skipClassifier,
   type FileHeaders,
+  type Skip,
   type SkipReason,
 } from "./classify.js";
+import { lockfileNotes } from "./lockfile.js";
 
 /** How closely to read a file. "move" and "mechanical" files only need a glance. */
 export type ReadingDepth = "full" | "move" | "mechanical";
@@ -23,13 +25,24 @@ export const TEST_TIER = 9;
 export const DEFAULT_MAX_FILES = 10;
 
 /**
- * Fewer added files than this in one vendored or build-output folder are reviewed, not skipped.
+ * Fewer added files than this in one folder, skipped by a vendored, build-output, generated or
+ * minified path, are reviewed, not skipped.
  * Source maps and licence files don't count, so they can't pad a folder past the limit.
  */
 export const BULK_ADDED_FILES = 5;
 
-function isFolderSkip(reason: SkipReason | undefined): boolean {
-  return reason === "vendored" || reason === "build-output";
+/** Skip globs for files that don't run: an added snapshot is never hidden code. */
+const INERT_GLOBS = new Set(["**/__snapshots__/**", "**/*.snap"]);
+
+/**
+ * Whether a skip is by a path the PR controls and the file can hold code that runs: vendored
+ * and build folders, generated and minified file names. A file the PR adds this way could be
+ * hand-written code hidden from review, so a few of them are reviewed.
+ */
+function isCodePathSkip(skip: Skip | undefined): boolean {
+  if (skip === undefined || skip.glob === undefined) return false;
+  if (skip.reason === "generated" || skip.reason === "minified") return !INERT_GLOBS.has(skip.glob);
+  return skip.reason === "vendored" || skip.reason === "build-output";
 }
 
 /** Folder names the vendored and build-output globs skip. */
@@ -85,10 +98,15 @@ export interface SkippedFile {
   file: FileDiff;
   reason: SkipReason;
   /**
-   * Added by this PR to a vendored or build-output folder, and skipped only because the PR adds
-   * many files there. It's new code nobody reviewed; say so in the review summary.
+   * Added by this PR under a vendored, build, generated or minified path, and skipped only
+   * because the PR adds many such files in that folder. It's new code nobody reviewed; say so in the review summary.
    */
   newCode?: true;
+  /**
+   * For a lockfile: suspicious changes to put in the review summary, such as a package now
+   * resolved from an unknown host (see `lockfileNotes`). Missing when there are none.
+   */
+  notes?: string[];
   /** The glob that matched, for glob-based reasons. */
   glob?: string;
 }
@@ -235,12 +253,12 @@ export function planReview(
   // vendor/ or build/ could be hand-written code hidden there, so those are reviewed.
   const addedPerFolder = new Map<string, number>();
   for (const [i, file] of diff.entries()) {
-    if (file.status !== "added" || !isFolderSkip(skips[i]?.reason) || isFiller(file.path)) continue;
+    if (file.status !== "added" || !isCodePathSkip(skips[i]) || isFiller(file.path)) continue;
     const folder = skippedFolderOf(file.path);
     addedPerFolder.set(folder, (addedPerFolder.get(folder) ?? 0) + 1);
   }
-  const isNewFolderCode = (file: FileDiff, reason: SkipReason | undefined) =>
-    file.status === "added" && isFolderSkip(reason);
+  const isNewFolderCode = (file: FileDiff, skip: Skip | undefined) =>
+    file.status === "added" && isCodePathSkip(skip);
   const isBulk = (file: FileDiff) =>
     (addedPerFolder.get(skippedFolderOf(file.path)) ?? 0) >= BULK_ADDED_FILES;
 
@@ -248,10 +266,16 @@ export function planReview(
   const kept: Omit<PlannedFile, "index">[] = [];
   for (const [i, file] of diff.entries()) {
     const found = skips[i];
-    const newCode = isNewFolderCode(file, found?.reason);
+    const newCode = isNewFolderCode(file, found);
     const skip = newCode && !isBulk(file) ? undefined : found;
     if (skip !== undefined) {
-      skipped.push(newCode ? { file, ...skip, newCode: true } : { file, ...skip });
+      const notes = skip.reason === "lockfile" ? lockfileNotes(file) : [];
+      skipped.push({
+        file,
+        ...skip,
+        ...(newCode ? { newCode: true as const } : {}),
+        ...(notes.length > 0 ? { notes } : {}),
+      });
       continue;
     }
     kept.push({
