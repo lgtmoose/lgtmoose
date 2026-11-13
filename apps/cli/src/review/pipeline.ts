@@ -81,6 +81,11 @@ export interface ReviewReport {
   /** Findings past the per-batch limit, least severe first. */
   overLimit: number;
   decision: ReviewDecision;
+  /**
+   * Whether every batch was reviewed and nothing the planner flagged (new code it skipped,
+   * lockfile notes) is left for a person. False also holds approval.
+   */
+  complete: boolean;
   batches: BatchReport[];
   plan: { reviewed: number; skipped: number };
   /** The summary comment that would be posted. */
@@ -92,8 +97,8 @@ const COMMENT_LIMIT = 200;
 /** Longest comment body passed to the model as context. */
 const COMMENT_BODY_LIMIT = 4000;
 
-const HOLD_TEXT: Record<HoldReason, string> = {
-  incomplete: "the review didn't finish: some batches failed",
+/** Why a run held approval; `incomplete` is spelled out from the batches and the plan instead. */
+const HOLD_TEXT: Record<Exclude<HoldReason, "incomplete">, string> = {
   prompt_injection: "a prompt-injection attempt was flagged",
   approve_disabled: "approvals are turned off (gate.approve: false)",
 };
@@ -286,11 +291,23 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     const kept = new Set(deduped.kept.map((entry) => entry.finding));
     const open = [...inline, ...body].filter((finding) => kept.has(finding));
 
+    // What the planner flagged for a person: new code it skipped, and lockfile changes it
+    // couldn't review. No findings there doesn't mean nothing is wrong, so they hold approval.
+    const unreviewed = [
+      ...(plan.skipped.some((entry) => entry.newCode === true)
+        ? ["new code in vendored, build or generated paths wasn't reviewed"]
+        : []),
+      ...(plan.skipped.some((entry) => (entry.notes?.length ?? 0) > 0)
+        ? ["dependency changes in lockfiles need a person to check them"]
+        : []),
+    ];
+    const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
+
     const latest = await deps.github.pull(target);
     const decision = decide(
       open,
       {
-        complete: batches.every((batch) => batch.error === undefined),
+        complete: failedBatches === 0 && unreviewed.length === 0,
         // No prompt-injection detector yet: the prompt tells the model to report attempts as
         // security findings instead.
         injectionFlagged: false,
@@ -300,7 +317,9 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     );
     const reasons = [
       ...(decision.outcome === "skipped" ? ["the PR's head moved during the run"] : []),
-      ...decision.holds.map((hold) => HOLD_TEXT[hold]),
+      ...(failedBatches > 0 ? [`${count(failedBatches, "batch", "batches")} failed`] : []),
+      ...(decision.outcome === "skipped" ? [] : unreviewed),
+      ...decision.holds.flatMap((hold) => (hold === "incomplete" ? [] : [HOLD_TEXT[hold]])),
     ];
     const summary = renderSummary({
       headSha: pr.headSha,
@@ -334,6 +353,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
       ],
       overLimit,
       decision,
+      complete: failedBatches === 0 && unreviewed.length === 0,
       batches,
       plan: { reviewed: plan.files.length, skipped: plan.skipped.length },
       summary,

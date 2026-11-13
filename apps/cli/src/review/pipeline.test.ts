@@ -221,7 +221,24 @@ describe("runReview", () => {
     const report = await runReview(d, OPTIONS);
     expect(report.batches[0]?.error).toBe("timeout: The run timed out.");
     expect(report.decision).toMatchObject({ event: "COMMENT", holds: ["incomplete"] });
-    expect(report.summary).toContain("the review didn\\'t finish");
+    expect(report.summary).toContain("1 batch failed");
+    expect(report.complete).toBe(false);
+  });
+
+  it("holds approval when a lockfile change needs a person, though nothing was found", async () => {
+    await commit(
+      {
+        "package-lock.json": '{\n  "resolved": "https://evil.example.com/left-pad.tgz"\n}\n',
+      },
+      "lockfile",
+    );
+    headSha = await git(work, "rev-parse", "HEAD");
+    const { deps: d } = deps();
+    const report = await runReview(d, OPTIONS);
+    expect(report.complete).toBe(false);
+    expect(report.decision).toMatchObject({ event: "COMMENT", holds: ["incomplete"] });
+    expect(report.summary).toContain("dependency changes in lockfiles need a person");
+    expect(report.summary).toContain("evil\\.example\\.com");
   });
 
   it("skips the decision when the head moved during the run", async () => {

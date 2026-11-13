@@ -60,7 +60,7 @@ export function formatText(report: ReviewReport, transcriptDir: string): string 
   if (report.dropped.length > 0 || report.overLimit > 0) {
     out.push(
       "",
-      `Left out: ${duplicates} already raised, ${misplaced} on files outside their batch, ${report.overLimit} over the per-batch limit.`,
+      `Left out: ${duplicates} already raised, ${misplaced} not on a file their batch reviews, ${report.overLimit} over the per-batch limit.`,
     );
   }
   const failed = report.batches.filter((batch) => batch.error !== undefined);

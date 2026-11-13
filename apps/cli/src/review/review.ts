@@ -24,6 +24,12 @@ Options:
   --transcripts <dir>   Where to save run transcripts (default: a new temporary directory)
   --claude <path>       The claude binary (default: claude on PATH)
   -h, --help
+
+Exit codes: 0 when the review is complete, 2 when it isn't (a batch failed, or new code or a
+lockfile change was skipped and needs a person), 1 on errors.
+
+Behind an HTTPS proxy, set NODE_USE_ENV_PROXY=1 so the GitHub API calls use HTTPS_PROXY too
+(git and Claude Code already do).
 `;
 
 /** What the command needs to build its I/O: the parsed flags. */
@@ -146,7 +152,7 @@ export async function runReviewCommand(
       runId: randomUUID(),
     });
     return {
-      exitCode: 0,
+      exitCode: report.complete ? 0 : 2,
       stdout: flags.json ? formatJson(report, transcriptDir) : formatText(report, transcriptDir),
       stderr: "",
     };
