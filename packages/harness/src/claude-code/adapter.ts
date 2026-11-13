@@ -293,8 +293,8 @@ export function claudeArgs(options: ClaudeArgsOptions): string[] {
     "--output-format",
     "stream-json",
     "--verbose",
-    "--model",
-    options.model,
+    // No model (a fallback chain with no model for the tier): Claude Code's own default.
+    ...(options.model.trim() === "" ? [] : ["--model", options.model]),
     // Only managed settings and --settings load; file tools stay inside the checkout.
     "--restricted",
     "--tools",

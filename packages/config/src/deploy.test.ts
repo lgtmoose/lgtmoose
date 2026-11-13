@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { ConfigError } from "./errors.js";
-import { defineConfig, parseDeployConfig, resolveRoles, type DeployConfigInput } from "./deploy.js";
+import {
+  defineConfig,
+  modelFor,
+  parseDeployConfig,
+  providerChain,
+  resolveRoles,
+  type DeployConfigInput,
+} from "./deploy.js";
 
 const minimal = {
   allowedOrgs: ["lgtmoose"],
@@ -118,5 +125,55 @@ describe("resolveRoles", () => {
     expect(roles.verifier.id).toBe("chatgpt");
     expect(roles.reviewer.id).toBe("claude");
     expect(roles.ticketExtractor.id).toBe("claude");
+  });
+});
+
+describe("modelFor", () => {
+  it("uses the provider's model for a tier, else the harness default", () => {
+    const config = parseDeployConfig({
+      ...minimal,
+      providers: [
+        {
+          id: "claude",
+          harness: "claude-code",
+          auth: "bedrock",
+          models: { deep: "claude-opus-5-5" },
+        },
+        { id: "chatgpt", harness: "codex", auth: "api-key" },
+      ],
+    });
+    const [claude, chatgpt] = config.providers;
+    expect(claude && modelFor(claude, "deep")).toBe("claude-opus-5-5");
+    expect(claude && modelFor(claude, "fast")).toBe("haiku");
+    expect(claude && modelFor(claude, "standard")).toBe("sonnet");
+    // Codex picks its own default model and maps the tier to a reasoning effort.
+    expect(chatgpt && modelFor(chatgpt, "deep")).toBeUndefined();
+  });
+
+  it("refuses a model name with spaces or quotes", () => {
+    const issues = issuesOf({
+      ...minimal,
+      providers: [
+        { id: "claude", harness: "claude-code", auth: "bedrock", models: { fast: 'x" --y' } },
+      ],
+    });
+    expect(issues.map((issue) => issue.path)).toContain("providers[0].models.fast");
+  });
+});
+
+describe("providerChain", () => {
+  it("starts on the role's provider and falls back to the others in order", () => {
+    const config = parseDeployConfig({
+      ...minimal,
+      providers: [
+        ...minimal.providers,
+        { id: "chatgpt", harness: "codex", auth: "api-key" },
+        { id: "bedrock2", harness: "claude-code", auth: "bedrock" },
+      ],
+      roles: { verifier: "chatgpt" },
+    });
+    const ids = (role: "verifier" | "reviewer") => providerChain(config, role).map((p) => p.id);
+    expect(ids("verifier")).toEqual(["chatgpt", "claude", "bedrock2"]);
+    expect(ids("reviewer")).toEqual(["claude", "chatgpt", "bedrock2"]);
   });
 });

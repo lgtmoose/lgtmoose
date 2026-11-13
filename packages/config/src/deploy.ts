@@ -30,7 +30,29 @@ export const ROLES = [
 ] as const;
 export type Role = (typeof ROLES)[number];
 
-const TIERS = ["fast", "standard", "deep"] as const;
+/** Model tiers: cheap and quick, the default, and the strongest. */
+export const TIERS = ["fast", "standard", "deep"] as const;
+export type Tier = (typeof TIERS)[number];
+
+/** A model name or alias as the CLIs take it, e.g. `sonnet`, `claude-opus-5-5`, `gpt-5-codex`. */
+const modelName = z
+  .string()
+  .regex(/^[\w.:@/[\]-]{1,128}$/, "use a model name or alias, without spaces or quotes");
+
+/**
+ * Models per tier when a provider's `models` leaves a tier out. Claude Code and the Agent SDK
+ * take aliases that follow the newest model of each family, also on Bedrock and Vertex. Codex
+ * and Cursor are left to their CLI's own default model: Codex maps the tier to a reasoning
+ * effort instead (see the harness).
+ */
+export const DEFAULT_TIER_MODELS: Readonly<
+  Record<Harness, Readonly<Partial<Record<Tier, string>>>>
+> = {
+  "claude-code": { fast: "haiku", standard: "sonnet", deep: "opus" },
+  "agent-sdk": { fast: "haiku", standard: "sonnet", deep: "opus" },
+  codex: {},
+  "cursor-agent": {},
+};
 
 const providerSchema = z
   .object({
@@ -39,7 +61,8 @@ const providerSchema = z
       .regex(/^[a-z][a-z0-9-]{0,31}$/, "use lowercase letters, digits and hyphens (max 32)"),
     harness: z.enum(HARNESSES),
     auth: z.enum(AUTH_METHODS),
-    models: z.partialRecord(z.enum(TIERS), z.string().min(1)).optional(),
+    /** Models per tier, overriding `DEFAULT_TIER_MODELS` for this provider's harness. */
+    models: z.partialRecord(z.enum(TIERS), modelName).optional(),
   })
   .strict()
   .superRefine((provider, ctx) => {
@@ -70,7 +93,15 @@ export const deployConfigSchema = z
     allowedOrgs: z
       .array(z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, "use a GitHub org or user"))
       .min(1, "list at least one GitHub org or user"),
+    /**
+     * Model providers, in fallback order: when a run hits a provider's rate or plan limit, it
+     * moves to the next one.
+     */
     providers: z.array(providerSchema).min(1, "configure at least one model provider"),
+    /**
+     * Which provider each role starts on. The rest of `providers` follow in order as fallbacks.
+     * A role left out starts on the first provider.
+     */
     roles: z.partialRecord(z.enum(ROLES), z.string()).default({}),
     maxConcurrency: z.number().int().min(1).max(64).default(4),
     /**
@@ -143,4 +174,18 @@ export function resolveRoles(config: DeployConfig): Record<Role, ProviderConfig>
       return [role, (id === undefined ? undefined : byId.get(id)) ?? first];
     }),
   ) as Record<Role, ProviderConfig>;
+}
+
+/** The model a provider uses for a tier: its own `models`, else the harness default. */
+export function modelFor(provider: ProviderConfig, tier: Tier): string | undefined {
+  return provider.models?.[tier] ?? DEFAULT_TIER_MODELS[provider.harness][tier];
+}
+
+/**
+ * The providers a role tries, in order: the one `roles` assigns (or the first provider), then
+ * every other provider in config order, as fallbacks for rate and plan limits.
+ */
+export function providerChain(config: DeployConfig, role: Role): ProviderConfig[] {
+  const first = resolveRoles(config)[role];
+  return [first, ...config.providers.filter((provider) => provider.id !== first.id)];
 }

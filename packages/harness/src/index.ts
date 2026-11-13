@@ -13,6 +13,19 @@ export {
   type ModelTier,
 } from "./harness.js";
 export {
+  DEFAULT_COOLDOWN_MS,
+  FallbackHarness,
+  MemoryCooldownStore,
+  summarizeUsage,
+  type ChainProvider,
+  type CooldownReason,
+  type CooldownStore,
+  type FallbackHarnessOptions,
+  type FallbackResult,
+  type ProviderAttempt,
+  type ProviderUsageSummary,
+} from "./fallback.js";
+export {
   MemoryTranscriptStore,
   S3TranscriptStore,
   transcriptKey,

@@ -1,11 +1,15 @@
 export { ConfigError, type ConfigIssue } from "./errors.js";
 export {
+  DEFAULT_TIER_MODELS,
   HARNESS_AUTH,
   PLAN_AUTH_METHODS,
   ROLES,
+  TIERS,
   defineConfig,
   deployConfigSchema,
+  modelFor,
   parseDeployConfig,
+  providerChain,
   resolveRoles,
   type AuthMethod,
   type DeployConfig,
@@ -13,6 +17,7 @@ export {
   type Harness,
   type ProviderConfig,
   type Role,
+  type Tier,
 } from "./deploy.js";
 export {
   DEFAULT_CONVENTIONS,

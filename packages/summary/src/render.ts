@@ -57,6 +57,22 @@ export interface SummaryInput {
   findingsOverLimit?: number;
   /** Status labels the repo doesn't have (from `syncStatusLabel`), so they couldn't be set. */
   missingLabels?: readonly string[];
+  /** Model usage per provider for this run (`summarizeUsage` in @lgtmoose/harness). */
+  usage?: readonly ProviderUsage[];
+}
+
+/** One provider's usage over a run, for the footer. */
+export interface ProviderUsage {
+  providerId: string;
+  /** Runs that produced output. */
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  /** Rate limits, used-up plans and rejected credentials. */
+  limitHits: number;
+  /** Times a run moved past this provider to the next one. */
+  fallbacks: number;
 }
 
 export interface RenderOptions {
@@ -380,6 +396,35 @@ function reviewColumn(plan: SummaryInput["plan"]): Map<string, string> {
   return review;
 }
 
+/** Most providers listed in the usage footer; a deploy config rarely has more. */
+const USAGE_LIMIT = 10;
+
+/** `12.3k`, `1.2M`: token counts short enough for a footer line. */
+function compact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${Math.round(n)}`;
+}
+
+/**
+ * The footer: per provider, tokens in and out, cost when there was one, and limit hits and
+ * fallbacks when there were any. Provider ids come from the deploy config, but are escaped all
+ * the same.
+ */
+function renderUsage(usage: readonly ProviderUsage[]): string | undefined {
+  if (usage.length === 0) return undefined;
+  const parts = usage.slice(0, USAGE_LIMIT).map((entry) => {
+    const details = [`${compact(entry.inputTokens)} in, ${compact(entry.outputTokens)} out`];
+    if (entry.costUsd > 0) details.push(`$${entry.costUsd.toFixed(2)}`);
+    if (entry.limitHits > 0) details.push(count(entry.limitHits, "limit hit"));
+    if (entry.fallbacks > 0) details.push(count(entry.fallbacks, "fallback"));
+    return `${inline(clip(entry.providerId, 50))} (${details.join(", ")})`;
+  });
+  if (usage.length > USAGE_LIMIT) parts.push(`${usage.length - USAGE_LIMIT} more`);
+  // Plain Markdown, not <sub>: inside HTML, backslash escapes may not apply.
+  return `_Model usage: ${parts.join(" · ")}_`;
+}
+
 function renderAt(
   input: SummaryInput,
   ctx: Context,
@@ -398,6 +443,8 @@ function renderAt(
   const findings = renderFindings(input.findings, detail.findingRows);
   if (findings !== undefined) sections.push(findings);
   if (input.tickets !== undefined) sections.push(renderTickets(input.tickets));
+  const usage = renderUsage(input.usage ?? []);
+  if (usage !== undefined) sections.push(usage);
   if (cut.length > 0) {
     sections.push(`_Left out to stay under GitHub's comment size limit: ${cut.join(", ")}._`);
   }

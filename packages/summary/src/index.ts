@@ -6,6 +6,7 @@ export {
   GITHUB_COMMENT_LIMIT,
   GROUP_FILES_OVER,
   renderSummary,
+  type ProviderUsage,
   type RenderOptions,
   type ReviewEvent,
   type SummaryDecision,
