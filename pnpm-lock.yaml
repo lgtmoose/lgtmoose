@@ -158,6 +158,10 @@ importers:
         version: 7.0.2
 
   packages/core:
+    dependencies:
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -189,6 +193,25 @@ importers:
         version: 7.0.2
 
   packages/git:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/roles:
+    dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'

@@ -1,0 +1,93 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`reviewerOutputSchema > converts to JSON Schema for the harness 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "description": "Every finding, or an empty list.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "What is wrong, why it matters and how to fix it, in plain, short sentences.",
+            "minLength": 1,
+            "type": "string",
+          },
+          "evidence": {
+            "description": "The text of the diff line or lines the finding is about, copied exactly.",
+            "minLength": 1,
+            "type": "string",
+          },
+          "line": {
+            "description": "The line the finding is about, numbered as in the diff. For a range, its last line.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer",
+          },
+          "path": {
+            "description": "The file's path at head, exactly as the diff shows it.",
+            "minLength": 1,
+            "type": "string",
+          },
+          "rule_category": {
+            "description": "The rule category this finding falls under, such as correctness or tests. Use a category id from the rule packs, or convention for a rule from the repo's convention files.",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "type": "string",
+          },
+          "severity": {
+            "description": "blocking, should_fix or nit, as the instructions define them.",
+            "enum": [
+              "blocking",
+              "should_fix",
+              "nit",
+            ],
+            "type": "string",
+          },
+          "side": {
+            "description": "RIGHT for a line of the new version (R lines), LEFT for a deleted line (L lines).",
+            "enum": [
+              "LEFT",
+              "RIGHT",
+            ],
+            "type": "string",
+          },
+          "start_line": {
+            "description": "The first line of a range, on the same side. Leave it out for a single line.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer",
+          },
+          "suggestion": {
+            "description": "Replacement code for the lines from start_line (or line) to line, when a small fix is clear. Code only, no fences.",
+            "type": "string",
+          },
+          "title": {
+            "description": "One short sentence that names the problem.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string",
+          },
+        },
+        "required": [
+          "rule_category",
+          "severity",
+          "path",
+          "line",
+          "side",
+          "title",
+          "body",
+          "evidence",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+  },
+  "required": [
+    "findings",
+  ],
+  "type": "object",
+}
+`;

@@ -1,0 +1,33 @@
+{
+  "name": "@lgtmoose/roles",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agent roles for LGTMoose: prompt templates, rule packs and the untrusted-text wrapping they share.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "rulepacks"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lgtmoose/config": "workspace:*",
+    "@lgtmoose/core": "workspace:*",
+    "@lgtmoose/git": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
