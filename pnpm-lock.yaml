@@ -188,6 +188,12 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/git:
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
 packages:
 
   '@aws-cdk/asset-awscli-v1@2.2.292':

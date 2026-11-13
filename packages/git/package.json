@@ -1,0 +1,26 @@
+{
+  "name": "@lgtmoose/git",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local checkouts for reviews: clone at a SHA, diff a PR or what changed since the last review, and map lines to review-comment positions.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
