@@ -1,10 +1,11 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
 import { CDK_CONTEXT, STACK_NAMES, egressAllowlist, type DeployConfig } from "@lgtmoose/config";
 import { ApiStack } from "./api-stack.js";
-import { DataStack } from "./data-stack.js";
+import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
 import { ProxyStack } from "./proxy-stack.js";
+import { WorkflowStack } from "./workflow-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
 
@@ -25,12 +26,11 @@ export interface LgtmooseStacks {
   data: DataStack;
   api: ApiStack;
   proxy: ProxyStack;
+  workflow: WorkflowStack;
 }
 
 /**
- * Builds the LGTMoose CDK app from a validated config. Stacks still to come:
- * Workflow (NIC-810), which points sandbox tasks' HTTPS_PROXY at `proxy.proxyUrl`, and
- * Dashboard (NIC-840).
+ * Builds the LGTMoose CDK app from a validated config. Stack still to come: Dashboard (NIC-840).
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -67,5 +67,25 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowedHosts: egressAllowlist(config),
   });
 
-  return { app, meta, network, data, api, proxy };
+  const workflow = new WorkflowStack(app, STACK_NAMES.workflow, {
+    env,
+    profile: config.profile,
+    providers: config.providers,
+    vpc: network.vpc,
+    controlSubnets: { subnetGroupName: "app" },
+    controlSecurityGroup: network.controlSecurityGroup,
+    sandboxSubnets: network.sandboxSubnets,
+    sandboxSecurityGroup: network.sandboxSecurityGroup,
+    proxyUrl: proxy.proxyUrl,
+    artifactBucket: data.artifactBucket,
+    databaseSecret: data.databaseSecret,
+    databaseName: DATABASE_NAME,
+    githubAppSecret: data.githubAppSecret,
+    providerSecrets: data.providerSecrets,
+  });
+  workflow.addDependency(data);
+  // Sandbox tasks can only reach model APIs once the proxy runs.
+  workflow.addDependency(proxy);
+
+  return { app, meta, network, data, api, proxy, workflow };
 }

@@ -20,6 +20,8 @@ pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
 pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
 
+`deploy` builds the control and sandbox container images for ARM64, so it needs Docker running: Docker Desktop, or on x86 Linux, Docker with QEMU emulation for arm64 (for example `docker run --privileged --rm tonistiigi/binfmt --install arm64`).
+
 `deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`. Administrator access is simplest. A scoped role needs to assume the CDK bootstrap roles and create the bootstrap stack, plus the calls the CLI makes itself:
 
 - `sts:GetCallerIdentity`
@@ -43,6 +45,8 @@ One AWS account and region holds one install for now, because the secret and sta
 
 ```
 apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dry-run)
+apps/control/    control task: prepares batches and posts results; holds the GitHub App
+apps/sandbox/    sandbox task: runs a model on one batch; one model credential, no GitHub token
 apps/egress-proxy/ the sandbox's only way out: CONNECT proxy with an exact-host allowlist
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
@@ -54,6 +58,7 @@ packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrappi
 packages/poster/  posts a run: one review, inline comments, check run, summary, labels
 packages/summary/ the PR summary comment and status label sync
 infra/cdk/       AWS CDK app
+infra/sandbox/   the sandbox image: pinned agent CLIs
 deploy/compose/  docker compose deployment for hosts other than AWS
 docs/            architecture and design notes
 ```

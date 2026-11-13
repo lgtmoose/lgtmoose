@@ -8,6 +8,7 @@ export const STACK_NAMES = {
   data: "Lgtmoose-Data",
   api: "Lgtmoose-Api",
   proxy: "Lgtmoose-Proxy",
+  workflow: "Lgtmoose-Workflow",
 } as const;
 
 /** Stack outputs the CLI reads from `cdk deploy --outputs-file`. */
@@ -19,6 +20,17 @@ export const STACK_OUTPUTS = {
     artifactBucketName: "ArtifactBucketName",
     databaseSecretArn: "DatabaseSecretArn",
     databaseIdentifier: "DatabaseIdentifier",
+  },
+  /** What the review workflow (NIC-811) needs to run tasks. */
+  workflow: {
+    clusterArn: "ClusterArn",
+    controlTaskDefinitionArn: "ControlTaskDefinitionArn",
+    controlSubnetIds: "ControlSubnetIds",
+    controlSecurityGroupId: "ControlSecurityGroupId",
+    sandboxSubnetIds: "SandboxSubnetIds",
+    sandboxSecurityGroupId: "SandboxSecurityGroupId",
+    /** JSON: provider id → that provider's sandbox task definition ARN. */
+    sandboxTaskDefinitionArns: "SandboxTaskDefinitionArns",
   },
 } as const;
 

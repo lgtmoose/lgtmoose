@@ -1,0 +1,21 @@
+{
+  "name": "@lgtmoose/sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Sandbox task for the review workflow: runs a model on one batch. Holds one model credential and no GitHub token.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,14 @@
+# Build context for the control and sandbox images (the repository root). Each image installs and
+# builds what it needs, so local dependencies, build output and git data stay out.
+**/node_modules
+**/dist
+**/cdk.out
+**/.turbo
+**/coverage
+.git
+.claude
+.migrations-check
+*.log
+.env
+.env.*
+lgtmoose.config.ts

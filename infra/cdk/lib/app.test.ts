@@ -33,6 +33,9 @@ describe("buildApp", () => {
     expect(outputs(assembly.getStackByName(STACK_NAMES.data))).toEqual(
       expect.arrayContaining(Object.values(STACK_OUTPUTS.data)),
     );
+    expect(outputs(assembly.getStackByName(STACK_NAMES.workflow))).toEqual(
+      expect.arrayContaining(Object.values(STACK_OUTPUTS.workflow)),
+    );
   });
 
   it("synthesizes every stack in the configured region", () => {
@@ -42,12 +45,14 @@ describe("buildApp", () => {
       "Lgtmoose-Meta",
       "Lgtmoose-Network",
       "Lgtmoose-Proxy",
+      "Lgtmoose-Workflow",
     ]);
     expect(stacks.network.region).toBe("eu-west-2");
   });
 
-  it("deploys the Api stack after the Data stack, so migrations run first", () => {
+  it("deploys the Api and Workflow stacks after the Data stack, so migrations run first", () => {
     expect(stacks.api.dependencies).toContain(stacks.data);
+    expect(stacks.workflow.dependencies).toContain(stacks.data);
   });
 
   it("passes the config's allowed orgs to the gateway", () => {
