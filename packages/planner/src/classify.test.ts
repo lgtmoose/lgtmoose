@@ -165,7 +165,7 @@ describe("skipClassifier with include", () => {
 
   it("reviews included files that a default skip would skip", () => {
     const skip = skipClassifier([]);
-    const include = skipClassifier([], undefined, ["build/**", "src/**/*.generated.ts", "x.go"]);
+    const include = skipClassifier([], { include: ["build/**", "src/**/*.generated.ts", "x.go"] });
     for (const path of ["build/compile.ts", "src/api/client.generated.ts"]) {
       expect(skip(diff(path))).toBeDefined();
       expect(include(diff(path))).toBeUndefined();
@@ -176,9 +176,11 @@ describe("skipClassifier with include", () => {
   });
 
   it("lets the repo's skip globs win over include, and still skips binaries", () => {
-    const classify = skipClassifier(["build/old/**"], undefined, ["build/**"]);
-    expect(classify(diff("build/old/a.ts"))).toEqual({ reason: "build-output", glob: "build/**" });
-    expect(skipClassifier(["docs/**"], undefined, ["docs/**"])(diff("docs/a.md"))).toEqual({
+    const classify = skipClassifier(["build/old/**"], { include: ["build/**"] });
+    // The repo's own skip glob is the reason, not the default an include had turned off.
+    expect(classify(diff("build/old/a.ts"))).toEqual({ reason: "config", glob: "build/old/**" });
+    expect(classify(diff("build/new/a.ts"))).toBeUndefined();
+    expect(skipClassifier(["docs/**"], { include: ["docs/**"] })(diff("docs/a.md"))).toEqual({
       reason: "config",
       glob: "docs/**",
     });
@@ -190,7 +192,7 @@ describe("skipClassifier with include", () => {
   });
 
   it("reviews a file renamed out of an included folder into a skipped one", () => {
-    const classify = skipClassifier([], undefined, ["build/**"]);
+    const classify = skipClassifier([], { include: ["build/**"] });
     const moved = diff("vendor/compile.ts", { status: "renamed", oldPath: "build/compile.ts" });
     expect(classify(moved)).toBeUndefined();
     const within = diff("build/b.ts", { status: "renamed", oldPath: "vendor/b.ts" });
@@ -228,7 +230,7 @@ describe("isMarkedGenerated", () => {
       ["b".repeat(40), `${MARKER}\npackage api`],
     ]);
     expect(isMarkedGenerated(file, headers)).toBe(true);
-    expect(skipClassifier([], headers)(file)).toEqual({ reason: "generated" });
+    expect(skipClassifier([], { headers })(file)).toEqual({ reason: "generated" });
   });
 
   it("refuses when only the head header has the marker", () => {

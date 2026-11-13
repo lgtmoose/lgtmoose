@@ -193,8 +193,9 @@ export interface Skip {
  * Builds the skip check for a repo's `skip` and `include` globs on top of the defaults. Checks
  * run in this order: binary, the repo's `skip` globs, the repo's `include` globs (which turn off
  * every default skip, the generated-header check included), the default skip globs, then the
- * generated header. When a `skip` glob and a default both match, the default's reason is kept
- * (so a lockfile still gets its notes).
+ * generated header. When a `skip` glob and a default both match a file that isn't included, the
+ * default's reason is kept (so a lockfile still gets its notes); for an included file the
+ * repo's own `skip` glob is the reason.
  *
  * `configSkip` and `include` must come from the base commit's `.lgtmoose.yaml`, not the PR's:
  * otherwise a PR could add `skip: ["**"]` and hide itself. A renamed file is skipped by glob
@@ -202,8 +203,10 @@ export interface Skip {
  */
 export function skipClassifier(
   configSkip: readonly string[],
-  headers?: FileHeaders,
-  include: readonly string[] = [],
+  {
+    headers,
+    include = [],
+  }: { headers?: FileHeaders | undefined; include?: readonly string[] | undefined } = {},
 ): (file: FileDiff) => Skip | undefined {
   const defaults = Object.entries(DEFAULT_SKIP).map(([reason, globs]) => ({
     reason: reason as SkipReason,
@@ -221,8 +224,12 @@ export function skipClassifier(
   /** The path's skip by glob, or "include" when an include glob turns the defaults off. */
   const pathSkip = (path: string): Skip | "include" | undefined => {
     const own = configured(path);
-    if (own !== undefined) return defaultSkip(path) ?? { reason: "config", glob: own };
-    if (isIncluded(path)) return "include";
+    const included = isIncluded(path);
+    if (own !== undefined) {
+      const ownSkip: Skip = { reason: "config", glob: own };
+      return included ? ownSkip : (defaultSkip(path) ?? ownSkip);
+    }
+    if (included) return "include";
     return defaultSkip(path);
   };
   return (file) => {

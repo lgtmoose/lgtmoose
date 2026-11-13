@@ -59,7 +59,7 @@ export async function readHeaders(
   config: Partial<Pick<RepoConfig, "skip" | "include">> = {},
 ): Promise<FileHeaders> {
   const include = config.include ?? [];
-  const skipByGlob = skipClassifier(config.skip ?? [], undefined, include);
+  const skipByGlob = skipClassifier(config.skip ?? [], { include });
   const isIncluded = includeMatcher(include);
   const candidates = files.filter(
     (file) =>

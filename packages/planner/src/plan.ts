@@ -246,7 +246,10 @@ export function planReview(
 ): Plan {
   const maxFiles = positiveInteger("maxFiles", options.maxFiles ?? DEFAULT_MAX_FILES);
   const maxLines = positiveInteger("maxLines", options.maxLines ?? DEFAULT_MAX_LINES);
-  const skipOf = skipClassifier(config.skip, options.headers, config.include ?? []);
+  const skipOf = skipClassifier(config.skip, {
+    headers: options.headers,
+    include: config.include,
+  });
   const trustedHosts = config.registries ?? [];
   // bun.lockb and the like: skipped as binary first, but still a lockfile change to mention.
   const isLockfilePath = globMatcher(DEFAULT_SKIP.lockfile);
