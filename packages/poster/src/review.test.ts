@@ -82,7 +82,7 @@ describe("buildReview", () => {
       nitCap: 10,
     });
     expect(review.body.length).toBeLessThanOrEqual(65_536);
-    expect(review.body).toMatch(/…and \d+ more findings that didn't fit here/);
+    expect(review.body).toMatch(/…and \d+ more findings that didn't fit in this review/);
   });
 
   it("keeps the intro when the retry rebuilds the body", () => {

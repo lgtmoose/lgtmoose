@@ -107,11 +107,11 @@ export function reviewBody(
       items.push(item);
       length += item.length + 2;
     }
-    parts.push(["**Findings outside the diff**", "", ...items].join("\n"));
+    parts.push(["**Findings not shown inline**", "", ...items].join("\n"));
     const more = sorted.length - items.length;
     if (more > 0) {
       parts.push(
-        `…and ${more} more ${more === 1 ? "finding" : "findings"} that didn't fit here; the check run's annotations list them.`,
+        `…and ${more} more ${more === 1 ? "finding" : "findings"} that didn't fit in this review.`,
       );
     }
   }
