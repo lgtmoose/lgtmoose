@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import type { DeployDeps } from "./deploy/deploy.js";
 import type { SetupDeps } from "./setup/setup.js";
 
 export const VERSION = "0.0.0";
@@ -7,8 +8,8 @@ export const VERSION = "0.0.0";
 export const COMMANDS = {
   setup: "Create the GitHub App and write lgtmoose.config.ts",
   auth: "Connect a model provider: claude, codex, cursor, bedrock, api-key (NIC-824)",
-  deploy: "Deploy every CDK stack and point the App's webhook at it (NIC-803)",
-  destroy: "Remove the stacks; keeps data unless --purge (NIC-803)",
+  deploy: "Deploy every CDK stack and point the App's webhook at it",
+  destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR locally, e.g. review owner/repo#123 --dry-run (NIC-809)",
 } as const;
 
@@ -31,6 +32,8 @@ export interface RunResult {
 export interface RunOptions {
   /** Builds setup's I/O. Tests pass fakes; by default it's AWS, GitHub and a real terminal. */
   setupDeps?: () => Promise<SetupDeps>;
+  /** Builds deploy and destroy's I/O, the same way. */
+  deployDeps?: () => Promise<DeployDeps>;
 }
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
@@ -41,6 +44,12 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     const getDeps =
       options.setupDeps ?? (async () => (await import("./setup/deps.js")).defaultSetupDeps());
     return runSetup(argv.slice(1), getDeps);
+  }
+  if (argv[0] === "deploy" || argv[0] === "destroy") {
+    const { runDeploy, runDestroy } = await import("./deploy/deploy.js");
+    const getDeps =
+      options.deployDeps ?? (async () => (await import("./deploy/deps.js")).defaultDeployDeps());
+    return (argv[0] === "deploy" ? runDeploy : runDestroy)(argv.slice(1), getDeps);
   }
 
   const { values, positionals } = parseArgs({

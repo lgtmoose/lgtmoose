@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { parseDeployConfig, SECRET_NAMES } from "@lgtmoose/config";
+import { SECRET_NAMES } from "@lgtmoose/config";
+import { loadDeployConfig } from "../paths.js";
 import { newState, startCallbackServer, DEFAULT_TIMEOUT_MS } from "./callback-server.js";
 import { renderConfigFile } from "./config-file.js";
 import type { CreatedApp, GitHubApi } from "./github.js";
@@ -15,7 +16,7 @@ import { isPromptCancel, type Prompter } from "./prompter.js";
 import {
   readExistingApp,
   storeAppSecrets,
-  webhookSecretProblem,
+  readWebhookSecret,
   type ExistingApp,
   type SetupSecretStore,
 } from "./secret-store.js";
@@ -93,7 +94,7 @@ async function chooseApp(
     `${SECRET_NAMES.githubApp} in ${inputs.region} already holds GitHub App ${describeApp(existing)}.\n`,
   );
   const problem =
-    existing.slug === undefined ? undefined : await webhookSecretProblem(store, existing);
+    existing.slug === undefined ? undefined : (await readWebhookSecret(store, existing)).problem;
   if (problem !== undefined) {
     // Keeping it would deploy a gateway that rejects every delivery, so only offer a new App.
     deps.out(`${problem}\n`);
@@ -155,6 +156,7 @@ async function setUpApp(
       privateKey: app.pem,
       clientId: app.clientId,
       clientSecret: app.clientSecret,
+      webhookCreatedActive: true,
     },
     webhookSecret,
   );
@@ -180,9 +182,9 @@ type ExistingConfig =
   | { kind: "unreadable"; reason: string };
 
 async function readExistingConfig(deps: SetupDeps): Promise<ExistingConfig> {
-  if (!(await deps.files.exists(deps.configPath))) return { kind: "none" };
   try {
-    const config = parseDeployConfig(await deps.files.loadConfig(deps.configPath), deps.configPath);
+    const config = await loadDeployConfig(deps.files, deps.configPath);
+    if (config === undefined) return { kind: "none" };
     return { kind: "parsed", region: config.region, allowedOrgs: config.allowedOrgs };
   } catch (error) {
     return { kind: "unreadable", reason: error instanceof Error ? error.message : String(error) };
@@ -262,11 +264,12 @@ function nextSteps(slug: string | undefined): string {
       : `Install the App on the repositories it should review:\n     ${installUrl(slug)}`;
   return `
 Next steps:
-  1. ${install}
-  2. Connect a model provider. Bedrock works with no key; for others run
+  1. Connect a model provider. Bedrock works with no key; for others run
      pnpm lgtmoose auth <claude|codex|cursor|api-key>   (coming in NIC-824)
-  3. Deploy, which also turns on the App's webhook:
-     pnpm lgtmoose deploy   (coming in NIC-803)
+  2. Deploy, which also points the App's webhook at your gateway. Until then the webhook
+     aims at a placeholder and GitHub's deliveries are lost, so install after deploying:
+     pnpm lgtmoose deploy
+  3. ${install}
 `;
 }
 

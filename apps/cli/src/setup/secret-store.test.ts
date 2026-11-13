@@ -7,10 +7,11 @@ import { SECRET_NAMES } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { awsSecretStore, type SecretsManagerSender } from "./aws-secret-store.js";
 import {
+  readAppCredentials,
   readExistingApp,
   storeAppSecrets,
   webhookFingerprint,
-  webhookSecretProblem,
+  readWebhookSecret,
   type SetupSecretStore,
 } from "./secret-store.js";
 
@@ -178,13 +179,16 @@ describe("storeAppSecrets", () => {
   });
 });
 
-describe("webhookSecretProblem", () => {
+describe("readWebhookSecret", () => {
+  const problemOf = async (...args: Parameters<typeof readWebhookSecret>) =>
+    (await readWebhookSecret(...args)).problem;
+
   const existing = { appId: 42, slug: "lgtmoose-acme" };
 
   it("accepts a webhook secret that matches the App's fingerprint", async () => {
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
     await expect(
-      webhookSecretProblem(aws.store, {
+      problemOf(aws.store, {
         ...existing,
         webhookSecretSha256: webhookFingerprint("whsec"),
       }),
@@ -193,14 +197,14 @@ describe("webhookSecretProblem", () => {
 
   it("accepts any webhook secret for an App stored before fingerprints", async () => {
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec" });
-    await expect(webhookSecretProblem(aws.store, existing)).resolves.toBeUndefined();
+    await expect(problemOf(aws.store, existing)).resolves.toBeUndefined();
   });
 
   it("flags a missing or mismatched webhook secret", async () => {
-    await expect(webhookSecretProblem(fakeAws().store, existing)).resolves.toContain("is missing");
+    await expect(problemOf(fakeAws().store, existing)).resolves.toContain("is missing");
     const aws = fakeAws({ [SECRET_NAMES.githubWebhook]: "whsec-other" });
     await expect(
-      webhookSecretProblem(aws.store, {
+      problemOf(aws.store, {
         ...existing,
         webhookSecretSha256: webhookFingerprint("whsec"),
       }),
@@ -227,5 +231,27 @@ describe("readExistingApp", () => {
       appId: undefined,
       slug: undefined,
     });
+  });
+});
+
+describe("readAppCredentials", () => {
+  it("returns what deploy needs to act as the App", async () => {
+    const aws = fakeAws({ [SECRET_NAMES.githubApp]: JSON.stringify(app) });
+    await expect(readAppCredentials(aws.store)).resolves.toEqual({
+      appId: 42,
+      slug: "lgtmoose-acme",
+      privateKey: app.privateKey,
+    });
+  });
+
+  it("says to run setup when the secret is missing or malformed, without echoing it", async () => {
+    await expect(readAppCredentials(fakeAws().store)).rejects.toThrow("Run pnpm lgtmoose setup");
+    const aws = fakeAws({ [SECRET_NAMES.githubApp]: '{"privateKey":"SECRET-KEY"}' });
+    const error = await readAppCredentials(aws.store).then(
+      () => new Error("expected a rejection"),
+      (caught: unknown) => caught as Error,
+    );
+    expect(error.message).toContain("isn't the JSON setup writes");
+    expect(error.message).not.toContain("SECRET-KEY");
   });
 });

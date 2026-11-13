@@ -151,6 +151,7 @@ describe("runSetup: first run", () => {
       clientId: created.clientId,
       clientSecret: created.clientSecret,
       webhookSecretSha256: webhookFingerprint("FAKE-WEBHOOK-SECRET"),
+      webhookCreatedActive: true,
     });
     expect(h.secrets.get(SECRET_NAMES.githubWebhook)).toBe("FAKE-WEBHOOK-SECRET");
 

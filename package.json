@@ -12,12 +12,13 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "synth": "pnpm --filter @lgtmoose/cdk synth",
-    "lgtmoose": "pnpm --silent --filter lgtmoose... build && node apps/cli/dist/index.js",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm --filter @lgtmoose/db check-migrations && pnpm synth"
+    "lint": "eslint . --cache --cache-strategy content --cache-location node_modules/.cache/eslint/",
+    "format": "prettier --write . --cache",
+    "format:check": "prettier --check . --cache",
+    "synth": "turbo run synth",
+    "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
+    "check": "turbo run format:check lint typecheck test test:integration build smoke check-migrations synth",
+    "db:test:start": "docker run -d --name lgtmoose-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 \"$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)\""
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

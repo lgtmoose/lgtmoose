@@ -13,12 +13,16 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1167.0",
+    "@aws-sdk/client-rds": "^3.1167.0",
     "@aws-sdk/client-secrets-manager": "^3.1167.0",
+    "@aws-sdk/client-sts": "^3.1167.0",
     "@inquirer/prompts": "^8.8.0",
     "@lgtmoose/config": "workspace:*",
     "zod": "^4.6.7"

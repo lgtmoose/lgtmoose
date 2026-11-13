@@ -9,7 +9,7 @@ import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { SECRET_NAMES } from "@lgtmoose/config";
+import { SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
 import { ROUTES } from "@lgtmoose/gateway/paths";
 import { lgtmooseFunction } from "./lambda.js";
 
@@ -127,7 +127,7 @@ export class ApiStack extends Stack {
     this.api = api;
 
     new CfnOutput(this, "ApiUrl", { value: api.apiEndpoint });
-    new CfnOutput(this, "GithubWebhookUrl", {
+    new CfnOutput(this, STACK_OUTPUTS.api.githubWebhookUrl, {
       value: `${api.apiEndpoint}${ROUTES.githubWebhook}`,
       description: "`lgtmoose deploy` points the GitHub App's webhook here.",
     });

@@ -4,6 +4,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
+import { awsError, errorName } from "../aws-errors.js";
 import type { SetupSecretStore } from "./secret-store.js";
 
 /** The subset of SecretsManagerClient we use, so tests can fake `send`. */
@@ -13,23 +14,10 @@ export interface SecretsManagerSender {
   ): Promise<{ SecretString?: string | undefined }>;
 }
 
-function errorName(error: unknown): string | undefined {
-  return error instanceof Error ? error.name : undefined;
-}
-
 /** SetupSecretStore on AWS Secrets Manager. Kept apart so `setup --help` doesn't load the AWS SDK. */
 export function awsSecretStore(client: SecretsManagerSender, region: string): SetupSecretStore {
-  // AWS error messages name the secret but never contain its value, so they're safe to show.
-  const context = (name: string, error: unknown) => {
-    const hint =
-      errorName(error) === "CredentialsProviderError"
-        ? " Sign in to AWS first (for example `aws sso login`), then run setup again."
-        : "";
-    const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
-    return new Error(`AWS Secrets Manager (${region}) failed on ${name}: ${message}.${hint}`, {
-      cause: error,
-    });
-  };
+  const context = (name: string, error: unknown) =>
+    awsError("Secrets Manager", region, name, error);
 
   return {
     async read(name) {

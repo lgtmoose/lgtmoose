@@ -12,39 +12,87 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# One job per concern, all running side by side, so a failure says what broke. The checks that
+# take a few seconds share one job, since GitHub bills every job as at least a minute. Every job
+# replays unchanged turbo tasks from the shared remote cache.
 jobs:
-  check:
+  static:
+    name: format, lint, migrations
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
+      - uses: ./.github/actions/setup
+      # ESLint and Prettier only re-check files whose contents changed since the cached run.
+      - uses: actions/cache@v6
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
+          path: |
+            node_modules/.cache/eslint
+            node_modules/.cache/prettier
+          key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
+          restore-keys: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
       - name: Format
-        run: pnpm format:check
-
+        run: pnpm turbo run format:check
       - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Test
-        run: pnpm test
-
-      - name: Build
-        run: pnpm build
-
+        run: pnpm turbo run lint
       - name: Migrations match the schema
-        run: pnpm --filter @lgtmoose/db check-migrations
+        run: pnpm turbo run check-migrations
 
-      - name: CDK synth
-        run: pnpm synth
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run test
+
+  test-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      # Started in the background, so pulling and booting it overlaps with setup instead of
+      # holding the job up the way a `services:` container does.
+      # The image is pinned in tools/test-postgres/Dockerfile, where Dependabot updates it.
+      - name: Start Postgres
+        run: |
+          image=$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)
+          docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres \
+            "$image" > /tmp/postgres.log 2>&1 &
+      - uses: ./.github/actions/setup
+      - name: Wait for Postgres
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec postgres pg_isready -U postgres >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat /tmp/postgres.log
+          exit 1
+      - run: pnpm turbo run test:integration
+
+  # Builds every package, then runs the built CLI the way a user does.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run build smoke
+
+  synth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run synth

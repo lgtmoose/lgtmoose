@@ -42,4 +42,14 @@ describe("lgtmoose CLI", () => {
     expect(result.stderr).toContain('--profile "huge"');
     expect(setupDeps).not.toHaveBeenCalled();
   });
+
+  it("hands deploy and destroy their own flags and help", async () => {
+    const deployDeps = vi.fn();
+    const deploy = await run(["deploy", "--help"], { deployDeps });
+    expect(deploy.stdout).toContain("Usage: lgtmoose deploy");
+    const destroy = await run(["destroy", "--nope"], { deployDeps });
+    expect(destroy.exitCode).toBe(1);
+    expect(destroy.stderr).toContain("Usage: lgtmoose destroy");
+    expect(deployDeps).not.toHaveBeenCalled();
+  });
 });

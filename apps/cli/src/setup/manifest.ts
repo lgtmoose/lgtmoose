@@ -7,8 +7,10 @@ export interface Owner {
 }
 
 /**
- * Placeholder webhook URL. The real one only exists after `lgtmoose deploy` (NIC-803), which
- * points the App's webhook at the gateway and turns it on. `.invalid` can never resolve.
+ * Placeholder webhook URL. The real one only exists after `lgtmoose deploy`, which points the
+ * App's webhook at the gateway. `.invalid` can never resolve, so nothing is delivered before
+ * then. The webhook is created active because GitHub's API can change its URL and secret but
+ * not switch it on.
  */
 export const PLACEHOLDER_WEBHOOK_URL = "https://example.invalid/webhooks/github";
 
@@ -61,7 +63,7 @@ export function buildManifest(options: {
     name: options.name,
     url: "https://github.com/lgtmoose/lgtmoose",
     description: "Self-hosted AI pull request reviewer (LGTMoose).",
-    hook_attributes: { url: PLACEHOLDER_WEBHOOK_URL, active: false },
+    hook_attributes: { url: PLACEHOLDER_WEBHOOK_URL, active: true },
     redirect_url: options.redirectUrl,
     public: false,
     default_permissions: permissions,

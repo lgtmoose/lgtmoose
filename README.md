@@ -17,8 +17,25 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 git clone https://github.com/lgtmoose/lgtmoose && cd lgtmoose && pnpm install
 pnpm lgtmoose setup     # creates the GitHub App, stores its keys in AWS Secrets Manager
 pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
-pnpm lgtmoose deploy    # cdk deploy, then prints the App install link
+pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
+
+`deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`. Administrator access is simplest. A scoped role needs to assume the CDK bootstrap roles and create the bootstrap stack, plus the calls the CLI makes itself:
+
+- `sts:GetCallerIdentity`
+- `cloudformation:DescribeStacks`
+- `secretsmanager:GetSecretValue`, `CreateSecret` and `PutSecretValue` on `lgtmoose/*` (setup writes them)
+- `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
+
+### Upgrading
+
+```bash
+git pull && pnpm install && pnpm lgtmoose deploy
+```
+
+### Removing it
+
+`pnpm lgtmoose destroy` deletes the stacks. It keeps a final snapshot of the database, the secret that unlocks it and the artifact bucket. `pnpm lgtmoose destroy --purge` deletes those too, after redeploying the Data stack from your checkout to change what deletion keeps; the database's CloudWatch logs expire on their own. Neither touches the GitHub App or its secrets.
 
 One AWS account and region holds one install for now, because the secret and stack names are fixed. Put a second install, such as staging, in another account or region.
 
@@ -38,7 +55,14 @@ Requires Node 24 and pnpm 10.
 
 ```bash
 pnpm install
-pnpm run check   # format, lint, typecheck, test, build, cdk synth
+pnpm run check   # format, lint, typecheck, test, build, run the built CLI, cdk synth
+```
+
+The migration runner also has an integration test against a real Postgres with pgvector (`test:integration`). CI always runs it; locally it runs when `LGTMOOSE_TEST_DATABASE_URL` points at an admin connection:
+
+```bash
+pnpm db:test:start   # the same pinned image as CI, from tools/test-postgres/Dockerfile
+LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres pnpm turbo run test:integration
 ```
 
 ## Roadmap

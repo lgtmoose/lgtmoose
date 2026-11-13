@@ -1,7 +1,11 @@
 version: 2
 updates:
+  # Workflows and the composite action in .github/actions. Bumps of third-party actions run with
+  # CI's tokens, so read their diff before merging; see CONTRIBUTING.md.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
   - package-ecosystem: npm
@@ -11,3 +15,8 @@ updates:
     groups:
       dev-tooling:
         dependency-type: development
+  # The Postgres image the integration tests use.
+  - package-ecosystem: docker
+    directory: /tools/test-postgres
+    schedule:
+      interval: weekly

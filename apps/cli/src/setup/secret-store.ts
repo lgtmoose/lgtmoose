@@ -10,33 +10,38 @@ export interface SetupSecretStore {
   write(name: string, value: string, description: string): Promise<"created" | "updated">;
 }
 
-/** The JSON stored in `lgtmoose/github-app`. */
-export interface GitHubAppSecret {
-  appId: number;
-  slug: string;
-  privateKey: string;
-  clientId: string;
-  clientSecret: string;
+/** The JSON stored in `lgtmoose/github-app`. The one description of it; the rest derive from it. */
+const appSecretSchema = z.object({
+  appId: z.number().int().positive(),
+  slug: z.string().min(1),
+  privateKey: z.string().min(1),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
   /**
    * SHA-256 of the webhook secret stored alongside this App, so a re-run can tell when
    * `lgtmoose/github-webhook-secret` belongs to a different App. Not secret on its own: the
    * webhook secret is 32 random bytes.
    */
-  webhookSecretSha256?: string;
-}
+  webhookSecretSha256: z.string().optional(),
+  /**
+   * Set by setup when it created the App's webhook active. Apps made by earlier versions have
+   * it off, and GitHub's API can't switch it on, so deploy tells their owners to.
+   */
+  webhookCreatedActive: z.literal(true).optional(),
+});
+
+export type GitHubAppSecret = z.infer<typeof appSecretSchema>;
 
 /** Just enough of an existing App secret to tell the person which App it is. */
+const existingSchema = appSecretSchema
+  .pick({ appId: true, slug: true, webhookSecretSha256: true })
+  .partial();
+
 export interface ExistingApp {
   appId: number | undefined;
   slug: string | undefined;
   webhookSecretSha256?: string | undefined;
 }
-
-const existingSchema = z.object({
-  appId: z.number().optional(),
-  slug: z.string().optional(),
-  webhookSecretSha256: z.string().optional(),
-});
 
 export function webhookFingerprint(webhookSecret: string): string {
   return createHash("sha256").update(webhookSecret, "utf8").digest("hex");
@@ -61,25 +66,62 @@ export async function readExistingApp(store: SetupSecretStore): Promise<Existing
   };
 }
 
+const credentialsSchema = appSecretSchema.pick({
+  appId: true,
+  slug: true,
+  privateKey: true,
+  webhookSecretSha256: true,
+  webhookCreatedActive: true,
+});
+
+/** What `deploy` needs to act as the App: its ID, slug and private key. */
+export type AppCredentials = z.infer<typeof credentialsSchema>;
+
+/** The App's credentials, or an error saying to run setup. Never puts the key in a message. */
+export async function readAppCredentials(store: SetupSecretStore): Promise<AppCredentials> {
+  const raw = await store.read(SECRET_NAMES.githubApp);
+  if (raw === undefined) {
+    throw new Error(`${SECRET_NAMES.githubApp} doesn't exist. Run pnpm lgtmoose setup first.`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    json = undefined;
+  }
+  const parsed = credentialsSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(
+      `${SECRET_NAMES.githubApp} isn't the JSON setup writes (appId, slug, privateKey). ` +
+        "Fix it, or run pnpm lgtmoose setup and create a new App.",
+    );
+  }
+  return parsed.data;
+}
+
 /**
- * Why the stored webhook secret can't be used with `existing`, or undefined when it can.
+ * The stored webhook secret if it belongs to `existing`, otherwise why it can't be used.
  * Apps stored before the fingerprint existed only get the "missing" check.
  */
-export async function webhookSecretProblem(
+export async function readWebhookSecret(
   store: SetupSecretStore,
   existing: ExistingApp,
-): Promise<string | undefined> {
+): Promise<{ secret: string; problem?: undefined } | { secret?: undefined; problem: string }> {
   const webhook = await store.read(SECRET_NAMES.githubWebhook);
   if (webhook === undefined) {
-    return `${SECRET_NAMES.githubWebhook} is missing, so the gateway can't verify webhooks.`;
+    return {
+      problem: `${SECRET_NAMES.githubWebhook} is missing, so the gateway can't verify webhooks.`,
+    };
   }
   if (
     existing.webhookSecretSha256 !== undefined &&
     existing.webhookSecretSha256 !== webhookFingerprint(webhook)
   ) {
-    return `${SECRET_NAMES.githubWebhook} doesn't belong to this App, so the gateway would reject its webhooks.`;
+    return {
+      problem: `${SECRET_NAMES.githubWebhook} doesn't belong to this App, so the gateway would reject its webhooks.`,
+    };
   }
-  return undefined;
+  return { secret: webhook };
 }
 
 export interface StoredSecrets {

@@ -16,6 +16,10 @@ Thanks for helping. LGTMoose is pre-alpha, so expect things to move.
 - No nested ternaries.
 - Never commit secrets, tokens or real customer data, including in test fixtures.
 
+## Dependency updates
+
+Dependabot opens weekly PRs for npm packages, GitHub Actions and the test Postgres image. A bump of a third-party action (one not under `actions/`) runs with CI's tokens and can write to the shared turbo cache, so read the action's diff between the two pinned commits before merging. Don't merge it as routine.
+
 ## Changing prompts or rule packs
 
 Changes to prompts, rule packs or harnesses must keep eval recall at or above the baseline. CI reports this once the eval harness lands.

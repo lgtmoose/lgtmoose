@@ -27,9 +27,11 @@ function axis(index: number): number[] {
   return Array.from({ length: EMBEDDING_DIMENSIONS }, (_, i) => (i === index ? 1 : 0));
 }
 
+// Starting PGlite (Postgres compiled to WebAssembly) and migrating takes a few seconds alone,
+// and much longer while turbo runs every other package's tests and typechecks alongside it.
 beforeAll(async () => {
   await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
-});
+}, 60_000);
 
 afterAll(async () => {
   await client.close();
