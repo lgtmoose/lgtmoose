@@ -54,12 +54,17 @@ const LOOKALIKES: Record<string, string> = {
 const WINDOW = 64;
 
 /**
- * Whether the text after an opener reads as `untrusted` or `/untrusted` to a model: compared
+ * Whether the text from `start` (just after an opener) reads as `untrusted` or `/untrusted` to a model: compared
  * after NFKC normalisation (which folds fullwidth and other compatibility letters), with
  * invisible characters, spaces and slashes removed, in any case.
  */
-function startsTagName(after: string): boolean {
-  const folded = Array.from(after.slice(0, WINDOW).normalize("NFKC").replace(INVISIBLE, ""))
+function startsTagName(text: string, start: number): boolean {
+  const folded = Array.from(
+    text
+      .slice(start, start + WINDOW)
+      .normalize("NFKC")
+      .replace(INVISIBLE, ""),
+  )
     .map((ch) => LOOKALIKES[ch] ?? ch)
     .join("")
     .replace(/^[\s/]*/, "")
@@ -77,7 +82,7 @@ export function escapeUntrusted(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i] ?? "";
-    out += OPENERS.has(ch) && startsTagName(text.slice(i + 1, i + 1 + WINDOW)) ? "&lt;" : ch;
+    out += OPENERS.has(ch) && startsTagName(text, i + 1) ? "&lt;" : ch;
   }
   return out;
 }

@@ -50,6 +50,17 @@ describe("placeFindings", () => {
     expect(placeFindings([reindented], batch).inline).toEqual([reindented]);
   });
 
+  it("accepts evidence copied with the prompt's line label and marker", () => {
+    const labelled = finding({ evidence: `R9 + ${LOOP}` });
+    const range = finding({ start_line: 8, evidence: `R8     let sum = 0;\nR9 + ${LOOP}` });
+    expect(placeFindings([labelled, range], batch).inline).toEqual([labelled, range]);
+  });
+
+  it("treats whitespace-only evidence as a mismatch", () => {
+    const blank = finding({ evidence: "  " });
+    expect(placeFindings([blank], batch).outsideDiff).toEqual([blank]);
+  });
+
   it("drops findings on pure renames", () => {
     const moved = { files: [{ file: fileDiff(TOTAL_PATCH), depth: "move" as const }] };
     expect(placeFindings([finding({})], moved).dropped).toHaveLength(1);

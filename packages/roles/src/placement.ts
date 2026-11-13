@@ -26,6 +26,20 @@ function collapse(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** A line label and marker as the prompt renders them (`R12 + `), which models often copy. */
+const LABEL = /^\s*[RL]\d+\s+[+\- ]\s?/;
+
+/** Whether the evidence is the text of the cited lines. Empty evidence never matches. */
+function quotes(cited: string, evidence: string): boolean {
+  const quoted = collapse(
+    evidence
+      .split("\n")
+      .map((line) => line.replace(LABEL, ""))
+      .join("\n"),
+  );
+  return quoted !== "" && collapse(cited).includes(quoted);
+}
+
 /** The text of the lines a finding cites, on its side, in diff order. */
 function citedText(file: FileDiff, finding: Finding): string {
   const first = finding.start_line ?? finding.line;
@@ -59,8 +73,8 @@ export function placeFindings(findings: readonly Finding[], batch: ReviewBatch):
       side: finding.side,
       ...(finding.start_line === undefined ? {} : { startLine: finding.start_line }),
     });
-    const quotes = collapse(citedText(entry.file, finding)).includes(collapse(finding.evidence));
-    (target.inHunk && quotes ? placed.inline : placed.outsideDiff).push(finding);
+    const matches = quotes(citedText(entry.file, finding), finding.evidence);
+    (target.inHunk && matches ? placed.inline : placed.outsideDiff).push(finding);
   }
   return placed;
 }
