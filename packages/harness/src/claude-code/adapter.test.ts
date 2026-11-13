@@ -288,6 +288,9 @@ describe("ClaudeCodeHarness", () => {
       },
     ]);
     expect((await failure(run(harness))).kind).toBe("invalid_output");
+    const transcript = store.objects.get("transcripts/run-1/1.jsonl") ?? "";
+    expect(transcript).toContain("lgtmoose_withheld");
+    expect(transcript).not.toContain(API_KEY.slice(8));
   });
 
   it("redacts the credential from transcripts and errors", async () => {

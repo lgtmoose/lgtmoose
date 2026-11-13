@@ -11,7 +11,7 @@ import {
   type HarnessUsage,
 } from "../harness.js";
 import { runProcess, type ProcessResult } from "../process.js";
-import { redact, valueContainsSecret } from "../redact.js";
+import { containsSecret, redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv, networkEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
@@ -173,7 +173,10 @@ export class ClaudeCodeHarness implements Harness {
       stopped: proc.stopped ?? null,
       stderr: proc.stderr,
     };
-    const body = redact(`${proc.stdout.replace(/\n?$/, "\n")}${JSON.stringify(meta)}\n`, secrets);
+    const body = withheldLines(
+      redact(`${proc.stdout.replace(/\n?$/, "\n")}${JSON.stringify(meta)}\n`, secrets),
+      secrets,
+    );
     try {
       await this.options.transcripts.put(key, body);
     } catch (error) {
@@ -347,4 +350,29 @@ function repairPrompt(problems: string): string {
     "",
     "Reply again with only the corrected JSON. Keep everything that was right. Don't explain.",
   ].join("\n");
+}
+
+/**
+ * Replaces transcript lines that still hold a credential after `redact` with a stub. redact only
+ * finds the literal and whole-value encodings; a key the model split over lines or wrote with a
+ * JSON escape inside it is only found in the parsed event.
+ */
+function withheldLines(body: string, secrets: readonly string[]): string {
+  const stub = JSON.stringify({
+    type: "lgtmoose_withheld",
+    reason: "contained a model credential",
+  });
+  return body
+    .split("\n")
+    .map((line) => {
+      if (line === "") return line;
+      let leaks: boolean;
+      try {
+        leaks = valueContainsSecret(JSON.parse(line), secrets);
+      } catch {
+        leaks = containsSecret(line, secrets);
+      }
+      return leaks ? stub : line;
+    })
+    .join("\n");
 }
