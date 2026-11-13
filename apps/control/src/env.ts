@@ -2,10 +2,9 @@
 export interface ControlEnv {
   /** The artifact bucket: batch inputs, findings and transcripts. */
   artifactBucket: string;
-  /** The database credentials secret. */
+  /** The database's generated secret: host, port, username and password. */
   databaseSecretArn: string;
-  /** Hostname of the database's writer endpoint. */
-  databaseHost: string;
+  /** The database name, which the generated secret doesn't hold. */
   databaseName: string;
   /** The GitHub App secret (App ID, private key and the rest). */
   githubAppSecretArn: string;
@@ -14,7 +13,6 @@ export interface ControlEnv {
 const VARIABLES = {
   artifactBucket: "ARTIFACT_BUCKET",
   databaseSecretArn: "DATABASE_SECRET_ARN",
-  databaseHost: "DATABASE_HOST",
   databaseName: "DATABASE_NAME",
   githubAppSecretArn: "GITHUB_APP_SECRET_ARN",
 } as const satisfies Record<keyof ControlEnv, string>;
@@ -29,7 +27,6 @@ export function readControlEnv(
   return {
     artifactBucket: read(VARIABLES.artifactBucket),
     databaseSecretArn: read(VARIABLES.databaseSecretArn),
-    databaseHost: read(VARIABLES.databaseHost),
     databaseName: read(VARIABLES.databaseName),
     githubAppSecretArn: read(VARIABLES.githubAppSecretArn),
   };

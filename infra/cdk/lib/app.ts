@@ -70,7 +70,6 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     proxyUrl: PROXY_URL,
     artifactBucket: data.artifactBucket,
     databaseSecret: data.databaseSecret,
-    databaseEndpoint: data.databaseEndpoint,
     databaseName: DATABASE_NAME,
     githubAppSecret: data.githubAppSecret,
     providerSecrets: data.providerSecrets,

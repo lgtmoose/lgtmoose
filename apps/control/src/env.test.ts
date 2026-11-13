@@ -7,14 +7,12 @@ describe("readControlEnv", () => {
       readControlEnv({
         ARTIFACT_BUCKET: "bucket",
         DATABASE_SECRET_ARN: "arn:db",
-        DATABASE_HOST: "db.internal",
         DATABASE_NAME: "lgtmoose",
         GITHUB_APP_SECRET_ARN: "arn:gh",
       }),
     ).toEqual({
       artifactBucket: "bucket",
       databaseSecretArn: "arn:db",
-      databaseHost: "db.internal",
       databaseName: "lgtmoose",
       githubAppSecretArn: "arn:gh",
     });
@@ -22,13 +20,7 @@ describe("readControlEnv", () => {
 
   it("names the missing ones, counting blank as missing", () => {
     expect(readControlEnv({ ARTIFACT_BUCKET: " " })).toEqual({
-      missing: [
-        "ARTIFACT_BUCKET",
-        "DATABASE_SECRET_ARN",
-        "DATABASE_HOST",
-        "DATABASE_NAME",
-        "GITHUB_APP_SECRET_ARN",
-      ],
+      missing: ["ARTIFACT_BUCKET", "DATABASE_SECRET_ARN", "DATABASE_NAME", "GITHUB_APP_SECRET_ARN"],
     });
   });
 });

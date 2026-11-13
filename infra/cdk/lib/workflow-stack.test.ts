@@ -104,6 +104,17 @@ describe("WorkflowStack", () => {
     expect(JSON.stringify(granted)).toContain(SECRET_NAMES.githubApp);
   });
 
+  it("doesn't import the database endpoint, so the database can be replaced", () => {
+    const [container] = taskDefinition("control").ContainerDefinitions as {
+      Environment: { Name: string; Value: unknown }[];
+    }[];
+    const names = (container?.Environment ?? []).map((e) => e.Name);
+    expect(names).toContain("DATABASE_SECRET_ARN");
+    expect(names).not.toContain("DATABASE_HOST");
+    // A cross-stack import of it would be named after the GetAtt: ...EndpointAddress...
+    expect(JSON.stringify(template.toJSON())).not.toMatch(/Endpoint\.?Address/);
+  });
+
   it("gives sandbox task roles no secrets, only their S3 prefix, and Bedrock only when used", () => {
     for (const provider of ["claude", "bedrock"]) {
       const role = getAttId(taskDefinition(provider).TaskRoleArn);

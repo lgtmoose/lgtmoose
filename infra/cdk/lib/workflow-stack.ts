@@ -62,8 +62,11 @@ export interface WorkflowStackProps extends StackProps {
   /** The egress proxy, as sandbox tasks reach it (see `PROXY_URL` in the network stack). */
   proxyUrl: string;
   artifactBucket: IBucket;
+  /**
+   * The database's generated secret. It holds the host and port too, so the endpoint isn't
+   * passed separately: a cross-stack reference to it would block replacing the database.
+   */
   databaseSecret: ISecret;
-  databaseEndpoint: string;
   databaseName: string;
   githubAppSecret: ISecret;
   /** Provider id → its credential secret, for providers that have one (not Bedrock). */
@@ -112,7 +115,6 @@ export class WorkflowStack extends Stack {
       environment: {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
-        DATABASE_HOST: props.databaseEndpoint,
         DATABASE_NAME: props.databaseName,
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
       },
