@@ -25,6 +25,16 @@ export {
   type ReviewerPromptInput,
 } from "./reviewer.js";
 export {
+  CROSS_FILE_LIMITS,
+  CROSS_FILE_TIER,
+  buildCrossFilePrompt,
+  collectBatchNotes,
+  type BatchNotes,
+  type CrossFilePromptInput,
+  type ReviewedBatch,
+  type SkippedPath,
+} from "./cross-file.js";
+export {
   RULE_PACK_DIR,
   RulePackError,
   availableRulePacks,

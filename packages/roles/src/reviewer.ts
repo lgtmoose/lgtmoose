@@ -76,6 +76,18 @@ Each diff line starts with a label. R12 is line 12 of the new version: cite it a
 - Each diff block has a depth. full: review every changed line. mechanical: only imports changed; check that they resolve and that nothing now unused is left behind. move: the file was renamed without changes; don't report on it.
 - If the review is incremental, focus on the lines changed since the last review. If a line the PR used to add was taken out and that is a problem (a removed check, say), report it on the nearest RIGHT line of the file's diff and say in the body what was removed.
 
+# Notes for the cross-file pass
+
+After every batch is reviewed, one more run checks how the batches fit together. It doesn't see your diff and starts from your notes, so add short notes (one fact each, no findings) on what this batch changes that other files depend on or that it relies on elsewhere:
+
+- new or changed exports, and the names other code must now use
+- environment variables, secrets and config keys it reads or sets
+- new required parameters, props or fields that every caller must pass
+- flows it changes: CI or deploy steps, scripts, migrations, routes, queues
+- a change that looks like one sibling apps or packages should get too
+
+Leave notes out when the batch has none of these.
+
 # Output
 
 Return only a JSON object that matches this JSON Schema, with no other text:
@@ -96,13 +108,13 @@ export function demoteHeadings(text: string): string {
     .join("\n");
 }
 
-function renderRulePacks(packs: readonly RulePack[]): string {
+export function renderRulePacks(packs: readonly RulePack[]): string {
   if (packs.length === 0) return "# Rule packs\n\nNo rule packs are selected.";
   const sections = packs.map((pack) => `## Rule pack: ${pack.id}\n\n${demoteHeadings(pack.text)}`);
   return ["# Rule packs", ...sections].join("\n\n");
 }
 
-function renderConventions(files: readonly ConventionFile[]): string {
+export function renderConventions(files: readonly ConventionFile[]): string {
   if (files.length === 0) return "# Repo conventions\n\nThe repository has no convention files.";
   const blocks = files.map((file) =>
     wrapUntrusted("convention_file", file.text, {
@@ -117,7 +129,10 @@ function renderConventions(files: readonly ConventionFile[]): string {
   ].join("\n\n");
 }
 
-function renderPullRequest(pr: PullRequestInfo, comments: readonly PullRequestComment[]): string {
+export function renderPullRequest(
+  pr: PullRequestInfo,
+  comments: readonly PullRequestComment[],
+): string {
   const parts = [
     "# Pull request",
     wrapUntrusted("pr_metadata", `author: ${pr.author}\nbase: ${pr.baseRef}\nhead: ${pr.headRef}`),

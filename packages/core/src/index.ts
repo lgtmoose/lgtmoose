@@ -22,9 +22,11 @@ export {
 export {
   FINDING_LIMITS,
   SIDES,
+  crossFileOutputSchema,
   findingSchema,
   keepMostSevere,
   reviewerOutputSchema,
+  type CrossFileOutput,
   type Finding,
   type FindingSide,
   type ReviewerOutput,
