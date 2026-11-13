@@ -71,6 +71,12 @@ export class HarnessError extends Error {
   readonly retryAfterSeconds: number | undefined;
   /** For `rate_limit` and `plan_limit`: when the limit resets, as the CLI wrote it. */
   readonly resetsAt: string | undefined;
+  /**
+   * The CLI refreshed its credential during the run, but handing it back to the credential
+   * broker failed (the error). A rotated token may now be lost: alert, the credential may need
+   * a new sign-in.
+   */
+  readonly authHandBackError: unknown;
 
   constructor(
     kind: HarnessErrorKind,
@@ -80,6 +86,7 @@ export class HarnessError extends Error {
       cause?: unknown;
       retryAfterSeconds?: number;
       resetsAt?: string;
+      authHandBackError?: unknown;
     } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -88,5 +95,6 @@ export class HarnessError extends Error {
     this.transcriptKeys = options.transcriptKeys ?? [];
     this.retryAfterSeconds = options.retryAfterSeconds;
     this.resetsAt = options.resetsAt;
+    this.authHandBackError = options.authHandBackError;
   }
 }

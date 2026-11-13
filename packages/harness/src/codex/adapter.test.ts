@@ -287,6 +287,22 @@ describe("CodexHarness", () => {
       expect(store.objects.get("transcripts/run-1/1.jsonl")).not.toContain("at-refreshed");
       expect(handed).toEqual([REFRESHED]);
     });
+
+    it("marks the run's error when a refreshed token couldn't be handed back", async () => {
+      const leak = JSON.stringify({ findings: [{ title: "at-refreshed-0123456789" }] });
+      const harness = await harnessFor(
+        [{ lines: codexTurn(leak), lastMessage: leak, writeAuth: REFRESHED }],
+        {
+          env: { PATH: process.env.PATH, CODEX_AUTH_JSON: AUTH },
+          onAuthRefreshed: () => {
+            throw new Error("broker unavailable");
+          },
+        },
+      );
+      const error = await failure(run(harness));
+      expect(error.kind).toBe("invalid_output");
+      expect(error.authHandBackError).toEqual(new Error("broker unavailable"));
+    });
   });
 });
 

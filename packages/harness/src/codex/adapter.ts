@@ -296,8 +296,13 @@ export class CodexHarness implements Harness {
     try {
       result = await execute();
     } catch (error) {
-      // Losing a refreshed token matters, but not more than the run's own failure.
-      await this.finish(home, auth.authJson, currentAuth).catch(() => undefined);
+      // The run's own failure is what's thrown, but a refreshed token that couldn't be handed
+      // back is recorded on it: a rotated refresh token may be lost.
+      try {
+        await this.finish(home, auth.authJson, currentAuth);
+      } catch (handBackError) {
+        throw withHandBackError(error, handBackError);
+      }
       throw error;
     }
     await this.finish(home, auth.authJson, currentAuth);
@@ -492,4 +497,23 @@ function repairPrompt(problems: string): string {
     "",
     "Reply again with only the corrected JSON. Keep everything that was right. Don't explain.",
   ].join("\n");
+}
+
+/** The run's error, marked with why the refreshed credential couldn't be handed back. */
+function withHandBackError(error: unknown, handBackError: unknown): HarnessError {
+  if (error instanceof HarnessError) {
+    return new HarnessError(error.kind, error.message, {
+      transcriptKeys: error.transcriptKeys,
+      cause: error.cause,
+      ...(error.retryAfterSeconds === undefined
+        ? {}
+        : { retryAfterSeconds: error.retryAfterSeconds }),
+      ...(error.resetsAt === undefined ? {} : { resetsAt: error.resetsAt }),
+      authHandBackError: handBackError,
+    });
+  }
+  return new HarnessError("process", error instanceof Error ? error.message : String(error), {
+    cause: error,
+    authHandBackError: handBackError,
+  });
 }
