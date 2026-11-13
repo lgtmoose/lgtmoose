@@ -352,6 +352,25 @@ function repairPrompt(problems: string): string {
   ].join("\n");
 }
 
+const JSON_ESCAPES: Record<string, string> = {
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  b: "\b",
+  f: "\f",
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+};
+
+/** Decodes the JSON string escapes in text that isn't valid JSON as a whole. */
+function unescapeJson(text: string): string {
+  return text.replace(/\\(?:u([0-9a-fA-F]{4})|(.))/g, (match, hex?: string, ch?: string) => {
+    if (hex !== undefined) return String.fromCharCode(Number.parseInt(hex, 16));
+    return JSON_ESCAPES[ch ?? ""] ?? match;
+  });
+}
+
 /**
  * Replaces transcript lines that still hold a credential after `redact` with a stub. redact only
  * finds the literal and whole-value encodings; a key the model split over lines or wrote with a
@@ -370,7 +389,9 @@ function withheldLines(body: string, secrets: readonly string[]): string {
       try {
         leaks = valueContainsSecret(JSON.parse(line), secrets);
       } catch {
-        leaks = containsSecret(line, secrets);
+        // Not whole JSON (stderr, or a line cut off when the run was killed): decode its JSON
+        // escapes, or a `\n` inside the key would still split it.
+        leaks = containsSecret(line, secrets) || containsSecret(unescapeJson(line), secrets);
       }
       return leaks ? stub : line;
     })

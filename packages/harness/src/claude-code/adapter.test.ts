@@ -293,6 +293,18 @@ describe("ClaudeCodeHarness", () => {
     expect(transcript).not.toContain(API_KEY.slice(8));
   });
 
+  it("withholds a cut-off transcript line that holds a split credential", async () => {
+    // A killed run can leave half a stream-json line: not JSON, with the key split by `\n`.
+    const partial = `{"type":"assistant","message":"${API_KEY.slice(0, 8)}\\n${API_KEY.slice(8)}`;
+    const harness = await harnessFor([
+      { lines: [resultLine({ structured_output: { findings: [] } })], stdout: partial },
+    ]);
+    await run(harness).catch(() => undefined);
+    const transcript = store.objects.get("transcripts/run-1/1.jsonl") ?? "";
+    expect(transcript).toContain("lgtmoose_withheld");
+    expect(transcript).not.toContain(API_KEY.slice(8));
+  });
+
   it("redacts the credential from transcripts and errors", async () => {
     const harness = await harnessFor([
       {
