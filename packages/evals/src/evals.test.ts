@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,32 @@ describe("fixtures", () => {
       ["missing-authz", "seeded"],
       ["off-by-one", "seeded"],
     ]);
+  });
+
+  it("points every expected and protected range at lines that exist", async () => {
+    const problems: string[] = [];
+    for (const f of await loadFixtures(FIXTURES)) {
+      const lineCount = async (side: "LEFT" | "RIGHT", path: string) => {
+        const dirs = side === "LEFT" ? ["base"] : ["head", "base"];
+        for (const dir of dirs) {
+          const text = await readFile(join(f.dir, dir, path), "utf8").catch(() => undefined);
+          if (text !== undefined) return text.split("\n").length;
+        }
+        return 0;
+      };
+      const ranges = [
+        ...f.expected.map((e) => ({ side: e.side, path: e.path, lines: e.lines })),
+        ...f.mustNotFlag.flatMap((m) =>
+          m.lines === undefined ? [] : [{ side: "RIGHT" as const, path: m.path, lines: m.lines }],
+        ),
+      ];
+      for (const range of ranges) {
+        if ((await lineCount(range.side, range.path)) < range.lines[1]) {
+          problems.push(`${f.name}: ${range.path}:${range.lines.join("-")}`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
   });
 
   it.each([
