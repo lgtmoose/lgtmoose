@@ -72,22 +72,55 @@ export interface FixtureScore {
 }
 
 /**
+ * Pairs expected problems with findings so that as many as possible are matched, each finding
+ * used once (augmenting paths; fixtures are small). Greedy first-come matching could give a
+ * finding to one problem when it was the only match for another. Returns the finding for each
+ * expected problem, by index, or undefined.
+ */
+function bestAssignment(
+  expected: readonly ExpectedFinding[],
+  findings: readonly Finding[],
+): (Finding | undefined)[] {
+  const candidates = expected.map((e) =>
+    findings.flatMap((finding, j) => (matchesExpected(finding, e) ? [j] : [])),
+  );
+  const owner = new Map<number, number>();
+  const tryAssign = (i: number, seen: Set<number>): boolean => {
+    for (const j of candidates[i] ?? []) {
+      if (seen.has(j)) continue;
+      seen.add(j);
+      const current = owner.get(j);
+      if (current === undefined || tryAssign(current, seen)) {
+        owner.set(j, i);
+        return true;
+      }
+    }
+    return false;
+  };
+  expected.forEach((_, i) => tryAssign(i, new Set()));
+  const result: (Finding | undefined)[] = expected.map(() => undefined);
+  for (const [j, i] of owner) result[i] = findings[j];
+  return result;
+}
+
+/**
  * Scores one run against its fixture. Each expected problem is matched by at most one finding,
- * and each finding matches at most one expected problem, in the fixture's order.
+ * and each finding matches at most one expected problem, matching as many as possible.
  */
 export function scoreFixture(fixture: Fixture, run: FixtureRun): FixtureScore {
+  const assigned = bestAssignment(fixture.expected, run.findings);
   const unused = new Set(run.findings);
   const matched: FixtureScore["matched"] = [];
   const missed: ExpectedFinding[] = [];
-  for (const expected of fixture.expected) {
-    const finding = [...unused].find((candidate) => matchesExpected(candidate, expected));
+  fixture.expected.forEach((expected, i) => {
+    const finding = assigned[i];
     if (finding === undefined) {
       missed.push(expected);
-      continue;
+      return;
     }
     unused.delete(finding);
     matched.push({ expected, finding });
-  }
+  });
   const falsePositives: Finding[] = [];
   const unexpected: Finding[] = [];
   for (const finding of unused) {

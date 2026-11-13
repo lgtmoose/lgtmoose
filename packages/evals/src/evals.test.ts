@@ -164,6 +164,24 @@ describe("scoring", () => {
     expect(score.unexpected).toEqual([duplicate, other]);
   });
 
+  it("matches as many expected problems as possible when their ranges overlap", () => {
+    const wide = {
+      category: "correctness",
+      path: "src/cart.ts",
+      lines: [10, 14] as [number, number],
+      side: "RIGHT" as const,
+      severity: "blocking" as const,
+    };
+    const narrow = { ...wide, lines: [12, 12] as [number, number] };
+    const f = fixture({ expected: [wide, narrow] });
+    // Greedy matching would give the line-12 finding to `wide` and leave `narrow` unmatched.
+    const at12 = finding({ line: 12 });
+    const at10 = finding({ line: 10 });
+    const score = scoreFixture(f, { ...RUN, findings: [at12, at10] });
+    expect(score.missed).toEqual([]);
+    expect(score.matched.map((m) => m.finding)).toEqual([at10, at12]);
+  });
+
   it("counts blocking and should-fix findings on a clean fixture as false positives", () => {
     const clean = fixture({ kind: "clean", expected: [] });
     const score = scoreFixture(clean, {

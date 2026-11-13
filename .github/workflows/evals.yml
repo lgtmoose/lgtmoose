@@ -49,6 +49,10 @@ jobs:
 
       - uses: actions/checkout@v7
         if: env.HAS_CREDENTIAL == 'true'
+        with:
+          # The job runs the PR's code and a model on it: don't leave a token in .git/config
+          # that it could read. The report step passes its own GH_TOKEN.
+          persist-credentials: false
       - uses: ./.github/actions/setup
         if: env.HAS_CREDENTIAL == 'true'
 
@@ -107,5 +111,5 @@ jobs:
       - name: Fail when recall dropped or the evals couldn't run
         if: env.HAS_CREDENTIAL == 'true' && steps.run.outputs.code != '0'
         run: |
-          echo "The evals exited with ${{ steps.run.outputs.code }}: 1 means recall fell below the baseline, 2 that they couldn't run."
+          echo "The evals exited with ${{ steps.run.outputs.code }}: 1 means recall fell below the baseline, 2 that some fixture runs failed (see the report) so recall wasn't compared."
           exit 1

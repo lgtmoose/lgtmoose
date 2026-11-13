@@ -111,21 +111,27 @@ async function main(argv: readonly string[]): Promise<number> {
     });
     const report = buildReport(scores, model, startedAt);
     const baseline = await readBaseline(baselinePath);
-    // Nothing ran (no credential, the CLI missing): the scores mean nothing, whatever the
-    // baseline, and they mustn't become the baseline.
-    const allFailed =
-      report.fixtures.length > 0 && report.totals.failedRuns === report.fixtures.length;
-    const gate = allFailed
-      ? { ok: false, message: "Every fixture run failed, so there's nothing to score." }
-      : gateFor(report, baseline, {
-          updating: values["update-baseline"] === true,
-          subset: values.only !== undefined,
-          baselinePath,
-        });
+    // A failed run (a timeout, a rate limit, no credential) scores as misses, which would read
+    // as a recall drop. Report it as "couldn't run" instead, and never make it the baseline.
+    const failed = report.totals.failedRuns;
+    const gate =
+      failed > 0
+        ? {
+            ok: false,
+            message:
+              failed === report.fixtures.length
+                ? "Every fixture run failed, so there's nothing to score."
+                : `${failed} of ${report.fixtures.length} fixture runs failed, so recall wasn't compared with the baseline. Rerun once they pass.`,
+          }
+        : gateFor(report, baseline, {
+            updating: values["update-baseline"] === true,
+            subset: values.only !== undefined,
+            baselinePath,
+          });
     await writeFile(join(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(join(out, "report.md"), renderMarkdown(report, baseline, gate));
     process.stderr.write(`${gate.message}\nReport: ${join(out, "report.md")}\n`);
-    if (allFailed) return 2;
+    if (failed > 0) return 2;
     if (values["update-baseline"]) {
       await writeFile(baselinePath, `${JSON.stringify(baselineFrom(report), null, 2)}\n`);
     }
