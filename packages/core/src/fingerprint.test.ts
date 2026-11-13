@@ -48,6 +48,20 @@ describe("normalizeCode", () => {
     expect(normalizeCode(["a  +  b"])).toEqual(normalizeCode(["x+y"]));
   });
 
+  it("drops comments, so adding or editing one keeps the fingerprint", () => {
+    expect(normalizeCode(["total += x; // fix later"])).toEqual(normalizeCode(["total += x;"]));
+    expect(normalizeCode(["total += x /* note */;"])).toEqual(normalizeCode(["total += x;"]));
+    expect(normalizeCode(["total += x  # python note"])).toEqual(normalizeCode(["total += x"]));
+    expect(normalizeCode(["#include <x.h>"])).toContain("#");
+  });
+
+  it("treats names inside a template literal's interpolations as identifiers", () => {
+    expect(normalizeCode(["log(`user ${user.id} denied`)"])).toEqual(
+      normalizeCode(["log(`user ${account.key} denied`)"]),
+    );
+    expect(normalizeCode(["`a`"])).not.toEqual(normalizeCode(["`b`"]));
+  });
+
   it("drops line breaks, so re-wrapped code matches", () => {
     expect(normalizeCode(["call(a,", "  b)"])).toEqual(normalizeCode(["call(a, b)"]));
   });
@@ -68,6 +82,15 @@ describe("titleNouns", () => {
       "refund",
     ]);
     expect(titleNouns("account may be null", ["return account.name;"])).toEqual(["null"]);
+  });
+
+  it("keeps non-ASCII words whole", () => {
+    expect(titleNouns("Überprüfung fehlt für Benutzer")).toEqual([
+      "benutzer",
+      "fehlt",
+      "für",
+      "überprüfung",
+    ]);
   });
 
   it("keeps words ending in ss", () => {
@@ -155,6 +178,10 @@ describe("commentTitle", () => {
       "Missing auth check",
     );
     expect(commentTitle("")).toBe("");
+  });
+
+  it("keeps underscores inside names but drops emphasis underscores", () => {
+    expect(commentTitle("_Note:_ user_id is never checked")).toBe("Note: user_id is never checked");
   });
 
   it("caps the length", () => {

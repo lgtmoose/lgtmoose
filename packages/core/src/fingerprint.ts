@@ -66,20 +66,32 @@ const KEYWORDS = new Set(
   ).split(" "),
 );
 
-/** Tokens: string literals, identifiers, numbers, then any other single non-space character. */
-const TOKEN = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|[A-Za-z_$][\w$]*|\d[\w.]*|\S/g;
+/**
+ * Tokens: comments (dropped), string literals, identifiers, numbers, then any other single
+ * non-space character. Comments are `//` line comments, one-line block comments, and `#`
+ * followed by a space (Python, shell, YAML), so `#include` and `#private` stay code.
+ */
+const TOKEN =
+  /\/\/.*|\/\*.*?\*\/|#\s.*|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|[A-Za-z_$][\w$]*|\d[\w.]*|\S/g;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+const COMMENT = /^(?:\/\/|\/\*|#\s)/;
+/** `${...}` inside a template literal: the names in it are identifiers too. */
+const INTERPOLATION = /\$\{[^}]*\}/g;
+
+function normalizeToken(token: string): string {
+  if (IDENTIFIER.test(token)) return KEYWORDS.has(token.toLowerCase()) ? token : "$id";
+  if (token.startsWith("`")) return token.replace(INTERPOLATION, "${}");
+  return token;
+}
 
 /**
- * Normalised tokens of some code: identifiers that aren't keywords become `$id`, whitespace and
- * line breaks disappear. String and number literals stay, since they're usually the point
- * (`"admin"`, a limit).
+ * Normalised tokens of some code: identifiers that aren't keywords become `$id` (also inside a
+ * template literal's `${...}`), comments, whitespace and line breaks disappear. String and
+ * number literals stay, since they're usually the point (`"admin"`, a limit).
  */
 export function normalizeCode(lines: readonly string[]): string[] {
   return lines.flatMap((line) =>
-    (line.match(TOKEN) ?? []).map((token) =>
-      IDENTIFIER.test(token) && !KEYWORDS.has(token.toLowerCase()) ? "$id" : token,
-    ),
+    (line.match(TOKEN) ?? []).filter((token) => !COMMENT.test(token)).map(normalizeToken),
   );
 }
 
@@ -109,10 +121,10 @@ export function titleNouns(title: string, code: readonly string[] = []): string[
   const names = identifiersIn(code);
   const words = title
     .replace(/`[^`]*`/g, " ")
-    .split(/[^A-Za-z0-9_]+/)
+    .split(/[^\p{L}\p{N}_]+/u)
     .filter((word) => word.length >= 3)
     // camelCase, PascalCase with an inner capital, snake_case or digits: an identifier.
-    .filter((word) => !/[a-z][A-Z]|_|\d/.test(word))
+    .filter((word) => !/\p{Ll}\p{Lu}|_|\d/u.test(word))
     .map((word) => word.toLowerCase())
     .filter((word) => !STOPWORDS.has(word) && !names.has(word))
     .map((word) =>
@@ -192,10 +204,12 @@ export function commentTitle(body: string): string {
   const text = body
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/[*_>#~]/g, " ")
+    // Markdown emphasis, quotes, headings and strike-through; an underscore inside a word
+    // (`user_id`) stays, so the name is still recognised as an identifier.
+    .replace(/[*>#~]|(?<!\w)_+|_+(?!\w)/g, " ")
     .trim();
   const first = text.split(/(?<=[.!?])\s|\n/)[0] ?? "";
-  return first.trim().slice(0, 200);
+  return first.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 /** Jaccard similarity of two sets of words or tokens. Two empty sets are equal. */
@@ -265,7 +279,9 @@ export interface DedupeResult<T> {
 
 /**
  * Drops findings already on the PR: an exact fingerprint match, or a fuzzy one (`isSimilar`)
- * unless the finding's category is protected. Candidates are also checked against each other,
+ * unless the finding's category is protected. Comments from other bots and humans have no rule
+ * category, so they never match a finding exactly; they're matched fuzzily, which means a
+ * protected finding is posted even if someone else already raised it. Candidates are also checked against each other,
  * in order, so two batches reporting the same problem post it once.
  */
 export function dedupeFindings<T>(
