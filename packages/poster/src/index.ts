@@ -24,7 +24,6 @@ export {
   reviewBody,
   withCommentsInBody,
   type ReviewComment,
-  type ReviewEvent,
   type ReviewInput,
   type ReviewPayload,
 } from "./review.js";

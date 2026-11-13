@@ -1,10 +1,7 @@
-import { severityRank, type Finding } from "@lgtmoose/core";
+import { severityRank, type Finding, type ReviewEvent } from "@lgtmoose/core";
 import { commentTarget, type CommentPosition, type FileDiff } from "@lgtmoose/git";
 import { clip, paragraphs } from "@lgtmoose/summary";
 import { GITHUB_BODY_LIMIT, findingHeading, findingLocation, formatComment } from "./format.js";
-
-/** The review event posted to GitHub. */
-export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 /** One inline comment in a review, as GitHub's "create a review" API takes it. */
 export interface ReviewComment extends CommentPosition {
@@ -36,6 +33,8 @@ export interface ReviewPayload {
   inBody: Finding[];
   /** Nits past `nitCap`, left out. */
   nitsLeftOut: number;
+  /** The intro the body starts with, kept so a retry rebuilds the same body. */
+  intro?: string;
 }
 
 const EVENT_TEXT: Record<ReviewEvent, string> = {
@@ -70,14 +69,9 @@ function capNits(
   return { inline: keptInline, outside: keptOutside, left };
 }
 
-/** The body list of findings that couldn't go inline, most severe first. */
-function bodyList(findings: readonly Finding[]): string {
-  const sorted = [...findings].sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
-  const items = sorted.map(
-    (finding) =>
-      `- ${findingLocation(finding)}: ${findingHeading(finding)}\n\n${indent(paragraphs(finding.body))}`,
-  );
-  return ["**Findings outside the diff**", "", ...items].join("\n");
+/** One finding as a body list item: where, what, and the body. */
+function bodyItem(finding: Finding): string {
+  return `- ${findingLocation(finding)}: ${findingHeading(finding)}\n\n${indent(paragraphs(finding.body))}`;
 }
 
 function indent(text: string): string {
@@ -87,21 +81,46 @@ function indent(text: string): string {
     .join("\n");
 }
 
-/** The review body: the outcome, findings that can't go inline, and nits left out. */
+/** Room kept for the closing lines (more findings, nits left out) when the body is full. */
+const TAIL_ROOM = 500;
+
+/**
+ * The review body: the outcome, findings that can't go inline (most severe first), and nits
+ * left out. Findings are added while they fit under GitHub's limit; any that don't are counted
+ * in a closing line rather than cut off silently.
+ */
 export function reviewBody(
   event: ReviewEvent,
   inBody: readonly Finding[],
   nitsLeftOut: number,
   intro?: string,
 ): string {
-  const parts = [intro?.trim() || EVENT_TEXT[event]];
-  if (inBody.length > 0) parts.push(bodyList(inBody));
+  const head = clip(intro?.trim() || EVENT_TEXT[event], 2_000);
+  const parts = [head];
+  let length = head.length;
+  if (inBody.length > 0) {
+    const sorted = [...inBody].sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
+    const items: string[] = [];
+    for (const finding of sorted) {
+      const item = bodyItem(finding);
+      if (length + item.length + 2 > GITHUB_BODY_LIMIT - TAIL_ROOM) break;
+      items.push(item);
+      length += item.length + 2;
+    }
+    parts.push(["**Findings outside the diff**", "", ...items].join("\n"));
+    const more = sorted.length - items.length;
+    if (more > 0) {
+      parts.push(
+        `…and ${more} more ${more === 1 ? "finding" : "findings"} that didn't fit here; the check run's annotations list them.`,
+      );
+    }
+  }
   if (nitsLeftOut > 0) {
     parts.push(
       `${nitsLeftOut} more ${nitsLeftOut === 1 ? "nit was" : "nits were"} left out (the review posts at most \`gate.nit_cap\` nits).`,
     );
   }
-  return clip(parts.join("\n\n"), GITHUB_BODY_LIMIT);
+  return parts.join("\n\n");
 }
 
 /**
@@ -143,6 +162,7 @@ export function buildReview(input: ReviewInput): ReviewPayload {
     commented,
     inBody,
     nitsLeftOut: capped.left,
+    ...(input.intro === undefined ? {} : { intro: input.intro }),
   };
 }
 
@@ -150,11 +170,11 @@ export function buildReview(input: ReviewInput): ReviewPayload {
  * The same review with every inline comment moved into the body, for when GitHub refuses a
  * comment position (HTTP 422 doesn't say which one).
  */
-export function withCommentsInBody(payload: ReviewPayload, intro?: string): ReviewPayload {
+export function withCommentsInBody(payload: ReviewPayload): ReviewPayload {
   const inBody = [...payload.inBody, ...payload.commented];
   return {
     ...payload,
-    body: reviewBody(payload.event, inBody, payload.nitsLeftOut, intro),
+    body: reviewBody(payload.event, inBody, payload.nitsLeftOut, payload.intro),
     comments: [],
     commented: [],
     inBody,

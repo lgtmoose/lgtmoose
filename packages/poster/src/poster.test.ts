@@ -24,6 +24,12 @@ describe("GitHubClient", () => {
     expect(String(error)).not.toContain(TOKEN);
   });
 
+  it("keeps GitHub's message readable when the token is empty", async () => {
+    const fake = fakeFetch([{ status: 401, body: { message: "Bad credentials" } }]);
+    const github = new GitHubClient({ token: async () => "", fetch: fake.fetch });
+    await expect(github.request("GET", "/user")).rejects.toThrow("Bad credentials");
+  });
+
   it("follows pages until a short one", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
     const { github, calls } = poster([
@@ -112,14 +118,20 @@ describe("GitHubPoster", () => {
     const { poster: p, calls } = poster([{ status: 201, body: { id: 9 } }]);
     await p.completeCheckRun(PULL, {
       headSha: "abc",
-      conclusion: "success",
-      title: "Approved",
+      conclusion: "action_required",
+      title: "Review incomplete",
       summary: "ok",
       annotations: [],
+      detailsUrl: "https://github.com/acme/app/pull/7#issuecomment-1",
     });
     expect(calls[0]).toMatchObject({
       method: "POST",
-      body: { name: "LGTMoose", head_sha: "abc", conclusion: "success" },
+      body: {
+        name: "LGTMoose",
+        head_sha: "abc",
+        conclusion: "action_required",
+        details_url: "https://github.com/acme/app/pull/7#issuecomment-1",
+      },
     });
   });
 

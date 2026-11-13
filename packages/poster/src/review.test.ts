@@ -70,6 +70,33 @@ describe("buildReview", () => {
     expect(review.body).toContain("2 more nits were left out");
   });
 
+  it("counts findings that don't fit under GitHub's limit instead of cutting them off", () => {
+    const long = Array.from({ length: 40 }, (_, i) =>
+      finding({ line: 200 + i, title: `Far ${i}`, body: "word ".repeat(800) }),
+    );
+    const review = buildReview({
+      event: "COMMENT",
+      inline: long,
+      outsideDiff: [],
+      files,
+      nitCap: 10,
+    });
+    expect(review.body.length).toBeLessThanOrEqual(65_536);
+    expect(review.body).toMatch(/…and \d+ more findings that didn't fit here/);
+  });
+
+  it("keeps the intro when the retry rebuilds the body", () => {
+    const review = buildReview({
+      event: "COMMENT",
+      inline: [finding()],
+      outsideDiff: [],
+      files,
+      nitCap: 10,
+      intro: "See the summary comment.",
+    });
+    expect(withCommentsInBody(review).body.startsWith("See the summary comment.")).toBe(true);
+  });
+
   it("always has a body", () => {
     const review = buildReview({
       event: "APPROVE",

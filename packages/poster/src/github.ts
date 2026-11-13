@@ -27,6 +27,11 @@ export class GitHubError extends Error {
 /** Longest GitHub error message kept, so a large error body can't flood a log line. */
 const MESSAGE_LIMIT = 300;
 
+/** Removes the token from a message. A short or empty token isn't one, and isn't searched for. */
+function redactToken(message: string, token: string): string {
+  return token.length >= 8 ? message.split(token).join("***") : message;
+}
+
 /** Items per page for list endpoints; GitHub's maximum. */
 const PAGE_SIZE = 100;
 
@@ -61,7 +66,7 @@ export class GitHubClient {
       const reply = (await response.json().catch(() => ({}))) as { message?: unknown };
       const message =
         typeof reply.message === "string" && reply.message !== ""
-          ? reply.message.split(token).join("***").slice(0, MESSAGE_LIMIT)
+          ? redactToken(reply.message, token).slice(0, MESSAGE_LIMIT)
           : undefined;
       throw new GitHubError(response.status, message, method, path);
     }

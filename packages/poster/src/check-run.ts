@@ -58,7 +58,15 @@ export interface CheckRunInput {
   summary: string;
   text?: string;
   annotations: readonly Annotation[];
-  /** The check run's ID from an earlier run on the same commit, to update instead of create. */
+  /**
+   * Where a person should look, such as the summary comment's URL. Worth giving for
+   * `action_required`, which asks someone to act.
+   */
+  detailsUrl?: string;
+  /**
+   * The in-progress run from `startCheckRun`, to complete instead of creating a new one. Updates
+   * add to a run's annotations, so don't pass a run that already has them.
+   */
   existingId?: number;
 }
 

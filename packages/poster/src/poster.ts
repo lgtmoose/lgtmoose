@@ -25,12 +25,7 @@ export interface SummaryCommentResult {
  */
 export interface Poster {
   /** Submits the run's one review on `commitId`. */
-  submitReview(
-    pull: PullRef,
-    commitId: string,
-    payload: ReviewPayload,
-    intro?: string,
-  ): Promise<PostedReview>;
+  submitReview(pull: PullRef, commitId: string, payload: ReviewPayload): Promise<PostedReview>;
   /** Starts the check run (in progress) and returns its ID, to complete with `completeCheckRun`. */
   startCheckRun(pull: PullRef, headSha: string): Promise<number | undefined>;
   /** Completes (or creates, without `existingId`) the check run with its conclusion and annotations. */
@@ -93,7 +88,6 @@ export class GitHubPoster implements Poster {
     pull: PullRef,
     commitId: string,
     payload: ReviewPayload,
-    intro?: string,
   ): Promise<PostedReview> {
     const path = `${repoPath(pull)}/pulls/${pull.pull}/reviews`;
     const send = (sent: ReviewPayload) =>
@@ -110,7 +104,7 @@ export class GitHubPoster implements Poster {
       // 422 usually means a comment position GitHub won't take (the diff changed, a line
       // outside a hunk). It doesn't say which, so all comments go into the body, once.
       if (!isStatus(error, 422) || payload.comments.length === 0) throw error;
-      const retry = withCommentsInBody(payload, intro);
+      const retry = withCommentsInBody(payload);
       const review = await send(retry);
       return { id: review.id, movedToBody: true, payload: retry };
     }
@@ -130,6 +124,7 @@ export class GitHubPoster implements Poster {
     const fields = {
       status: "completed",
       conclusion: input.conclusion,
+      ...(input.detailsUrl === undefined ? {} : { details_url: input.detailsUrl }),
       output: checkOutput(input, first),
     };
     const run =
