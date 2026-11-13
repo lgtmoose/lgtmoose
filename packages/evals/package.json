@@ -1,0 +1,40 @@
+{
+  "name": "@lgtmoose/evals",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Evals for the review pipeline: fixtures with seeded bugs and clean PRs, scores, reports and a recall gate.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "lgtmoose-evals": "./dist/main.js"
+  },
+  "files": [
+    "dist",
+    "fixtures",
+    "baseline.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json --ignore-pattern 'fixtures/**' .",
+    "test": "vitest run",
+    "eval": "node dist/main.js"
+  },
+  "dependencies": {
+    "@lgtmoose/core": "workspace:*",
+    "@lgtmoose/git": "workspace:*",
+    "@lgtmoose/harness": "workspace:*",
+    "@lgtmoose/pipeline": "workspace:*",
+    "@lgtmoose/summary": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

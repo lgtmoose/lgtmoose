@@ -1,0 +1,7 @@
+{
+  "recall": 0,
+  "falsePositiveRate": 0,
+  "model": "none",
+  "fixtures": 0,
+  "measuredAt": "never: run `pnpm --filter @lgtmoose/evals eval -- --update-baseline` with a model credential and commit the result"
+}

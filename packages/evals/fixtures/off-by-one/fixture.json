@@ -1,0 +1,21 @@
+{
+  "title": "Support a discount on the cart total",
+  "body": "Adds an optional discount, in cents, taken off the cart total.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": "correctness",
+      "path": "src/cart.ts",
+      "lines": [10, 10],
+      "severity": "blocking",
+      "note": "the loop bound now skips the last item"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/cart.ts",
+      "lines": [15, 15],
+      "note": "clamping the discounted total at zero is intended"
+    }
+  ]
+}

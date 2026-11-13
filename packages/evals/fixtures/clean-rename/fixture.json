@@ -1,0 +1,15 @@
+{
+  "title": "Rename fmt to formatPrice",
+  "body": "A clearer name for the price formatter. Every caller is updated; behaviour is unchanged.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "src/money.ts",
+      "note": "the rename changes no behaviour"
+    },
+    {
+      "path": "src/receipt.ts",
+      "note": "both callers use the new name"
+    }
+  ]
+}

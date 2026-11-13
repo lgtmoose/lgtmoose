@@ -46,6 +46,8 @@ apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dr
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
+packages/evals/   eval fixtures, scores and the recall gate for prompt and harness changes
+packages/pipeline/ one whole review in-process, without posting (review --dry-run, evals)
 packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth
 packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrapping
 packages/poster/  posts a run: one review, inline comments, check run, summary, labels

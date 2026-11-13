@@ -25,8 +25,7 @@ import {
   type PullRequestComment,
 } from "@lgtmoose/roles";
 import { renderSummary } from "@lgtmoose/summary";
-import type { PullComment, PullReader, PullRequest } from "./github.js";
-import type { PullTarget } from "./target.js";
+import type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 
 /** Everything a dry run touches outside its own process. Tests pass fakes. */
 export interface ReviewDeps {
