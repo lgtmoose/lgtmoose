@@ -1,0 +1,228 @@
+import type { FileDiff, Hunk } from "@lgtmoose/git";
+import { describe, expect, it } from "vitest";
+import { lockfileNotes } from "./lockfile.js";
+
+function lockfile(removed: string[], added: string[], path = "package-lock.json"): FileDiff {
+  let oldLine = 10;
+  let newLine = 10;
+  const hunk: Hunk = {
+    oldStart: 10,
+    oldLines: removed.length,
+    newStart: 10,
+    newLines: added.length,
+    section: "",
+    lines: [
+      ...removed.map((text) => ({ kind: "del" as const, oldLine: oldLine++, text })),
+      ...added.map((text) => ({ kind: "add" as const, newLine: newLine++, text })),
+    ],
+  };
+  return {
+    path,
+    status: "modified",
+    oldBlob: "a".repeat(40),
+    newBlob: "b".repeat(40),
+    submodule: false,
+    moved: false,
+    mechanical: false,
+    binary: false,
+    hunks: [hunk],
+  };
+}
+
+const RESOLVED = (host: string) =>
+  `      "resolved": "https://${host}/left-pad/-/left-pad-1.3.0.tgz",`;
+
+describe("lockfileNotes", () => {
+  it("notes a package resolved from an unknown host", () => {
+    const file = lockfile(
+      [RESOLVED("registry.npmjs.org"), '      "integrity": "sha512-AAA",'],
+      [RESOLVED("evil.example.com"), '      "integrity": "sha512-BBB",'],
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "1 package resolves from evil.example.com, not a known registry (first at line 10)",
+      "line 11: a checksum changed with no version change (version 1.3.0)",
+    ]);
+  });
+
+  it("notes a checksum change for the same version", () => {
+    const file = lockfile(
+      ['      "integrity": "sha512-AAA",'],
+      ['      "integrity": "sha512-BBB",'],
+    );
+    expect(lockfileNotes(file)).toEqual(["line 10: a checksum changed with no version change"]);
+  });
+
+  it("finds a checksum swap next to a legitimate bump in the same hunk", () => {
+    const file = lockfile(
+      [
+        '      "version": "1.3.0",',
+        '      "integrity": "sha512-AAA",',
+        '      "version": "7.0.0",',
+        '      "integrity": "sha512-CCC",',
+      ],
+      [
+        '      "version": "1.3.1",',
+        '      "integrity": "sha512-BBB",',
+        '      "version": "7.0.0",',
+        '      "integrity": "sha512-EVIL",',
+      ],
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "line 13: a checksum changed with no version change (version 7.0.0)",
+    ]);
+  });
+
+  it("doesn't mix up two packages with the same version", () => {
+    const file = lockfile(
+      [
+        '    "node_modules/chalk": {',
+        '      "version": "5.0.0",',
+        '      "integrity": "sha512-AAA",',
+      ],
+      [
+        '    "node_modules/colorette": {',
+        '      "version": "5.0.0",',
+        '      "integrity": "sha512-BBB",',
+      ],
+    );
+    expect(lockfileNotes(file)).toEqual([]);
+  });
+
+  it("is quiet for an ordinary version bump from the registry", () => {
+    const file = lockfile(
+      [
+        '      "version": "1.3.0",',
+        RESOLVED("registry.npmjs.org"),
+        '      "integrity": "sha512-AAA",',
+      ],
+      [
+        '      "version": "1.3.1",',
+        '      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.1.tgz",',
+        '      "integrity": "sha512-BBB",',
+      ],
+    );
+    expect(lockfileNotes(file)).toEqual([]);
+  });
+
+  it("notes git and ssh sources", () => {
+    const file = lockfile([], ['  dep: "git+ssh://git@gitlab.example.org/team/dep.git#abc"']);
+    expect(lockfileNotes(file)).toEqual([
+      "1 package resolves from gitlab.example.org, not a known registry (first at line 10)",
+    ]);
+  });
+
+  it("doesn't flag a Go dependency bump, where version and checksum share a line", () => {
+    const file = lockfile(
+      ["golang.org/x/net v0.20.0 h1:aaaa=", "golang.org/x/net v0.20.0/go.mod h1:bbbb="],
+      ["golang.org/x/net v0.21.0 h1:cccc=", "golang.org/x/net v0.21.0/go.mod h1:dddd="],
+      "go.sum",
+    );
+    expect(lockfileNotes(file)).toEqual([]);
+  });
+
+  it("flags a go.sum hash change for the same version", () => {
+    const file = lockfile(
+      ["golang.org/x/net v0.20.0 h1:aaaa="],
+      ["golang.org/x/net v0.20.0 h1:zzzz="],
+      "go.sum",
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "line 10: a checksum changed with no version change (version 0.20.0)",
+    ]);
+  });
+
+  it("ignores metadata URLs and Cargo's registry index", () => {
+    const npm = lockfile(
+      [],
+      ['      "funding": {', '        "url": "https://github.com/sponsors/ljharb"', "      },"],
+    );
+    const cargo = lockfile(
+      [],
+      [
+        'name = "serde"',
+        'version = "1.0.1"',
+        'source = "registry+https://github.com/rust-lang/crates.io-index"',
+      ],
+      "Cargo.lock",
+    );
+    expect(lockfileNotes(npm)).toEqual([]);
+    expect(lockfileNotes(cargo)).toEqual([]);
+  });
+
+  it("checks composer dist and source URLs, trusting the usual Git hosts there", () => {
+    const composer = (host: string) =>
+      lockfile(
+        [],
+        [
+          '            "dist": {',
+          '                "type": "zip",',
+          `                "url": "https://${host}/repos/a/b/zipball/abc",`,
+        ],
+        "composer.lock",
+      );
+    expect(lockfileNotes(composer("api.github.com"))).toEqual([]);
+    expect(lockfileNotes(composer("evil.example.com"))).toHaveLength(1);
+  });
+
+  it("groups packages by host and skips trusted registries", () => {
+    const lines = Array.from({ length: 3 }, (_, i) =>
+      RESOLVED("npm.acme.internal").replace("1.3.0", `1.3.${i}`),
+    );
+    expect(lockfileNotes(lockfile([], lines))).toEqual([
+      "3 packages resolve from npm.acme.internal, not a known registry (first at line 10)",
+    ]);
+    expect(lockfileNotes(lockfile([], lines), { trustedHosts: ["npm.acme.internal"] })).toEqual([]);
+  });
+
+  it("notes a composer download moved to another GitHub repository", () => {
+    const dist = (owner: string) => [
+      '            "dist": {',
+      '                "type": "zip",',
+      `                "url": "https://api.github.com/repos/${owner}/console/zipball/abc",`,
+    ];
+    const moved = lockfile(dist("symfony").slice(2), dist("attacker").slice(2), "composer.lock");
+    moved.hunks[0]?.lines.unshift(
+      { kind: "context", oldLine: 8, newLine: 8, text: '            "dist": {' },
+      { kind: "context", oldLine: 9, newLine: 9, text: '                "type": "zip",' },
+    );
+    expect(lockfileNotes(moved)).toEqual([
+      "line 10: now downloads from api.github.com/attacker/console, replacing symfony/console",
+    ]);
+    const bumped = lockfile(dist("symfony"), dist("symfony"), "composer.lock");
+    expect(lockfileNotes(bumped)).toEqual([]);
+  });
+
+  it("doesn't report a new composer package next to an updated one as a swap", () => {
+    const url = (repo: string, ref: string) =>
+      `                "url": "https://api.github.com/repos/${repo}/zipball/${ref}",`;
+    const file = lockfile(
+      ['            "dist": {', url("php-fig/log", "aaa")],
+      [
+        '            "dist": {',
+        url("php-fig/log", "bbb"),
+        '            "dist": {',
+        url("seldaek/monolog", "ccc"),
+      ],
+      "composer.lock",
+    );
+    expect(lockfileNotes(file)).toEqual([]);
+  });
+
+  it("checks poetry's custom package sources", () => {
+    const file = lockfile(
+      [],
+      ["[package.source]", 'type = "legacy"', 'url = "https://evil.example.com/simple"'],
+      "poetry.lock",
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "1 package resolves from evil.example.com, not a known registry (first at line 12)",
+    ]);
+  });
+
+  it("notes downloads without TLS, even from a known registry", () => {
+    const file = lockfile([], [RESOLVED("registry.npmjs.org").replace("https://", "http://")]);
+    expect(lockfileNotes(file)).toEqual([
+      "1 package downloads over http://registry.npmjs.org without TLS (first at line 10)",
+    ]);
+  });
+});
