@@ -53,7 +53,9 @@ export type BlockReason =
   | "not_allowed"
   | "dns_failed"
   | "private_address"
-  | "upstream_failed";
+  | "upstream_failed"
+  | "sni_mismatch"
+  | "not_tls";
 
 /**
  * Addresses a tunnel may never reach: private, shared, loopback, link-local (the instance
@@ -129,6 +131,60 @@ export function parseTarget(target: string): { host: string; port: number } | un
     .replace(/\.$/, "");
   // 253 is the longest DNS name; the cap also keeps log lines short.
   return host === "" || host.length > 253 ? undefined : { host, port };
+}
+
+/** The most bytes read while waiting for the TLS ClientHello: one full TLS record and its header. */
+const MAX_HELLO_BYTES = 5 + 16_384;
+
+export type ClientHello =
+  { kind: "incomplete" } | { kind: "invalid" } | { kind: "hello"; serverName: string | undefined };
+
+/**
+ * Reads the server name (SNI) from the start of a TLS connection: a handshake record holding a
+ * ClientHello. The tunnel's host is checked against the allowlist, but the TLS inside it could
+ * name another site on the same IP (a CDN serves many customers per address), so the proxy
+ * checks that the ClientHello names the same host. The ClientHello must fit in the first record.
+ */
+export function readClientHello(data: Buffer): ClientHello {
+  if (data.length < 5) return { kind: "incomplete" };
+  // A handshake record, TLS 1.0 to 1.3 framing.
+  if (data[0] !== 0x16 || data[1] !== 0x03) return { kind: "invalid" };
+  const recordLength = data.readUInt16BE(3);
+  if (recordLength < 4 || recordLength > 16_384) return { kind: "invalid" };
+  if (data.length < 5 + recordLength) return { kind: "incomplete" };
+  const record = data.subarray(5, 5 + recordLength);
+  if (record[0] !== 0x01) return { kind: "invalid" };
+  const helloLength = (record.readUInt16BE(1) << 8) | (record[3] ?? 0);
+  if (helloLength + 4 > record.length) return { kind: "invalid" };
+  const hello = record.subarray(4, 4 + helloLength);
+  let at = 2 + 32; // version, random
+  const skip = (lengthBytes: 1 | 2): boolean => {
+    if (at + lengthBytes > hello.length) return false;
+    const length = lengthBytes === 1 ? (hello[at] ?? 0) : hello.readUInt16BE(at);
+    at += lengthBytes + length;
+    return at <= hello.length;
+  };
+  // Session ID, cipher suites, compression methods.
+  if (!skip(1) || !skip(2) || !skip(1)) return { kind: "invalid" };
+  if (at === hello.length) return { kind: "hello", serverName: undefined };
+  if (at + 2 > hello.length) return { kind: "invalid" };
+  const extensionsEnd = at + 2 + hello.readUInt16BE(at);
+  if (extensionsEnd > hello.length) return { kind: "invalid" };
+  at += 2;
+  while (at + 4 <= extensionsEnd) {
+    const type = hello.readUInt16BE(at);
+    const length = hello.readUInt16BE(at + 2);
+    const body = hello.subarray(at + 4, at + 4 + length);
+    at += 4 + length;
+    if (at > extensionsEnd) return { kind: "invalid" };
+    if (type !== 0) continue;
+    // server_name: a list of (type, name); only host_name (0) is defined.
+    if (body.length < 5 || body[2] !== 0) return { kind: "invalid" };
+    const nameLength = body.readUInt16BE(3);
+    if (5 + nameLength > body.length) return { kind: "invalid" };
+    return { kind: "hello", serverName: body.subarray(5, 5 + nameLength).toString("latin1") };
+  }
+  return { kind: "hello", serverName: undefined };
 }
 
 const FORBIDDEN = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -223,8 +279,10 @@ export function createProxy(options: ProxyOptions): Server {
 
       const upstream = dial(first.address, port);
       let established = false;
+      let helloTimer: NodeJS.Timeout | undefined;
       const close = () => {
         clearTimeout(lifetime);
+        clearTimeout(helloTimer);
         upstream.destroy();
         client.destroy();
       };
@@ -241,11 +299,52 @@ export function createProxy(options: ProxyOptions): Server {
         upstream.setTimeout(idleTimeoutMs, close);
         // The CONNECT socket is a net.Socket; Node types it as a plain Duplex.
         (client as Socket).setTimeout(idleTimeoutMs, close);
-        log({ event: "tunnel", host, port, address: first.address, client: remote });
         client.write(ESTABLISHED);
-        if (head.length > 0) upstream.write(head);
-        upstream.pipe(client);
-        client.pipe(upstream);
+        // Nothing goes upstream until the client's ClientHello names the tunnel's host.
+        let buffered = head;
+        helloTimer = setTimeout(() => {
+          log({ event: "blocked", reason: "not_tls", client: remote, host, port });
+          close();
+        }, connectTimeoutMs);
+        const check = (): boolean => {
+          const hello = readClientHello(buffered);
+          if (hello.kind === "incomplete" && buffered.length < MAX_HELLO_BYTES) return false;
+          client.off("data", onData);
+          client.off("end", close);
+          clearTimeout(helloTimer);
+          const name =
+            hello.kind === "hello" ? hello.serverName?.toLowerCase().replace(/\.$/, "") : undefined;
+          if (hello.kind !== "hello" || name !== host) {
+            log({
+              event: "blocked",
+              reason: hello.kind === "hello" ? "sni_mismatch" : "not_tls",
+              client: remote,
+              host,
+              port,
+              ...(hello.kind === "hello"
+                ? { serverName: (hello.serverName ?? "").slice(0, 253) }
+                : {}),
+            });
+            close();
+            return true;
+          }
+          log({ event: "tunnel", host, port, address: first.address, client: remote });
+          upstream.write(buffered);
+          upstream.pipe(client);
+          client.pipe(upstream);
+          return true;
+        };
+        const onData = (chunk: Buffer) => {
+          buffered = Buffer.concat([buffered, chunk]);
+          check();
+        };
+        if (!check()) {
+          client.on("data", onData);
+          // The HTTP server keeps sockets half-open: a client that ends before its ClientHello
+          // would otherwise leave the tunnel waiting.
+          client.once("end", close);
+          client.resume();
+        }
       });
       upstream.on("error", () => {
         if (!established) {
