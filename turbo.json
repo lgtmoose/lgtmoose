@@ -1,6 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": ["tsconfig.base.json", ".nvmrc"],
+  "globalDependencies": [
+    "tsconfig.base.json",
+    ".nvmrc",
+    "pnpm-workspace.yaml",
+    ".github/workflows/ci.yml",
+    ".github/actions/**"
+  ],
   "tasks": {
     "//#format:check": {
       "inputs": ["**/*", "!**/node_modules/**", "!**/dist/**", "!**/cdk.out/**", "!.turbo/**"]
@@ -8,7 +14,8 @@
     "//#lint": {
       "inputs": [
         "**/*.{js,mjs,cjs,ts,mts,cts,tsx}",
-        "eslint.config.js",
+        "**/tsconfig*.json",
+        ".oxlintrc.json",
         "!**/node_modules/**",
         "!**/dist/**",
         "!**/cdk.out/**"

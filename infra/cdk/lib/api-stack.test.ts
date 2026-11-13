@@ -89,11 +89,9 @@ describe("ApiStack", () => {
       (r) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties.Roles).includes(role),
     );
     expect(policies).toHaveLength(1);
-    const statements = (
-      policies[0]?.Properties.PolicyDocument as {
-        Statement: { Action: unknown; Resource: unknown }[];
-      }
-    ).Statement;
+    const document = policies[0]?.Properties.PolicyDocument as
+      { Statement: { Action: unknown; Resource: unknown }[] } | undefined;
+    const statements = document?.Statement ?? [];
     const text = JSON.stringify(statements);
 
     expect(text).toContain("sqs:SendMessage");
@@ -120,8 +118,8 @@ describe("ApiStack", () => {
   it("routes only the health and webhook paths to the gateway, with throttling", () => {
     const routes = Object.values(resources)
       .filter((r) => r.Type === "AWS::ApiGatewayV2::Route")
-      .map((r) => r.Properties.RouteKey)
-      .sort();
+      .map((r) => String(r.Properties.RouteKey))
+      .sort((a, b) => a.localeCompare(b));
     expect(routes).toEqual([`GET ${ROUTES.health}`, `POST ${ROUTES.githubWebhook}`]);
     template.hasResourceProperties("AWS::ApiGatewayV2::Stage", {
       StageName: "$default",

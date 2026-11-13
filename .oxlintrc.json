@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "import"],
+  "categories": { "correctness": "error" },
+  "ignorePatterns": ["**/dist/**", "**/cdk.out/**", "**/coverage/**"],
+  "rules": {
+    "no-nested-ternary": "error",
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error"
+  }
+}

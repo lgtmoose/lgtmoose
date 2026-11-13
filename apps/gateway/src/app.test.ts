@@ -84,9 +84,10 @@ describe("gateway app", () => {
     // express.raw leaves req.body unset when a request has neither Content-Length nor
     // Transfer-Encoding; call the handler directly to cover that case for certain.
     const json = vi.fn();
-    const res = { status: vi.fn(() => ({ json })) } as unknown as Response;
+    const status = vi.fn(() => ({ json }));
+    const res = { status } as unknown as Response;
     await githubWebhookHandler(testDeps())({ body: undefined } as Request, res, () => {});
-    expect(res.status).toHaveBeenCalledWith(400);
+    expect(status).toHaveBeenCalledWith(400);
     expect(json).toHaveBeenCalledWith({ error: "Empty body" });
   });
 

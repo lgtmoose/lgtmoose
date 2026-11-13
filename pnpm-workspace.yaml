@@ -6,3 +6,8 @@ packages:
 # pnpm 10 blocks dependency install scripts by default; allow only what we need.
 onlyBuiltDependencies:
   - esbuild
+
+# TypeScript 7, the native compiler, for the root and every package: about 5x faster than 5.9
+# with the same JavaScript output. Each package depends on it too, so its own `tsc` is pinned.
+catalog:
+  typescript: 7.0.2

@@ -12,7 +12,7 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "lint": "eslint . --cache --cache-strategy content --cache-location node_modules/.cache/eslint/",
+    "lint": "oxlint --type-aware --deny-warnings",
     "format": "prettier --write . --cache",
     "format:check": "prettier --check . --cache",
     "synth": "turbo run synth",
@@ -21,16 +21,15 @@
     "db:test:start": "docker run -d --name lgtmoose-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 \"$(sed -n 's/^FROM //p' tools/test-postgres/Dockerfile)\""
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
     "@lgtmoose/config": "workspace:*",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
-    "eslint": "^9.39.5",
+    "oxlint": "1.93.0",
+    "oxlint-tsgolint": "7.0.2007",
     "prettier": "^3.10.0",
     "tsx": "^4.23.15",
     "turbo": "^2.11.11",
-    "typescript": "~5.9.3",
-    "typescript-eslint": "^8.72.2",
+    "typescript": "catalog:",
     "vitest": "^3.2.7"
   }
 }

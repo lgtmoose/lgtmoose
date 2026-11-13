@@ -15,6 +15,14 @@ concurrency:
 # One job per concern, all running side by side, so a failure says what broke. The checks that
 # take a few seconds share one job, since GitHub bills every job as at least a minute. Every job
 # replays unchanged turbo tasks from the shared remote cache.
+#
+# On pull requests, turbo runs only the packages the PR changes and the packages that depend on
+# them (`--affected`, compared with the base branch, so those jobs check out full history).
+# Changing turbo.json or a file in its globalDependencies (the root tsconfig, .nvmrc,
+# pnpm-workspace.yaml, this workflow) counts as changing everything. Pushes to main always run
+# every task.
+env:
+  AFFECTED: ${{ github.event_name == 'pull_request' && '--affected' || '' }}
 jobs:
   static:
     name: format, lint, migrations
@@ -23,14 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      # ESLint and Prettier only re-check files whose contents changed since the cached run.
+      # Prettier only re-checks files whose contents changed since the cached run. Oxlint needs no
+      # cache: it lints the whole repo, with type information, in a few seconds.
       - uses: actions/cache@v6
         with:
-          path: |
-            node_modules/.cache/eslint
-            node_modules/.cache/prettier
-          key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
-          restore-keys: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
+          path: node_modules/.cache/prettier
+          key: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-${{ github.sha }}
+          restore-keys: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-
       - name: Format
         run: pnpm turbo run format:check
       - name: Lint
@@ -43,16 +50,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup
-      - run: pnpm turbo run typecheck
+      - run: pnpm turbo run typecheck $AFFECTED
 
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup
-      - run: pnpm turbo run test
+      - run: pnpm turbo run test $AFFECTED
 
   test-integration:
     runs-on: ubuntu-latest
@@ -61,6 +72,8 @@ jobs:
       LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       # Started in the background, so pulling and booting it overlaps with setup instead of
       # holding the job up the way a `services:` container does.
       # The image is pinned in tools/test-postgres/Dockerfile, where Dependabot updates it.
@@ -78,7 +91,7 @@ jobs:
           done
           cat /tmp/postgres.log
           exit 1
-      - run: pnpm turbo run test:integration
+      - run: pnpm turbo run test:integration $AFFECTED
 
   # Builds every package, then runs the built CLI the way a user does.
   build:
@@ -86,13 +99,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup
-      - run: pnpm turbo run build smoke
+      - run: pnpm turbo run build smoke $AFFECTED
 
   synth:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup
-      - run: pnpm turbo run synth
+      - run: pnpm turbo run synth $AFFECTED

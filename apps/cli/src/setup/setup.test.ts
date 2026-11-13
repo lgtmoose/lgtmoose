@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { SECRET_NAMES, parseDeployConfig } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { CALLBACK_PATH } from "./callback-server.js";
@@ -126,10 +130,21 @@ async function setup(argv: string[], h: Harness) {
   return { ...result, all: h.output() + result.stdout + result.stderr };
 }
 
-/** Loads the rendered config the way `cdk synth` would, minus the import. */
-function writtenConfig(text: string) {
-  const body = /export default defineConfig\(([\s\S]*)\);\s*$/.exec(text)?.[1] ?? "";
-  return parseDeployConfig(new Function(`return (${body});`)());
+/**
+ * Loads the rendered config the way `cdk synth` does: imports the file, then validates it. It's
+ * written inside this package so its `@lgtmoose/config` import resolves.
+ */
+const SCRATCH = fileURLToPath(new URL("../../node_modules/.cache/setup-test/", import.meta.url));
+async function writtenConfig(text: string) {
+  mkdirSync(SCRATCH, { recursive: true });
+  const path = join(SCRATCH, `config-${randomUUID()}.ts`);
+  writeFileSync(path, text);
+  try {
+    const module = (await import(pathToFileURL(path).href)) as { default: unknown };
+    return parseDeployConfig(module.default);
+  } finally {
+    rmSync(path, { force: true });
+  }
 }
 
 describe("runSetup: first run", () => {
@@ -155,7 +170,7 @@ describe("runSetup: first run", () => {
     });
     expect(h.secrets.get(SECRET_NAMES.githubWebhook)).toBe("FAKE-WEBHOOK-SECRET");
 
-    const config = writtenConfig(h.files.get(CONFIG_PATH) ?? "");
+    const config = await writtenConfig(h.files.get(CONFIG_PATH) ?? "");
     expect(config).toMatchObject({
       region: "eu-west-1",
       profile: "standard",
@@ -445,7 +460,9 @@ describe("runSetup: an existing config that points elsewhere", () => {
     const result = await setup(flags, accepted);
     expect(result.exitCode).toBe(0);
     expect(confirm).toHaveBeenCalledOnce();
-    expect(writtenConfig(accepted.files.get(CONFIG_PATH) ?? "").allowedOrgs).toEqual(["globex"]);
+    expect((await writtenConfig(accepted.files.get(CONFIG_PATH) ?? "")).allowedOrgs).toEqual([
+      "globex",
+    ]);
   });
 
   it("won't keep a config it can't load with --yes", async () => {
