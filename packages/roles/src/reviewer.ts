@@ -96,13 +96,13 @@ export function demoteHeadings(text: string): string {
     .join("\n");
 }
 
-function renderRulePacks(packs: readonly RulePack[]): string {
+export function renderRulePacks(packs: readonly RulePack[]): string {
   if (packs.length === 0) return "# Rule packs\n\nNo rule packs are selected.";
   const sections = packs.map((pack) => `## Rule pack: ${pack.id}\n\n${demoteHeadings(pack.text)}`);
   return ["# Rule packs", ...sections].join("\n\n");
 }
 
-function renderConventions(files: readonly ConventionFile[]): string {
+export function renderConventions(files: readonly ConventionFile[]): string {
   if (files.length === 0) return "# Repo conventions\n\nThe repository has no convention files.";
   const blocks = files.map((file) =>
     wrapUntrusted("convention_file", file.text, {
@@ -117,7 +117,10 @@ function renderConventions(files: readonly ConventionFile[]): string {
   ].join("\n\n");
 }
 
-function renderPullRequest(pr: PullRequestInfo, comments: readonly PullRequestComment[]): string {
+export function renderPullRequest(
+  pr: PullRequestInfo,
+  comments: readonly PullRequestComment[],
+): string {
   const parts = [
     "# Pull request",
     wrapUntrusted("pr_metadata", `author: ${pr.author}\nbase: ${pr.baseRef}\nhead: ${pr.headRef}`),

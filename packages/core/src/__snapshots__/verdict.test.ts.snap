@@ -1,0 +1,55 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`verifierOutputSchema > converts to JSON Schema for the harness 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "verdicts": {
+      "description": "One verdict for each finding in the prompt, in any order.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "adjusted_severity": {
+            "description": "Only when confirmed and the reviewer's severity is wrong: blocking, should_fix or nit, as the instructions define them.",
+            "enum": [
+              "blocking",
+              "should_fix",
+              "nit",
+            ],
+            "type": "string",
+          },
+          "confirmed": {
+            "description": "true only if you found concrete evidence that the problem is real. false if it isn't, or you can't show that it is.",
+            "type": "boolean",
+          },
+          "id": {
+            "description": "The id of the finding this verdict is for, exactly as the prompt gives it.",
+            "maxLength": 20,
+            "minLength": 1,
+            "type": "string",
+          },
+          "reason": {
+            "description": "The evidence, in a few plain sentences: the guard, caller, test or code path that shows the problem is or isn't real.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string",
+          },
+        },
+        "required": [
+          "id",
+          "confirmed",
+          "reason",
+        ],
+        "type": "object",
+      },
+      "maxItems": 10,
+      "type": "array",
+    },
+  },
+  "required": [
+    "verdicts",
+  ],
+  "type": "object",
+}
+`;
