@@ -135,4 +135,40 @@ describe("lockfileNotes", () => {
     ]);
     expect(lockfileNotes(lockfile([], lines), { trustedHosts: ["npm.acme.internal"] })).toEqual([]);
   });
+
+  it("notes a composer download moved to another GitHub repository", () => {
+    const dist = (owner: string) => [
+      '            "dist": {',
+      '                "type": "zip",',
+      `                "url": "https://api.github.com/repos/${owner}/console/zipball/abc",`,
+    ];
+    const moved = lockfile(dist("symfony").slice(2), dist("attacker").slice(2), "composer.lock");
+    moved.hunks[0]?.lines.unshift(
+      { kind: "context", oldLine: 8, newLine: 8, text: '            "dist": {' },
+      { kind: "context", oldLine: 9, newLine: 9, text: '                "type": "zip",' },
+    );
+    expect(lockfileNotes(moved)).toEqual([
+      "line 10: now downloads from api.github.com/attacker/console, replacing symfony/console",
+    ]);
+    const bumped = lockfile(dist("symfony"), dist("symfony"), "composer.lock");
+    expect(lockfileNotes(bumped)).toEqual([]);
+  });
+
+  it("checks poetry's custom package sources", () => {
+    const file = lockfile(
+      [],
+      ["[package.source]", 'type = "legacy"', 'url = "https://evil.example.com/simple"'],
+      "poetry.lock",
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "1 package resolves from evil.example.com, not a known registry (first at line 12)",
+    ]);
+  });
+
+  it("notes downloads without TLS, even from a known registry", () => {
+    const file = lockfile([], [RESOLVED("registry.npmjs.org").replace("https://", "http://")]);
+    expect(lockfileNotes(file)).toEqual([
+      "1 package downloads over http://registry.npmjs.org without TLS (first at line 10)",
+    ]);
+  });
 });
