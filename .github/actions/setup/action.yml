@@ -1,5 +1,11 @@
 name: Set up the workspace
-description: Node from .nvmrc, pnpm, and dependencies from the cached pnpm store.
+description: >-
+  Node from .nvmrc, pnpm, dependencies from the cached pnpm store, and optionally the job's turbo
+  task cache.
+inputs:
+  turbo-cache:
+    description: Name of the job's turbo cache. Leave empty for jobs that don't run turbo.
+    default: ""
 runs:
   using: composite
   steps:
@@ -13,3 +19,14 @@ runs:
 
     - run: pnpm install --frozen-lockfile
       shell: bash
+
+    # One cache per job, keyed by branch (a PR's head branch, not its NN/merge ref), so jobs
+    # don't race to save the same key. A new branch falls back to the newest cache from main.
+    - if: inputs.turbo-cache != ''
+      uses: actions/cache@v6
+      with:
+        path: .turbo/cache
+        key: turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        restore-keys: |
+          turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-
+          turbo-${{ inputs.turbo-cache }}-${{ runner.os }}-main-

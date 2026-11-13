@@ -18,7 +18,7 @@
     "synth": "turbo run synth",
     "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
     "check": "pnpm format:check && pnpm lint && pnpm verify",
-    "verify": "turbo run typecheck test build smoke check-migrations synth"
+    "verify": "turbo run typecheck test test:integration build smoke check-migrations synth"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

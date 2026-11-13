@@ -6,8 +6,8 @@ import { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 /**
  * Runs the real migration runner (node-postgres, as the migration Lambda does) against a real
  * Postgres with pgvector. Set LGTMOOSE_TEST_DATABASE_URL to an admin connection, for example
- * postgres://postgres:postgres@localhost:5432/postgres. CI always sets it, and fails if it's
- * missing rather than skipping.
+ * postgres://postgres:postgres@localhost:5432/postgres. Runs as `test:integration`, not with the
+ * unit tests. CI's integration job always sets it, and fails if it's missing rather than skipping.
  */
 const adminUrl = process.env.LGTMOOSE_TEST_DATABASE_URL;
 if (adminUrl === undefined && process.env.CI === "true") {

@@ -9,6 +9,9 @@
       "dependsOn": ["^build"]
     },
     "test": {
+      "dependsOn": ["^build"]
+    },
+    "test:integration": {
       "dependsOn": ["^build"],
       "env": ["LGTMOOSE_TEST_DATABASE_URL", "CI"]
     },

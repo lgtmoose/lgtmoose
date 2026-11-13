@@ -12,36 +12,62 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# The jobs run side by side. Within `verify`, turbo runs every task concurrently as far as the
-# dependency graph allows, and replays any task whose inputs haven't changed from the cache.
+# One job per concern, all running side by side, so each shows up as its own check and a failure
+# says what broke. Jobs that run turbo replay any task whose inputs haven't changed from their
+# cache, and prune it afterwards to what the run used (a restored cache is saved again under a
+# new key, so it would otherwise only grow).
 jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: actions/cache@v6
+        with:
+          path: node_modules/.cache/prettier
+          key: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-${{ github.sha }}
+          restore-keys: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-
+      - run: pnpm format:check
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-
       - uses: ./.github/actions/setup
-
-      # ESLint and Prettier only re-check files that changed since the cached run.
       - uses: actions/cache@v6
         with:
-          path: |
-            node_modules/.cache/eslint
-            node_modules/.cache/prettier
-          key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
-          restore-keys: |
-            lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
+          path: node_modules/.cache/eslint
+          key: eslint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js') }}-${{ github.sha }}
+          restore-keys: eslint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js') }}-
+      - run: pnpm lint
 
-      - name: Format
-        run: pnpm format:check
-
-      - name: Lint
-        run: pnpm lint
-
-  verify:
+  typecheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          turbo-cache: typecheck
+      - run: pnpm turbo run typecheck --summarize
+      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          turbo-cache: test
+      - run: pnpm turbo run test --summarize
+      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+
+  test-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Postgres with pgvector, so migrations also run through the real runner on a real server.
     services:
       postgres:
@@ -57,25 +83,42 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
-
       - uses: ./.github/actions/setup
-
-      # Turbo's task cache, keyed by branch (a PR's head branch, not its NN/merge ref). A new
-      # branch falls back to the newest cache from main.
-      - uses: actions/cache@v6
         with:
-          path: .turbo/cache
-          key: turbo-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            turbo-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-
-            turbo-${{ runner.os }}-main-
-
-      # typecheck, test, build, run the built CLI, migrations match the schema, cdk synth.
-      - name: Verify
-        run: pnpm verify --summarize
+          turbo-cache: test-integration
+      - run: pnpm turbo run test:integration --summarize
         env:
           LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
 
-      # The restored cache is saved again under a new key, so keep only what this run used.
-      - name: Prune the turbo cache
-        run: pnpm exec tsx scripts/prune-turbo-cache.ts
+  # Builds every package, then runs the built CLI the way a user does.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          turbo-cache: build
+      - run: pnpm turbo run build smoke --summarize
+      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+
+  synth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          turbo-cache: synth
+      - run: pnpm turbo run synth --summarize
+      - run: pnpm exec tsx scripts/prune-turbo-cache.ts
+
+  migrations:
+    name: migrations match the schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run check-migrations

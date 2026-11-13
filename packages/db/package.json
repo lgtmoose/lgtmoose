@@ -22,9 +22,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/*.integration.test.ts\"",
     "generate": "drizzle-kit generate",
-    "check-migrations": "tsx scripts/check-migrations.ts"
+    "check-migrations": "tsx scripts/check-migrations.ts",
+    "test:integration": "vitest run integration"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.4",
