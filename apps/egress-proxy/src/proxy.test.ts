@@ -158,6 +158,30 @@ describe("egress proxy", () => {
     expect(logs).toContainEqual(expect.objectContaining({ reason: "plain_http" }));
   });
 
+  it("dials an IPv4 answer before an IPv6 one, since the VPC is IPv4-only", async () => {
+    proxy.closeAllConnections();
+    await new Promise((resolve) => proxy.close(resolve));
+    await startProxy({
+      resolve: async () => [
+        { address: "2606:4700::6810:84e5", family: 6 },
+        { address: "160.79.104.10", family: 4 },
+      ],
+    });
+    const { status, socket } = await connectThrough("api.anthropic.com:443");
+    expect(status).toBe(200);
+    socket.destroy();
+    expect(dialed).toEqual([{ address: "160.79.104.10", port: 443 }]);
+  });
+
+  it("gives up on a resolver that hangs", async () => {
+    proxy.closeAllConnections();
+    await new Promise((resolve) => proxy.close(resolve));
+    await startProxy({ resolve: () => new Promise(() => {}), connectTimeoutMs: 50 });
+    const { status } = await connectThrough("api.anthropic.com:443");
+    expect(status).toBe(502);
+    expect(logs).toContainEqual(expect.objectContaining({ reason: "dns_failed" }));
+  });
+
   it("answers 502 when the upstream refuses the connection", async () => {
     await new Promise((resolve) => upstream.close(resolve));
     upstream = createServer();

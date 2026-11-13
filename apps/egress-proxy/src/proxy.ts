@@ -196,15 +196,25 @@ export function createProxy(options: ProxyOptions): Server {
 
     void (async () => {
       let addresses: ResolvedAddress[];
+      let dnsTimer: NodeJS.Timeout | undefined;
       try {
-        addresses = await resolve(host);
+        // A resolver that hangs mustn't hold the client open: give up after the connect timeout.
+        addresses = await Promise.race([
+          resolve(host),
+          new Promise<never>((_, reject) => {
+            dnsTimer = setTimeout(() => reject(new Error("DNS timeout")), connectTimeoutMs);
+          }),
+        ]);
       } catch {
         refuse("dns_failed", { host, port }, BAD_GATEWAY);
         return;
+      } finally {
+        clearTimeout(dnsTimer);
       }
       // All of them must be public: a name with one private answer is treated as hostile.
       const blocked = addresses.find((entry) => !isPublicAddress(entry.address));
-      const [first] = addresses;
+      // The VPC is IPv4-only, so an IPv6 answer is dialed only when there's no IPv4 one.
+      const [first] = [...addresses].sort((a, b) => a.family - b.family);
       if (first === undefined || blocked !== undefined) {
         refuse("private_address", { host, port, address: blocked?.address });
         return;

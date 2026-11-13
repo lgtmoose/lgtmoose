@@ -25,7 +25,8 @@ const PROVIDER_HOSTS: Record<
     vertex: ["aiplatform.googleapis.com", "oauth2.googleapis.com"],
   },
   // Codex signed in with ChatGPT uses the ChatGPT backend and refreshes its token with OpenAI's
-  // auth service; with an API key it uses the platform API.
+  // auth service; with an API key it uses the platform API. Check these against the pinned Codex
+  // CLI with its adapter (NIC-821).
   codex: {
     "chatgpt-login": ["chatgpt.com", "auth.openai.com"],
     "access-token": ["chatgpt.com", "auth.openai.com"],
