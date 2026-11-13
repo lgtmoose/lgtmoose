@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import type { DeployDeps } from "./deploy/deploy.js";
+import type { ReviewEnvironmentFactory } from "./review/review.js";
 import type { SetupDeps } from "./setup/setup.js";
 
 export const VERSION = "0.0.0";
@@ -10,7 +11,7 @@ export const COMMANDS = {
   auth: "Connect a model provider: claude, codex, cursor, bedrock, api-key (NIC-824)",
   deploy: "Deploy every CDK stack and point the App's webhook at it",
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
-  review: "Review one PR locally, e.g. review owner/repo#123 --dry-run (NIC-809)",
+  review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
 } as const;
 
 export type Command = keyof typeof COMMANDS;
@@ -34,6 +35,8 @@ export interface RunOptions {
   setupDeps?: () => Promise<SetupDeps>;
   /** Builds deploy and destroy's I/O, the same way. */
   deployDeps?: () => Promise<DeployDeps>;
+  /** Builds the review dry run's I/O from its flags: GitHub, git and Claude Code by default. */
+  reviewEnvironment?: ReviewEnvironmentFactory;
 }
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
@@ -50,6 +53,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     const getDeps =
       options.deployDeps ?? (async () => (await import("./deploy/deps.js")).defaultDeployDeps());
     return (argv[0] === "deploy" ? runDeploy : runDestroy)(argv.slice(1), getDeps);
+  }
+
+  if (argv[0] === "review") {
+    const { runReviewCommand } = await import("./review/review.js");
+    const environment: ReviewEnvironmentFactory =
+      options.reviewEnvironment ??
+      (async (flags) => (await import("./review/deps.js")).defaultReviewEnvironment(flags));
+    return runReviewCommand(argv.slice(1), environment);
   }
 
   const { values, positionals } = parseArgs({

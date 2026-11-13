@@ -48,6 +48,7 @@ packages/git/    local checkouts: clone at a SHA, review diffs, comment position
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
 packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth
 packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrapping
+packages/poster/  posts a run: one review, inline comments, check run, summary, labels
 packages/summary/ the PR summary comment and status label sync
 infra/cdk/       AWS CDK app
 deploy/compose/  docker compose deployment for hosts other than AWS

@@ -1,7 +1,7 @@
 /**
  * @lgtmoose/core holds the deterministic parts of a review: no model calls, no I/O.
- * The finding schema (NIC-808), finding fingerprints with convergence dedupe (NIC-814) and the
- * review decision (NIC-815) are here.
+ * The finding schema (NIC-808), finding fingerprints with convergence dedupe (NIC-814), the
+ * review decision (NIC-815) and the verifier's verdict schema (NIC-829) are here.
  */
 
 export { SEVERITIES, isSeverity, severityRank, type Severity } from "./severity.js";
@@ -64,3 +64,10 @@ export {
   type ReviewJobKind,
   type ToReviewJobOptions,
 } from "./review-job.js";
+export {
+  MAX_FINDINGS_PER_VERIFIER_RUN,
+  verdictSchema,
+  verifierOutputSchema,
+  type Verdict,
+  type VerifierOutput,
+} from "./verdict.js";

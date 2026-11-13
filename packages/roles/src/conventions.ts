@@ -1,6 +1,7 @@
 import { glob, open, realpath, lstat } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, matchesGlob, relative, sep } from "node:path";
 import { DEFAULT_CONVENTIONS } from "@lgtmoose/config";
+import type { Repo } from "@lgtmoose/git";
 
 /** A repo convention file (`CLAUDE.md`, `AGENTS.md`, ...), with its path relative to the repo. */
 export interface ConventionFile {
@@ -101,5 +102,59 @@ export async function readConventionFiles(
     remaining -= Buffer.byteLength(text, "utf8");
     files.push(truncated ? { path, text, truncated } : { path, text });
   }
+  return { files, omitted };
+}
+
+/** A regular file in a git tree: a blob with a normal file mode (not a symlink or submodule). */
+const REGULAR_FILE = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.+)$/;
+
+/**
+ * Reads the repo's convention files as they are at a commit, such as the PR's base, from git
+ * rather than a checkout: the PR can't change the rules it's reviewed against. Only regular
+ * files count (symlinks and submodules in the tree are ignored), with the same globs, limits
+ * and `omitted` list as `readConventionFiles`. Results are sorted by path.
+ */
+export async function readConventionFilesAt(
+  repo: Pick<Repo, "git" | "readBlobs">,
+  sha: string,
+  {
+    globs = DEFAULT_CONVENTIONS,
+    maxBytes = DEFAULT_MAX_BYTES,
+    maxFiles = DEFAULT_MAX_FILES,
+    maxTotalBytes = DEFAULT_MAX_TOTAL_BYTES,
+  }: ReadConventionsOptions = {},
+): Promise<ConventionFiles> {
+  const patterns = globs.filter(isSafeGlob);
+  const tree = await repo.git(["ls-tree", "-r", "-z", "--full-tree", sha]);
+  const matches: { path: string; blob: string }[] = [];
+  for (const entry of tree.split("\0")) {
+    const parsed = REGULAR_FILE.exec(entry);
+    const [, , blob, path] = parsed ?? [];
+    if (blob === undefined || path === undefined) continue;
+    if (patterns.some((pattern) => matchesGlob(path, pattern))) matches.push({ path, blob });
+  }
+  // Code-unit order, as readConventionFiles sorts, so it doesn't depend on the locale.
+  matches.sort((a, b) => Number(a.path > b.path) - Number(a.path < b.path));
+
+  const wanted = matches.slice(0, maxFiles);
+  const blobs = await repo.readBlobs(wanted.map((match) => match.blob));
+  const files: ConventionFile[] = [];
+  const omitted = matches.slice(maxFiles).map((match) => match.path);
+  let remaining = maxTotalBytes;
+  for (const { path, blob } of wanted) {
+    const content = blobs.get(blob);
+    if (content === undefined) continue;
+    if (remaining <= 0) {
+      omitted.push(path);
+      continue;
+    }
+    const limit = Math.min(maxBytes, remaining);
+    const truncated = content.length > limit;
+    // Cutting can split a multi-byte character; the decoder replaces the stray bytes.
+    const text = content.subarray(0, limit).toString("utf8");
+    remaining -= Buffer.byteLength(text, "utf8");
+    files.push(truncated ? { path, text, truncated } : { path, text });
+  }
+  omitted.sort();
   return { files, omitted };
 }
