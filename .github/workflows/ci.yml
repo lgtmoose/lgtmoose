@@ -60,13 +60,14 @@ jobs:
 
       - uses: ./.github/actions/setup
 
-      # Turbo's task cache. A pull request falls back to the newest cache from main.
+      # Turbo's task cache, keyed by branch (a PR's head branch, not its NN/merge ref). A new
+      # branch falls back to the newest cache from main.
       - uses: actions/cache@v6
         with:
           path: .turbo/cache
-          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          key: turbo-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-
             turbo-${{ runner.os }}-main-
 
       # typecheck, test, build, run the built CLI, migrations match the schema, cdk synth.
