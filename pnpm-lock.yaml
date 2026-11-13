@@ -249,6 +249,22 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/summary:
+    dependencies:
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      '@lgtmoose/planner':
+        specifier: workspace:*
+        version: link:../planner
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
 packages:
 
   '@aws-cdk/asset-awscli-v1@2.2.292':

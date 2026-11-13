@@ -1,0 +1,31 @@
+{
+  "name": "@lgtmoose/summary",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The PR summary comment LGTMoose keeps up to date, rendered from review data, and status label sync.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lgtmoose/core": "workspace:*",
+    "@lgtmoose/git": "workspace:*",
+    "@lgtmoose/planner": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
