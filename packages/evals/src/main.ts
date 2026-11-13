@@ -111,21 +111,23 @@ async function main(argv: readonly string[]): Promise<number> {
     });
     const report = buildReport(scores, model, startedAt);
     const baseline = await readBaseline(baselinePath);
-    const gate = gateFor(report, baseline, {
-      updating: values["update-baseline"] === true,
-      subset: values.only !== undefined,
-      baselinePath,
-    });
+    // Nothing ran (no credential, the CLI missing): the scores mean nothing, whatever the
+    // baseline, and they mustn't become the baseline.
+    const allFailed =
+      report.fixtures.length > 0 && report.totals.failedRuns === report.fixtures.length;
+    const gate = allFailed
+      ? { ok: false, message: "Every fixture run failed, so there's nothing to score." }
+      : gateFor(report, baseline, {
+          updating: values["update-baseline"] === true,
+          subset: values.only !== undefined,
+          baselinePath,
+        });
     await writeFile(join(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(join(out, "report.md"), renderMarkdown(report, baseline, gate));
+    process.stderr.write(`${gate.message}\nReport: ${join(out, "report.md")}\n`);
+    if (allFailed) return 2;
     if (values["update-baseline"]) {
       await writeFile(baselinePath, `${JSON.stringify(baselineFrom(report), null, 2)}\n`);
-    }
-    process.stderr.write(`${gate.message}\nReport: ${join(out, "report.md")}\n`);
-    // Nothing ran (no credential, the CLI missing): the scores mean nothing, whatever the gate.
-    if (report.fixtures.length > 0 && report.totals.failedRuns === report.fixtures.length) {
-      process.stderr.write("Every fixture run failed; see the report's details.\n");
-      return 2;
     }
     return gate.ok ? 0 : 1;
   } finally {
