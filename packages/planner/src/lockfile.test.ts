@@ -40,7 +40,7 @@ describe("lockfileNotes", () => {
     );
     expect(lockfileNotes(file)).toEqual([
       "1 package resolves from evil.example.com, not a known registry (first at line 10)",
-      "lines 10-11: a checksum changed with no version change",
+      "line 11: a checksum changed with no version change (version 1.3.0)",
     ]);
   });
 
@@ -49,7 +49,27 @@ describe("lockfileNotes", () => {
       ['      "integrity": "sha512-AAA",'],
       ['      "integrity": "sha512-BBB",'],
     );
-    expect(lockfileNotes(file)).toEqual(["lines 10-10: a checksum changed with no version change"]);
+    expect(lockfileNotes(file)).toEqual(["line 10: a checksum changed with no version change"]);
+  });
+
+  it("finds a checksum swap next to a legitimate bump in the same hunk", () => {
+    const file = lockfile(
+      [
+        '      "version": "1.3.0",',
+        '      "integrity": "sha512-AAA",',
+        '      "version": "7.0.0",',
+        '      "integrity": "sha512-CCC",',
+      ],
+      [
+        '      "version": "1.3.1",',
+        '      "integrity": "sha512-BBB",',
+        '      "version": "7.0.0",',
+        '      "integrity": "sha512-EVIL",',
+      ],
+    );
+    expect(lockfileNotes(file)).toEqual([
+      "line 13: a checksum changed with no version change (version 7.0.0)",
+    ]);
   });
 
   it("is quiet for an ordinary version bump from the registry", () => {
@@ -90,7 +110,9 @@ describe("lockfileNotes", () => {
       ["golang.org/x/net v0.20.0 h1:zzzz="],
       "go.sum",
     );
-    expect(lockfileNotes(file)).toEqual(["lines 10-10: a checksum changed with no version change"]);
+    expect(lockfileNotes(file)).toEqual([
+      "line 10: a checksum changed with no version change (version 0.20.0)",
+    ]);
   });
 
   it("ignores metadata URLs and Cargo's registry index", () => {
@@ -152,6 +174,22 @@ describe("lockfileNotes", () => {
     ]);
     const bumped = lockfile(dist("symfony"), dist("symfony"), "composer.lock");
     expect(lockfileNotes(bumped)).toEqual([]);
+  });
+
+  it("doesn't report a new composer package next to an updated one as a swap", () => {
+    const url = (repo: string, ref: string) =>
+      `                "url": "https://api.github.com/repos/${repo}/zipball/${ref}",`;
+    const file = lockfile(
+      ['            "dist": {', url("php-fig/log", "aaa")],
+      [
+        '            "dist": {',
+        url("php-fig/log", "bbb"),
+        '            "dist": {',
+        url("seldaek/monolog", "ccc"),
+      ],
+      "composer.lock",
+    );
+    expect(lockfileNotes(file)).toEqual([]);
   });
 
   it("checks poetry's custom package sources", () => {

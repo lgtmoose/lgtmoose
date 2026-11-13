@@ -70,7 +70,8 @@ const INTEGRITY = /\b(integrity|checksum|shasum|resolution|sha(?:1|256|384|512)-
 /** A checksum token on a line, removed before looking for versions (go.sum holds both). */
 const CHECKSUM_TOKEN =
   /\b(?:h1:|sha(?:1|256|384|512)[-:=]|10c0\/)[A-Za-z0-9+/=_.-]+|\b(?:integrity|checksum|shasum)\b["':=\s]+[A-Za-z0-9+/=_.-]+/gi;
-const VERSION = /\d+\.\d+\.\d+[\w.+-]*/g;
+/** A semver-like version, with any pre-release and build parts (not a following `.tgz`). */
+const VERSION = /\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z.-]+)?/g;
 
 export interface LockfileNoteOptions {
   /** Extra hosts to trust, from the repo's `registries` setting (base commit). */
@@ -140,42 +141,72 @@ function packages(count: number, verb: string): string {
   return count === 1 ? `1 package ${verb}s` : `${count} packages ${verb}`;
 }
 
-/** Added downloads from a different Git repository than the ones they replace in the hunk. */
+/**
+ * Added downloads of a repository whose owner changed in the same hunk: the same repo name
+ * from a different owner, as when a package is swapped for a fork. A different repo name is a
+ * different package (an add next to an update), not a swap.
+ */
 function repoChanges(hunk: Hunk): string[] {
-  const before = new Set(downloadUrls(hunk, "del").flatMap((url) => repoOf(url) ?? []));
-  if (before.size === 0) return [];
+  const ownersByName = new Map<string, Set<string>>();
+  for (const url of downloadUrls(hunk, "del")) {
+    const [owner, name] = repoOf(url)?.split("/") ?? [];
+    if (owner === undefined || name === undefined) continue;
+    ownersByName.set(name, (ownersByName.get(name) ?? new Set()).add(owner));
+  }
   return downloadUrls(hunk, "add").flatMap((url) => {
-    const repo = repoOf(url);
-    if (repo === undefined || before.has(repo)) return [];
+    const [owner, name] = repoOf(url)?.split("/") ?? [];
+    const before = name === undefined ? undefined : ownersByName.get(name);
+    if (owner === undefined || before === undefined || before.has(owner)) return [];
+    const was = [...before].map((o) => `${o}/${name}`).join(", ");
     return [
-      `line ${url.line ?? "?"}: now downloads from ${url.host}/${repo}, replacing ${[...before].join(", ")}`,
+      `line ${url.line ?? "?"}: now downloads from ${url.host}/${owner}/${name}, replacing ${was}`,
     ];
   });
 }
 
-function versions(lines: Hunk["lines"]): string {
-  return lines
-    .flatMap((line) => line.text.replace(CHECKSUM_TOKEN, " ").match(VERSION) ?? [])
-    .sort()
-    .join(" ");
+/** The last version string on a line, ignoring checksum tokens (go.sum holds both). */
+function lineVersion(text: string): string | undefined {
+  return text.replace(CHECKSUM_TOKEN, " ").match(VERSION)?.at(-1);
 }
 
-/** A checksum changed in the hunk while its version strings stayed the same. */
-function sameVersionChecksum(hunk: Hunk): string | undefined {
-  const added = hunk.lines.filter((line) => line.kind === "add");
-  const removed = hunk.lines.filter((line) => line.kind === "del");
-  const integrityChanged =
-    added.some((line) => INTEGRITY.test(line.text)) &&
-    removed.some((line) => INTEGRITY.test(line.text));
-  if (!integrityChanged || versions(added) !== versions(removed)) return undefined;
-  const end = hunk.newStart + Math.max(hunk.newLines - 1, 0);
-  return `lines ${hunk.newStart}-${end}: a checksum changed with no version change`;
+/**
+ * Checksums that changed while the version they belong to didn't. Each checksum line is paired
+ * with the version nearest above it on its own side (or on its own line), so a checksum swap
+ * next to a legitimate bump in the same hunk is still found.
+ */
+function sameVersionChecksums(hunk: Hunk): string[] {
+  const before = new Map<string, string>();
+  const after = new Map<string, { text: string; line: number | undefined; version: string }>();
+  let oldVersion = "";
+  let newVersion = "";
+  for (const line of hunk.lines) {
+    const version = lineVersion(line.text);
+    if (version !== undefined) {
+      if (line.kind !== "add") oldVersion = version;
+      if (line.kind !== "del") newVersion = version;
+    }
+    if (line.kind === "context" || !INTEGRITY.test(line.text)) continue;
+    const rest = line.text.replace(CHECKSUM_TOKEN, " ").trim();
+    if (line.kind === "del") before.set(`${oldVersion}|${rest}`, line.text.trim());
+    else
+      after.set(`${newVersion}|${rest}`, {
+        text: line.text.trim(),
+        line: line.newLine,
+        version: newVersion,
+      });
+  }
+  return [...after].flatMap(([key, { text, line, version }]) => {
+    const was = before.get(key);
+    if (was === undefined || was === text) return [];
+    const of = version === "" ? "" : ` (version ${version})`;
+    return [`line ${line ?? "?"}: a checksum changed with no version change${of}`];
+  });
 }
 
 /**
  * What a reviewer should know about a lockfile change without reading it: packages resolved
  * from hosts that aren't known or trusted (one note per host), downloads without TLS, downloads
- * moved to a different Git repository, and checksums that changed without a version change
+ * moved to a fork (same repo, new owner), and checksums that changed without a version change
  * (the same version from different contents). Lockfiles stay out of
  * the prompt; these notes go in the review summary.
  */
@@ -201,10 +232,7 @@ export function lockfileNotes(file: FileDiff, options: LockfileNoteOptions = {})
       `${packages(count, "download")} over ${key} without TLS (first at line ${firstLine ?? "?"})`,
   );
   const repoNotes = [...new Set(file.hunks.flatMap(repoChanges))];
-  const checksumNotes = file.hunks.flatMap((hunk) => {
-    const note = sameVersionChecksum(hunk);
-    return note === undefined ? [] : [note];
-  });
+  const checksumNotes = file.hunks.flatMap(sameVersionChecksums);
   return [...hostNotes, ...plainNotes, ...repoNotes, ...checksumNotes];
 }
 
