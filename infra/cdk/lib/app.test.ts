@@ -41,6 +41,7 @@ describe("buildApp", () => {
       "Lgtmoose-Data",
       "Lgtmoose-Meta",
       "Lgtmoose-Network",
+      "Lgtmoose-Proxy",
     ]);
     expect(stacks.network.region).toBe("eu-west-2");
   });

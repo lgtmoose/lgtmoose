@@ -1,0 +1,6 @@
+# Only package.json and the two sources go into the image; the rest would only change the asset
+# hash and redeploy the proxy for nothing.
+node_modules
+.turbo
+**/*.test.ts
+tsconfig.json
