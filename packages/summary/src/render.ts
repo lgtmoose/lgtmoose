@@ -273,21 +273,32 @@ function renderFindings(findings: readonly Finding[], rows: number): string | un
   return lines.join("\n");
 }
 
-function fileRow(file: FileDiff, review: Map<string, string>): string {
-  const { added, removed } = lineCounts(file);
-  const lines = file.binary ? "binary" : `+${added} −${removed}`;
-  return `| ${pathText(file)} | ${file.status} | ${lines} | ${review.get(file.path) ?? "not planned"} |`;
+/** Facts about the files, worked out once per render rather than at every detail level. */
+interface Context {
+  review: Map<string, string>;
+  counts: Map<FileDiff, { added: number; removed: number }>;
 }
 
-function renderChanges(input: SummaryInput, review: Map<string, string>, detail: Detail): string {
+function sumCounts(files: readonly FileDiff[], ctx: Context): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const file of files) {
+    const counts = ctx.counts.get(file);
+    added += counts?.added ?? 0;
+    removed += counts?.removed ?? 0;
+  }
+  return { added, removed };
+}
+
+function fileRow(file: FileDiff, ctx: Context): string {
+  const { added, removed } = ctx.counts.get(file) ?? { added: 0, removed: 0 };
+  const lines = file.binary ? "binary" : `+${added} −${removed}`;
+  return `| ${pathText(file)} | ${file.status} | ${lines} | ${ctx.review.get(file.path) ?? "not planned"} |`;
+}
+
+function renderChanges(input: SummaryInput, ctx: Context, detail: Detail): string {
   const files = [...input.files].sort((a, b) => byPath(a.path, b.path));
-  const totals = files.reduce(
-    (sum, file) => {
-      const { added, removed } = lineCounts(file);
-      return { added: sum.added + added, removed: sum.removed + removed };
-    },
-    { added: 0, removed: 0 },
-  );
+  const totals = sumCounts(files, ctx);
   const lines = [
     "### Changes",
     "",
@@ -297,7 +308,7 @@ function renderChanges(input: SummaryInput, review: Map<string, string>, detail:
 
   if (files.length <= GROUP_FILES_OVER) {
     lines.push("", "| File | Status | Lines | Review |", "| --- | --- | --- | --- |");
-    for (const file of files) lines.push(fileRow(file, review));
+    for (const file of files) lines.push(fileRow(file, ctx));
     return lines.join("\n");
   }
 
@@ -308,13 +319,7 @@ function renderChanges(input: SummaryInput, review: Map<string, string>, detail:
   }
   lines.push("", "| Folder | Files | Lines |", "| --- | --- | --- |");
   for (const [key, members] of [...groups].sort(([a], [b]) => byPath(a, b))) {
-    const sum = members.reduce(
-      (acc, file) => {
-        const { added, removed } = lineCounts(file);
-        return { added: acc.added + added, removed: acc.removed + removed };
-      },
-      { added: 0, removed: 0 },
-    );
+    const sum = sumCounts(members, ctx);
     lines.push(`| ${inline(key)} | ${members.length} | +${sum.added} −${sum.removed} |`);
   }
   if (!detail.fileRows) return lines.join("\n");
@@ -327,7 +332,7 @@ function renderChanges(input: SummaryInput, review: Map<string, string>, detail:
       "",
       "| File | Status | Lines | Review |",
       "| --- | --- | --- | --- |",
-      ...members.map((file) => fileRow(file, review)),
+      ...members.map((file) => fileRow(file, ctx)),
     );
   }
   return lines.join("\n");
@@ -367,8 +372,12 @@ function reviewColumn(plan: SummaryInput["plan"]): Map<string, string> {
   return review;
 }
 
-function renderAt(input: SummaryInput, detail: Detail, cut: readonly string[]): string {
-  const review = reviewColumn(input.plan);
+function renderAt(
+  input: SummaryInput,
+  ctx: Context,
+  detail: Detail,
+  cut: readonly string[],
+): string {
   const sections = ["## LGTMoose review"];
   const walkthrough = input.walkthrough?.trim() ?? "";
   if (detail.walkthrough && walkthrough !== "") {
@@ -376,7 +385,7 @@ function renderAt(input: SummaryInput, detail: Detail, cut: readonly string[]): 
       ["### Walkthrough", "", paragraphs(clip(walkthrough, WALKTHROUGH_LIMIT))].join("\n"),
     );
   }
-  sections.push(renderChanges(input, review, detail));
+  sections.push(renderChanges(input, ctx, detail));
   sections.push(renderStatus(input));
   const findings = renderFindings(input.findings, detail.findingRows);
   if (findings !== undefined) sections.push(findings);
@@ -399,6 +408,21 @@ function cutAt(input: SummaryInput, detail: Detail): string[] {
   return cut;
 }
 
+const CUT_NOTE =
+  "\n_The rest of this comment was cut to stay under GitHub's comment size limit._\n";
+
+/**
+ * Last resort when even the least detailed comment is too long (very long ticket lists, say):
+ * keeps whole lines from the top, where the outcome is, and says the rest was cut. Cutting at a
+ * line keeps every escape and table row intact.
+ */
+function cutToFit(text: string, max: number): string {
+  const room = max - CUT_NOTE.length - 1;
+  if (room <= 0) return text.slice(0, Math.max(0, max));
+  const end = text.lastIndexOf("\n", room);
+  return `${text.slice(0, end > 0 ? end : room)}\n${CUT_NOTE}`;
+}
+
 /**
  * Renders the PR's summary comment from review data. It's a pure function of its input, with no
  * hidden markers: the poster finds the comment to edit by the ID it stored, and the same data
@@ -410,11 +434,14 @@ function cutAt(input: SummaryInput, detail: Detail): string[] {
  */
 export function renderSummary(input: SummaryInput, options: RenderOptions = {}): string {
   const max = options.maxLength ?? GITHUB_COMMENT_LIMIT;
+  const ctx: Context = {
+    review: reviewColumn(input.plan),
+    counts: new Map(input.files.map((file) => [file, lineCounts(file)])),
+  };
   let last = "";
   for (const detail of DETAIL_LEVELS) {
-    last = renderAt(input, detail, cutAt(input, detail));
+    last = renderAt(input, ctx, detail, cutAt(input, detail));
     if (last.length <= max) return last;
   }
-  // The least detailed form is bounded by its list limits; this only trips on a tiny maxLength.
-  return `${last.slice(0, Math.max(0, max - 2))}…\n`;
+  return cutToFit(last, max);
 }

@@ -245,6 +245,16 @@ describe("renderSummary", () => {
     expect(text.endsWith("…\n")).toBe(false);
   });
 
+  it("cuts whole lines from the end as a last resort, and says so", () => {
+    const text = renderSummary(input(), { maxLength: 900 });
+    expect(text.length).toBeLessThanOrEqual(900);
+    expect(text).toContain("**Decision:** Changes requested");
+    expect(text).toContain(
+      "The rest of this comment was cut to stay under GitHub's comment size limit.",
+    );
+    for (const line of text.split("\n")) expect(line.endsWith("\\")).toBe(false);
+  });
+
   it("lists a small change without grouping", () => {
     expect(renderSummary(input())).toContain("| File | Status | Lines | Review |");
     expect(renderSummary(input())).not.toContain("| Folder |");
