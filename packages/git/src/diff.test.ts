@@ -132,6 +132,7 @@ describe("reviewDiff: first review", () => {
 
     const files = byPath((await reviewDiff(await clone(head, [base]), { baseSha: base })).files);
     expect(files["gone.txt"]).toMatchObject({ status: "deleted", newBlob: undefined });
+    expect(files["gone.txt"]?.oldBlob).toMatch(/^[0-9a-f]{40}$/);
     expect(files["gone.txt"]?.hunks[0]?.lines).toEqual([{ kind: "del", oldLine: 1, text: "bye" }]);
     expect(files["logo.png"]).toMatchObject({
       status: "modified",
@@ -144,6 +145,71 @@ describe("reviewDiff: first review", () => {
       { kind: "add", newLine: 1, text: "hello" },
     ]);
     expect(files['odd "quoted".txt']?.status).toBe("added");
+  });
+});
+
+describe("reviewDiff: edge cases", () => {
+  it("handles a submodule bump without reading it as a file", async () => {
+    await setUp({ "a.txt": "a\n" });
+    const base = await fixture.commitGitlink("vendor/lib", "1".repeat(40), "add submodule");
+    const head = await fixture.commitGitlink("vendor/lib", "2".repeat(40), "bump submodule");
+
+    const [file] = (await reviewDiff(await clone(head, [base]), { baseSha: base })).files;
+    expect(file).toMatchObject({
+      path: "vendor/lib",
+      status: "modified",
+      submodule: true,
+      mechanical: false,
+    });
+    expect(file?.hunks[0]?.lines.map((l) => l.text)).toEqual([
+      `Subproject commit ${"1".repeat(40)}`,
+      `Subproject commit ${"2".repeat(40)}`,
+    ]);
+  });
+
+  it("keeps both halves of a file turned into a symlink", async () => {
+    const base = await setUp({ "config.json": "{}\n", "real.json": "{}\n" });
+    await fixture.remove("config.json");
+    await fixture.symlink("real.json", "config.json");
+    const head = await fixture.commit("symlink");
+
+    const [file] = (await reviewDiff(await clone(head, [base]), { baseSha: base })).files;
+    expect(file?.status).toBe("type-changed");
+    expect(file?.hunks.flatMap((h) => h.lines)).toEqual([
+      { kind: "del", oldLine: 1, text: "{}" },
+      { kind: "add", newLine: 1, text: "real.json" },
+    ]);
+  });
+
+  it("only calls an edit mechanical when an import changed", async () => {
+    const base = await setUp({
+      "a.ts": "import x from 'x';\n\nexport const a = x;\n",
+      "notes.md": "import this\n",
+    });
+    await fixture.write({
+      "a.ts": "import x from 'x';\n\n\nexport const a = x;\n",
+      "notes.md": "import that\n",
+    });
+    const head = await fixture.commit("blank line and prose");
+
+    const files = byPath((await reviewDiff(await clone(head, [base]), { baseSha: base })).files);
+    expect(files["a.ts"]?.mechanical).toBe(false);
+    expect(files["notes.md"]?.mechanical).toBe(false);
+  });
+
+  it("diffs a large PR with every blob read in one batch", async () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 150 }, (_, i) => [`src/f${i}.ts`, `import a from "a${i}";\n`]),
+    );
+    const base = await setUp(many);
+    await fixture.write(
+      Object.fromEntries(Object.keys(many).map((p, i) => [p, `import a from "b${i}";\n`])),
+    );
+    const head = await fixture.commit("rename imports everywhere");
+
+    const diff = await reviewDiff(await clone(head, [base]), { baseSha: base });
+    expect(diff.files).toHaveLength(150);
+    expect(diff.files.every((f) => f.mechanical)).toBe(true);
   });
 });
 
@@ -245,6 +311,32 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.kind).toBe("full");
     expect(diff.fallbackReason).toContain("force-pushed away");
     expect(diff.files.map((f) => f.path)).toEqual(["a.txt"]);
+  });
+
+  it("reports lines the PR stopped adding since the last review", async () => {
+    const base = await setUp({ "auth.ts": lines(20), "other.ts": lines(5) });
+    await fixture.write({
+      "auth.ts": lines(20).replace("line 10\n", "line 10\nrequireAdmin(user);\n"),
+      "other.ts": lines(5).replace("line 1\n", "temporary\n"),
+    });
+    const reviewed = await fixture.commit("add the check");
+    await fixture.write({
+      "auth.ts": lines(20).replace("line 1\n", "line one\n"),
+      "other.ts": lines(5),
+    });
+    const head = await fixture.commit("drop the check, revert other.ts");
+
+    const files = byPath(
+      (
+        await reviewDiff(await clone(head, [base, reviewed]), {
+          baseSha: base,
+          lastReviewed: reviewed,
+        })
+      ).files,
+    );
+    expect(files["auth.ts"]?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
+    // Fully reverted: no longer in the PR diff, but what it took out is still worth a mention.
+    expect(files["other.ts"]).toMatchObject({ hunks: [], removedSinceLastReview: ["temporary"] });
   });
 
   it("includes files renamed or deleted since the last review, and nothing when head is unchanged", async () => {

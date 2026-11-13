@@ -30,6 +30,39 @@ describe("cloneAtSha", () => {
     );
   });
 
+  it("can skip the working tree and write only the files asked for", async () => {
+    await fixture.write({ "a.txt": "one\n", "dir/b c.txt": "two\n", ":magic": "three\n" });
+    const head = await fixture.commit("first");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: head,
+      checkout: "none",
+    });
+    await expect(readFile(join(repo.dir, "a.txt"), "utf8")).rejects.toThrow();
+    await repo.checkoutPaths(["dir/b c.txt", ":magic"]);
+    expect(await readFile(join(repo.dir, "dir/b c.txt"), "utf8")).toBe("two\n");
+    expect(await readFile(join(repo.dir, ":magic"), "utf8")).toBe("three\n");
+    await expect(readFile(join(repo.dir, "a.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("reads many blobs at once", async () => {
+    await fixture.write({ "a.txt": "one\n", "b.bin": Buffer.from([0, 10, 255]) });
+    const head = await fixture.commit("first");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: head,
+      checkout: "none",
+    });
+    const [a, b] = (await repo.git(["rev-parse", `${head}:a.txt`, `${head}:b.bin`]))
+      .trim()
+      .split("\n");
+    const blobs = await repo.readBlobs([a ?? "", b ?? ""]);
+    expect(blobs.get(a ?? "")?.toString()).toBe("one\n");
+    expect([...(blobs.get(b ?? "") ?? [])]).toEqual([0, 10, 255]);
+  });
+
   it("fetches other commits by SHA, even ones no branch points at", async () => {
     const first = await fixture.commit("first");
     await fixture.write({ "a.txt": "changed\n" });

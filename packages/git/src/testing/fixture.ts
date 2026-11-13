@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, rename, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -67,6 +67,21 @@ export class FixtureRepo {
     await this.git(["commit", "--quiet", "--allow-empty", "-m", message]);
     await this.git(["push", "--quiet", "--force", "--all", "origin"]);
     return this.git(["rev-parse", "HEAD"]);
+  }
+
+  /**
+   * Points `path` at a commit of another repository (a submodule) and commits it, without
+   * needing the submodule itself.
+   */
+  async commitGitlink(path: string, commit: string, message: string): Promise<string> {
+    await this.git(["update-index", "--add", "--cacheinfo", `160000,${commit},${path}`]);
+    await this.git(["commit", "--quiet", "-m", message]);
+    await this.git(["push", "--quiet", "--force", "--all", "origin"]);
+    return this.git(["rev-parse", "HEAD"]);
+  }
+
+  async symlink(target: string, path: string): Promise<void> {
+    await symlink(target, join(this.work, path));
   }
 
   async checkout(branch: string, create = false): Promise<void> {

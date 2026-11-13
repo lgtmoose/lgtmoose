@@ -29,6 +29,7 @@ const file: FileDiff = {
   status: "modified",
   oldBlob: "a",
   newBlob: "b",
+  submodule: false,
   moved: false,
   mechanical: false,
   binary: false,

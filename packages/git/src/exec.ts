@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { devNull } from "node:os";
 
 /** A git command failed. The message never contains a token: see `redact`. */
 export class GitError extends Error {
@@ -17,12 +18,16 @@ export interface RunOptions {
   config?: Readonly<Record<string, string>>;
   /** Strings to hide from errors (tokens, auth headers). */
   secrets?: readonly string[];
-  /** Exit codes that aren't failures, e.g. 1 for `merge-base --is-ancestor`. */
+  /** Exit codes that aren't failures, e.g. 1 for `cat-file -e` on a missing object. */
   okExitCodes?: readonly number[];
+  /** Written to the command's stdin. */
+  input?: string;
+  /** Extra environment variables. */
+  env?: Readonly<Record<string, string>>;
 }
 
-export interface RunResult {
-  stdout: string;
+export interface RunResult<T> {
+  stdout: T;
   exitCode: number;
 }
 
@@ -32,30 +37,32 @@ function redact(text: string, secrets: readonly string[] = []): string {
   return secrets.reduce((out, secret) => (secret ? out.split(secret).join("***") : out), text);
 }
 
-/**
- * Runs git in `cwd`. Never prompts for credentials, never reads system or global config (so a
- * machine's settings can't change a review), and treats output as UTF-8.
- */
-export function runGit(cwd: string, args: readonly string[], options: RunOptions = {}) {
+function run(
+  cwd: string,
+  args: readonly string[],
+  options: RunOptions,
+  encoding: "utf8" | "buffer",
+): Promise<RunResult<string | Buffer>> {
   const config = Object.entries(options.config ?? {}).flatMap(([key, value]) => [
     "-c",
     `${key}=${value}`,
   ]);
-  const fullArgs = [...config, ...args];
-  return new Promise<RunResult>((resolve, reject) => {
-    execFile(
+  return new Promise((resolve, reject) => {
+    const child = execFile(
       "git",
-      fullArgs,
+      [...config, ...args],
       {
         cwd,
         maxBuffer: MAX_OUTPUT,
-        encoding: "utf8",
+        encoding,
         env: {
           ...process.env,
           GIT_TERMINAL_PROMPT: "0",
+          // A machine's own settings mustn't change a review.
           GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_GLOBAL: devNull,
           LC_ALL: "C",
+          ...options.env,
         },
       },
       (error, stdout, stderr) => {
@@ -66,12 +73,32 @@ export function runGit(cwd: string, args: readonly string[], options: RunOptions
           resolve({ stdout, exitCode });
           return;
         }
+        const errText = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : stderr;
         const command = redact(`git ${args.join(" ")}`, options.secrets);
-        const detail = redact(stderr.trim() || (error?.message ?? ""), options.secrets);
+        const detail = redact(errText.trim() || (error?.message ?? ""), options.secrets);
         reject(
-          new GitError(`${command} failed: ${detail}`, exitCode, redact(stderr, options.secrets)),
+          new GitError(`${command} failed: ${detail}`, exitCode, redact(errText, options.secrets)),
         );
       },
     );
+    if (options.input !== undefined) child.stdin?.end(options.input);
   });
+}
+
+/** Runs git in `cwd` and returns its output as UTF-8. Never prompts for credentials. */
+export async function runGit(
+  cwd: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): Promise<RunResult<string>> {
+  return (await run(cwd, args, options, "utf8")) as RunResult<string>;
+}
+
+/** Like runGit, but returns raw bytes, for output that mixes headers and binary content. */
+export async function runGitBytes(
+  cwd: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): Promise<RunResult<Buffer>> {
+  return (await run(cwd, args, options, "buffer")) as RunResult<Buffer>;
 }
