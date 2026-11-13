@@ -64,8 +64,14 @@ export interface RenderOptions {
 /** More files than this and the changes table is grouped by folder. */
 export const GROUP_FILES_OVER = 10;
 
+// Every list and text in the status section is capped, so its least detailed form always fits
+// well under GitHub's limit however large the PR is.
 const LIST_LIMIT = 25;
-const NOTES_PER_LOCKFILE = 10;
+const LOCKFILE_LIMIT = 10;
+const NOTES_PER_LOCKFILE = 5;
+const REASON_LIMIT = 10;
+/** Longest single item (a path, a note, a reason) shown in a list. */
+const ITEM_LENGTH = 200;
 const WALKTHROUGH_LIMIT = 8_000;
 
 const EVENT_TEXT: Record<ReviewEvent, string> = {
@@ -123,7 +129,7 @@ function count(n: number, one: string, many = `${one}s`): string {
 
 /** At most `limit` items as list lines, with a line saying how many more there are. */
 function bullets(items: readonly string[], limit = LIST_LIMIT): string[] {
-  const shown = items.slice(0, limit).map((item) => `  - ${item}`);
+  const shown = items.slice(0, limit).map((item) => `  - ${inline(clip(item, ITEM_LENGTH))}`);
   if (items.length > limit) shown.push(`  - …and ${items.length - limit} more`);
   return shown;
 }
@@ -167,6 +173,28 @@ function byPath(a: string, b: string): number {
 function renderStatus(input: SummaryInput): string {
   const lines = ["### Review status", ""];
   lines.push(`- **Commit:** ${shortSha(input.headSha)}`);
+  // The outcome first: if anything below is ever cut, these lines survive.
+  lines.push(`- **Decision:** ${EVENT_TEXT[input.decision.event]}`);
+  lines.push(...bullets(input.decision.reasons ?? [], REASON_LIMIT));
+  lines.push(`- **Label:** ${inline(clip(input.decision.label, ITEM_LENGTH))}`);
+  const missing = input.missingLabels ?? [];
+  if (missing.length > 0) {
+    lines.push(
+      `  - The repository has no ${missing.map((label) => inline(clip(label, ITEM_LENGTH))).join(", ")} ${missing.length === 1 ? "label" : "labels"}. LGTMoose doesn't create labels; add them in the repository's settings.`,
+    );
+  }
+
+  const severities = SEVERITIES.map((severity) => {
+    const n = input.findings.filter((finding) => finding.severity === severity).length;
+    return `${n} ${SEVERITY_TEXT[severity].toLowerCase()}`;
+  });
+  lines.push(`- **Open findings:** ${input.findings.length} (${severities.join(", ")})`);
+  const over = input.findingsOverLimit ?? 0;
+  if (over > 0) {
+    lines.push(
+      `  - ${count(over, "more finding")} past the per-batch limit, least severe first, weren't posted`,
+    );
+  }
 
   const depths = new Map<ReadingDepth, number>();
   for (const planned of input.plan.files) {
@@ -193,7 +221,7 @@ function renderStatus(input: SummaryInput): string {
   if (newCode.length > 0) {
     lines.push(
       `- **New code, not reviewed:** ${count(newCode.length, "file")} added to vendored, build or generated paths`,
-      ...bullets(newCode.map((entry) => inline(entry.file.path))),
+      ...bullets(newCode.map((entry) => entry.file.path)),
     );
   }
 
@@ -202,47 +230,23 @@ function renderStatus(input: SummaryInput): string {
   );
   if (noted.length > 0) {
     lines.push("- **Dependency changes to check:**");
-    for (const entry of noted.slice(0, LIST_LIMIT)) {
-      lines.push(`  - ${inline(entry.file.path)}`);
-      lines.push(
-        ...bullets(
-          entry.notes.map((note) => inline(note)),
-          NOTES_PER_LOCKFILE,
-        ).map((l) => `  ${l}`),
-      );
+    for (const entry of noted.slice(0, LOCKFILE_LIMIT)) {
+      lines.push(`  - ${inline(clip(entry.file.path, ITEM_LENGTH))}`);
+      lines.push(...bullets(entry.notes, NOTES_PER_LOCKFILE).map((l) => `  ${l}`));
     }
-    if (noted.length > LIST_LIMIT) lines.push(`  - …and ${noted.length - LIST_LIMIT} more files`);
+    if (noted.length > LOCKFILE_LIMIT) {
+      lines.push(`  - …and ${noted.length - LOCKFILE_LIMIT} more files`);
+    }
   }
 
   const omitted = input.conventionFilesOmitted ?? [];
   if (omitted.length > 0) {
     lines.push(
       `- **Convention files left out** (over the size limit): ${count(omitted.length, "file")}`,
-      ...bullets(omitted.map((path) => inline(path))),
+      ...bullets(omitted),
     );
   }
 
-  lines.push(`- **Decision:** ${EVENT_TEXT[input.decision.event]}`);
-  for (const reason of input.decision.reasons ?? []) lines.push(`  - ${inline(reason)}`);
-  lines.push(`- **Label:** ${inline(input.decision.label)}`);
-  const missing = input.missingLabels ?? [];
-  if (missing.length > 0) {
-    lines.push(
-      `  - The repository has no ${missing.map((label) => inline(label)).join(", ")} ${missing.length === 1 ? "label" : "labels"}. LGTMoose doesn't create labels; add them in the repository's settings.`,
-    );
-  }
-
-  const severities = SEVERITIES.map((severity) => {
-    const n = input.findings.filter((finding) => finding.severity === severity).length;
-    return `${n} ${SEVERITY_TEXT[severity].toLowerCase()}`;
-  });
-  lines.push(`- **Open findings:** ${input.findings.length} (${severities.join(", ")})`);
-  const over = input.findingsOverLimit ?? 0;
-  if (over > 0) {
-    lines.push(
-      `  - ${count(over, "more finding")} past the per-batch limit, least severe first, weren't posted`,
-    );
-  }
   return lines.join("\n");
 }
 
@@ -315,29 +319,29 @@ function renderChanges(input: SummaryInput, review: Map<string, string>, detail:
   }
   if (!detail.fileRows) return lines.join("\n");
   for (const [key, members] of [...groups].sort(([a], [b]) => byPath(a, b))) {
+    // A Markdown heading, not <details>: inside an HTML block backslash escapes don't apply, so a
+    // folder name could add HTML there.
     lines.push(
       "",
-      `<details><summary>${inline(key)} (${count(members.length, "file")})</summary>`,
+      `#### ${inline(key)} (${count(members.length, "file")})`,
       "",
       "| File | Status | Lines | Review |",
       "| --- | --- | --- | --- |",
       ...members.map((file) => fileRow(file, review)),
-      "",
-      "</details>",
     );
   }
   return lines.join("\n");
 }
 
 function renderTickets(tickets: TicketCoverage): string {
-  const lines = [`### Ticket coverage (${inline(tickets.provider)})`, ""];
+  const lines = [`### Ticket coverage (${inline(clip(tickets.provider, 50))})`, ""];
   if (tickets.tickets.length === 0) {
     lines.push("No linked tickets.");
     return lines.join("\n");
   }
   lines.push("| Ticket | Coverage | Notes |", "| --- | --- | --- |");
   for (const ticket of tickets.tickets.slice(0, LIST_LIMIT)) {
-    const name = `${link(ticket.key, ticket.url)} ${inline(clip(ticket.title, 120))}`;
+    const name = `${link(clip(ticket.key, 50), ticket.url)} ${inline(clip(ticket.title, 120))}`;
     lines.push(
       `| ${name} | ${COVERAGE_TEXT[ticket.coverage]} | ${inline(clip(ticket.note ?? "", 300))} |`,
     );

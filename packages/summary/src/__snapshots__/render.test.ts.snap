@@ -24,6 +24,10 @@ Moves sum into src\\/math and updates the import\\.
 ### Review status
 
 - **Commit:** \`0123456789ab\`
+- **Decision:** Changes requested
+- **Label:** Requires Changes
+- **Open findings:** 3 (1 blocking, 1 should fix, 1 nit)
+  - 2 more findings past the per-batch limit, least severe first, weren't posted
 - **Files reviewed:** 3 (1 full review, 1 imports only, 1 moved only)
 - **Files skipped:** 2 (1 lockfile, 1 vendored)
 - **New code, not reviewed:** 1 file added to vendored, build or generated paths
@@ -33,10 +37,6 @@ Moves sum into src\\/math and updates the import\\.
     - 1 package resolves from evil\\.example\\.com\\, not a known registry \\(first at line 10\\)
 - **Convention files left out** (over the size limit): 1 file
   - docs\\/agents\\/extra\\.md
-- **Decision:** Changes requested
-- **Label:** Requires Changes
-- **Open findings:** 3 (1 blocking, 1 should fix, 1 nit)
-  - 2 more findings past the per-batch limit, least severe first, weren't posted
 
 ### Open findings
 

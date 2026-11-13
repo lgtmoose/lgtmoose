@@ -187,7 +187,7 @@ describe("renderSummary", () => {
     expect(text).toContain("| Folder | Files | Lines |");
     expect(text).toContain("| packages\\/core\\/ | 8 | +24 −8 |");
     expect(text).toContain("| \\(repository root\\) | 4 | +12 −4 |");
-    expect(text).toContain("<details><summary>packages\\/core\\/ (8 files)</summary>");
+    expect(text).toContain("#### packages\\/core\\/ (8 files)");
   });
 
   it("shows a one-line range as one line and binary files as binary", () => {
@@ -203,6 +203,46 @@ describe("renderSummary", () => {
     expect(text).toContain("| src\\/total\\.ts:9 |");
     expect(text).toContain("| logo\\.png | modified | binary | skipped (binary) |");
     expect(text).toContain("no Approved, Requires Changes labels");
+  });
+
+  it("keeps folder names out of HTML in the grouped table", () => {
+    const files = Array.from({ length: 11 }, (_, i) =>
+      file(`x<img src=1 onerror=alert(1)>/f${i}.ts`),
+    );
+    const text = renderSummary(
+      input({ files, plan: { files: files.map((f, i) => planned(f, "full", i)), skipped: [] } }),
+    );
+    expect(text).not.toMatch(/(^|[^\\])<img/m);
+    expect(text).not.toContain("<details>");
+  });
+
+  it("keeps the outcome when even the least detailed comment is long", () => {
+    const long = "n".repeat(5_000);
+    const lockfiles = Array.from({ length: 60 }, (_, i) => file(`lock${i}/package-lock.json`));
+    const text = renderSummary(
+      input({
+        files: lockfiles,
+        plan: {
+          files: [],
+          skipped: lockfiles.map((f) => ({
+            file: f,
+            reason: "lockfile" as const,
+            notes: Array.from({ length: 50 }, () => long),
+          })),
+        },
+        decision: {
+          event: "COMMENT",
+          label: "Ready for Review",
+          reasons: Array.from({ length: 50 }, () => long),
+        },
+        conventionFilesOmitted: Array.from({ length: 500 }, () => long),
+      }),
+    );
+    expect(text.length).toBeLessThanOrEqual(GITHUB_COMMENT_LIMIT);
+    expect(text).toContain("**Decision:** Commented, no approval");
+    expect(text).toContain("**Open findings:** 3");
+    expect(text).toContain("…and 50 more files");
+    expect(text.endsWith("…\n")).toBe(false);
   });
 
   it("lists a small change without grouping", () => {
