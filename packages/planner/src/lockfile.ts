@@ -164,6 +164,13 @@ function repoChanges(hunk: Hunk): string[] {
   });
 }
 
+/**
+ * A line that names a package entry: package-lock's `"node_modules/x": {`, Cargo's and poetry's
+ * `name = "x"`, a yarn or pnpm entry header (`x@^1.0.0:`, `/x@1.0.0:`). Checksums are paired
+ * with the nearest one, so two packages with the same version aren't mixed up.
+ */
+const PACKAGE_LINE = /^\s*"[^"]+"\s*:\s*\{\s*$|^\s*name\s*=|^\S.*:\s*$|^\s+\/?[^\s:]+@[^\s:]+:\s*$/;
+
 /** The last version string on a line, ignoring checksum tokens (go.sum holds both). */
 function lineVersion(text: string): string | undefined {
   return text.replace(CHECKSUM_TOKEN, " ").match(VERSION)?.at(-1);
@@ -177,23 +184,28 @@ function lineVersion(text: string): string | undefined {
 function sameVersionChecksums(hunk: Hunk): string[] {
   const before = new Map<string, string>();
   const after = new Map<string, { text: string; line: number | undefined; version: string }>();
-  let oldVersion = "";
-  let newVersion = "";
+  // Per side: the nearest package identity line and version above the current line.
+  const old = { name: "", version: "" };
+  const now = { name: "", version: "" };
   for (const line of hunk.lines) {
+    const sides = { add: [now], del: [old], context: [old, now] }[line.kind];
     const version = lineVersion(line.text);
-    if (version !== undefined) {
-      if (line.kind !== "add") oldVersion = version;
-      if (line.kind !== "del") newVersion = version;
+    const name = PACKAGE_LINE.test(line.text) ? line.text.trim() : undefined;
+    for (const side of sides) {
+      if (name !== undefined) side.name = name;
+      if (version !== undefined) side.version = version;
     }
     if (line.kind === "context" || !INTEGRITY.test(line.text)) continue;
     const rest = line.text.replace(CHECKSUM_TOKEN, " ").trim();
-    if (line.kind === "del") before.set(`${oldVersion}|${rest}`, line.text.trim());
-    else
-      after.set(`${newVersion}|${rest}`, {
+    if (line.kind === "del") {
+      before.set(`${old.name}|${old.version}|${rest}`, line.text.trim());
+    } else {
+      after.set(`${now.name}|${now.version}|${rest}`, {
         text: line.text.trim(),
         line: line.newLine,
-        version: newVersion,
+        version: now.version,
       });
+    }
   }
   return [...after].flatMap(([key, { text, line, version }]) => {
     const was = before.get(key);

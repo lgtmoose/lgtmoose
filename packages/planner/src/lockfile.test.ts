@@ -72,6 +72,22 @@ describe("lockfileNotes", () => {
     ]);
   });
 
+  it("doesn't mix up two packages with the same version", () => {
+    const file = lockfile(
+      [
+        '    "node_modules/chalk": {',
+        '      "version": "5.0.0",',
+        '      "integrity": "sha512-AAA",',
+      ],
+      [
+        '    "node_modules/colorette": {',
+        '      "version": "5.0.0",',
+        '      "integrity": "sha512-BBB",',
+      ],
+    );
+    expect(lockfileNotes(file)).toEqual([]);
+  });
+
   it("is quiet for an ordinary version bump from the registry", () => {
     const file = lockfile(
       [
