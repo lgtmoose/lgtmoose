@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { findingSchema, reviewerOutputSchema, type Finding } from "./index.js";
+import { FINDING_LIMITS, findingSchema, reviewerOutputSchema, type Finding } from "./index.js";
 
 const finding: Finding = {
   rule_category: "correctness",
@@ -54,5 +54,29 @@ describe("reviewerOutputSchema", () => {
 
   it("converts to JSON Schema for the harness", () => {
     expect(z.toJSONSchema(reviewerOutputSchema)).toMatchSnapshot();
+  });
+});
+
+describe("finding limits", () => {
+  const base = {
+    rule_category: "correctness",
+    severity: "nit",
+    path: "a.ts",
+    line: 1,
+    side: "RIGHT",
+    title: "t",
+    body: "b",
+    evidence: "e",
+  };
+
+  it("refuses more findings than one run may return", () => {
+    const findings = Array.from({ length: FINDING_LIMITS.findingsPerRun + 1 }, () => base);
+    expect(reviewerOutputSchema.safeParse({ findings }).success).toBe(false);
+    expect(reviewerOutputSchema.safeParse({ findings: findings.slice(1) }).success).toBe(true);
+  });
+
+  it.each(["body", "evidence", "suggestion"] as const)("refuses an overlong %s", (field) => {
+    const text = "x".repeat(FINDING_LIMITS[field] + 1);
+    expect(findingSchema.safeParse({ ...base, [field]: text }).success).toBe(false);
   });
 });

@@ -9,6 +9,18 @@ export type FindingSide = (typeof SIDES)[number];
 const lineNumber = z.number().int().positive();
 
 /**
+ * Limits on what one reviewer run may return, so a runaway or prompt-injected model can't flood
+ * a pull request or exceed GitHub's comment limits. Output over them fails validation, which
+ * gets the harness's repair retry.
+ */
+export const FINDING_LIMITS = {
+  findingsPerRun: 50,
+  body: 4000,
+  evidence: 2000,
+  suggestion: 4000,
+} as const;
+
+/**
  * One problem a reviewer found. This is the JSON the model returns, so field names are
  * snake_case, and each field has a description that ends up in the JSON Schema the model sees.
  */
@@ -39,13 +51,16 @@ export const findingSchema = z
     body: z
       .string()
       .min(1)
+      .max(FINDING_LIMITS.body)
       .describe("What is wrong, why it matters and how to fix it, in plain, short sentences."),
     evidence: z
       .string()
       .min(1)
+      .max(FINDING_LIMITS.evidence)
       .describe("The text of the diff line or lines the finding is about, copied exactly."),
     suggestion: z
       .string()
+      .max(FINDING_LIMITS.suggestion)
       .optional()
       .describe(
         "Replacement code for the lines from start_line (or line) to line, when a small fix is clear. Code only, no fences.",
@@ -60,7 +75,12 @@ export type Finding = z.infer<typeof findingSchema>;
 
 /** What a reviewer run returns. An empty list means there was nothing worth reporting. */
 export const reviewerOutputSchema = z.object({
-  findings: z.array(findingSchema).describe("Every finding, or an empty list."),
+  findings: z
+    .array(findingSchema)
+    .max(FINDING_LIMITS.findingsPerRun)
+    .describe(
+      `Every finding, or an empty list. At most ${FINDING_LIMITS.findingsPerRun}: keep the most important.`,
+    ),
 });
 
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;

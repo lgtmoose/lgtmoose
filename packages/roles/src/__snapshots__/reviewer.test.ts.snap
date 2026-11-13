@@ -49,6 +49,7 @@ Return only a JSON object that matches this JSON Schema, with no other text:
   "type": "object",
   "properties": {
     "findings": {
+      "maxItems": 50,
       "type": "array",
       "items": {
         "type": "object",
@@ -101,16 +102,19 @@ Return only a JSON object that matches this JSON Schema, with no other text:
           "body": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 4000,
             "description": "What is wrong, why it matters and how to fix it, in plain, short sentences."
           },
           "evidence": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 2000,
             "description": "The text of the diff line or lines the finding is about, copied exactly."
           },
           "suggestion": {
             "description": "Replacement code for the lines from start_line (or line) to line, when a small fix is clear. Code only, no fences.",
-            "type": "string"
+            "type": "string",
+            "maxLength": 4000
           }
         },
         "required": [
@@ -125,7 +129,7 @@ Return only a JSON object that matches this JSON Schema, with no other text:
         ],
         "additionalProperties": false
       },
-      "description": "Every finding, or an empty list."
+      "description": "Every finding, or an empty list. At most 50: keep the most important."
     }
   },
   "required": [

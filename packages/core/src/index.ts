@@ -6,6 +6,7 @@
 
 export { SEVERITIES, isSeverity, severityRank, type Severity } from "./severity.js";
 export {
+  FINDING_LIMITS,
   SIDES,
   findingSchema,
   reviewerOutputSchema,

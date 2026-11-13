@@ -8,14 +8,54 @@
 export const UNTRUSTED_TAG = "untrusted";
 
 /**
- * Anything a reader could take for an `<untrusted` or `</untrusted` tag, in any case and with
- * any spacing: `</untrusted>`, `< / UNTRUSTED >`, `<untrusted source="x">`.
+ * Characters a reader could take for `<`: the ASCII one and its lookalikes (fullwidth, small
+ * form, angle brackets and quotation marks).
  */
-const TAG_LIKE = /<(\s*\/?\s*)untrusted/gi;
+const OPENERS = new Set([
+  "<",
+  "\uFF1C",
+  "\uFE64",
+  "\u2039",
+  "\u2329",
+  "\u3008",
+  "\u27E8",
+  "\u276C",
+]);
 
-/** Escapes text so it can't open or close an untrusted block. */
+/** Invisible characters that could split the tag name: zero-width spaces, joiners, BOM. */
+const INVISIBLE = /\u034F|[\u00AD\u180E\u200B-\u200F\u2060-\u2064\uFEFF]/g;
+
+/** How far after an opener to look for the tag name, allowing for spaces and invisibles. */
+const WINDOW = 64;
+
+/**
+ * Whether the text after an opener reads as `untrusted` or `/untrusted` to a model: compared
+ * after NFKC normalisation (which folds fullwidth and other compatibility letters), with
+ * invisible characters, spaces and slashes removed, in any case.
+ */
+function startsTagName(after: string): boolean {
+  const folded = after
+    .slice(0, WINDOW)
+    .normalize("NFKC")
+    .replace(INVISIBLE, "")
+    .replace(/^[\s/]*/, "")
+    .toLowerCase();
+  return folded.startsWith(UNTRUSTED_TAG);
+}
+
+/**
+ * Escapes text so it can't open or close an untrusted block: any `<`, or a lookalike, that
+ * starts something a reader could take for an `<untrusted` or `</untrusted` tag becomes `&lt;`.
+ * That covers any case and spacing (`< / UNTRUSTED >`), fullwidth forms (`＜／ｕｎｔｒｕｓｔｅｄ＞`)
+ * and zero-width characters inside the name.
+ */
 export function escapeUntrusted(text: string): string {
-  return text.replace(TAG_LIKE, "&lt;$1untrusted");
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i] ?? "";
+    out += OPENERS.has(ch) && startsTagName(text.slice(i + 1, i + 1 + WINDOW)) ? "&lt;" : ch;
+  }
+  return out;
 }
 
 const ATTRIBUTE_ESCAPES: Record<string, string> = {

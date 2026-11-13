@@ -6,8 +6,10 @@
 export {
   readConventionFiles,
   type ConventionFile,
+  type ConventionFiles,
   type ReadConventionsOptions,
 } from "./conventions.js";
+export { placeFindings, type PlacedFindings } from "./placement.js";
 export {
   formatRanges,
   renderBatch,
@@ -38,6 +40,7 @@ export {
   type UntrustedAttributes,
 } from "./untrusted.js";
 export {
+  FINDING_LIMITS,
   findingSchema,
   reviewerOutputSchema,
   type Finding,
