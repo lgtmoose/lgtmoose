@@ -134,6 +134,7 @@ describe("skipClassifier", () => {
     ["apps/site/out/index.html", "build-output"],
     ["libs/ui/coverage/lcov.info", "build-output"],
     ["packages/go/vendor/x/y.go", "vendored"],
+    ["packages/@acme/sdk/dist/index.js", "build-output"],
   ])("skips package-level build and vendor folders: %s", (path, reason) => {
     expect(skip(diff(path))?.reason).toBe(reason);
   });

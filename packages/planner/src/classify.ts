@@ -8,9 +8,13 @@ export type SkipReason =
 /** Workspace folders whose children are packages, as in most monorepos. */
 const PACKAGE_PARENTS = "{packages,apps,libs,services,modules,crates,plugins,tools}";
 
-/** Globs for folders at the repo root, or at the root of a workspace package. */
+/** Globs for folders at the repo root, or at the root of a workspace package (scoped too). */
 function atRootOrPackage(folders: readonly string[]): string[] {
-  return folders.flatMap((folder) => [`${folder}/**`, `${PACKAGE_PARENTS}/*/${folder}/**`]);
+  return folders.flatMap((folder) => [
+    `${folder}/**`,
+    `${PACKAGE_PARENTS}/*/${folder}/**`,
+    `${PACKAGE_PARENTS}/@*/*/${folder}/**`,
+  ]);
 }
 
 /** Default skip globs by reason. Each is matched against the whole path, at any depth. */

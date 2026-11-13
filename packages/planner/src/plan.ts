@@ -21,6 +21,13 @@ export const OTHER_TIER = 8;
 export const TEST_TIER = 9;
 
 export const DEFAULT_MAX_FILES = 10;
+
+/** Fewer added files than this in vendored or build-output folders are reviewed, not skipped. */
+export const BULK_ADDED_FILES = 5;
+
+function isFolderSkip(reason: SkipReason | undefined): boolean {
+  return reason === "vendored" || reason === "build-output";
+}
 export const DEFAULT_MAX_LINES = 1500;
 
 export interface PlannedFile {
@@ -181,10 +188,20 @@ export function planReview(
   const skipOf = skipClassifier(config.skip, options.headers);
   const tierOf = tierClassifier(config.tiers);
 
+  const skips = diff.map((file) => skipOf(file));
+  // Real vendoring or committed build output adds many files at once. A handful of new files in
+  // vendor/ or build/ could be hand-written code hidden there, so those are reviewed.
+  const addedByFolder = diff.filter(
+    (file, i) => file.status === "added" && isFolderSkip(skips[i]?.reason),
+  ).length;
+  const reviewAdded = addedByFolder < BULK_ADDED_FILES;
+
   const skipped: SkippedFile[] = [];
   const kept: Omit<PlannedFile, "index">[] = [];
-  for (const file of diff) {
-    const skip = skipOf(file);
+  for (const [i, file] of diff.entries()) {
+    const found = skips[i];
+    const skip =
+      reviewAdded && file.status === "added" && isFolderSkip(found?.reason) ? undefined : found;
     if (skip !== undefined) {
       skipped.push({ file, ...skip });
       continue;

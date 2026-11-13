@@ -158,6 +158,16 @@ describe("planReview", () => {
     expect(planReview([...input].reverse(), config)).toEqual(plan);
   });
 
+  it("reviews a few files the PR adds to vendor/ or build/, but skips bulk vendoring", () => {
+    const added = (path: string) => diff(path, { status: "added", oldBlob: undefined });
+    const few = planReview([added("vendor/analytics.js"), diff("vendor/old.js")], noConfig);
+    expect(paths(few.files)).toEqual(["vendor/analytics.js"]);
+    expect(few.skipped.map((s) => s.file.path)).toEqual(["vendor/old.js"]);
+
+    const bulk = Array.from({ length: 5 }, (_, i) => added(`vendor/lib/f${i}.js`));
+    expect(planReview(bulk, noConfig).files).toEqual([]);
+  });
+
   it("orders paths by code unit, not locale", () => {
     const plan = planReview([diff("b.ts"), diff("B.ts"), diff("a.ts"), diff("_.ts")], noConfig);
     expect(paths(plan.files)).toEqual(["B.ts", "_.ts", "a.ts", "b.ts"]);
