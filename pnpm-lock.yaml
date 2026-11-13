@@ -65,6 +65,24 @@ importers:
       '@lgtmoose/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../../packages/git
+      '@lgtmoose/harness':
+        specifier: workspace:*
+        version: link:../../packages/harness
+      '@lgtmoose/planner':
+        specifier: workspace:*
+        version: link:../../packages/planner
+      '@lgtmoose/roles':
+        specifier: workspace:*
+        version: link:../../packages/roles
+      '@lgtmoose/summary':
+        specifier: workspace:*
+        version: link:../../packages/summary
       zod:
         specifier: ^4.6.7
         version: 4.6.7
