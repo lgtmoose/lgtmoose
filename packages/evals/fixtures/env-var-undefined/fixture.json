@@ -21,8 +21,8 @@
     {
       "path": "src/webhooks.ts",
       "lines": [
-        8,
-        8
+        10,
+        10
       ],
       "note": "the length check before timingSafeEqual is correct"
     }

@@ -8,7 +8,7 @@
       "path": "src/checkout.ts",
       "lines": [
         6,
-        10
+        11
       ],
       "severity": "blocking",
       "note": "shippingFee is in dollars but is added to a cents amount: shipping is charged as 4.99 cents (and the amount isn't an integer)"

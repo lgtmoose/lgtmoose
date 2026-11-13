@@ -10,7 +10,7 @@
       ],
       "path": "src/send.ts",
       "lines": [
-        12,
+        10,
         15
       ],
       "severity": "should_fix",

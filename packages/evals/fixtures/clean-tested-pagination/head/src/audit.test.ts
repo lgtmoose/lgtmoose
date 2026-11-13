@@ -18,6 +18,7 @@ describe("listEntries", () => {
   it("clamps the limit, and uses the default when it isn't a number", () => {
     expect(listEntries(entries, { limit: 0 }).entries).toHaveLength(1);
     expect(listEntries(entries, { limit: Number.NaN }).entries).toHaveLength(5);
+    expect(listEntries(entries, { after: Number.NaN }).entries).toHaveLength(5);
     const many = Array.from({ length: MAX_LIMIT + 10 }, (_, i) => ({ id: i + 1, action: "x", at: "" }));
     expect(listEntries(many, { limit: 10_000 }).entries).toHaveLength(MAX_LIMIT);
   });
