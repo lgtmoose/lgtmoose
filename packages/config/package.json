@@ -18,12 +18,16 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
     "test": "vitest run",
     "schema": "tsx scripts/write-json-schema.ts"
   },
   "dependencies": {
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
   }
 }

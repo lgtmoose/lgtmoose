@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
     "test": "vitest run",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js"
@@ -37,6 +38,7 @@
     "@types/aws-lambda": "^8.10.164",
     "@types/express": "^5.0.6",
     "@types/supertest": "^7.2.1",
-    "supertest": "^7.3.2"
+    "supertest": "^7.3.2",
+    "typescript": "catalog:"
   }
 }

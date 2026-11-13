@@ -40,8 +40,8 @@ describe("createGitHubAppApi", () => {
     const [url, init] = fetchFn.mock.calls[0] ?? [];
     expect(url).toBe("https://api.test/app/hook/config");
     expect(init?.method).toBe("PATCH");
-    expect((init?.headers as Record<string, string>).authorization).toBe("Bearer JWT");
-    expect(JSON.parse(String(init?.body))).toEqual({
+    expect((init?.headers as Record<string, string> | undefined)?.authorization).toBe("Bearer JWT");
+    expect(JSON.parse(init?.body as string)).toEqual({
       url: "https://abc.execute-api.us-east-1.amazonaws.com/webhooks/github",
       secret: "whsec",
       content_type: "json",
@@ -57,7 +57,7 @@ describe("createGitHubAppApi", () => {
   it("leaves the secret alone when only the URL changes", async () => {
     const fetchFn = fakeFetch(200, {});
     await createGitHubAppApi(fetchFn).setWebhook("JWT", { url: "https://x.test" });
-    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({
+    expect(JSON.parse(fetchFn.mock.calls[0]?.[1]?.body as string)).toEqual({
       url: "https://x.test",
       insecure_ssl: "0",
     });

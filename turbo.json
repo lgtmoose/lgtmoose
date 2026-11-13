@@ -1,17 +1,26 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": ["tsconfig.base.json", ".nvmrc"],
+  "globalDependencies": [
+    "package.json",
+    "tsconfig.base.json",
+    ".nvmrc",
+    "pnpm-workspace.yaml",
+    ".oxlintrc.json",
+    "tools/test-postgres/Dockerfile",
+    ".github/workflows/ci.yml",
+    ".github/actions/**"
+  ],
   "tasks": {
     "//#format:check": {
       "inputs": ["**/*", "!**/node_modules/**", "!**/dist/**", "!**/cdk.out/**", "!.turbo/**"]
     },
-    "//#lint": {
+    "//#lint:root": {
       "inputs": [
         "**/*.{js,mjs,cjs,ts,mts,cts,tsx}",
-        "eslint.config.js",
-        "!**/node_modules/**",
-        "!**/dist/**",
-        "!**/cdk.out/**"
+        "!apps/**",
+        "!packages/**",
+        "!infra/**",
+        "!**/node_modules/**"
       ]
     },
     "build": {
@@ -20,6 +29,10 @@
     },
     "typecheck": {
       "dependsOn": ["^build"]
+    },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.oxlintrc.json"]
     },
     "test": {
       "dependsOn": ["^build"]
