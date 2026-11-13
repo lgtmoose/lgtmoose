@@ -233,6 +233,22 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/poster:
+    dependencies:
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      '@lgtmoose/summary':
+        specifier: workspace:*
+        version: link:../summary
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
   packages/roles:
     dependencies:
       '@lgtmoose/config':
