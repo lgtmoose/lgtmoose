@@ -12,12 +12,13 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "synth": "pnpm --filter @lgtmoose/cdk synth",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "format": "prettier --write . --cache",
+    "format:check": "prettier --check . --cache",
+    "synth": "turbo run synth",
     "lgtmoose": "pnpm --silent --filter \"lgtmoose...\" --filter \"@lgtmoose/cdk...\" build && node apps/cli/dist/index.js",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm --filter lgtmoose smoke && pnpm --filter @lgtmoose/db check-migrations && pnpm synth"
+    "check": "pnpm format:check && pnpm lint && pnpm verify",
+    "verify": "turbo run typecheck test build smoke check-migrations synth"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

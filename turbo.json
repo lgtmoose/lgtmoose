@@ -11,6 +11,18 @@
     "test": {
       "dependsOn": ["^build"],
       "env": ["LGTMOOSE_TEST_DATABASE_URL", "CI"]
+    },
+    "smoke": {
+      "dependsOn": ["build"]
+    },
+    "check-migrations": {
+      "cache": false
+    },
+    "synth": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/lgtmoose.config.ts"],
+      "env": ["LGTMOOSE_CONFIG", "CDK_DEFAULT_ACCOUNT", "CDK_DEFAULT_REGION"],
+      "outputs": ["cdk.out/**"]
     }
   }
 }

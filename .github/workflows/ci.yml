@@ -12,8 +12,34 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The jobs run side by side. Within `verify`, turbo runs every task concurrently as far as the
+# dependency graph allows, and replays any task whose inputs haven't changed from the cache.
 jobs:
-  check:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup
+
+      # ESLint and Prettier only re-check files that changed since the cached run.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            node_modules/.cache/eslint
+            node_modules/.cache/prettier
+          key: lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-${{ github.sha }}
+          restore-keys: |
+            lint-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'eslint.config.js', '.prettierrc*') }}-
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Postgres with pgvector, so migrations also run through the real runner on a real server.
@@ -32,37 +58,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v6
+      - uses: ./.github/actions/setup
 
-      - uses: actions/setup-node@v7
+      # Turbo's task cache. A pull request falls back to the newest cache from main.
+      - uses: actions/cache@v6
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-main-
 
-      - run: pnpm install --frozen-lockfile
-
-      - name: Format
-        run: pnpm format:check
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Test
-        run: pnpm test
+      # typecheck, test, build, run the built CLI, migrations match the schema, cdk synth.
+      - name: Verify
+        run: pnpm verify --summarize
         env:
           LGTMOOSE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
-      - name: Build
-        run: pnpm build
-
-      - name: Run the built CLI
-        run: pnpm --filter lgtmoose smoke
-
-      - name: Migrations match the schema
-        run: pnpm --filter @lgtmoose/db check-migrations
-
-      - name: CDK synth
-        run: pnpm synth
+      # The restored cache is saved again under a new key, so keep only what this run used.
+      - name: Prune the turbo cache
+        run: pnpm exec tsx scripts/prune-turbo-cache.ts

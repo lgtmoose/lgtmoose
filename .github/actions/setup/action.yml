@@ -1,0 +1,15 @@
+name: Set up the workspace
+description: Node from .nvmrc, pnpm, and dependencies from the cached pnpm store.
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v6
+
+    # Caches the pnpm store keyed on pnpm-lock.yaml, so install only links packages.
+    - uses: actions/setup-node@v7
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+
+    - run: pnpm install --frozen-lockfile
+      shell: bash
