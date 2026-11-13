@@ -7,6 +7,7 @@ export {
   globMatcher,
   hasGeneratedMarker,
   headerHasMarker,
+  includeMatcher,
   isMarkedGenerated,
   skipClassifier,
   type FileHeaders,

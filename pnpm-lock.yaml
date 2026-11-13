@@ -159,6 +159,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -244,6 +247,22 @@ importers:
       zod:
         specifier: ^4.6.7
         version: 4.6.7
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/summary:
+    dependencies:
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../git
+      '@lgtmoose/planner':
+        specifier: workspace:*
+        version: link:../planner
     devDependencies:
       typescript:
         specifier: 'catalog:'

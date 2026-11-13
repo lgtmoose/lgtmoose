@@ -185,6 +185,28 @@ describe("planReview", () => {
     expect(plan.skipped.map((s) => s.file.path)).toEqual(["src/__snapshots__/view.test.ts.snap"]);
   });
 
+  it("plans included files like any other, through tiers and batches", () => {
+    const files = [diff("packages/web/dist/index.js"), diff("src/build/run.ts")];
+    expect(paths(planReview(files, noConfig).files)).toEqual(["src/build/run.ts"]);
+    const plan = planReview(files, {
+      ...noConfig,
+      tiers: { "1": ["packages/web/**"] },
+      include: ["packages/*/dist/**"],
+    });
+    expect(plan.files.map((f) => [f.file.path, f.tier])).toEqual([
+      ["packages/web/dist/index.js", 1],
+      ["src/build/run.ts", 8],
+    ]);
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it("reviews an included lockfile as text, without lockfile notes", () => {
+    const lock = diff("package-lock.json");
+    const plan = planReview([lock], { ...noConfig, include: ["package-lock.json"] });
+    expect(paths(plan.files)).toEqual(["package-lock.json"]);
+    expect(plan.skipped).toEqual([]);
+  });
+
   it("attaches lockfile notes to a skipped lockfile", () => {
     const lock = diff("package-lock.json", {
       hunks: [
