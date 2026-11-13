@@ -190,35 +190,62 @@ export interface Skip {
 }
 
 /**
- * Builds the skip check for a repo's `skip` globs on top of the defaults.
+ * Builds the skip check for a repo's `skip` and `include` globs on top of the defaults. Checks
+ * run in this order: binary, the repo's `skip` globs, the repo's `include` globs (which turn off
+ * every default skip, the generated-header check included), the default skip globs, then the
+ * generated header. When a `skip` glob and a default both match a file that isn't included, the
+ * default's reason is kept (so a lockfile still gets its notes); for an included file the
+ * repo's own `skip` glob is the reason.
  *
- * `configSkip` must come from the base commit's `.lgtmoose.yaml`, not the PR's: otherwise a PR
- * could add `skip: ["**"]` and hide itself. A renamed file is skipped by glob only if its old
- * path matches a skip glob too, so moving a file into `vendor/` doesn't hide its edits.
+ * `configSkip` and `include` must come from the base commit's `.lgtmoose.yaml`, not the PR's:
+ * otherwise a PR could add `skip: ["**"]` and hide itself. A renamed file is skipped by glob
+ * only if its old path is skipped too, so moving a file into `vendor/` doesn't hide its edits.
  */
 export function skipClassifier(
   configSkip: readonly string[],
-  headers?: FileHeaders,
+  {
+    headers,
+    include = [],
+  }: { headers?: FileHeaders | undefined; include?: readonly string[] | undefined } = {},
 ): (file: FileDiff) => Skip | undefined {
   const defaults = Object.entries(DEFAULT_SKIP).map(([reason, globs]) => ({
     reason: reason as SkipReason,
     match: globMatcher(globs),
   }));
-  const configured = { reason: "config" as const, match: globMatcher(configSkip) };
-  const byGlob = [...defaults, configured];
-  const globSkip = (path: string): Skip | undefined => {
-    for (const { reason, match } of byGlob) {
+  const configured = globMatcher(configSkip);
+  const isIncluded = includeMatcher(include);
+  const defaultSkip = (path: string): Skip | undefined => {
+    for (const { reason, match } of defaults) {
       const glob = match(path);
       if (glob !== undefined) return { reason, glob };
     }
     return undefined;
   };
+  /** The path's skip by glob, or "include" when an include glob turns the defaults off. */
+  const pathSkip = (path: string): Skip | "include" | undefined => {
+    const own = configured(path);
+    const included = isIncluded(path);
+    if (own !== undefined) {
+      const ownSkip: Skip = { reason: "config", glob: own };
+      return included ? ownSkip : (defaultSkip(path) ?? ownSkip);
+    }
+    if (included) return "include";
+    return defaultSkip(path);
+  };
   return (file) => {
     if (file.binary) return { reason: "binary" };
-    const skip = globSkip(file.path);
-    const movedIn = file.oldPath !== undefined && globSkip(file.oldPath) === undefined;
+    const skip = pathSkip(file.path);
+    if (skip === "include") return undefined;
+    const old = file.oldPath === undefined ? undefined : pathSkip(file.oldPath);
+    const movedIn = file.oldPath !== undefined && (old === undefined || old === "include");
     if (skip !== undefined && !movedIn) return skip;
     if (isMarkedGenerated(file, headers)) return { reason: "generated" };
     return undefined;
   };
+}
+
+/** Whether a path matches the repo's `include` globs, which turn the default skips off. */
+export function includeMatcher(include: readonly string[]): (path: string) => boolean {
+  const match = globMatcher(include);
+  return (path) => match(path) !== undefined;
 }

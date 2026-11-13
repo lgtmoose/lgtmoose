@@ -9,6 +9,7 @@ describe("parseRepoConfigYaml", () => {
       conventions: [...DEFAULT_CONVENTIONS],
       tiers: {},
       skip: [],
+      include: [],
       registries: [],
       gate: { check_run: "required", approve: true, nit_cap: 10 },
       labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
@@ -34,6 +35,11 @@ labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "A
       "2": ["src/payments/**"],
     });
     expect(config.gate.nit_cap).toBe(10);
+  });
+
+  it("parses include globs and rejects empty ones", () => {
+    expect(parseRepoConfigYaml('include: ["src/build/**"]\n').include).toEqual(["src/build/**"]);
+    expect(() => parseRepoConfigYaml('include: [""]\n')).toThrow(ConfigError);
   });
 
   it("fills missing nested defaults when a section is partly set", () => {

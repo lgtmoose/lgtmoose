@@ -19,7 +19,17 @@ export const repoConfigSchema = z
     tiers: z
       .record(z.string().regex(/^[1-7]$/, "tier keys are numbers 1 to 7"), z.array(glob))
       .default({}),
+    /**
+     * Globs for files never to review, on top of the planner's defaults (lockfiles, build
+     * output, vendored, generated and minified files, binaries). They win over `include`.
+     */
     skip: z.array(glob).default([]),
+    /**
+     * Globs for files to review even though a default skip matches them, such as real source in
+     * `build/` or a hand-written `*.generated.ts`. `skip` globs still win, and binaries are
+     * always skipped. An included lockfile is reviewed as text, without lockfile notes.
+     */
+    include: z.array(glob).default([]),
     /**
      * Extra package hosts to trust in lockfiles, such as a private registry, on top of the
      * public ones. Packages resolved from them aren't flagged in the review summary.
