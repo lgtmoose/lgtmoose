@@ -8,11 +8,18 @@ export interface Repo {
   git(args: readonly string[], options?: Pick<RunOptions, "okExitCodes">): Promise<string>;
   /** Whether the commit is in this checkout (it may have been force-pushed away). */
   hasCommit(sha: string): Promise<boolean>;
+  /** True when head's whole tree is on disk (`checkout: "full"`), so its blobs are local. */
+  readonly fullCheckout: boolean;
   /**
    * Contents of many blobs, read by one `git cat-file --batch`. In a partial clone, missing ones
-   * are first fetched together in one request rather than one request each.
+   * are first fetched together in one request rather than one request each. `local` lists IDs
+   * the caller knows are already here (head's versions after a full checkout), so they aren't
+   * fetched again.
    */
-  readBlobs(shas: Iterable<string>): Promise<Map<string, Buffer>>;
+  readBlobs(
+    shas: Iterable<string>,
+    options?: { local?: Iterable<string> },
+  ): Promise<Map<string, Buffer>>;
   /** Writes these head paths into the working tree, for a clone made with `checkout: "none"`. */
   checkoutPaths(paths: readonly string[]): Promise<void>;
 }
@@ -60,8 +67,9 @@ export function isMissingObjectError(error: unknown): boolean {
     )
   );
 }
-/** Blob IDs per prefetch request, to keep the command line a sensible length. */
+/** Blob IDs per prefetch request, and paths per ls-tree, to stay well under ARG_MAX. */
 const PREFETCH_BATCH = 500;
+const PATHS_PER_LIST = 1000;
 
 export function githubCloneUrl(owner: string, repo: string, host = "github.com"): string {
   return `https://${host}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git`;
@@ -150,20 +158,13 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     await run(["checkout", "--quiet", "--detach", options.headSha]);
   }
 
-  // Blobs known to be local, so a prefetch can leave them out: head's tree after a full
-  // checkout, plus whatever this clone has already prefetched.
+  // Blobs this clone has prefetched, so a later prefetch can leave them out.
   const local = new Set<string>();
-  if (partial && options.checkout !== "none") {
-    const tree = await run(["ls-tree", "-r", "-z", "--full-tree", options.headSha]);
-    for (const entry of tree.stdout.split("\0")) {
-      const [mode, type, sha] = entry.split(/\s/);
-      if (type === "blob" && mode !== "160000" && sha !== undefined) local.add(sha);
-    }
-  }
 
   /**
    * One request for every listed blob that isn't local yet, rather than git's lazy fetch, which
-   * asks for each blob separately. If it fails, git falls back to fetching lazily.
+   * asks for each blob separately. Only "not found" errors are ignored (git then fetches what it
+   * can lazily); an expired token, a rate limit or a network failure is thrown.
    */
   const prefetch = async (shas: Iterable<string>): Promise<void> => {
     if (!partial) return;
@@ -171,18 +172,21 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     for (let i = 0; i < missing.length; i += PREFETCH_BATCH) {
       const batch = missing.slice(i, i + PREFETCH_BATCH);
       try {
-        // Without the blob filter, which would leave out the very blobs asked for.
         await fetch(batch, false);
         for (const sha of batch) local.add(sha);
       } catch (error) {
-        if (!(error instanceof GitError)) throw error;
+        if (!isMissingObjectError(error)) throw error;
       }
     }
   };
 
-  const readBlobs = async (shas: Iterable<string>): Promise<Map<string, Buffer>> => {
+  const readBlobs = async (
+    shas: Iterable<string>,
+    { local: known = [] }: { local?: Iterable<string> } = {},
+  ): Promise<Map<string, Buffer>> => {
     const wanted = [...new Set(shas)].filter((sha) => SHA.test(sha));
     if (wanted.length === 0) return new Map();
+    for (const sha of known) local.add(sha);
     await prefetch(wanted);
     const { stdout } = await runGitBytes(options.dir, ["cat-file", "--batch"], {
       ...base,
@@ -194,6 +198,7 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
   return {
     dir: options.dir,
     headSha: options.headSha,
+    fullCheckout: options.checkout !== "none",
     git: async (args, extra) => (await run(args, extra)).stdout,
     hasCommit: async (sha) => {
       if (fetched.has(sha)) return true;
@@ -210,15 +215,20 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     checkoutPaths: async (paths) => {
       if (paths.length === 0) return;
       const literal = { env: { GIT_LITERAL_PATHSPECS: "1" } };
-      // Find the files' blobs and fetch them in one request before checking out.
-      const tree = await run(["ls-tree", "-z", options.headSha, "--", ...paths], literal);
-      await prefetch(
-        tree.stdout
-          .split("\0")
-          .map((entry) => entry.split(/\s/))
-          .filter(([, type]) => type === "blob")
-          .map(([, , sha]) => sha ?? ""),
-      );
+      // The files' blobs (directories expanded, -r), listed in chunks so a long list of paths
+      // never hits the OS argument limit, then fetched in one request before checking out.
+      const blobs: string[] = [];
+      for (let i = 0; i < paths.length; i += PATHS_PER_LIST) {
+        const tree = await run(
+          ["ls-tree", "-r", "-z", options.headSha, "--", ...paths.slice(i, i + PATHS_PER_LIST)],
+          literal,
+        );
+        for (const entry of tree.stdout.split("\0")) {
+          const [, type, sha] = entry.split(/\s/);
+          if (type === "blob" && sha !== undefined) blobs.push(sha);
+        }
+      }
+      await prefetch(blobs);
       // NUL-separated and literal, so no path is read as pathspec magic or split on a newline.
       await run(["checkout", options.headSha, "--pathspec-from-file=-", "--pathspec-file-nul"], {
         input: paths.join("\0") + "\0",

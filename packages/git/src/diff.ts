@@ -177,12 +177,19 @@ async function diffRange(
   const entries = parseRaw(raw);
   const patches = mergePatches(parsePatch(patch));
   // One batched read for every blob mechanical detection needs, instead of a process each.
+  const candidates = entries.filter(mightBeMechanical);
+  // After a full checkout, head's versions are on disk already; only the other side needs fetching.
+  const headSide = repo.fullCheckout && to === repo.headSha;
   const blobs = detectMechanical
     ? await repo.readBlobs(
-        entries
-          .filter(mightBeMechanical)
+        candidates
           .flatMap((e) => [e.oldBlob, e.newBlob])
           .filter((blob): blob is string => blob !== undefined),
+        {
+          local: headSide
+            ? candidates.flatMap((e) => (e.newBlob === undefined ? [] : [e.newBlob]))
+            : [],
+        },
       )
     : new Map<string, Buffer>();
 
@@ -230,15 +237,35 @@ function addedTexts(file: FileDiff | undefined): Map<string, number> {
 /** Lines that say nothing on their own: blank, or only brackets and punctuation. */
 const TRIVIAL = /^[\s{}()[\];,.]*$/;
 
+const words = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9_$]+/g) ?? []);
+
+/** Share of words two lines have in common (Jaccard). 1 for identical word sets. */
+function similarity(a: string, b: string): number {
+  const left = words(a);
+  const right = words(b);
+  if (left.size === 0 && right.size === 0) return 1;
+  let shared = 0;
+  for (const word of left) if (right.has(word)) shared += 1;
+  return shared / (left.size + right.size - shared);
+}
+
+/** Lines whose replacement in the same hunk keeps at least half their words count as reworded. */
+const REWORDED = 0.5;
+
 /**
- * Texts of lines replaced in place since the last review (a hunk that removes some lines and
- * adds others): rewordings, whose new form is already in `changedSinceLastReview`.
+ * Texts of lines reworded since the last review: removed in a hunk that adds a similar line.
+ * A line replaced by something unrelated (a check swapped for a log line) isn't a rewording,
+ * so it stays in the removed list.
  */
-function replacedTexts(changed: FileDiff | undefined): Set<string> {
+function rewordedTexts(changed: FileDiff | undefined): Set<string> {
   const texts = new Set<string>();
   for (const hunk of changed?.hunks ?? []) {
-    if (!hunk.lines.some((l) => l.kind === "add")) continue;
-    for (const line of hunk.lines) if (line.kind === "del") texts.add(line.text);
+    const added = hunk.lines.filter((l) => l.kind === "add").map((l) => l.text);
+    for (const line of hunk.lines) {
+      if (line.kind === "del" && added.some((text) => similarity(line.text, text) >= REWORDED)) {
+        texts.add(line.text);
+      }
+    }
   }
   return texts;
 }
@@ -253,10 +280,10 @@ function removedTexts(
   changed?: FileDiff,
 ): string[] {
   const now = addedTexts(after);
-  const replaced = replacedTexts(changed);
+  const reworded = rewordedTexts(changed);
   const removed: string[] = [];
   for (const [text, count] of addedTexts(before)) {
-    if (TRIVIAL.test(text) || replaced.has(text)) continue;
+    if (TRIVIAL.test(text) || reworded.has(text)) continue;
     for (let i = now.get(text) ?? 0; i < count; i++) removed.push(text);
   }
   return removed;

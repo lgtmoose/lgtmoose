@@ -377,6 +377,26 @@ describe("reviewDiff: incremental review", () => {
     expect(file?.removedSinceLastReview).toEqual(["assertOwner(user);"]);
   });
 
+  it("still reports a check swapped for an unrelated line in the same spot", async () => {
+    const base = await setUp({ "a.ts": lines(20) });
+    const draft = lines(20).replace("line 10\n", "line 10\nrequireAdmin(user);\n");
+    await fixture.write({ "a.ts": draft });
+    const reviewed = await fixture.commit("add check");
+    await fixture.write({
+      "a.ts": draft.replace("requireAdmin(user);", "logger.info(request.id);"),
+    });
+    const head = await fixture.commit("swap it");
+
+    const [file] = (
+      await reviewDiff(await clone(head, [base, reviewed]), {
+        baseSha: base,
+        lastReviewed: reviewed,
+      })
+    ).files;
+    expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
+    expect(file?.changedSinceLastReview).toEqual([11]);
+  });
+
   it("includes files renamed or deleted since the last review, and nothing when head is unchanged", async () => {
     const base = await setUp({ "a.txt": lines(10), "b.txt": lines(10, "b") });
     await fixture.write({

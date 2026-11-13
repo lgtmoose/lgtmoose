@@ -229,6 +229,111 @@ describe("cloneAtSha", () => {
     }
   });
 
+  describe("over HTTP, counting requests", () => {
+    const token = "ghs_FAKE";
+    const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+
+    it("writes a directory with one fetch, not one per file", async () => {
+      await fixture.write(
+        Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`dir/f${i}.txt`, `${i}\n`])),
+      );
+      const head = await fixture.commit("files");
+      const server = await serveOverHttp(fixture.remote, auth);
+      try {
+        const repo = await cloneAtSha({
+          url: server.url,
+          dir: await fixture.cloneDir(),
+          headSha: head,
+          token,
+          checkout: "none",
+        });
+        const before = server.authorizations.length;
+        await repo.checkoutPaths(["dir"]);
+        expect(await readFile(join(repo.dir, "dir/f19.txt"), "utf8")).toBe("19\n");
+        // git's own lazy fetch would make two requests per file (40 here).
+        expect(server.authorizations.length - before).toBeLessThanOrEqual(3);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("doesn't fetch head blobs a full checkout already wrote, or anything twice", async () => {
+      await fixture.write({ "a.ts": "import a from 'a';\n" });
+      const base = await fixture.commit("base");
+      await fixture.write({ "a.ts": "import a from 'b';\n" });
+      const head = await fixture.commit("head");
+      const server = await serveOverHttp(fixture.remote, auth);
+      try {
+        const repo = await cloneAtSha({
+          url: server.url,
+          dir: await fixture.cloneDir(),
+          headSha: head,
+          otherShas: [base],
+          token,
+        });
+        const [oldBlob, newBlob] = (await repo.git(["rev-parse", `${base}:a.ts`, `${head}:a.ts`]))
+          .trim()
+          .split("\n");
+        let before = server.authorizations.length;
+        await repo.readBlobs([newBlob ?? ""], { local: [newBlob ?? ""] });
+        expect(server.authorizations.length).toBe(before);
+        await repo.readBlobs([oldBlob ?? ""]);
+        expect(server.authorizations.length).toBeGreaterThan(before);
+        before = server.authorizations.length;
+        expect((await repo.readBlobs([oldBlob ?? ""])).get(oldBlob ?? "")?.toString()).toBe(
+          "import a from 'a';\n",
+        );
+        expect(server.authorizations.length).toBe(before);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("throws an auth or server failure during a prefetch instead of hiding it", async () => {
+      await fixture.write({ "a.txt": "a\n" });
+      const head = await fixture.commit("head");
+      const server = await serveOverHttp(fixture.remote, auth);
+      try {
+        const repo = await cloneAtSha({
+          url: server.url,
+          dir: await fixture.cloneDir(),
+          headSha: head,
+          token,
+          checkout: "none",
+        });
+        const blob = (await repo.git(["rev-parse", `${head}:a.txt`])).trim();
+        server.failAfter(0, 401);
+        const error = await repo.readBlobs([blob]).then(
+          () => new Error("expected a failure"),
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect(String(error)).not.toContain("expected a failure");
+        expect(isMissingObjectError(error)).toBe(false);
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  it("checks out more paths than fit on one command line", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 2500 }, (_, i) => [`many/file-with-a-longish-name-${i}.txt`, `${i}\n`]),
+    );
+    await fixture.write(files);
+    const head = await fixture.commit("many");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: head,
+      checkout: "none",
+    });
+    await repo.checkoutPaths(Object.keys(files));
+    expect(await readFile(join(repo.dir, "many/file-with-a-longish-name-2499.txt"), "utf8")).toBe(
+      "2499\n",
+    );
+  }, 60_000);
+
   it("names the clone URL for a GitHub repository", () => {
     expect(githubCloneUrl("acme", "web app")).toBe("https://github.com/acme/web%20app.git");
   });
