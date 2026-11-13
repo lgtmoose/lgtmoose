@@ -260,8 +260,8 @@ export interface AppliedVerdicts {
 /**
  * Applies verdicts to the findings they're for. Confirmed findings are kept, with
  * `adjusted_severity` applied; rejected ones are dropped with the verifier's reason, and
- * protected-category rejections and lowered severities are listed again for eval review. The first verdict for an id
- * counts; later ones and unknown ids are ignored.
+ * protected-category rejections and lowered severities are listed again for eval review. The
+ * first verdict for an id counts; later ones and unknown ids are ignored.
  */
 export function applyVerdicts(
   targets: readonly VerifyTarget[],
