@@ -49,7 +49,8 @@ export const DEPLOY_HELP = `Usage: lgtmoose deploy [--yes]
 
 Deploys every LGTMoose stack to the account and region in lgtmoose.config.ts, bootstrapping
 the CDK there the first time, then points the GitHub App's webhook at the new gateway.
-Run it again after \`git pull\` to upgrade.
+Run it again after \`git pull\` to upgrade. It builds ARM64 container images, so Docker must be
+running (on x86 Linux, with QEMU emulation for arm64).
 
 Options:
   --yes   Don't stop to approve IAM and security group changes

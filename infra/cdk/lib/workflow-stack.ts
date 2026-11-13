@@ -31,12 +31,15 @@ export const SANDBOX_PREFIX = "sandbox/";
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
 
 /**
- * Hosts sandbox tasks reach directly, not through the proxy: the ECS credential and metadata
- * endpoints, and the AWS services that have VPC endpoints in the sandbox subnets. Everything
- * else, model APIs and Bedrock included, goes through the proxy.
+ * Hosts sandbox tasks reach directly, not through the proxy: loopback, the ECS credential and
+ * metadata endpoints, and the AWS services that have VPC endpoints in the sandbox subnets.
+ * Everything else, model APIs and Bedrock included, goes through the proxy.
  */
 function noProxy(region: string): string {
   return [
+    "localhost",
+    "127.0.0.1",
+    "::1",
     "169.254.170.2",
     "169.254.169.254",
     `s3.${region}.amazonaws.com`,

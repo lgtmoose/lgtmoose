@@ -20,6 +20,8 @@ pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
 pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
 
+`deploy` builds the control and sandbox container images for ARM64, so it needs Docker running: Docker Desktop, or on x86 Linux, Docker with QEMU emulation for arm64 (for example `docker run --privileged --rm tonistiigi/binfmt --install arm64`).
+
 `deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`. Administrator access is simplest. A scoped role needs to assume the CDK bootstrap roles and create the bootstrap stack, plus the calls the CLI makes itself:
 
 - `sts:GetCallerIdentity`

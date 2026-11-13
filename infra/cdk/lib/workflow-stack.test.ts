@@ -145,6 +145,7 @@ describe("WorkflowStack", () => {
     expect(env.HTTPS_PROXY).toBe(PROXY_URL);
     expect(env.ARTIFACT_PREFIX).toBe(SANDBOX_PREFIX);
     expect(JSON.stringify(env.NO_PROXY)).toContain("169.254.170.2");
+    expect(JSON.stringify(env.NO_PROXY)).toContain("127.0.0.1");
     expect(JSON.stringify(env.NO_PROXY)).not.toContain("bedrock");
   });
 
