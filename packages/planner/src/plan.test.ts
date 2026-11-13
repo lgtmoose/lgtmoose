@@ -68,13 +68,18 @@ describe("changedLines", () => {
     expect(changedLines(diff("a.ts", { hunks: [] }))).toBe(0);
   });
 
-  it("counts only lines changed since the last review on an incremental review", () => {
+  it("counts the whole PR diff on an incremental review, since the prompt shows it", () => {
     const file = diff("a.ts", {
       hunks: [hunk(300)],
       changedSinceLastReview: [12],
-      removedSinceLastReview: ["check(x);"],
+      removedSinceLastReview: [],
     });
-    expect(changedLines(file)).toBe(2);
+    expect(changedLines(file)).toBe(300);
+  });
+
+  it("counts removed lines for a file the PR no longer changes", () => {
+    const reverted = diff("a.ts", { hunks: [], removedSinceLastReview: ["a", "b"] });
+    expect(changedLines(reverted)).toBe(2);
   });
 });
 

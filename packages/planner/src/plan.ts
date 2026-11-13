@@ -28,8 +28,9 @@ export interface PlannedFile {
   depth: ReadingDepth;
   tier: Tier;
   /**
-   * Lines to review: added plus deleted lines in the file's hunks, or on an incremental review,
-   * the lines changed or taken out since the last review.
+   * Added plus deleted lines in the file's hunks: how much diff the prompt shows for it. On an
+   * incremental review the hunks still cover the whole PR, so this is the PR's diff of the file,
+   * not just what changed since the last review.
    */
   changedLines: number;
   /** Position in the plan's fixed order, from 0. */
@@ -89,13 +90,11 @@ export function readingDepth(file: FileDiff): ReadingDepth {
 }
 
 /**
- * How many lines of a file need reading. On an incremental review that's what changed since
- * the last review, not the whole PR's diff of the file, so a one-line follow-up stays small.
+ * How many diff lines a file puts into the prompt, which is what batches are sized by. A file
+ * the PR no longer changes at all (no hunks) still lists lines removed since the last review.
  */
 export function changedLines(file: FileDiff): number {
-  if (file.changedSinceLastReview !== undefined) {
-    return file.changedSinceLastReview.length + (file.removedSinceLastReview?.length ?? 0);
-  }
+  if (file.hunks.length === 0) return file.removedSinceLastReview?.length ?? 0;
   let count = 0;
   for (const hunk of file.hunks) {
     for (const line of hunk.lines) if (line.kind !== "context") count += 1;
