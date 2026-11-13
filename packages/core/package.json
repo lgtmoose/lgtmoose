@@ -17,6 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
     "test": "vitest run"
   },
   "devDependencies": {

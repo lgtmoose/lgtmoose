@@ -25,14 +25,13 @@ env:
   AFFECTED: ${{ github.event_name == 'pull_request' && '--affected' || '' }}
 jobs:
   static:
-    name: format, lint, migrations
+    name: format, migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      # Prettier only re-checks files whose contents changed since the cached run. Oxlint needs no
-      # cache: it lints the whole repo, with type information, in a few seconds.
+      # Prettier only re-checks files whose contents changed since the cached run.
       - uses: actions/cache@v6
         with:
           path: node_modules/.cache/prettier
@@ -40,12 +39,12 @@ jobs:
           restore-keys: prettier-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '.prettierrc*') }}-
       - name: Format
         run: pnpm turbo run format:check
-      - name: Lint
-        run: pnpm turbo run lint
       - name: Migrations match the schema
         run: pnpm turbo run check-migrations
 
+  # Oxlint's type-aware rules need the same built dependency types as typecheck.
   typecheck:
+    name: typecheck, lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -53,7 +52,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup
-      - run: pnpm turbo run typecheck $AFFECTED
+      - run: pnpm turbo run typecheck lint $AFFECTED
 
   test:
     runs-on: ubuntu-latest

@@ -12,7 +12,7 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "lint": "oxlint --type-aware --deny-warnings",
+    "lint": "turbo run lint",
     "format": "prettier --write . --cache",
     "format:check": "prettier --check . --cache",
     "synth": "turbo run synth",

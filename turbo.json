@@ -11,22 +11,16 @@
     "//#format:check": {
       "inputs": ["**/*", "!**/node_modules/**", "!**/dist/**", "!**/cdk.out/**", "!.turbo/**"]
     },
-    "//#lint": {
-      "inputs": [
-        "**/*.{js,mjs,cjs,ts,mts,cts,tsx}",
-        "**/tsconfig*.json",
-        ".oxlintrc.json",
-        "!**/node_modules/**",
-        "!**/dist/**",
-        "!**/cdk.out/**"
-      ]
-    },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
     "typecheck": {
       "dependsOn": ["^build"]
+    },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.oxlintrc.json"]
     },
     "test": {
       "dependsOn": ["^build"]
