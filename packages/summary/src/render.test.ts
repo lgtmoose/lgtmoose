@@ -190,6 +190,21 @@ describe("renderSummary", () => {
     expect(text).toContain("<details><summary>packages\\/core\\/ (8 files)</summary>");
   });
 
+  it("shows a one-line range as one line and binary files as binary", () => {
+    const logo = file("logo.png", { binary: true, hunks: [] });
+    const text = renderSummary(
+      input({
+        files: [logo],
+        plan: { files: [], skipped: [{ file: logo, reason: "binary" }] },
+        findings: [finding({ start_line: 9, line: 9 })],
+        missingLabels: ["Approved", "Requires Changes"],
+      }),
+    );
+    expect(text).toContain("| src\\/total\\.ts:9 |");
+    expect(text).toContain("| logo\\.png | modified | binary | skipped (binary) |");
+    expect(text).toContain("no Approved, Requires Changes labels");
+  });
+
   it("lists a small change without grouping", () => {
     expect(renderSummary(input())).toContain("| File | Status | Lines | Review |");
     expect(renderSummary(input())).not.toContain("| Folder |");

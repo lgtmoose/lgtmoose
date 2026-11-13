@@ -7,22 +7,32 @@
 /** Every ASCII punctuation character: CommonMark lets any of them be backslash-escaped. */
 const PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g;
 
+/** Bidirectional formatting controls: embeddings, overrides and isolates. */
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g;
+
 /** Word joiner: invisible, and stops GitHub from linking `@user` and `#123`. */
 const JOINER = "\u2060";
 
 /**
  * Escapes untrusted text for one line of Markdown, such as a table cell or a list item. Line
- * breaks become spaces, every ASCII punctuation mark is backslash-escaped (so `|`, `<`, `*`, `[`
- * and the rest are literal), and `@` and `#` get a word joiner after them so GitHub doesn't turn
- * them into mentions or issue links.
+ * breaks become spaces, bidi controls are removed, every ASCII punctuation mark is
+ * backslash-escaped (so `|`, `<`, `*`, `[` and the rest are literal), and `@`, `#`, `://` and
+ * `www.` get a word joiner so GitHub doesn't turn them into mentions, issue links or links.
  */
 export function inline(text: string): string {
-  return text
-    .replace(/[\r\n\t\u2028\u2029]+/g, " ")
-    .trim()
-    .replace(PUNCTUATION, (char) =>
-      char === "@" || char === "#" ? `\\${char}${JOINER}` : `\\${char}`,
-    );
+  return (
+    text
+      .replace(/[\r\n\t\u2028\u2029]+/g, " ")
+      // Bidi controls can make a path or title read as something else ("Trojan Source").
+      .replace(BIDI_CONTROLS, "")
+      .trim()
+      .replace(PUNCTUATION, (char) =>
+        char === "@" || char === "#" ? `\\${char}${JOINER}` : `\\${char}`,
+      )
+      // GitHub links bare URLs and www. addresses even when their punctuation is escaped.
+      .replace(/\\:\\\//g, `\\:${JOINER}\\/`)
+      .replace(/\b(www)\\\./gi, `$1\\.${JOINER}`)
+  );
 }
 
 /**

@@ -14,6 +14,16 @@ describe("inline", () => {
     expect(inline("ping @octocat about #12")).toBe(`ping \\@${J}octocat about \\#${J}12`);
   });
 
+  it("stops bare URLs and www. addresses from becoming links", () => {
+    expect(inline("see https://evil.example/x or www.evil.example")).toBe(
+      `see https\\:${J}\\/\\/evil\\.example\\/x or www\\.${J}evil\\.example`,
+    );
+  });
+
+  it("removes bidi controls", () => {
+    expect(inline("src/a\u202Esj.ts")).toBe("src\\/asj\\.ts");
+  });
+
   it("puts everything on one line", () => {
     expect(inline(" one\ntwo\r\n\tthree ")).toBe("one two three");
   });

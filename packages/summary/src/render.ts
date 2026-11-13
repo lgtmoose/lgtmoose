@@ -228,7 +228,7 @@ function renderStatus(input: SummaryInput): string {
   const missing = input.missingLabels ?? [];
   if (missing.length > 0) {
     lines.push(
-      `  - The repository has no ${missing.map((label) => inline(label)).join(", ")} label. LGTMoose doesn't create labels; add them in the repository's settings.`,
+      `  - The repository has no ${missing.map((label) => inline(label)).join(", ")} ${missing.length === 1 ? "label" : "labels"}. LGTMoose doesn't create labels; add them in the repository's settings.`,
     );
   }
 
@@ -256,7 +256,11 @@ function renderFindings(findings: readonly Finding[], rows: number): string | un
   );
   const lines = ["### Open findings", "", "| Severity | Where | Finding |", "| --- | --- | --- |"];
   for (const finding of sorted.slice(0, rows)) {
-    const where = `${inline(finding.path)}:${finding.start_line === undefined ? "" : `${finding.start_line}\\-`}${finding.line}`;
+    const range =
+      finding.start_line === undefined || finding.start_line === finding.line
+        ? `${finding.line}`
+        : `${finding.start_line}\\-${finding.line}`;
+    const where = `${inline(finding.path)}:${range}`;
     lines.push(
       `| ${SEVERITY_TEXT[finding.severity]} | ${where} | ${inline(clip(finding.title, 200))} |`,
     );
@@ -267,7 +271,8 @@ function renderFindings(findings: readonly Finding[], rows: number): string | un
 
 function fileRow(file: FileDiff, review: Map<string, string>): string {
   const { added, removed } = lineCounts(file);
-  return `| ${pathText(file)} | ${file.status} | +${added} −${removed} | ${review.get(file.path) ?? "not planned"} |`;
+  const lines = file.binary ? "binary" : `+${added} −${removed}`;
+  return `| ${pathText(file)} | ${file.status} | ${lines} | ${review.get(file.path) ?? "not planned"} |`;
 }
 
 function renderChanges(input: SummaryInput, review: Map<string, string>, detail: Detail): string {

@@ -107,6 +107,6 @@ function matches(
 function problemFor(missing: readonly string[]): { problem?: string } {
   if (missing.length === 0) return {};
   return {
-    problem: `The repository has no ${missing.map((label) => `"${label}"`).join(", ")} label. LGTMoose doesn't create labels; add them in the repository's settings.`,
+    problem: `The repository has no ${missing.map((label) => `"${label}"`).join(", ")} ${missing.length === 1 ? "label" : "labels"}. LGTMoose doesn't create labels; add them in the repository's settings.`,
   };
 }
