@@ -76,11 +76,5 @@ describe("drizzleDispatchStore", () => {
     expect(await store.reviewed("Acme/Shop", 6, "h2")).toBe(true);
     expect(await store.reviewed("Acme/Shop", 5, "h1")).toBe(false);
     expect(await store.reviewed("Acme/Shop", 6, "other")).toBe(false);
-    // A run stopped while its post step submits the review still counts its head as reviewed.
-    await db
-      .update(reviewRuns)
-      .set({ reviewSubmittedAt: new Date() })
-      .where(eq(reviewRuns.id, running));
-    expect(await store.reviewed("Acme/Shop", 5, "h1")).toBe(true);
   });
 });

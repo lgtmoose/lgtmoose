@@ -69,12 +69,6 @@ export interface RunStore {
    * label are then the PR's, and an older run mustn't write over them.
    */
   newerRunPosted(runId: string): Promise<boolean>;
-  /**
-   * Records that the run is submitting its review (or, false, that GitHub refused it). The
-   * dispatcher counts the head as reviewed from then on, even if the run is later stopped or
-   * fails while it finishes posting.
-   */
-  markReviewSubmitted(runId: string, submitted: boolean): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
 }

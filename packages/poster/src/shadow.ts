@@ -86,7 +86,7 @@ export class ShadowPoster implements Poster {
     return { id: commentId, created: commentId === undefined };
   }
 
-  async reviewPosted(_pull: PullRef, _marker: string): Promise<boolean> {
+  async reviewedAt(_pull: PullRef, _commitId: string, _markerPrefix: string): Promise<boolean> {
     return false;
   }
 

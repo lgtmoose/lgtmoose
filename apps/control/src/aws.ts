@@ -307,12 +307,6 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           .where(eq(pullRequests.id, run.pullRequestId));
       });
     },
-    async markReviewSubmitted(runId, submitted) {
-      await db
-        .update(reviewRuns)
-        .set({ reviewSubmittedAt: submitted ? now() : null })
-        .where(eq(reviewRuns.id, runId));
-    },
     async newerRunPosted(runId) {
       const [run] = await db
         .select({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt })

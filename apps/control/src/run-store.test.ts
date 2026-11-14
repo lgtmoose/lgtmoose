@@ -117,14 +117,6 @@ describe("drizzleRunStore", () => {
     expect(await prRow(newer.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
   });
 
-  it("records when a run starts submitting its review, and clears it", async () => {
-    const run = await start("arn:exec:14", 14);
-    await store.markReviewSubmitted(run.runId, true);
-    expect((await runRow(run.runId))?.reviewSubmittedAt).toBeInstanceOf(Date);
-    await store.markReviewSubmitted(run.runId, false);
-    expect((await runRow(run.runId))?.reviewSubmittedAt).toBeNull();
-  });
-
   it("supersedes only a queued or running run", async () => {
     const failed = await start("arn:exec:13", 13);
     await store.failRun("arn:exec:13", "States.TaskFailed");

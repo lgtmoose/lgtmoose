@@ -51,10 +51,11 @@ export interface Poster {
   /** Status label calls for this PR, for `syncStatusLabel`. */
   labels(pull: PullRef): LabelClient;
   /**
-   * Whether the PR has a review by us whose body carries `marker` (see `reviewMarkerComment`).
-   * Always false in shadow mode, where reviews are recorded, not posted.
+   * Whether the PR has a review by us on `commitId` whose body carries a marker starting with
+   * `markerPrefix` (see `reviewMarkerComment`): from any run. Always false in shadow mode,
+   * where reviews are recorded, not posted.
    */
-  reviewPosted(pull: PullRef, marker: string): Promise<boolean>;
+  reviewedAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<boolean>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -130,6 +131,7 @@ export interface GitHubPosterOptions {
 /** A review as the reviews endpoint lists it. */
 interface ListedReview {
   body?: string | null;
+  commit_id?: string | null;
   user?: { login?: string; type?: string } | null;
 }
 
@@ -148,8 +150,9 @@ export class GitHubPoster implements Poster {
     return comment.user?.type === "Bot";
   }
 
-  async reviewPosted(pull: PullRef, marker: string): Promise<boolean> {
-    const comment = reviewMarkerComment(marker);
+  async reviewedAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<boolean> {
+    // The opening of a marker comment with this prefix (the prefix must be a marker's start).
+    const opening = reviewMarkerComment(markerPrefix).replace(/ -->$/, "");
     // The App's bot (or, without its slug, any bot): anyone can quote a marker.
     const bot =
       this.options.appSlug === undefined ? undefined : `${await this.options.appSlug()}[bot]`;
@@ -158,9 +161,10 @@ export class GitHubPoster implements Poster {
     );
     return reviews.some(
       (review) =>
+        review.commit_id === commitId &&
         review.user?.type === "Bot" &&
         (bot === undefined || review.user.login === bot) &&
-        review.body?.includes(comment) === true,
+        review.body?.includes(opening) === true,
     );
   }
 

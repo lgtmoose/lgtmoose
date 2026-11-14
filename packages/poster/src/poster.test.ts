@@ -311,22 +311,26 @@ describe("GitHubPoster", () => {
     expect(error).toMatchObject({ status: 403, rateLimited: true });
   });
 
-  it("finds its own review by marker, matching the App's bot user", async () => {
+  it("finds a review of ours on a commit, from any run, matching the App's bot user", async () => {
+    const ours = { login: "lgtmoose[bot]", type: "Bot" };
     const reviews = [
-      { body: "<!-- lgtmoose-run:r1 -->", user: { login: "other-app[bot]", type: "Bot" } },
-      { body: "> <!-- lgtmoose-run:r2 -->", user: { login: "dev", type: "User" } },
-      { body: "x\n\n<!-- lgtmoose-run:r3 -->", user: { login: "lgtmoose[bot]", type: "Bot" } },
+      {
+        commit_id: "c1",
+        body: "<!-- lgtmoose-run:r1 -->",
+        user: { login: "other[bot]", type: "Bot" },
+      },
+      { commit_id: "c2", body: "> <!-- lgtmoose-run:r2 -->", user: { login: "dev", type: "User" } },
+      { commit_id: "c3", body: "x\n\n<!-- lgtmoose-run:r3 -->", user: ours },
+      { commit_id: "c4", body: "no marker", user: ours },
     ];
-    const fake = fakeFetch([
-      { status: 200, body: reviews },
-      { status: 200, body: reviews },
-      { status: 200, body: reviews },
-    ]);
+    const fake = fakeFetch(Array.from({ length: 5 }, () => ({ status: 200, body: reviews })));
     const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
     const p = new GitHubPoster(github, { appSlug: async () => "lgtmoose" });
-    expect(await p.reviewPosted(PULL, "lgtmoose-run:r1")).toBe(false);
-    expect(await p.reviewPosted(PULL, "lgtmoose-run:r2")).toBe(false);
-    expect(await p.reviewPosted(PULL, "lgtmoose-run:r3")).toBe(true);
+    expect(await p.reviewedAt(PULL, "c1", "lgtmoose-run:")).toBe(false);
+    expect(await p.reviewedAt(PULL, "c2", "lgtmoose-run:")).toBe(false);
+    expect(await p.reviewedAt(PULL, "c3", "lgtmoose-run:")).toBe(true);
+    expect(await p.reviewedAt(PULL, "c4", "lgtmoose-run:")).toBe(false);
+    expect(await p.reviewedAt(PULL, "c9", "lgtmoose-run:")).toBe(false);
   });
 
   it("leaves room in the summary for the longest marker", async () => {

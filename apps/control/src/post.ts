@@ -121,9 +121,12 @@ function parseJson(text: string | undefined): unknown {
   }
 }
 
-/** The hidden marker in a run's review, by which a retry finds it on GitHub. */
+/** How every run's review marker starts. */
+export const REVIEW_MARKER_PREFIX = "lgtmoose-run:";
+
+/** The hidden marker in a run's review, by which a later post finds it on GitHub. */
 export function reviewMarker(runId: string): string {
-  return `lgtmoose-run:${runId}`;
+  return `${REVIEW_MARKER_PREFIX}${runId}`;
 }
 
 /** Who a post attempt is, for the review claim. */
@@ -312,16 +315,20 @@ export async function post(
     progressEtag = etag;
   };
 
-  // On a takeover, the earlier holder may have posted the review and stopped before saving
-  // that. Then it's posted, whatever has happened to the PR since: record it, never supersede.
-  if (
-    claim.tookOver &&
-    !progress.review &&
-    (await poster.reviewPosted(pull, reviewMarker(runId)))
-  ) {
+  // Whether the head already has a review by us, from this run or any other (a stopped run
+  // whose post finished, a retry, an overlapping execution). Then none is submitted: it's this
+  // head's review, and the run records it and carries on. Looked up once, when needed.
+  let reviewed: Promise<boolean> | undefined;
+  const headReviewed = () => {
+    reviewed ??= poster.reviewedAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+    return reviewed;
+  };
+
+  // On a takeover, the earlier holder may have posted and stopped before saving that. Then
+  // it's posted, whatever has happened to the PR since: record it, never supersede.
+  if (claim.tookOver && !progress.review && (await headReviewed())) {
     progress.review = true;
     await save();
-    await deps.runs.markReviewSubmitted(runId, true);
   }
 
   let stale: string | undefined;
@@ -355,30 +362,26 @@ export async function post(
     });
   try {
     if (!progress.review) {
-      // Recorded before the review goes up, so the dispatcher counts this head as reviewed
-      // from now on: a reopen while this (maybe stopped) execution posts mustn't start another.
-      await deps.runs.markReviewSubmitted(runId, true);
-      try {
-        await poster.submitReview(pull, pr.headSha, payload);
-      } catch (error) {
-        // Refused, it's not on GitHub: let the next attempt claim it at once, and the head
-        // count as unreviewed again. Otherwise (a timeout, a 5xx) it may be, and the claim
-        // stays until this task has stopped.
-        if (refused(error)) {
-          const log = (what: string) => (failure: unknown) => {
-            deps.log(what, {
-              runId,
-              error: failure instanceof Error ? failure.message : String(failure),
-            });
-          };
-          await deps.store
-            .deleteIfMatch(keys.reviewClaim, claim.etag)
-            .catch(log("releasing the review claim failed"));
-          await deps.runs
-            .markReviewSubmitted(runId, false)
-            .catch(log("clearing the review's submission failed"));
+      if (await headReviewed()) {
+        deps.log("the head already has our review; not posting another", { runId });
+      } else {
+        try {
+          await poster.submitReview(pull, pr.headSha, payload);
+        } catch (error) {
+          // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise (a
+          // timeout, a 5xx) it may be, and the next attempt's lookup will tell.
+          if (refused(error)) {
+            await deps.store
+              .deleteIfMatch(keys.reviewClaim, claim.etag)
+              .catch((release: unknown) => {
+                deps.log("releasing the review claim failed", {
+                  runId,
+                  error: release instanceof Error ? release.message : String(release),
+                });
+              });
+          }
+          throw error;
         }
-        throw error;
       }
       progress.review = true;
       await save();
