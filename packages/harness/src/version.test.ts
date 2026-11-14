@@ -49,7 +49,13 @@ describe("CURSOR_AGENT_VERSION", () => {
  * The cursor stage's RUN script, run with sh against a stub download, so its guards are tested
  * without Docker. Paths are moved into a temp dir; apt-get and curl are stubs.
  */
-describe("the sandbox image's Cursor install step", () => {
+/** The step runs in Debian; GNU sha256sum isn't on macOS by default. */
+const hasSha256sum = await run("sha256sum", ["--version"]).then(
+  () => true,
+  () => false,
+);
+
+describe.skipIf(!hasSha256sum)("the sandbox image's Cursor install step", () => {
   let dir: string;
   let tarball: Buffer;
 

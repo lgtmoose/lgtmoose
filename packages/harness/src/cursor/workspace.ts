@@ -8,9 +8,16 @@ import { isInside } from "../paths.js";
  * - `.cursor`: hooks (commands the CLI runs itself, outside the tool deny rules, with the key in
  *   their environment), `cli.json`, `mcp.json`, `sandbox.json` and rules, all PR content that a
  *   trusted workspace would load (https://cursor.com/docs/agent/hooks);
- * - `.claude`: Claude Code settings, whose hooks Cursor can load too.
+ * - `.claude`: Claude Code settings, whose hooks Cursor can load too;
+ * - `node_modules`: installed dependencies, not the change, and often most of a working tree's
+ *   files when the harness runs outside the sandbox (whose checkout comes from git).
  */
-export const CURSOR_SKIPPED_DIRS: readonly string[] = [".git", ".cursor", ".claude"];
+export const CURSOR_SKIPPED_DIRS: readonly string[] = [
+  ".git",
+  ".cursor",
+  ".claude",
+  "node_modules",
+];
 
 /**
  * Instruction files Cursor applies as always-on rules, at any depth (it reads nested ones too).

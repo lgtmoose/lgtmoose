@@ -194,6 +194,7 @@ describe("CursorHarness", () => {
     await mkdir(join(cwd, ".claude"));
     await mkdir(join(cwd, ".git"));
     await mkdir(join(cwd, "pkg", ".cursor"), { recursive: true });
+    await mkdir(join(cwd, "pkg", "node_modules", "dep"), { recursive: true });
     await writeFile(join(cwd, ".cursor", "hooks.json"), '{"hooks":{}}');
     await writeFile(join(cwd, ".claude", "settings.json"), "{}");
     await writeFile(join(cwd, ".git", "config"), "");
