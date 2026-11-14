@@ -345,6 +345,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 body: row.body,
                 raisedAtSha: row.raisedAtSha,
                 githubCommentId: row.githubCommentId ?? undefined,
+                basePath: row.basePath ?? undefined,
               },
             ],
       );
@@ -382,6 +383,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 raisedAtSha: row.raisedAtSha,
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
+                basePath: row.basePath ?? undefined,
               },
             ],
       );
@@ -395,7 +397,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             .values(
               posted
                 .slice(i, i + INSERT_CHUNK)
-                .map(({ finding, fingerprint, githubCommentId }) => ({
+                .map(({ finding, fingerprint, githubCommentId, basePath }) => ({
                   pullRequestId,
                   runId,
                   fingerprint,
@@ -409,6 +411,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   body: finding.body,
                   raisedAtSha: headSha,
                   githubCommentId: githubCommentId ?? null,
+                  basePath: basePath ?? null,
                 })),
             )
             .onConflictDoUpdate({
@@ -423,6 +426,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 // there's a new one.
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
+                basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
                 side: sql`excluded.side`,

@@ -63,7 +63,11 @@ type TrackedRecord = Omit<FindingRecord, "status"> & { status?: FindingRecord["s
 /** A file's names now: at head, for new-side findings; at today's merge base, for old-side ones. */
 interface Names {
   nameAtHead: (path: string) => string;
-  nameAtMergeBase: (path: string) => string;
+  /**
+   * An old-side finding's file at today's merge base: its recorded base-side name followed
+   * through the base's renames. Rows without one fall back to their head name's base side.
+   */
+  baseNow: (record: TrackedRecord) => string;
 }
 
 /**
@@ -84,7 +88,7 @@ function toTrack<T extends TrackedRecord>(
       followAll(record) ||
       (record.side === "RIGHT"
         ? atHead.has(names.nameAtHead(record.path))
-        : changedBase.has(names.nameAtMergeBase(record.path))),
+        : changedBase.has(names.baseNow(record))),
   );
 }
 
@@ -147,7 +151,8 @@ function prOnlyNames(changes: readonly ChangedPath[]): Names {
   const base = prBaseNames(changes);
   return {
     nameAtHead: (path) => head.get(path) ?? path,
-    nameAtMergeBase: (path) => base.get(path) ?? path,
+    // Before any history is read: the base-side name as recorded.
+    baseNow: (record) => record.basePath ?? base.get(record.path) ?? record.path,
   };
 }
 
@@ -170,8 +175,11 @@ async function readHistory(
   const learn = (from: string, to: string) => {
     if (!names.has(from)) names.set(from, to);
   };
+  // Rows without a recorded base-side name: through the PR's base-side names (legacy).
   const baseNames = prBaseNames(changes);
   const nameAtMergeBase = (path: string) => baseNames.get(path) ?? path;
+  // For each finding's base, a name there's name at today's merge base.
+  const movedSince = new Map<string, Map<string, string>>();
 
   // One check for every commit the findings were raised at.
   const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
@@ -202,14 +210,22 @@ async function readHistory(
   const nameAtBase = new Map<string, Map<string, string>>();
   for (const [i, base] of bases.entries()) {
     const earlier = new Map<string, string>();
+    const later = new Map<string, string>();
     for (const file of baseMoves[i] ?? []) {
       if (file.oldPath === undefined || file.status === "deleted") continue;
       earlier.set(file.path, file.oldPath);
+      later.set(file.oldPath, file.path);
       if (!baseNames.has(file.oldPath)) baseNames.set(file.oldPath, file.path);
     }
     nameAtBase.set(base, earlier);
+    movedSince.set(base, later);
   }
-  return { present, raisedBase, nameAtHead, nameAtMergeBase, nameAtBase, since };
+  const baseNow = (record: TrackedRecord) => {
+    if (record.basePath === undefined) return nameAtMergeBase(record.path);
+    const base = raisedBase.get(record.raisedAtSha) ?? "";
+    return movedSince.get(base)?.get(record.basePath) ?? record.basePath;
+  };
+  return { present, raisedBase, nameAtHead, baseNow, nameAtBase, since };
 }
 
 /** Which of `paths` are files at `headSha` (one tree read). */
@@ -313,7 +329,7 @@ async function standing(
   const refs = (list: readonly TrackedRecord[], path: (record: TrackedRecord) => string) =>
     list.map((record) => ({ path: path(record), line: record.line }));
 
-  const { present, raisedBase, nameAtHead, nameAtMergeBase, nameAtBase, since } = history;
+  const { present, raisedBase, nameAtHead, baseNow, nameAtBase, since } = history;
   const followable = records.filter((record) => present.has(record.raisedAtSha));
 
   // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
@@ -346,9 +362,11 @@ async function standing(
     [...Map.groupBy(left, (record) => raisedBase.get(record.raisedAtSha) ?? "")],
     FOLLOW_AT_ONCE,
     async ([base, group]) => {
-      // Old-side names only: never a name only head has.
+      // Old-side names only: never a name only head has. Its recorded base-side name is its
+      // name at that base; rows without one go back from today's.
       const atBase = (record: TrackedRecord) => {
-        const merged = nameAtMergeBase(record.path);
+        if (record.basePath !== undefined) return record.basePath;
+        const merged = baseNow(record);
         return nameAtBase.get(base)?.get(merged) ?? merged;
       };
       const moved = await trackLines(repo, base, mergeBase, refs(group, atBase));
@@ -399,7 +417,7 @@ async function standing(
       // new-side one under the file's name at head, an old-side one under its base file's.
       let path: string | undefined;
       if (isLeft) {
-        const base = nameAtMergeBase(record.path);
+        const base = baseNow(record);
         path = changedBase.has(base) ? (fromBase.get(base) ?? base) : undefined;
       } else {
         const head = nameAtHead(record.path);
@@ -527,17 +545,19 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       // in the PR under some name nor at head under that name was renamed (by the PR since, or
       // by the base) or is gone: its commit's history says which.
       const known = prNames(changes);
-      const knownBase = prBaseNames(changes);
+      const prOnly = prOnlyNames(changes);
+      const { changedBase } = prPaths(changes);
+      // The file a finding is on: at head for a new-side one, on the base side for an old-side.
+      const fileOf = (record: TrackedRecord) =>
+        record.side === "RIGHT" ? record.path : (record.basePath ?? record.path);
       const unplaced = candidates.filter((record) =>
-        record.side === "RIGHT" ? !known.has(record.path) : !knownBase.has(record.path),
+        record.side === "RIGHT"
+          ? !known.has(record.path)
+          : !changedBase.has(prOnly.baseNow(record)),
       );
-      const atHead = await pathsAtHead(
-        repo,
-        pr.headSha,
-        unplaced.map((record) => record.path),
-      );
-      const needHistory = unplaced.filter((record) => !atHead.has(record.path));
-      const byName = toTrack(candidates, changes, followAll, prOnlyNames(changes));
+      const atHead = await pathsAtHead(repo, pr.headSha, unplaced.map(fileOf));
+      const needHistory = unplaced.filter((record) => !atHead.has(fileOf(record)));
+      const byName = toTrack(candidates, changes, followAll, prOnly);
       const read = [...new Set([...byName, ...needHistory])];
       // The commits those findings were raised at: one request.
       await repo.fetchCommits(read.map((record) => record.raisedAtSha));
@@ -645,7 +665,13 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     pr.headSha,
     report.posted.map((entry) => {
       const id = commentIds.get(entry.finding);
-      return id === undefined ? entry : { ...entry, githubCommentId: id };
+      const file = prepared.files.find((candidate) => candidate.path === entry.finding.path);
+      const basePath = file === undefined ? undefined : (file.oldPath ?? file.path);
+      return {
+        ...entry,
+        ...(id === undefined ? {} : { githubCommentId: id }),
+        ...(basePath === undefined ? {} : { basePath }),
+      };
     }),
   );
   await deps.runs.recordFiles(runId, report.reviewedFiles);

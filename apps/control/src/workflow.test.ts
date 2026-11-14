@@ -257,7 +257,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       );
     },
     async saveFindings(_pr, _run, headSha, posted) {
-      for (const { finding, fingerprint, githubCommentId } of posted) {
+      for (const { finding, fingerprint, githubCommentId, basePath } of posted) {
         const row: StoredFinding = {
           id: `f${rows.length}`,
           fingerprint,
@@ -272,6 +272,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
           raisedAtSha: headSha,
           status: "open",
           githubCommentId,
+          basePath,
         };
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
         const known = rows[at];
@@ -285,6 +286,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
               severityRank(known.severity) < severityRank(row.severity)
                 ? known.severity
                 : row.severity,
+            basePath: basePath ?? known.basePath,
             // Reopened from outdated: the new comment or none; still open: kept unless new.
             githubCommentId:
               known.status === "open"
@@ -1383,6 +1385,46 @@ describe("later runs", { timeout: 30_000 }, () => {
     const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
     expect(row).toContain("total");
     expect(row).not.toContain("orders");
+  });
+
+  /** The PR renames src/total.ts to src/sum.ts and drops its return: an old-side finding on it. */
+  async function renamedWithDroppedReturn() {
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit({ "src/sum.ts": HEAD_TOTAL.replace("  return sum;\n", "") }, "rename");
+    return finding({
+      path: "src/sum.ts",
+      side: "LEFT",
+      line: 6,
+      title: "Return was removed",
+      evidence: "return sum;",
+    });
+  }
+
+  it("keeps an old-side finding through a second rename by the PR", async () => {
+    const h = harness();
+    const left = await renamedWithDroppedReturn();
+    await review(h, 1, [left]);
+    // Renamed again; the base's return is still deleted.
+    await git(work, "mv", "src/sum.ts", "src/amount.ts");
+    headSha = await commit({}, "rename again");
+
+    const again = await review(h, 2, [{ ...left, path: "src/amount.ts" }]);
+    expect(h.findings.rows).toMatchObject([{ status: "open", basePath: "src/total.ts" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
+  });
+
+  it("keeps a resolved old-side finding resolved through a second rename by the PR", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    const left = await renamedWithDroppedReturn();
+    await review(h, 1, [left]);
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    await git(work, "mv", "src/sum.ts", "src/amount.ts");
+    headSha = await commit({}, "rename again");
+
+    const again = await review(h, 2, [{ ...left, path: "src/amount.ts" }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
   });
 
   it("skips following findings when there are none", async () => {

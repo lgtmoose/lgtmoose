@@ -56,6 +56,11 @@ export interface FindingRecord {
   status: "open" | "outdated";
   /** Its inline review comment on GitHub, when it was posted inline and the ID was read back. */
   githubCommentId: number | undefined;
+  /**
+   * The file's name on the base side of the PR's diff when it was raised: the file an old-side
+   * line is in. Undefined for rows recorded before it was kept.
+   */
+  basePath: string | undefined;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -63,6 +68,8 @@ export interface FindingToSave {
   finding: Finding;
   fingerprint: string;
   githubCommentId?: number;
+  /** Its file's base-side name in the PR's diff (see `FindingRecord.basePath`). */
+  basePath?: string;
 }
 
 /** `findings` and `finding_events`, for our own findings. */

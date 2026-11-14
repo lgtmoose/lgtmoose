@@ -157,6 +157,9 @@ export const findings = pgTable(
     ruleCategory: text("rule_category").notNull(),
     severity: severity("severity").notNull(),
     path: text("path"),
+    // The file's name on the base side of the PR's diff when the finding was raised: the file an
+    // old-side (LEFT) line is in. Followed through the base's renames, never the head's.
+    basePath: text("base_path"),
     line: integer("line"),
     startLine: integer("start_line"),
     side: diffSide("side"),
