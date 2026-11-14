@@ -1,7 +1,13 @@
 import type { LabelClient } from "@lgtmoose/summary";
 import type { CheckRunInput } from "./check-run.js";
 import type { PullRef } from "./github.js";
-import type { PostedReview, Poster, SummaryCommentResult } from "./poster.js";
+import type {
+  MarkedReview,
+  OurCheckRun,
+  PostedReview,
+  Poster,
+  SummaryCommentResult,
+} from "./poster.js";
 import type { ReviewPayload } from "./review.js";
 
 /** Where shadow mode writes. `S3TranscriptStore` from @lgtmoose/harness fits. */
@@ -76,9 +82,26 @@ export class ShadowPoster implements Poster {
     pull: PullRef,
     body: string,
     commentId?: number,
+    marker?: string,
   ): Promise<SummaryCommentResult> {
-    await this.record(pull, "summary-comment", { comment_id: commentId ?? null, body });
+    await this.record(pull, "summary-comment", {
+      comment_id: commentId ?? null,
+      body,
+      ...(marker === undefined ? {} : { marker }),
+    });
     return { id: commentId, created: commentId === undefined };
+  }
+
+  async markersAt(
+    _pull: PullRef,
+    _commitId: string,
+    _markerPrefix: string,
+  ): Promise<MarkedReview[]> {
+    return [];
+  }
+
+  async checkRunsOn(_pull: PullRef, _headSha: string): Promise<OurCheckRun[]> {
+    return [];
   }
 
   labels(pull: PullRef): LabelClient {

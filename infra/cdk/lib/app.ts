@@ -95,6 +95,8 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     databaseName: DATABASE_NAME,
     githubAppSecret: data.githubAppSecret,
     providerSecrets: data.providerSecrets,
+    jobQueue: api.jobQueue,
+    deadLetterQueue: api.deadLetterQueue,
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
       isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),

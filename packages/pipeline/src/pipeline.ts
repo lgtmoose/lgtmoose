@@ -24,7 +24,7 @@ import {
   readConventionFilesAt,
   type PullRequestComment,
 } from "@lgtmoose/roles";
-import { renderSummary } from "@lgtmoose/summary";
+import { GITHUB_COMMENT_LIMIT, SUMMARY_MARKER_ROOM, renderSummary } from "@lgtmoose/summary";
 import type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 
 /** Everything a dry run touches outside its own process. Tests pass fakes. */
@@ -427,20 +427,23 @@ export async function finishReview(
     ...(decision.outcome === "skipped" ? [] : unreviewed),
     ...decision.holds.flatMap((hold) => (hold === "incomplete" ? [] : [HOLD_TEXT[hold]])),
   ];
-  const summary = renderSummary({
-    headSha: pr.headSha,
-    files: prepared.files,
-    plan,
-    decision: {
-      event: decision.event,
-      ...(decision.label === undefined ? {} : { label: decision.label }),
-      reasons,
+  const summary = renderSummary(
+    {
+      headSha: pr.headSha,
+      files: prepared.files,
+      plan,
+      decision: {
+        event: decision.event,
+        ...(decision.label === undefined ? {} : { label: decision.label }),
+        reasons,
+      },
+      findings: open,
+      conventionFilesOmitted: prepared.conventionFilesOmitted,
+      rulePackProblems: prepared.rulePackProblems ?? [],
+      findingsOverLimit: overLimit,
     },
-    findings: open,
-    conventionFilesOmitted: prepared.conventionFilesOmitted,
-    rulePackProblems: prepared.rulePackProblems ?? [],
-    findingsOverLimit: overLimit,
-  });
+    { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
+  );
 
   return {
     target: prepared.target,

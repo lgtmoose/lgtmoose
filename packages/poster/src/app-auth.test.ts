@@ -54,6 +54,21 @@ describe("installationTokenProvider", () => {
     expect(calls[0]?.auth).toMatch(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
   });
 
+  it("gives up on a token request that takes longer than its timeout", async () => {
+    const hang: typeof fetch = (_url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const token = installationTokenProvider({
+      appId: 42,
+      privateKey: PEM,
+      installationId: 7,
+      fetch: hang,
+      timeoutMs: 20,
+    });
+    await expect(token()).rejects.toThrow();
+  });
+
   it("throws GitHub's reason without the JWT", async () => {
     const { fetchFn } = fakeFetch([{ status: 404, body: { message: "Not Found" } }]);
     const token = installationTokenProvider({
