@@ -75,33 +75,36 @@ account available to anyone else; Team and Enterprise fall under its commercial 
 Neither says a bot may review other people's pull requests on one person's seat. Anthropic
 documents API keys for automation. On a Max, Ultra or Team plan, a key from the plan's linked
 Console organization draws on the plan's monthly API credits first. To use one, set this
-provider's auth to "api-key" in lgtmoose.config.ts, then run:
+provider's auth to "api-key" in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider anthropic
-Bedrock (auth "bedrock") needs no key at all.`,
+Bedrock (auth "bedrock", then ${CLI} deploy) needs no key at all.`,
   "codex/chatgpt-login": `OpenAI's terms forbid sharing account credentials or making your account available to
 others. OpenAI recommends an API key for automation: set this provider's auth to "api-key"
-in lgtmoose.config.ts, then run:
+in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider openai
 On ChatGPT Business or Enterprise, a Codex access token is the documented alternative
-(auth "access-token", then ${CLI} auth codex --access-token).`,
+(auth "access-token", ${CLI} auth codex --access-token, then ${CLI} deploy).`,
   "codex/access-token": `A Codex access token acts as the workspace user who created it. OpenAI documents it for
 trusted runners on Business and Enterprise workspaces. Create it while signed in as a
 dedicated bot user in the workspace, not as a person, and keep the deployment private.
-An OpenAI API key avoids the question: set this provider's auth to "api-key", then run:
+An OpenAI API key avoids the question: set this provider's auth to "api-key", run the
+command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider openai`,
   "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't be
 shared. Cursor's service accounts (Enterprise) are made for automation: set this provider's
-auth to "service-account" in lgtmoose.config.ts and store a service-account key. Without
-Enterprise, a claude-code provider on Bedrock or an API key avoids the question.`,
+auth to "service-account" in lgtmoose.config.ts, store a service-account key, then
+${CLI} deploy. Without Enterprise, a claude-code provider on Bedrock or an API key avoids
+the question.`,
 };
 
 /** The warning for one plan credential. */
 export function planCredentialWarning(provider: Pick<ProviderConfig, "harness" | "auth">): string {
   const kind = `${provider.harness}/${provider.auth}`;
-  const advice =
-    kind in PLAN_CREDENTIAL_ADVICE
-      ? PLAN_CREDENTIAL_ADVICE[kind as PlanCredentialKind]
-      : "Bedrock, or an Anthropic or OpenAI API key, avoids the question.";
+  if (!(kind in PLAN_CREDENTIAL_ADVICE)) {
+    // isPlanCredential grew without advice here: fail loudly rather than warn vaguely.
+    throw new Error(`No plan-credential advice for ${kind}. Add it to PLAN_CREDENTIAL_ADVICE.`);
+  }
+  const advice = PLAN_CREDENTIAL_ADVICE[kind as PlanCredentialKind];
   return (
     `\n${PLAN_CREDENTIAL_HEADER}\nLGTMoose will use it to review everyone's pull requests in ` +
     `the repositories the App is installed on.\n${advice}\n` +
