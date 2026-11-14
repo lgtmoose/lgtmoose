@@ -1,6 +1,14 @@
 import { statusLabels } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
-import { diffCommits, trackLines, type FileDiff, type LineRef, type Repo } from "@lgtmoose/git";
+import {
+  changedPaths,
+  diffCommits,
+  pool,
+  trackLines,
+  type ChangedPath,
+  type LineRef,
+  type Repo,
+} from "@lgtmoose/git";
 import {
   finishReview,
   runKeys,
@@ -48,8 +56,11 @@ function costOf(report: ReviewReport): number | undefined {
  * changes their file (so they could stand again). Outdated findings on files the PR left alone
  * stay as they are, which keeps the work from growing with the PR's age.
  */
-function toTrack(records: readonly FindingRecord[], prFiles: readonly FileDiff[]): FindingRecord[] {
-  const { changed, atHead } = prPaths(prFiles);
+function toTrack(
+  records: readonly FindingRecord[],
+  changes: readonly ChangedPath[],
+): FindingRecord[] {
+  const { changed, atHead } = prPaths(changes);
   return records.filter(
     (record) =>
       record.status === "open" || (record.side === "RIGHT" ? atHead : changed).has(record.path),
@@ -57,12 +68,15 @@ function toTrack(records: readonly FindingRecord[], prFiles: readonly FileDiff[]
 }
 
 /** Paths the PR changes (deleting included), and those of them still there at head. */
-function prPaths(prFiles: readonly FileDiff[]): { changed: Set<string>; atHead: Set<string> } {
+function prPaths(changes: readonly ChangedPath[]): { changed: Set<string>; atHead: Set<string> } {
   return {
-    changed: new Set(prFiles.map((file) => file.path)),
-    atHead: new Set(prFiles.flatMap((file) => (file.status === "deleted" ? [] : [file.path]))),
+    changed: new Set(changes.map((file) => file.path)),
+    atHead: new Set(changes.flatMap((file) => (file.status === "deleted" ? [] : [file.path]))),
   };
 }
+
+/** How many commits' lines are followed at once. */
+const FOLLOW_AT_ONCE = 4;
 
 /**
  * Splits the PR's tracked findings into those standing at `headSha`, moved to where their lines
@@ -79,37 +93,16 @@ function prPaths(prFiles: readonly FileDiff[]): { changed: Set<string>; atHead: 
 async function standing(
   repo: Repo,
   records: readonly FindingRecord[],
-  prFiles: readonly FileDiff[],
+  changes: readonly ChangedPath[],
   mergeBase: string,
   headSha: string,
 ): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
-  const { atHead } = prPaths(prFiles);
+  const { atHead } = prPaths(changes);
   // Old-side lines are keyed by the file's path on the base side, which differs for renames.
-  const baseSide = new Map(prFiles.map((file) => [file.path, file.oldPath ?? file.path]));
-  const deletedLines = new Map(
-    prFiles.map((file) => [
-      file.oldPath ?? file.path,
-      new Set(
-        file.hunks.flatMap((hunk) =>
-          hunk.lines.flatMap((line) =>
-            line.kind === "del" && line.oldLine !== undefined ? [line.oldLine] : [],
-          ),
-        ),
-      ),
-    ]),
-  );
+  const baseSide = new Map(changes.map((file) => [file.path, file.oldPath ?? file.path]));
   const refs = (list: readonly FindingRecord[], path: (record: FindingRecord) => string) =>
     list.map((record) => ({ path: path(record), line: record.line }));
-  const groupBy = <K>(list: readonly FindingRecord[], key: (record: FindingRecord) => K) => {
-    const groups = new Map<K, FindingRecord[]>();
-    for (const record of list) {
-      const group = groups.get(key(record));
-      if (group === undefined) groups.set(key(record), [record]);
-      else group.push(record);
-    }
-    return groups;
-  };
 
   // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
   // followed (the commit it was raised at is gone, or shares no history with the base).
@@ -118,35 +111,57 @@ async function standing(
   const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
   // New-side lines: from the head they were raised at to this head.
   const right = records.filter((r) => r.side === "RIGHT" && present.has(r.raisedAtSha));
-  for (const [sha, group] of groupBy(right, (record) => record.raisedAtSha)) {
-    const moved = await trackLines(
-      repo,
-      sha,
-      headSha,
-      refs(group, (record) => record.path),
-    );
-    for (const [i, record] of group.entries()) at.set(record, moved[i]);
-  }
+  await pool(
+    [...Map.groupBy(right, (record) => record.raisedAtSha)],
+    FOLLOW_AT_ONCE,
+    async ([sha, group]) => {
+      const moved = await trackLines(
+        repo,
+        sha,
+        headSha,
+        refs(group, (record) => record.path),
+      );
+      for (const [i, record] of group.entries()) at.set(record, moved[i]);
+    },
+  );
   // Old-side lines: from the base the PR had when they were raised (its merge base with
-  // today's) to today's merge base, by their base-side path; one diff per such base.
+  // today's) to today's merge base, by their base-side path; one diff per such base. They
+  // stand while the PR still deletes that line, so only their files' patches are read.
   const left = records.filter((r) => r.side === "LEFT" && present.has(r.raisedAtSha));
-  const raisedBases = new Map<string, string>();
-  for (const sha of new Set(left.map((record) => record.raisedAtSha))) {
-    // No common history: exit 1, no output.
-    const base = (await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })).trim();
-    if (base !== "") raisedBases.set(sha, base);
-  }
-  const leftFollowed = left.filter((record) => raisedBases.has(record.raisedAtSha));
-  for (const [base, group] of groupBy(leftFollowed, (r) => raisedBases.get(r.raisedAtSha))) {
-    if (base === undefined) continue;
+  if (left.length > 0) {
     const basePath = (record: FindingRecord) => baseSide.get(record.path) ?? record.path;
-    const moved = await trackLines(repo, base, mergeBase, refs(group, basePath));
-    for (const [i, record] of group.entries()) {
-      const place = moved[i];
-      // Stands only while the PR still deletes that line.
-      const deleted = place !== undefined && deletedLines.get(place.path)?.has(place.line);
-      at.set(record, deleted === true ? { path: record.path, line: place.line } : undefined);
-    }
+    const patches = await diffCommits(repo, mergeBase, headSha, {
+      paths: [...new Set(left.flatMap((record) => [record.path, basePath(record)]))],
+    });
+    const deletedLines = new Map(
+      patches.map((file) => [
+        file.oldPath ?? file.path,
+        new Set(
+          file.hunks.flatMap((hunk) =>
+            hunk.lines.flatMap((line) =>
+              line.kind === "del" && line.oldLine !== undefined ? [line.oldLine] : [],
+            ),
+          ),
+        ),
+      ]),
+    );
+    const shas = [...new Set(left.map((record) => record.raisedAtSha))];
+    const bases = await pool(shas, FOLLOW_AT_ONCE, async (sha) =>
+      // No common history: exit 1, no output.
+      (await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })).trim(),
+    );
+    const raisedBase = new Map(shas.map((sha, i) => [sha, bases[i] ?? ""]));
+    const followed = left.filter((record) => raisedBase.get(record.raisedAtSha) !== "");
+    const byBase = [...Map.groupBy(followed, (record) => raisedBase.get(record.raisedAtSha) ?? "")];
+    await pool(byBase, FOLLOW_AT_ONCE, async ([base, group]) => {
+      const moved = await trackLines(repo, base, mergeBase, refs(group, basePath));
+      for (const [i, record] of group.entries()) {
+        const place = moved[i];
+        // Stands only while the PR still deletes that line.
+        const deleted = place !== undefined && deletedLines.get(place.path)?.has(place.line);
+        at.set(record, deleted === true ? { path: record.path, line: place.line } : undefined);
+      }
+    });
   }
 
   const open: EarlierFinding[] = [];
@@ -260,11 +275,12 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     });
     let earlier: Awaited<ReturnType<typeof standing>> = { open: [], outdated: [], reopened: [] };
     if (records.length > 0) {
-      const prFiles = await diffCommits(repo, prepared.mergeBase, pr.headSha);
-      const tracked = toTrack(records, prFiles);
+      // Which files the PR changes: names only, no patches or contents.
+      const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
+      const tracked = toTrack(records, changes);
       // The commits those findings were raised at, to follow their lines: one request.
       await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
-      earlier = await standing(repo, tracked, prFiles, prepared.mergeBase, pr.headSha);
+      earlier = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
     }
     ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);

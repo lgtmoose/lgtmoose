@@ -65,6 +65,13 @@ describe("renderBatchFile", () => {
     `);
   });
 
+  it("says which base lines a file deletes that it didn't at the last review", () => {
+    const file = fileDiff(TOTAL_PATCH, { deletedSinceLastReview: [3, 4, 9] });
+    expect(renderBatchFile({ file, depth: "full" })).toContain(
+      "Deleted since the last review: LEFT lines 3-4, 9.",
+    );
+  });
+
   it("lists at most 200 lines a file stopped adding, and counts the rest", () => {
     const removed = Array.from({ length: 205 }, (_, i) => `check${i}();`);
     const file = fileDiff(TOTAL_PATCH, { removedSinceLastReview: removed });

@@ -32,6 +32,8 @@ export interface RunRecord {
 export interface FileRecord {
   path: string;
   blobSha: string;
+  /** The base side's version (the merge base's), when there is one. */
+  baseBlobSha: string | undefined;
   depth: "full" | "move" | "mechanical";
 }
 

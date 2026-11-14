@@ -211,6 +211,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .selectDistinctOn([filesReviewed.path], {
           path: filesReviewed.path,
           blobSha: filesReviewed.blobSha,
+          baseBlobSha: filesReviewed.baseBlobSha,
           depth: filesReviewed.depth,
           reviewedAt: reviewRuns.headSha,
         })
@@ -219,13 +220,21 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .where(and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")))
         .orderBy(filesReviewed.path, desc(reviewRuns.createdAt), desc(filesReviewed.createdAt));
       // Runs never record "skipped"; the enum has it for files the planner left out.
-      return rows.flatMap((row) => (row.depth === "skipped" ? [] : [{ ...row, depth: row.depth }]));
+      return rows.flatMap((row) =>
+        row.depth === "skipped"
+          ? []
+          : [{ ...row, baseBlobSha: row.baseBlobSha ?? undefined, depth: row.depth }],
+      );
     },
     async recordFiles(runId, files) {
       for (let i = 0; i < files.length; i += INSERT_CHUNK) {
         await db
           .insert(filesReviewed)
-          .values(files.slice(i, i + INSERT_CHUNK).map((file) => ({ runId, ...file })))
+          .values(
+            files
+              .slice(i, i + INSERT_CHUNK)
+              .map((file) => ({ runId, ...file, baseBlobSha: file.baseBlobSha ?? null })),
+          )
           .onConflictDoNothing();
       }
     },

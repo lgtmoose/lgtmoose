@@ -286,23 +286,28 @@ describe("prepareReview and finishReview with earlier runs", () => {
       headSha,
       otherShas: [baseSha],
     });
-    const blobs = new Map(
-      (await git(work, "ls-tree", "-r", headSha))
-        .split("\n")
-        .map((line) => line.split(/\s/))
-        .map(([, , sha = "", path = ""]) => [path, sha]),
-    );
+    const tree = async (sha: string) =>
+      new Map(
+        (await git(work, "ls-tree", "-r", sha))
+          .split("\n")
+          .map((line) => line.split(/\s/))
+          .map(([, , blob = "", path = ""]) => [path, blob]),
+      );
+    const blobs = await tree(headSha);
+    // The base side of the PR's diff: the merge base's versions.
+    const baseBlobs = await tree(await git(work, "merge-base", baseSha, headSha));
     const github = deps().deps.github;
     const prepare = (options: PrepareOptions) =>
       prepareReview({ github, progress: () => {} }, OPTIONS.target, repo, pull(), options);
-    return { repo, blobs, prepare };
+    return { repo, blobs, baseBlobs, prepare };
   }
 
   it("leaves files out of the prompt when a posted run reviewed the same blob", async () => {
-    const { repo, blobs, prepare } = await setUp();
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
     const reviewed = ALL.map((path) => ({
       path,
       blobSha: blobs.get(path) ?? "",
+      baseBlobSha: baseBlobs.get(path),
       depth: FULL,
       reviewedAt: GONE,
     }));
@@ -329,6 +334,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const reviewed = ALL.map((path) => ({
       path,
       blobSha: first.blobs.get(path) ?? "",
+      baseBlobSha: first.baseBlobs.get(path),
       depth: FULL,
       reviewedAt: lastReviewed,
     }));
@@ -358,10 +364,10 @@ describe("prepareReview and finishReview with earlier runs", () => {
   });
 
   it("carries an unposted run's findings for files whose blob didn't change", async () => {
-    const { repo, blobs, prepare } = await setUp();
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
     const total = {
       path: "src/total.ts",
-      oldBlob: undefined,
+      oldBlob: baseBlobs.get("src/total.ts"),
       newBlob: blobs.get("src/total.ts"),
       depth: FULL,
     };
@@ -382,14 +388,33 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(changed.carried).toEqual([]);
   });
 
-  it("doesn't count a file as done when it was only read less closely before", async () => {
+  it("doesn't count a file as done when its base side differs from the one read", async () => {
     const { blobs, prepare } = await setUp();
+    const prepared = await prepare({
+      reviewed: [
+        {
+          path: "src/total.ts",
+          blobSha: blobs.get("src/total.ts") ?? "",
+          // Read against another base version: what the PR changes isn't the same.
+          baseBlobSha: "f".repeat(40),
+          depth: FULL,
+          reviewedAt: GONE,
+        },
+      ],
+    });
+    expect(prepared.done).toEqual([]);
+    expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
+  });
+
+  it("doesn't count a file as done when it was only read less closely before", async () => {
+    const { blobs, baseBlobs, prepare } = await setUp();
     for (const depth of ["move", "mechanical"] as const) {
       const prepared = await prepare({
         reviewed: [
           {
             path: "src/total.ts",
             blobSha: blobs.get("src/total.ts") ?? "",
+            baseBlobSha: baseBlobs.get("src/total.ts"),
             depth,
             reviewedAt: GONE,
           },
@@ -401,10 +426,10 @@ describe("prepareReview and finishReview with earlier runs", () => {
   });
 
   it("places each resumed batch's findings under its own per-batch limit", async () => {
-    const { repo, blobs, prepare } = await setUp();
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
     const total = {
       path: "src/total.ts",
-      oldBlob: undefined,
+      oldBlob: baseBlobs.get("src/total.ts"),
       newBlob: blobs.get("src/total.ts"),
       depth: FULL,
     };
@@ -444,6 +469,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       ["CLAUDE.md", ".lgtmoose.yaml"].map(async (path) => ({
         path,
         blobSha: await git(work, "rev-parse", `${lastReviewed}:${path}`),
+        baseBlobSha: await git(work, "rev-parse", `${baseSha}:${path}`),
         depth: FULL,
         reviewedAt: lastReviewed,
       })),
@@ -492,12 +518,13 @@ describe("prepareReview and finishReview with earlier runs", () => {
       { "src/imports.ts": "import { a } from './b';\nexport const x = a;\n" },
       "move import",
     );
-    const { repo, blobs, prepare } = await setUp();
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
     const prepared = await prepare({
       reviewed: [
         {
           path: "src/imports.ts",
           blobSha: blobs.get("src/imports.ts") ?? "",
+          baseBlobSha: baseBlobs.get("src/imports.ts"),
           depth: FULL,
           reviewedAt: GONE,
         },
@@ -512,6 +539,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(report.reviewedFiles).toContainEqual({
       path: "src/imports.ts",
       blobSha: blobs.get("src/imports.ts"),
+      baseBlobSha: baseBlobs.get("src/imports.ts"),
       depth: "full",
     });
     expect(lastReviewed).not.toBe(headSha);
@@ -531,6 +559,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const reviewed = [".lgtmoose.yaml"].map((path) => ({
       path,
       blobSha: first.blobs.get(path) ?? "",
+      baseBlobSha: first.baseBlobs.get(path),
       depth: FULL,
       reviewedAt: lastReviewed,
     }));
@@ -557,6 +586,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const records = [...ALL, "src/util.ts"].map((path) => ({
       path,
       blobSha: first.blobs.get(path) ?? "",
+      baseBlobSha: first.baseBlobs.get(path),
       depth: FULL,
       reviewedAt: reviewedHead,
     }));

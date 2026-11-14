@@ -870,6 +870,24 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
+  it("reviews a push that only deletes a base line, instead of approving it as covered", async () => {
+    const h = harness();
+    await review(h, 1);
+    expect(h.runs.pr.lastReviewEvent).toBe("APPROVE");
+    // Only deletes a line the base has: the PR adds nothing new.
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("    sum += items[i].price;\n", "") },
+      "drop a base line",
+    );
+
+    const { prepared } = await review(h, 2);
+
+    expect(prepared.batches).toHaveLength(1);
+    const prompt = promptOf(h, prepared.runId);
+    expect(prompt).toContain("src/total.ts");
+    expect(prompt).toContain("Deleted since the last review: LEFT line 4.");
+  });
+
   it("doesn't review a file again when only a base merge changed its blob", async () => {
     const h = harness();
     await addOther();

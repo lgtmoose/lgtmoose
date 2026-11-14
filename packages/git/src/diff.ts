@@ -31,6 +31,11 @@ export interface FileDiff {
    */
   changedSinceLastReview?: number[];
   /**
+   * Incremental reviews only: base lines the PR deletes now and didn't delete at the last
+   * review (old-side line numbers, LEFT in the PR diff), such as a check it takes out.
+   */
+  deletedSinceLastReview?: number[];
+  /**
    * Incremental reviews only: lines the PR added at the last review but no longer adds, such as
    * a requested check that was taken out again. They're not in the PR diff, so they can't take
    * inline comments; mention them in the review body.
@@ -276,6 +281,31 @@ async function diffRange(
   });
 }
 
+/** One file a diff changes, without its patch. */
+export interface ChangedPath {
+  /** Path at `to`; for deleted files, the path at `from`. */
+  path: string;
+  /** Path at `from`, when it differs (renames). */
+  oldPath?: string;
+  status: FileStatus;
+}
+
+/**
+ * The files `from..to` changes, with renames found, from `git diff --raw` alone: no patch and
+ * no file contents, so it's cheap however big the diff is.
+ */
+export async function changedPaths(repo: Repo, from: string, to: string): Promise<ChangedPath[]> {
+  const entries = parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]));
+  return entries.map((entry) => {
+    const path = keyOf(entry);
+    return {
+      path,
+      ...(entry.oldPath !== path ? { oldPath: entry.oldPath } : {}),
+      status: entry.status,
+    };
+  });
+}
+
 /**
  * Every file `from..to` changes, with hunks and blob SHAs, as a plain commit-to-commit diff (no
  * merge base, no mechanical detection). For following lines from one commit to another.
@@ -380,8 +410,10 @@ async function baseline(
   baseSha: string,
   sha: string,
   paths: readonly string[],
-): Promise<Baseline> {
-  const previousBase = (await repo.git(["merge-base", baseSha, sha])).trim();
+): Promise<Baseline | undefined> {
+  // No history in common with the base (exit 1, no output): nothing to compare with.
+  const previousBase = (await repo.git(["merge-base", baseSha, sha], { okExitCodes: [1] })).trim();
+  if (previousBase === "") return undefined;
   // Only the files reviewed at this commit matter here; renames are still found.
   const [sinceFiles, previousFiles] = await Promise.all([
     diffRange(repo, sha, repo.headSha, { detectMechanical: false, paths }),
@@ -410,27 +442,66 @@ function withRemoved(file: FileDiff, removed: readonly string[]): FileDiff {
 const BASELINES_AT_ONCE = 4;
 
 /**
- * What changed in one file's PR change since its baseline: the file with its incremental
- * notes, or undefined when nothing did (the PR adds the same lines, moved or not, and stopped
- * adding nothing).
+ * What the PR's change to a file is, for telling whether it's the one reviewed: its added and
+ * deleted lines in order, with whitespace normalised, plus the blobs when there are no lines to
+ * compare (binary files, submodules, pure moves). Base-branch changes elsewhere in the file
+ * don't change it; a line the PR now adds or deletes, or a base line it deletes that changed,
+ * does.
+ */
+function prChange(file: FileDiff | undefined): string {
+  if (file === undefined) return "";
+  const lines = file.hunks.flatMap((hunk) =>
+    hunk.lines.flatMap((line) =>
+      line.kind === "context" ? [] : [`${line.kind === "add" ? "+" : "-"}${normalised(line.text)}`],
+    ),
+  );
+  const blobs = lines.length === 0 || file.binary || file.submodule;
+  return [file.status, ...(blobs ? [file.oldBlob ?? "", file.newBlob ?? ""] : []), ...lines].join(
+    "\n",
+  );
+}
+
+/** Copies of each line the PR deletes from the base, by normalised text. */
+function deletedCopies(file: FileDiff | undefined): Map<string, number> {
+  const copies = new Map<string, number>();
+  for (const line of file?.hunks.flatMap((h) => h.lines) ?? []) {
+    if (line.kind !== "del") continue;
+    const key = normalised(line.text);
+    copies.set(key, (copies.get(key) ?? 0) + 1);
+  }
+  return copies;
+}
+
+/**
+ * The file with what changed in its PR change since its last review (`base`), or undefined
+ * when its PR change is exactly the one reviewed: the same lines added and deleted. Otherwise
+ * it's reviewed again, with the lines it adds that changed since, the base lines it now deletes
+ * and didn't then, and the lines it added then and no longer does.
  */
 function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
-  const changed = base.since.get(file.path);
-  if (file.status === "deleted") {
-    // Deleted since the last review (it still existed then).
-    return changed?.status === "deleted"
-      ? { ...file, changedSinceLastReview: [], removedSinceLastReview: [] }
-      : undefined;
-  }
-  // The PR's diff of the file back then.
   const before = base.previous.get(file.path);
+  if (before !== undefined && prChange(before) === prChange(file)) return undefined;
+  const changed = base.since.get(file.path);
   const removed = noLongerAdded([{ change: before, reviewedAt: "" }], file);
   const prLines = addedLines(file);
   const newLines = changed
     ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
     : [];
-  if (newLines.length === 0 && removed.length === 0) return undefined;
-  return withRemoved({ ...file, changedSinceLastReview: newLines }, removed);
+  // Base lines deleted now beyond the copies deleted then: the later copies are the new ones.
+  const then = deletedCopies(before);
+  const seen = new Map<string, number>();
+  const newlyDeleted: number[] = [];
+  for (const line of file.hunks.flatMap((h) => h.lines)) {
+    if (line.kind !== "del" || line.oldLine === undefined) continue;
+    const key = normalised(line.text);
+    const n = (seen.get(key) ?? 0) + 1;
+    seen.set(key, n);
+    if (n > (then.get(key) ?? 0)) newlyDeleted.push(line.oldLine);
+  }
+  return withRemoved(
+    { ...file, changedSinceLastReview: newLines, deletedSinceLastReview: newlyDeleted },
+    removed,
+  );
 }
 
 /**
@@ -462,12 +533,12 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
 
   // Every baseline commit in use, with what it gives (undefined when it's gone), each diffed
   // only for the paths reviewed there.
-  const pathsAt = new Map<string, string[]>();
-  for (const [path, sha] of reviewedAt) {
-    const paths = pathsAt.get(sha);
-    if (paths === undefined) pathsAt.set(sha, [path]);
-    else paths.push(path);
-  }
+  const pathsAt = new Map(
+    [...Map.groupBy(reviewedAt, ([, sha]) => sha)].map(([sha, entries]) => [
+      sha,
+      entries.map(([path]) => path),
+    ]),
+  );
   const shas = [...pathsAt.keys()];
   const present = await repo.hasCommits(shas.filter((sha) => sha !== repo.headSha));
   const built = await pool(shas, BASELINES_AT_ONCE, async (sha): Promise<Baseline | undefined> => {

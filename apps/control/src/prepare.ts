@@ -118,14 +118,9 @@ export function readManifest(text: string): RunManifest {
     }
     return manifest as unknown as RunManifest;
   }
-  const incrementalFields = [
-    "kind",
-    "done",
-    "carried",
-    "unreviewed",
-    "unchanged",
-    "noLongerChanged",
-  ].filter((field) => manifest.review !== undefined && field in manifest.review);
+  const incrementalFields = ["kind", "done", "carried", "unchanged", "noLongerChanged"].filter(
+    (field) => manifest.review !== undefined && field in manifest.review,
+  );
   if (manifest.version !== 1 || manifest.review === undefined || incrementalFields.length > 0) {
     throw new Error(`Unsupported run manifest (version ${JSON.stringify(manifest.version)}).`);
   }

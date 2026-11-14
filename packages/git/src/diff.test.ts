@@ -740,6 +740,71 @@ describe("reviewDiff: incremental review", () => {
     expect(file?.removedSinceLastReview).toEqual(["assert(ok);"]);
   });
 
+  it("reviews a push that only deletes a base line, such as a check", async () => {
+    const base = await setUp({
+      "auth.ts": lines(10).replace("line 5\n", "if (!authorized) throw new Error('no');\n"),
+    });
+    await fixture.write({
+      "auth.ts": lines(10)
+        .replace("line 5\n", "if (!authorized) throw new Error('no');\n")
+        .replace("line 9\n", "line 9 pr\n"),
+    });
+    const reviewed = await fixture.commit("an edit");
+    // Only deletes the base's check.
+    await fixture.write({
+      "auth.ts": lines(10).replace("line 5\n", "").replace("line 9\n", "line 9 pr\n"),
+    });
+    const head = await fixture.commit("drop the check");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["auth.ts", reviewed]]),
+    });
+    const [file] = diff.files;
+    expect(file?.path).toBe("auth.ts");
+    // The deleted base line, on the old side.
+    expect(file?.deletedSinceLastReview).toEqual([5]);
+    expect(diff.unchanged).toEqual([]);
+  });
+
+  it("reviews a file the PR deletes again when the base content it deletes changed", async () => {
+    await setUp({ "old.ts": lines(5), "keep.ts": lines(3) });
+    await fixture.remove("old.ts");
+    const reviewed = await fixture.commit("delete old.ts");
+    // main changes the file the PR deletes, and the PR merges main.
+    await fixture.checkout("main");
+    await fixture.write({ "old.ts": lines(5).replace("line 2\n", "requireAdmin(user);\n") });
+    const main = await fixture.commit("main edits old.ts");
+    await fixture.checkout("pr");
+    // Keeps the PR's deletion: the PR now deletes main's new version.
+    await fixture.git(["merge", "--quiet", "--no-edit", "-s", "ours", main]);
+    await fixture.git(["push", "--quiet", "--force", "--all", "origin"]);
+    const head = await fixture.git(["rev-parse", "HEAD"]);
+
+    const diff = await reviewDiff(await clone(head, [main, reviewed]), {
+      baseSha: main,
+      reviewedAt: new Map([["old.ts", reviewed]]),
+    });
+    expect(diff.files.map((file) => [file.path, file.status])).toEqual([["old.ts", "deleted"]]);
+    expect(diff.files[0]?.deletedSinceLastReview).toEqual([2]);
+  });
+
+  it("treats a review commit with no history in common with the base as gone", async () => {
+    const base = await setUp({ "a.ts": lines(5) });
+    await fixture.write({ "a.ts": lines(5).replace("line 1\n", "A\n") });
+    const head = await fixture.commit("change a");
+    await fixture.git(["checkout", "--quiet", "--orphan", "unrelated"]);
+    await fixture.write({ "x.txt": "x\n" });
+    const orphan = await fixture.commit("unrelated history");
+
+    const diff = await reviewDiff(await clone(head, [base, orphan]), {
+      baseSha: base,
+      reviewedAt: new Map([["a.ts", orphan]]),
+    });
+    expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
+    expect(diff.fallbackReason).toContain("couldn't compare");
+  });
+
   it("has nothing to review when a pure rename is undone", async () => {
     const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
     await fixture.move("a.ts", "b.ts");

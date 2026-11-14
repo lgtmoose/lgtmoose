@@ -94,6 +94,12 @@ export function renderBatchFile(entry: BatchFile): string {
         : `Changed since the last review: RIGHT ${changed.length === 1 ? "line" : "lines"} ${formatRanges(changed)}.`,
     );
   }
+  const deleted = file.deletedSinceLastReview ?? [];
+  if (deleted.length > 0) {
+    parts.push(
+      `Deleted since the last review: LEFT ${deleted.length === 1 ? "line" : "lines"} ${formatRanges(deleted)}.`,
+    );
+  }
   const removed = file.removedSinceLastReview ?? [];
   if (removed.length > 0) {
     const shown = removed.slice(0, REMOVED_LINES_SHOWN);

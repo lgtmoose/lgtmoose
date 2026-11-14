@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cloneAtSha } from "./clone.js";
-import { diffCommits } from "./diff.js";
+import { changedPaths, diffCommits } from "./diff.js";
 import { FixtureRepo } from "./testing/fixture.js";
 import { trackLine, trackLines } from "./track.js";
 
@@ -68,6 +68,30 @@ describe("trackLines", () => {
       ],
     );
     expect(result).toEqual([{ path: "new.ts", line: 4 }, undefined, { path: "same.ts", line: 3 }]);
+  });
+});
+
+describe("changedPaths", () => {
+  it("lists what a diff changes, renames included, without patches", async () => {
+    await fixture.write({ "old.ts": lines(10), "gone.ts": lines(2), "edit.ts": lines(3) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    await fixture.remove("gone.ts");
+    await fixture.write({ "edit.ts": lines(4), "added.ts": "x\n" });
+    const to = await fixture.commit("after");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const changes = await changedPaths(repo, from, to);
+    expect(changes.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([
+      { path: "added.ts", status: "added" },
+      { path: "edit.ts", status: "modified" },
+      { path: "gone.ts", status: "deleted" },
+      { path: "new.ts", oldPath: "old.ts", status: "renamed" },
+    ]);
   });
 });
 

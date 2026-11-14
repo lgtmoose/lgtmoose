@@ -130,6 +130,11 @@ export const filesReviewed = pgTable(
       .references(() => reviewRuns.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
     blobSha: text("blob_sha").notNull(),
+    /**
+     * The version on the base side of the PR's diff (the merge base's), when there is one: a
+     * file is only reviewed already when both sides match.
+     */
+    baseBlobSha: text("base_blob_sha"),
     depth: reviewDepth("depth").notNull(),
     createdAt: createdAt(),
   },

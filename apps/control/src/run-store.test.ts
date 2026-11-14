@@ -113,7 +113,12 @@ describe("drizzleRunStore", () => {
       });
     const first = await start("arn:exec:files:1", 20);
     const second = await start("arn:exec:files:2", 20);
-    const file = { path: "src/a.ts", blobSha: "c".repeat(40), depth: "full" as const };
+    const file = {
+      path: "src/a.ts",
+      blobSha: "c".repeat(40),
+      baseBlobSha: undefined,
+      depth: "full" as const,
+    };
     await store.recordFiles(first.runId, [file]);
     await store.recordFiles(first.runId, [file]);
     await store.recordFiles(second.runId, [file, { ...file, path: "src/b.ts" }]);

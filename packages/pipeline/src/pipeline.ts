@@ -110,6 +110,8 @@ export interface ReviewReport {
 export interface ReviewedFile {
   path: string;
   blobSha: string;
+  /** The base side's version (the merge base's), when there is one. */
+  baseBlobSha: string | undefined;
   depth: ReadingDepth;
 }
 
@@ -192,6 +194,8 @@ export interface BatchJob {
 export interface ReviewedBlob {
   path: string;
   blobSha: string;
+  /** The base side's version it was read against; both sides must match to count as read. */
+  baseBlobSha: string | undefined;
   depth: ReadingDepth;
   /** The head of the run that recorded it: where the file's PR change was last reviewed. */
   reviewedAt: string;
@@ -358,6 +362,7 @@ export async function prepareReview(
       path,
       // The PR doesn't change the path at all now.
       blobSha: (file === undefined ? undefined : reviewedBlobOf(file)) ?? NOT_CHANGED,
+      baseBlobSha: file?.oldBlob,
       // Every covered path has a record; without one, the lowest depth claims the least.
       depth: reviewed.get(path)?.depth ?? ("move" as const),
     };
@@ -451,9 +456,12 @@ export function reviewedBlobOf(file: {
 /** How closely a depth reads a file: a file read this closely is read at any lower depth too. */
 const DEPTH_RANK: Record<ReadingDepth, number> = { move: 0, mechanical: 1, full: 2 };
 
-/** Whether an earlier read of a file covers reading it now: the same version, as closely. */
+/**
+ * Whether an earlier read of a file covers reading it now: the same versions on both sides of
+ * the diff (head and merge base), read as closely.
+ */
 function covers(
-  earlier: { blobSha: string; depth: ReadingDepth } | undefined,
+  earlier: { blobSha: string; baseBlobSha: string | undefined; depth: ReadingDepth } | undefined,
   file: FileDiff,
   depth: ReadingDepth = readingDepth(file),
 ): boolean {
@@ -462,6 +470,7 @@ function covers(
     earlier !== undefined &&
     blob !== undefined &&
     earlier.blobSha === blob &&
+    earlier.baseBlobSha === file.oldBlob &&
     DEPTH_RANK[earlier.depth] >= DEPTH_RANK[depth]
   );
 }
@@ -497,7 +506,9 @@ function doneFiles(
       const entry = seen.get(file.path);
       const blobSha = entry === undefined ? undefined : reviewedBlobOf(entry);
       if (entry === undefined || blobSha === undefined) continue;
-      if (!covers({ blobSha, depth: entry.depth }, file, depth)) continue;
+      if (!covers({ blobSha, baseBlobSha: entry.oldBlob, depth: entry.depth }, file, depth)) {
+        continue;
+      }
       mark(file.path, entry.depth);
       same.set(file.path, { oldSide: entry.oldBlob === file.oldBlob });
     }
@@ -736,11 +747,12 @@ function reviewedBatchFiles(
           const names = (file.alsoReviewedAs ?? []).map((path) => ({
             path,
             blobSha: NOT_CHANGED,
+            baseBlobSha: undefined,
             depth: read,
           }));
           return blobSha === undefined
             ? names
-            : [{ path: file.path, blobSha, depth: read }, ...names];
+            : [{ path: file.path, blobSha, baseBlobSha: file.oldBlob, depth: read }, ...names];
         })
       : [],
   );

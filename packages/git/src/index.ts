@@ -4,6 +4,7 @@
  */
 export { cloneAtSha, githubCloneUrl, type CloneOptions, type Repo } from "./clone.js";
 export {
+  changedPaths,
   diffCommits,
   noLongerAdded,
   readingDepth,
@@ -11,6 +12,7 @@ export {
   type EarlierChange,
   reviewDiff,
   type ReadingDepth,
+  type ChangedPath,
   type DiffOptions,
   type FileDiff,
   type FileStatus,
@@ -27,6 +29,7 @@ export {
   type LineKind,
 } from "./patch.js";
 export { trackLine, trackLines, type LineRef } from "./track.js";
+export { pool } from "./pool.js";
 export {
   commentTarget,
   hunkFor,
