@@ -192,7 +192,8 @@ describe("CursorHarness", () => {
       }),
     );
     expect(error.kind).toBe("process");
-    expect(error.message).toContain("Could not copy the checkout");
+    expect(error.message.match(/Could not copy the checkout/g)).toHaveLength(1);
+    expect((error.cause as { code?: string } | undefined)?.code).toBe("ENOENT");
     expect(await fake!.calls()).toEqual([]);
   });
 

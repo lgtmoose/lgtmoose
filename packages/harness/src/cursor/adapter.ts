@@ -160,7 +160,7 @@ export class CursorHarness implements Harness {
         this.workspaces.set(source, made);
         made.catch(() => this.workspaces.delete(source));
         return made;
-      }, fail)
+      })
       .catch(fail);
   }
 
