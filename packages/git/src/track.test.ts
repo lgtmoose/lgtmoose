@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cloneAtSha } from "./clone.js";
+import { diffCommits } from "./diff.js";
 import { FixtureRepo } from "./testing/fixture.js";
 import { trackLine, trackLines } from "./track.js";
 
@@ -67,6 +68,26 @@ describe("trackLines", () => {
       ],
     );
     expect(result).toEqual([{ path: "new.ts", line: 4 }, undefined, { path: "same.ts", line: 3 }]);
+  });
+});
+
+describe("diffCommits with paths", () => {
+  it("diffs only the files asked for, renames included", async () => {
+    await fixture.write({ "old.ts": lines(10), "other.ts": lines(3) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    await fixture.write({ "other.ts": lines(4) });
+    const to = await fixture.commit("after");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const files = await diffCommits(repo, from, to, { paths: ["old.ts"] });
+    expect(files.map((file) => [file.path, file.oldPath, file.status])).toEqual([
+      ["new.ts", "old.ts", "renamed"],
+    ]);
   });
 });
 

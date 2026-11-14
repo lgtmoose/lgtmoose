@@ -276,6 +276,8 @@ describe("runReview", () => {
 describe("prepareReview and finishReview with earlier runs", () => {
   const ALL = ["src/total.ts", "CLAUDE.md", ".lgtmoose.yaml"];
   const FULL = "full" as const;
+  /** A last reviewed commit that's gone (force-pushed away): files are reviewed in full. */
+  const GONE = "e".repeat(40);
 
   async function setUp() {
     const repo = await cloneAtSha({
@@ -298,7 +300,12 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
   it("leaves files out of the prompt when a posted run reviewed the same blob", async () => {
     const { repo, blobs, prepare } = await setUp();
-    const reviewed = ALL.map((path) => ({ path, blobSha: blobs.get(path) ?? "", depth: FULL }));
+    const reviewed = ALL.map((path) => ({
+      path,
+      blobSha: blobs.get(path) ?? "",
+      depth: FULL,
+      reviewedAt: GONE,
+    }));
 
     const partly = await prepare({ reviewed: reviewed.slice(1) });
     expect(partly.done.map((entry) => entry.path).toSorted()).toEqual([
@@ -318,12 +325,13 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
   it("still reviews a file whose change was reverted since the last review", async () => {
     const first = await setUp();
+    const lastReviewed = headSha;
     const reviewed = ALL.map((path) => ({
       path,
       blobSha: first.blobs.get(path) ?? "",
       depth: FULL,
+      reviewedAt: lastReviewed,
     }));
-    const lastReviewed = headSha;
     headSha = await commit({ "src/total.ts": TOTAL }, "revert");
     const repo = await cloneAtSha({
       url: pathToFileURL(remote).href,
@@ -372,7 +380,14 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const { blobs, prepare } = await setUp();
     for (const depth of ["move", "mechanical"] as const) {
       const prepared = await prepare({
-        reviewed: [{ path: "src/total.ts", blobSha: blobs.get("src/total.ts") ?? "", depth }],
+        reviewed: [
+          {
+            path: "src/total.ts",
+            blobSha: blobs.get("src/total.ts") ?? "",
+            depth,
+            reviewedAt: GONE,
+          },
+        ],
       });
       expect(prepared.done).toEqual([]);
       expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
@@ -424,6 +439,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
         path,
         blobSha: await git(work, "rev-parse", `${lastReviewed}:${path}`),
         depth: FULL,
+        reviewedAt: lastReviewed,
       })),
     );
     const prepared = await prepareReview(
@@ -447,6 +463,12 @@ describe("prepareReview and finishReview with earlier runs", () => {
     // The summary names the lockfile behind the hold.
     expect(report.summary).toMatch(/bun\\?\.lockb/);
     expect(report.reviewedFiles.map((file) => file.path)).not.toContain("bun.lockb");
+    // Files whose PR change didn't move are covered at this head, without a review.
+    expect(prepared.unchanged.map((file) => file.path).toSorted()).toEqual([
+      ".lgtmoose.yaml",
+      "CLAUDE.md",
+    ]);
+    expect(report.reviewedFiles).toContainEqual(prepared.unchanged[0]);
   });
 
   it("keeps a done file's closer earlier read when recording it again", async () => {
@@ -467,7 +489,12 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const { repo, blobs, prepare } = await setUp();
     const prepared = await prepare({
       reviewed: [
-        { path: "src/imports.ts", blobSha: blobs.get("src/imports.ts") ?? "", depth: FULL },
+        {
+          path: "src/imports.ts",
+          blobSha: blobs.get("src/imports.ts") ?? "",
+          depth: FULL,
+          reviewedAt: GONE,
+        },
       ],
     });
     expect(
@@ -499,6 +526,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       path,
       blobSha: first.blobs.get(path) ?? "",
       depth: FULL,
+      reviewedAt: lastReviewed,
     }));
     const prepared = await prepareReview(
       { github: deps().deps.github, progress: () => {} },

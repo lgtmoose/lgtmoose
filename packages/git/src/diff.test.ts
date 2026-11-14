@@ -346,12 +346,30 @@ describe("reviewDiff: incremental review", () => {
     });
   });
 
-  it("gives a file added and then fully reverted no blob at head", async () => {
+  it("has nothing to review in a file the PR added and dropped again", async () => {
     const base = await setUp({ "keep.txt": "k\n" });
     await fixture.write({ "added.ts": "export const debug = true;\n" });
     const reviewed = await fixture.commit("add a file");
     await fixture.remove("added.ts");
     const head = await fixture.commit("drop it again");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["added.ts", reviewed]]),
+    });
+    expect(diff.files).toEqual([]);
+    // Covered at this head: nothing left of the PR's change to it.
+    expect(diff.unchanged).toEqual(["added.ts"]);
+  });
+
+  it("drops the old path of a rename the PR reverted", async () => {
+    const base = await setUp({ "old.ts": lines(10) });
+    await fixture.move("old.ts", "new.ts");
+    await fixture.write({ "new.ts": lines(10).replace("line 3\n", "line 3\ncheck();\n") });
+    const reviewed = await fixture.commit("rename and add a check");
+    await fixture.move("new.ts", "old.ts");
+    await fixture.write({ "old.ts": lines(10) });
+    const head = await fixture.commit("undo it all");
 
     const files = byPath(
       (
@@ -361,12 +379,94 @@ describe("reviewDiff: incremental review", () => {
         })
       ).files,
     );
-    expect(files["added.ts"]).toMatchObject({
-      status: "deleted",
-      oldBlob: undefined,
-      newBlob: undefined,
-      removedSinceLastReview: ["export const debug = true;"],
+    // Back at its old path, with what it no longer adds; the reverted rename's path is gone.
+    expect(files["new.ts"]).toBeUndefined();
+    expect(files["old.ts"]).toMatchObject({
+      status: "modified",
+      removedSinceLastReview: ["check();"],
     });
+    expect(files["old.ts"]?.oldPath).toBeUndefined();
+  });
+
+  it("compares each file with its own last review, so a base merge doesn't bring one back", async () => {
+    await setUp({ "a.ts": lines(30), "b.ts": lines(10) });
+    // The PR changes both; a.ts was reviewed at `first`, then b.ts again at `second`.
+    await fixture.write({
+      "a.ts": lines(30).replace("line 5\n", "line 5 pr\n"),
+      "b.ts": lines(10).replace("line 2\n", "line 2 pr\n"),
+    });
+    const first = await fixture.commit("pr change");
+    await fixture.write({ "b.ts": lines(10).replace("line 2\n", "line 2 pr again\n") });
+    const second = await fixture.commit("b again");
+    // main changes a.ts far from the PR's line, and the PR merges main.
+    await fixture.checkout("main");
+    await fixture.write({ "a.ts": lines(30).replace("line 25\n", "line 25 main\n") });
+    const main = await fixture.commit("main edits a.ts");
+    await fixture.checkout("pr");
+    await fixture.git(["merge", "--quiet", "--no-edit", main]);
+    await fixture.git(["push", "--quiet", "--force", "--all", "origin"]);
+    const head = await fixture.git(["rev-parse", "HEAD"]);
+
+    const diff = await reviewDiff(await clone(head, [main, first, second]), {
+      baseSha: main,
+      reviewedAt: new Map([
+        ["a.ts", first],
+        ["b.ts", second],
+      ]),
+    });
+    // a.ts's blob changed (the merge), but not its PR change: covered, not reviewed again.
+    expect(diff.kind).toBe("incremental");
+    expect(diff.files).toEqual([]);
+    expect(diff.unchanged.toSorted()).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("keeps lines a file stopped adding since its own, older review", async () => {
+    const base = await setUp({ "auth.ts": lines(20), "other.ts": lines(5) });
+    await fixture.write({
+      "auth.ts": lines(20).replace("line 10\n", "line 10\nrequireAdmin(user);\n"),
+    });
+    // Reviewed here, but auth.ts's batch failed at the next head, so its record stays here.
+    const reviewed = await fixture.commit("add the check");
+    await fixture.write({
+      "auth.ts": lines(20),
+      "other.ts": lines(5).replace("line 1\n", "first\n"),
+    });
+    const failed = await fixture.commit("drop the check");
+    await fixture.write({ "other.ts": lines(5).replace("line 1\n", "one\n") });
+    const head = await fixture.commit("later");
+
+    const files = byPath(
+      (
+        await reviewDiff(await clone(head, [base, reviewed, failed]), {
+          baseSha: base,
+          reviewedAt: new Map([
+            ["auth.ts", reviewed],
+            ["other.ts", failed],
+          ]),
+        })
+      ).files,
+    );
+    expect(files["auth.ts"]).toMatchObject({ removedSinceLastReview: ["requireAdmin(user);"] });
+    expect(files["other.ts"]?.changedSinceLastReview).toEqual([1]);
+  });
+
+  it("reviews a file never reviewed, and one whose last review is gone, in full", async () => {
+    const base = await setUp({ "a.ts": lines(5), "b.ts": lines(5) });
+    await fixture.write({
+      "a.ts": lines(5).replace("line 1\n", "A\n"),
+      "b.ts": lines(5).replace("line 1\n", "B\n"),
+    });
+    const head = await fixture.commit("change both");
+    const gone = "e".repeat(40);
+
+    const diff = await reviewDiff(await clone(head, [base]), {
+      baseSha: base,
+      reviewedAt: new Map([["b.ts", gone]]),
+    });
+    expect(diff.kind).toBe("full");
+    expect(diff.files.map((file) => file.path).toSorted()).toEqual(["a.ts", "b.ts"]);
+    expect(diff.files[0]?.changedSinceLastReview).toBeUndefined();
+    expect(diff.fallbackReason).toContain("b.ts");
   });
 
   it("doesn't call a file renamed since the last review reverted", async () => {

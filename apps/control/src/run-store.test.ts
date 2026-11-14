@@ -124,9 +124,10 @@ describe("drizzleRunStore", () => {
     for (const run of [first, second, other]) await succeed(run.runId);
 
     const files = await store.reviewedFiles(first.pullRequestId);
+    // Each with the head of the run that recorded it.
     expect(files.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([
-      { path: "src/a.ts", blobSha: "c".repeat(40), depth: "full" },
-      { path: "src/b.ts", blobSha: "c".repeat(40), depth: "full" },
+      { path: "src/a.ts", blobSha: "c".repeat(40), depth: "full", reviewedAt: "a".repeat(40) },
+      { path: "src/b.ts", blobSha: "c".repeat(40), depth: "full", reviewedAt: "a".repeat(40) },
     ]);
 
     // Only each path's latest posted record counts: after a fix (blob d) and a revert, the old
@@ -140,7 +141,12 @@ describe("drizzleRunStore", () => {
       .where(eq(reviewRuns.id, fix.runId));
     expect(
       (await store.reviewedFiles(first.pullRequestId)).find((row) => row.path === "src/a.ts"),
-    ).toEqual({ path: "src/a.ts", blobSha: "d".repeat(40), depth: "mechanical" });
+    ).toEqual({
+      path: "src/a.ts",
+      blobSha: "d".repeat(40),
+      depth: "mechanical",
+      reviewedAt: "a".repeat(40),
+    });
   });
 
   it("lists the runs since the last posted one that didn't post, newest first", async () => {

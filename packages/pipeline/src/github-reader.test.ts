@@ -86,10 +86,12 @@ describe("githubPullReader", () => {
     expect(calls.filter((path) => path.includes("issues"))).toHaveLength(2);
   });
 
-  it("reads one review's state, and refuses an ID that isn't one", async () => {
-    const { get } = fakeGet({ "/repos/acme/shop/pulls/7/reviews/55": { state: "DISMISSED" } });
+  it("reads one review's state and commit, and refuses an ID that isn't one", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/pulls/7/reviews/55": { state: "DISMISSED", commit_id: SHA_A },
+    });
     const reader = githubPullReader(get);
-    expect(await reader.reviewState?.(target, 55)).toBe("DISMISSED");
-    await expect(reader.reviewState?.(target, -1)).rejects.toThrow("Not a review ID");
+    expect(await reader.review?.(target, 55)).toEqual({ state: "DISMISSED", commitId: SHA_A });
+    await expect(reader.review?.(target, -1)).rejects.toThrow("Not a review ID");
   });
 });

@@ -255,6 +255,9 @@ describe("cloneAtSha", () => {
     const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
 
     it("fetches many other commits in one request", async () => {
+      await fixture.write({ "a.txt": "older\n" });
+      const older = await fixture.commit("older");
+      await fixture.write({ "a.txt": "head\n" });
       const head = await fixture.commit("head");
       await fixture.checkout("side", true);
       const others: string[] = [];
@@ -278,6 +281,11 @@ describe("cloneAtSha", () => {
         for (const sha of others) expect(await counted.hasCommit(sha)).toBe(true);
         // One fetch (a protocol v2 fetch is two HTTP requests), not one per commit.
         expect(server.authorizations.length - before).toBeLessThanOrEqual(forHead);
+        // Commits it has already, fetched or in head's history, aren't asked for again.
+        const after = server.authorizations.length;
+        await counted.fetchCommits([...others, older]);
+        expect(server.authorizations.length).toBe(after);
+        expect(await counted.hasCommit(older)).toBe(true);
       } finally {
         await server.close();
       }

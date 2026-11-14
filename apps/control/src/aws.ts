@@ -212,6 +212,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           path: filesReviewed.path,
           blobSha: filesReviewed.blobSha,
           depth: filesReviewed.depth,
+          reviewedAt: reviewRuns.headSha,
         })
         .from(filesReviewed)
         .innerJoin(reviewRuns, eq(filesReviewed.runId, reviewRuns.id))

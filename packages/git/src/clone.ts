@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { GitError, runGit, runGitBytes, type RunOptions } from "./exec.js";
+import { listTree } from "./tree.js";
 
 /** A local checkout. Every command it runs carries the auth header, so lazily fetched blobs work. */
 export interface Repo {
@@ -72,9 +73,8 @@ export function isMissingObjectError(error: unknown): boolean {
     )
   );
 }
-/** Blob IDs per prefetch request, and paths per ls-tree, to stay well under ARG_MAX. */
+/** Blob IDs per prefetch request, to stay well under ARG_MAX. */
 const PREFETCH_BATCH = 500;
-const PATHS_PER_LIST = 1000;
 
 export function githubCloneUrl(owner: string, repo: string, host = "github.com"): string {
   return `https://${host}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git`;
@@ -145,14 +145,28 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
 
   const fetched = new Set([options.headSha]);
   await fetch([options.headSha]);
+  /** Whether the commit is in this clone, without asking the remote. */
+  const isLocalCommit = async (sha: string): Promise<boolean> => {
+    const { exitCode } = await run(["cat-file", "-e", `${sha}^{commit}`], {
+      okExitCodes: [1, 128],
+      env: { GIT_NO_LAZY_FETCH: "1" },
+    });
+    return exitCode === 0;
+  };
   /**
    * Fetches commits in one request; if one of them is gone, the request fails as a whole, so
    * they're fetched one at a time instead, skipping the ones that are gone.
    */
   const fetchCommits = async (shas: Iterable<string>): Promise<void> => {
-    const wanted = [...new Set(shas)].filter((sha) => !fetched.has(sha));
-    for (const sha of wanted) {
+    const unknown = [...new Set(shas)].filter((sha) => !fetched.has(sha));
+    for (const sha of unknown) {
       if (!SHA.test(sha)) throw new Error(`Not a full commit SHA: ${JSON.stringify(sha)}`);
+    }
+    // Commits in head's history (or fetched before) are here already: don't ask for them.
+    const wanted: string[] = [];
+    for (const sha of unknown) {
+      if (await isLocalCommit(sha)) fetched.add(sha);
+      else wanted.push(sha);
     }
     if (wanted.length === 0) return;
     try {
@@ -228,31 +242,21 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
       if (!SHA.test(sha)) return false;
       // Present only if it's in head's history; a failed fetch already showed the remote lacks
       // it, so don't ask the remote again.
-      const { exitCode } = await run(["cat-file", "-e", `${sha}^{commit}`], {
-        okExitCodes: [1, 128],
-        env: { GIT_NO_LAZY_FETCH: "1" },
-      });
-      return exitCode === 0;
+      return isLocalCommit(sha);
     },
     readBlobs,
     fetchCommits,
     checkoutPaths: async (paths) => {
       if (paths.length === 0) return;
       const literal = { env: { GIT_LITERAL_PATHSPECS: "1" } };
-      // The files' blobs (directories expanded, -r), listed in chunks so a long list of paths
-      // never hits the OS argument limit, then fetched in one request before checking out.
-      const blobs: string[] = [];
-      for (let i = 0; i < paths.length; i += PATHS_PER_LIST) {
-        const tree = await run(
-          ["ls-tree", "-r", "-z", options.headSha, "--", ...paths.slice(i, i + PATHS_PER_LIST)],
-          literal,
-        );
-        for (const entry of tree.stdout.split("\0")) {
-          const [, type, sha] = entry.split(/\s/);
-          if (type === "blob" && sha !== undefined) blobs.push(sha);
-        }
-      }
-      await prefetch(blobs);
+      // The files' blobs (directories expanded), fetched in one request before checking out.
+      const tree = await listTree(
+        async (args) => (await run(args)).stdout,
+        options.headSha,
+        paths,
+        { recursive: true },
+      );
+      await prefetch(tree.flatMap((entry) => (entry.type === "blob" ? [entry.sha] : [])));
       // NUL-separated and literal, so no path is read as pathspec magic or split on a newline.
       await run(["checkout", options.headSha, "--pathspec-from-file=-", "--pathspec-file-nul"], {
         input: paths.join("\0") + "\0",

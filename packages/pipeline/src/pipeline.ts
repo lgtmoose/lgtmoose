@@ -13,7 +13,7 @@ import {
   type KnownFinding,
   type ReviewDecision,
 } from "@lgtmoose/core";
-import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
+import type { CloneOptions, DiffOptions, FileDiff, Repo } from "@lgtmoose/git";
 import { reviewDiff } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness";
 import {
@@ -164,6 +164,12 @@ export interface PreparedReview {
    * resumed batch, so each keeps its own per-batch limit when placed.
    */
   carried: Finding[][];
+  /**
+   * Files covered at this head without a review: their PR change hasn't moved since they were
+   * last reviewed (see `ReviewDiff.unchanged`). Recorded at this head with the depth they were
+   * read at, so later runs compare with this head.
+   */
+  unchanged: ReviewedFile[];
 }
 
 /**
@@ -184,6 +190,8 @@ export interface ReviewedBlob {
   path: string;
   blobSha: string;
   depth: ReadingDepth;
+  /** The head of the run that recorded it: where the file's PR change was last reviewed. */
+  reviewedAt: string;
 }
 
 /**
@@ -333,23 +341,30 @@ export async function prepareReview(
 ): Promise<PreparedReview> {
   const comments = await deps.github.comments(target, COMMENT_LIMIT);
   const config = await baseConfig(repo, pr.baseSha);
-  const diff = await reviewDiff(repo, {
-    baseSha: pr.baseSha,
-    ...(options.lastReviewed === undefined ? {} : { lastReviewed: options.lastReviewed }),
-  });
-  if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
-  // An incremental review also takes every file the PR changes whose version at head no posted
-  // run has reviewed: a file whose batch failed, say. So the range can move on with every run,
-  // and per-file records say what's left.
+  // With records, each file is compared with its own last review: a file whose batch failed
+  // keeps the commit it was last reviewed at, so what changed since then is still reviewed.
   const reviewed = new Map((options.reviewed ?? []).map((entry) => [entry.path, entry]));
-  const inRange = new Set(diff.files.map((file) => file.path));
-  const unreviewed =
-    diff.kind === "incremental"
-      ? diff.prFiles.filter(
-          (file) => !inRange.has(file.path) && !covers(reviewed.get(file.path), file),
-        )
-      : [];
-  const files = [...diff.files, ...unreviewed];
+  const diffOptions: DiffOptions = { baseSha: pr.baseSha };
+  if (options.reviewed !== undefined) {
+    diffOptions.reviewedAt = new Map(
+      [...reviewed].map(([path, entry]) => [path, entry.reviewedAt]),
+    );
+  } else if (options.lastReviewed !== undefined) {
+    diffOptions.lastReviewed = options.lastReviewed;
+  }
+  const diff = await reviewDiff(repo, diffOptions);
+  if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
+  const { files } = diff;
+  const prFiles = new Map(diff.prFiles.map((file) => [file.path, file]));
+  const unchanged = diff.unchanged.map((path) => {
+    const file = prFiles.get(path);
+    return {
+      path,
+      // The PR doesn't change the path at all now.
+      blobSha: (file === undefined ? undefined : reviewedBlobOf(file)) ?? NOT_CHANGED,
+      depth: reviewed.get(path)?.depth ?? ("full" as const),
+    };
+  });
   const headers = await readHeaders(repo, files, { skip: config.skip, include: config.include });
   const plan = planReview(files, config, { headers });
   const conventions = await readConventionFilesAt(repo, pr.baseSha, {
@@ -358,7 +373,7 @@ export async function prepareReview(
   const rulePacks = await loadRulePacks(config.rulepacks);
   const { done, carried } = doneFiles(plan, options);
   deps.progress(
-    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}${unreviewed.length > 0 ? `, ${unreviewed.length} left from earlier runs` : ""}.`,
+    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}.`,
   );
 
   const context = {
@@ -400,8 +415,12 @@ export async function prepareReview(
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
     done: [...done].map(([path, depth]) => ({ path, depth })),
     carried,
+    unchanged,
   };
 }
+
+/** What `files_reviewed` records for a path the PR doesn't change at a head it was covered at. */
+export const NOT_CHANGED = "not-changed";
 
 /**
  * What the planner flagged for a person: new code it skipped, and lockfile changes it couldn't
@@ -699,6 +718,16 @@ function reviewedFiles(prepared: PreparedReview, batches: readonly BatchReport[]
   );
   // A done file keeps the depth it was read at before, which may be closer than this plan's.
   const doneDepth = new Map(prepared.done.map((entry) => [entry.path, entry.depth]));
+  // Files whose PR change hasn't moved since they were reviewed are covered at this head too,
+  // whatever happened to the batches.
+  return [...prepared.unchanged, ...reviewedBatchFiles(prepared, finished, doneDepth)];
+}
+
+function reviewedBatchFiles(
+  prepared: PreparedReview,
+  finished: ReadonlySet<number>,
+  doneDepth: ReadonlyMap<string, ReadingDepth>,
+): ReviewedFile[] {
   return prepared.plan.batches.flatMap((batch) =>
     finished.has(batch.index)
       ? batch.files.flatMap(({ file, depth }) => {

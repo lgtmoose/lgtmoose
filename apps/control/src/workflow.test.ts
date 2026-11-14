@@ -177,11 +177,13 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         Object.assign(run, { filesTotal: plan.filesTotal, kind: plan.kind, fromSha: plan.fromSha });
     },
     async reviewedFiles() {
-      // The latest posted run's record of each path.
-      const latest = new Map<string, FileRecord>();
+      // The latest posted run's record of each path, with that run's head.
+      const latest = new Map<string, FileRecord & { reviewedAt: string }>();
       for (const run of runs.values()) {
-        if (run.status !== "succeeded") continue;
-        for (const file of run.files) latest.set(file.path, file);
+        if (run.status !== "succeeded" || run.result === undefined) continue;
+        for (const file of run.files) {
+          latest.set(file.path, { ...file, reviewedAt: run.result.reviewedSha });
+        }
       }
       return [...latest.values()];
     },
@@ -274,8 +276,8 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
 interface Setup {
   /** The head the PR is at when it's read. */
   head?: string;
-  /** What GitHub says the state of any review is; unset for a reader that can't tell. */
-  reviewState?: string;
+  /** What GitHub says about any review; unset for a reader that can't tell. */
+  review?: () => { state: string; commitId: string };
 }
 
 function harness(setup: Setup = {}) {
@@ -300,20 +302,21 @@ function harness(setup: Setup = {}) {
   };
   const runs = memoryRuns();
   const findings = memoryFindings();
-  const reviewStates: number[] = [];
+  /** The review IDs read from GitHub. */
+  const reviewReads: number[] = [];
   const logFields: Record<string, unknown>[] = [];
   /** What each `fetchCommits` on a clone asked for. */
   const fetched: string[][] = [];
-  const { reviewState } = setup;
+  const { review: reviewOf } = setup;
   const reader: PullReader = {
     pull: async () => pull(setup.head ?? headSha),
     comments: async () => [],
-    ...(reviewState === undefined
+    ...(reviewOf === undefined
       ? {}
       : {
-          reviewState: async (_target: unknown, id: number) => {
-            reviewStates.push(id);
-            return reviewState;
+          review: async (_target: unknown, id: number) => {
+            reviewReads.push(id);
+            return reviewOf();
           },
         }),
   };
@@ -372,7 +375,7 @@ function harness(setup: Setup = {}) {
     logFields,
     fetched,
     setup,
-    reviewStates,
+    reviewReads,
   };
 }
 
@@ -686,21 +689,31 @@ describe("later runs", () => {
     expect(reviews(h)).toBe(1);
   });
 
-  it("approves again after a push only when the earlier approval was dismissed", async () => {
-    for (const [state, again] of [
-      ["APPROVED", false],
-      ["DISMISSED", true],
-    ] as const) {
-      const h = harness({ reviewState: state });
+  it("posts no second approval only while GitHub has it as approved on this head", async () => {
+    const cases = [
+      // Still approved, on this commit: nothing to post.
+      { state: "APPROVED", onHead: true, push: false, again: false },
+      // Dismissed without a push: approve again.
+      { state: "DISMISSED", onHead: true, push: false, again: true },
+      // After a push the approval is of an older commit: approve the latest push.
+      { state: "APPROVED", onHead: false, push: true, again: true },
+    ];
+    for (const { state, onHead, push, again } of cases) {
+      const reviewed = headSha;
+      const h = harness({
+        review: () => ({ state, commitId: onHead ? headSha : reviewed }),
+      });
       await review(h, 1);
       // Shadow mode has no review IDs; a real poster records GitHub's.
       h.runs.pr.lastReviewId = 900;
-      headSha = await commit({ "src/other.ts": `export const rate = ${state.length};\n` }, state);
+      if (push) {
+        headSha = await commit({ "src/other.ts": "export const rate = 11;\n" }, "push");
+      }
 
       const { posted } = await review(h, 2);
 
       expect(posted).toMatchObject({ event: "APPROVE", reviewed: again });
-      expect(h.reviewStates).toEqual([900]);
+      expect(h.reviewReads).toEqual([900]);
     }
   });
 
@@ -723,7 +736,8 @@ describe("later runs", () => {
     // Fails again: src/total.ts is still unreviewed, however many runs go by.
     const again = await prepare(h.deps, JOB, exec(2), SETTINGS);
     expect(promptOf(h, again.runId)).toContain("src/total.ts");
-    expect(h.runs.runs.get(again.runId)).toMatchObject({ kind: "incremental", fromSha: first });
+    // Nothing has been reviewed yet, so there is nothing to compare with: still a full review.
+    expect(h.runs.runs.get(again.runId)).toMatchObject({ kind: "full" });
     await post(h.deps, again.runId);
     headSha = await commit({ "src/other.ts": "export const rate = 17;\n" }, "unrelated again");
 
@@ -853,6 +867,83 @@ describe("later runs", () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
+  it("doesn't review a file again when only a base merge changed its blob", async () => {
+    const h = harness();
+    await addOther();
+    await review(h, 1);
+    // main appends to src/total.ts, far from the PR's change, and the PR merges main.
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit({ "src/total.ts": `${TOTAL}export const unit = 1;\n` }, "main edit");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "merge", "--quiet", "--no-edit", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    headSha = await git(work, "rev-parse", "HEAD");
+
+    const { prepared } = await review(h, 2);
+
+    expect(h.runs.runs.get(prepared.runId)).toMatchObject({ kind: "incremental" });
+    expect(prepared.batches).toEqual([]);
+  });
+
+  it("reviews what a failed batch's files stopped adding, on a later run", async () => {
+    const h = harness();
+    const CHECK = "  if (items.length === 0) return 0;\n";
+    // Run 1 reviews a check the PR adds, and a change to src/other.ts.
+    const withCheck = HEAD_TOTAL.replace("  let sum = 0;\n", `  let sum = 0;\n${CHECK}`);
+    headSha = await commit(
+      { "src/total.ts": withCheck, "src/other.ts": "export const rate = 3;\n" },
+      "add a check",
+    );
+    await review(h, 1);
+    // The next push drops the check and reverts src/other.ts; that run's batch fails.
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL, "src/other.ts": OTHER }, "drop them");
+    const failed = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    await post(h.deps, failed.runId);
+    expect(h.runs.pr.lastReviewedSha).toBe(headSha);
+    // A later, unrelated push: both are still compared with run 1's review.
+    headSha = await commit({ "src/new.ts": "export const later = true;\n" }, "later");
+
+    const { prepared } = await review(h, 3);
+
+    const prompt = promptOf(h, prepared.runId);
+    expect(prompt).toContain("src/total.ts");
+    expect(prompt).toContain("src/other.ts");
+    expect(prompt).toContain("if (items.length === 0) return 0;");
+    expect(prompt).toContain("no longer adds");
+  });
+
+  it("follows an old-side finding on a renamed file across base edits", async () => {
+    const h = harness();
+    // The PR renames src/total.ts and deletes its return; main later edits the file's top.
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit({ "src/sum.ts": HEAD_TOTAL.replace("  return sum;\n", "") }, "rename");
+    const left = finding({
+      path: "src/sum.ts",
+      side: "LEFT",
+      line: 6,
+      title: "Return was removed",
+      evidence: "return sum;",
+    });
+    await review(h, 1, [left]);
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit({ "src/total.ts": `// header\n// more\n${TOTAL}` }, "main edit");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "merge", "--quiet", "--no-edit", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    headSha = await git(work, "rev-parse", "HEAD");
+
+    await review(h, 2);
+
+    // Still deleted, two lines further down the base.
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("skips following findings when there are none", async () => {
+    const h = harness();
+    await review(h, 1);
+    expect(h.fetched).toEqual([]);
+  });
+
   it("reviews a change again when it's re-applied after a full revert", async () => {
     const h = harness();
     await addOther();
@@ -915,7 +1006,7 @@ describe("later runs", () => {
       version: number;
       review: Record<string, unknown>;
     };
-    for (const field of ["kind", "done", "carried", "unreviewed"]) delete manifest.review[field];
+    for (const field of ["kind", "done", "carried", "unchanged"]) delete manifest.review[field];
     h.objects.set(key, JSON.stringify({ ...manifest, version: 1 }));
     h.objects.set(runKeys(prepared.runId).batchOutput(0), JSON.stringify(output()));
 
@@ -938,6 +1029,17 @@ describe("readManifest", () => {
         JSON.stringify({ version: 1, installationId: 1, review: { ...review, carried: [[]] } }),
       ),
     ).toThrow("Unsupported run manifest");
+  });
+
+  it("refuses a version 2 manifest of another shape", async () => {
+    const h = harness();
+    const prepared = await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    const text = h.objects.get(runKeys(prepared.runId).prepared) ?? "";
+    expect(readManifest(text).version).toBe(2);
+    const manifest = JSON.parse(text) as { review: Record<string, unknown> };
+    // An earlier build of version 2 kept `done` as paths.
+    manifest.review.done = ["src/total.ts"];
+    expect(() => readManifest(JSON.stringify(manifest))).toThrow("review.done");
   });
 
   it("fills in a main-branch version 1 manifest", () => {

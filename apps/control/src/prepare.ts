@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { findingSchema } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import {
   batchInputSchema,
@@ -9,6 +10,7 @@ import {
   type ResumedWork,
 } from "@lgtmoose/pipeline";
 import { jobTarget, type WorkflowJob } from "./job.js";
+import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps } from "./ports.js";
 
@@ -32,7 +34,7 @@ export interface RunManifest {
 interface LegacyManifest {
   version: 1;
   installationId: number;
-  review: Omit<PreparedReview, "kind" | "done" | "carried">;
+  review: Omit<PreparedReview, "kind" | "done" | "carried" | "unchanged">;
 }
 
 /** What the prepare step hands the state machine: the run and the batches to map over. */
@@ -70,16 +72,52 @@ function runKind(
   return prepared.kind;
 }
 
+const depth = z.enum(["full", "mechanical", "move"]);
+const reviewedFile = z.object({ path: z.string(), blobSha: z.string(), depth });
+
+/**
+ * The parts of a version 2 manifest that incremental reviews added or changed shape, checked
+ * so a manifest of another shape (one from an earlier build of this version) is refused rather
+ * than misread. The rest is passed through as written.
+ */
+const manifestSchema = z.object({
+  version: z.literal(MANIFEST_VERSION),
+  installationId: z.number().int().positive(),
+  review: z.looseObject({
+    kind: z.enum(["full", "incremental"]),
+    done: z.array(z.object({ path: z.string(), depth })),
+    carried: z.array(z.array(findingSchema)),
+    unchanged: z.array(reviewedFile),
+    jobs: z.array(
+      z.looseObject({
+        index: z.number().int().min(0),
+        files: z.array(z.string()),
+        prompt: z.string().optional(),
+      }),
+    ),
+    files: z.array(z.looseObject({ path: z.string() })),
+    plan: z.looseObject({ files: z.array(z.unknown()), skipped: z.array(z.unknown()) }),
+  }),
+});
+
 /**
  * Parses a run's manifest. Written by the run's own prepare step with the control task's role:
- * trusted, not model output. A version 1 manifest from before incremental reviews (it has none
- * of their fields) gets them, so a run prepared before a deploy still posts after it. Any other
- * version, or a version 1 with some of those fields, is refused rather than guessed at.
+ * trusted, not model output, but its shape is checked (see `manifestSchema`). A version 1
+ * manifest from before incremental reviews (it has none of their fields) gets them, so a run
+ * prepared before a deploy still posts after it. Anything else is refused rather than guessed
+ * at.
  */
 export function readManifest(text: string): RunManifest {
   const manifest = JSON.parse(text) as { version?: unknown; review?: Record<string, unknown> };
-  if (manifest.version === MANIFEST_VERSION) return manifest as unknown as RunManifest;
-  const incrementalFields = ["kind", "done", "carried", "unreviewed"].filter(
+  if (manifest.version === MANIFEST_VERSION) {
+    const parsed = manifestSchema.safeParse(manifest);
+    if (!parsed.success) {
+      const fields = parsed.error.issues.map((issue) => issue.path.join(".")).join(", ");
+      throw new Error(`Unsupported run manifest (version 2, unexpected fields: ${fields}).`);
+    }
+    return manifest as unknown as RunManifest;
+  }
+  const incrementalFields = ["kind", "done", "carried", "unreviewed", "unchanged"].filter(
     (field) => manifest.review !== undefined && field in manifest.review,
   );
   if (manifest.version !== 1 || manifest.review === undefined || incrementalFields.length > 0) {
@@ -89,7 +127,7 @@ export function readManifest(text: string): RunManifest {
   return {
     ...legacy,
     version: MANIFEST_VERSION,
-    review: { ...legacy.review, kind: "full", done: [], carried: [] },
+    review: { ...legacy.review, kind: "full", done: [], carried: [], unchanged: [] },
   };
 }
 
@@ -184,7 +222,8 @@ export async function prepare(
       url: deps.cloneUrl(target.owner, target.repo),
       dir: checkout,
       headSha: pr.headSha,
-      otherShas: lastReviewed === undefined ? [pr.baseSha] : [pr.baseSha, lastReviewed],
+      // The commits files were last reviewed at, to compare their PR changes with.
+      otherShas: [pr.baseSha, ...new Set(reviewed.map((file) => file.reviewedAt))],
       token: await github.token(),
     });
     const prepared = await prepareReview(
@@ -226,7 +265,7 @@ export async function prepare(
     await deps.runs.setPlan(run.runId, {
       filesTotal: prepared.plan.files.length,
       kind: runKind(prepared, lastReviewed),
-      fromSha: prepared.lastReviewed,
+      fromSha: prepared.kind === "incremental" ? lastReviewed : undefined,
     });
     deps.log("prepared", {
       runId: run.runId,

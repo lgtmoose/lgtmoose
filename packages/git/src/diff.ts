@@ -1,6 +1,7 @@
 import type { Repo } from "./clone.js";
 import { importLines, languageOf } from "./imports.js";
 import { parsePatch, type FilePatch, type Hunk } from "./patch.js";
+import { listTree } from "./tree.js";
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed" | "type-changed";
 
@@ -43,21 +44,33 @@ export interface ReviewDiff {
   mergeBase: string;
   headSha: string;
   lastReviewed?: string;
-  /** Why an incremental review fell back to a full one. */
+  /** Why an incremental review fell back to a full one, for some files or all. */
   fallbackReason?: string;
   files: FileDiff[];
   /**
    * Every file the PR changes against the merge base, whatever the kind: `files` itself for a
-   * full review. For what holds approval for the whole PR, such as a lockfile change.
+   * full review.
    */
   prFiles: FileDiff[];
+  /**
+   * Incremental reviews with `reviewedAt` only: paths reviewed at a commit still here whose PR
+   * change hasn't moved since, so they're covered at this head too (whether or not the PR still
+   * changes them). Not in `files`.
+   */
+  unchanged: string[];
 }
 
 export interface DiffOptions {
   /** The base branch's head commit. */
   baseSha: string;
-  /** The commit reviewed last time. Omit for a first review. */
+  /** The commit reviewed last time, for every file. Omit for a first review. */
   lastReviewed?: string;
+  /**
+   * The commit each path (at the time) was last reviewed at, when that differs per file, such
+   * as after a batch failed. Takes the place of `lastReviewed`: a path with no entry has never
+   * been reviewed, so its whole PR diff is reviewed.
+   */
+  reviewedAt?: ReadonlyMap<string, string>;
 }
 
 const STATUS: Record<string, FileStatus> = {
@@ -173,13 +186,45 @@ async function diffRange(
   repo: Repo,
   from: string,
   to: string,
-  { detectMechanical = true }: { detectMechanical?: boolean } = {},
+  {
+    detectMechanical = true,
+    paths,
+  }: {
+    detectMechanical?: boolean;
+    /**
+     * Only files with one of these paths on either side. Renames are still found: the file list
+     * comes from the whole diff, and only the patch is limited (to both sides' paths).
+     */
+    paths?: readonly string[];
+  } = {},
 ): Promise<FileDiff[]> {
-  const [raw, patch] = await Promise.all([
-    repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]),
-    repo.git([...DIFF_FLAGS, "--unified=3", from, to]),
-  ]);
-  const entries = parseRaw(raw);
+  let entries: RawEntry[];
+  let patch: string;
+  if (paths === undefined) {
+    const [raw, text] = await Promise.all([
+      repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]),
+      repo.git([...DIFF_FLAGS, "--unified=3", from, to]),
+    ]);
+    entries = parseRaw(raw);
+    patch = text;
+  } else {
+    const wanted = new Set(paths);
+    entries = parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to])).filter(
+      (entry) => wanted.has(entry.oldPath) || wanted.has(entry.newPath),
+    );
+    const sides = [...new Set(entries.flatMap((entry) => [entry.oldPath, entry.newPath]))];
+    patch =
+      sides.length === 0
+        ? ""
+        : await repo.git([
+            ...DIFF_FLAGS,
+            "--unified=3",
+            from,
+            to,
+            "--",
+            ...sides.map((path) => `:(literal)${path}`),
+          ]);
+  }
   const patches = mergePatches(parsePatch(patch));
   // One batched read for every blob mechanical detection needs, instead of a process each.
   const candidates = entries.filter(mightBeMechanical);
@@ -223,34 +268,31 @@ async function diffRange(
   });
 }
 
-/** Paths per ls-tree, to stay well under the OS argument limit. */
-const PATHS_PER_LIST = 1000;
-
 /** The blob (or gitlink) each of these paths has at `sha`; paths it doesn't have are left out. */
 async function blobsAt(
   repo: Repo,
   sha: string,
   paths: readonly string[],
 ): Promise<Map<string, string>> {
-  const blobs = new Map<string, string>();
-  for (let i = 0; i < paths.length; i += PATHS_PER_LIST) {
-    // `:(literal)`: no path is read as a glob or pathspec magic.
-    const literal = paths.slice(i, i + PATHS_PER_LIST).map((path) => `:(literal)${path}`);
-    const out = await repo.git(["ls-tree", "-z", "--full-tree", sha, "--", ...literal]);
-    for (const entry of out.split("\0")) {
-      const match = /^\d+ (?:blob|commit) ([0-9a-f]{40,64})\t(.*)$/s.exec(entry);
-      if (match?.[1] !== undefined && match[2] !== undefined) blobs.set(match[2], match[1]);
-    }
-  }
-  return blobs;
+  const entries = await listTree((args) => repo.git(args), sha, paths);
+  return new Map(
+    entries.flatMap((entry) =>
+      entry.type === "blob" || entry.type === "commit" ? [[entry.path, entry.sha] as const] : [],
+    ),
+  );
 }
 
 /**
  * Every file `from..to` changes, with hunks and blob SHAs, as a plain commit-to-commit diff (no
  * merge base, no mechanical detection). For following lines from one commit to another.
  */
-export function diffCommits(repo: Repo, from: string, to: string): Promise<FileDiff[]> {
-  return diffRange(repo, from, to, { detectMechanical: false });
+export function diffCommits(
+  repo: Repo,
+  from: string,
+  to: string,
+  options: { paths?: readonly string[] } = {},
+): Promise<FileDiff[]> {
+  return diffRange(repo, from, to, { detectMechanical: false, ...options });
 }
 
 /** Head-side line numbers each file's diff adds. */
@@ -324,6 +366,55 @@ function removedTexts(
   return removed;
 }
 
+/** What one baseline commit gives: the PR's diff back then, and what changed since. */
+interface Baseline {
+  since: Map<string, FileDiff>;
+  previous: Map<string, FileDiff>;
+  previousFiles: FileDiff[];
+  /** Paths renamed since then, to their new names: the previous diff has them under the old ones. */
+  movedAway: Map<string, string>;
+}
+
+async function baseline(repo: Repo, baseSha: string, sha: string): Promise<Baseline> {
+  const previousBase = (await repo.git(["merge-base", baseSha, sha])).trim();
+  const [sinceFiles, previousFiles] = await Promise.all([
+    diffRange(repo, sha, repo.headSha, { detectMechanical: false }),
+    diffRange(repo, previousBase, sha, { detectMechanical: false }),
+  ]);
+  return {
+    since: new Map(sinceFiles.map((f) => [f.path, f])),
+    previous: new Map(previousFiles.map((f) => [f.path, f])),
+    previousFiles,
+    movedAway: new Map(
+      sinceFiles.flatMap((f) => (f.oldPath === undefined ? [] : [[f.oldPath, f.path] as const])),
+    ),
+  };
+}
+
+/**
+ * What changed in one file's PR change since its baseline: the file with its incremental
+ * notes, or undefined when nothing did (the PR adds the same lines, moved or not, and stopped
+ * adding nothing).
+ */
+function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
+  const changed = base.since.get(file.path);
+  if (file.status === "deleted") {
+    // Deleted since the last review (it still existed then).
+    return changed?.status === "deleted"
+      ? { ...file, changedSinceLastReview: [], removedSinceLastReview: [] }
+      : undefined;
+  }
+  const before = base.previous.get(file.oldPath ?? file.path) ?? base.previous.get(file.path);
+  const removed = removedTexts(before, file, changed);
+  const prLines = addedLines(file);
+  const newLines = changed
+    ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
+    : [];
+  const renamedSince = changed?.status === "renamed" && file.status === "renamed";
+  if (newLines.length === 0 && removed.length === 0 && !renamedSince) return undefined;
+  return { ...file, changedSinceLastReview: newLines, removedSinceLastReview: removed };
+}
+
 /**
  * The diff to review.
  *
@@ -331,99 +422,123 @@ function removedTexts(
  * whatever the base branch did meanwhile.
  *
  * An incremental review keeps the same PR diff, but only the files where the PR's own changes
- * moved since `lastReviewed`: lines it adds that changed since then, and lines it added then but
- * no longer does. Both come from comparing the PR's diff, not the commits, so changes that
- * arrived by merging the base branch into the PR, and the base-branch changes a rebase brings,
- * drop out. If the last reviewed commit is gone (force-pushed away and collected), it falls back
- * to a full review.
+ * moved since they were last reviewed: lines it adds that changed since then, and lines it
+ * added then but no longer does. Both come from comparing the PR's diff, not the commits, so
+ * changes that arrived by merging the base branch into the PR, and the base-branch changes a
+ * rebase brings, drop out. Each file is compared with its own last review (`reviewedAt`), or
+ * all with `lastReviewed`; a file never reviewed is reviewed whole. If a file's last reviewed
+ * commit is gone (force-pushed away and collected), that file is reviewed whole too.
+ *
+ * Files the PR stopped changing altogether are listed with what they no longer add, when they
+ * still exist; a file the PR added and dropped again has nothing left to review.
  */
 export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<ReviewDiff> {
   const mergeBase = (await repo.git(["merge-base", options.baseSha, repo.headSha])).trim();
-  const lastReviewed = options.lastReviewed;
   const files = await diffRange(repo, mergeBase, repo.headSha);
-  if (lastReviewed === repo.headSha) {
-    return {
-      kind: "incremental",
-      mergeBase,
-      headSha: repo.headSha,
-      lastReviewed,
-      files: [],
-      prFiles: files,
-    };
-  }
-  const full: ReviewDiff = {
-    kind: "full",
+  const { reviewedAt, lastReviewed } = options;
+  const baselineOf = (path: string): string | undefined =>
+    reviewedAt === undefined ? lastReviewed : reviewedAt.get(path);
+  const result = {
     mergeBase,
     headSha: repo.headSha,
-    files,
+    ...(lastReviewed === undefined ? {} : { lastReviewed }),
     prFiles: files,
   };
-  if (lastReviewed === undefined) return full;
-  if (!(await repo.hasCommit(lastReviewed))) {
-    return {
-      ...full,
-      fallbackReason: `The last reviewed commit ${lastReviewed.slice(0, 12)} is no longer in the repository (force-pushed away), so this is a full review.`,
-    };
+  if (reviewedAt === undefined && lastReviewed === undefined) {
+    return { ...result, kind: "full", files, unchanged: [] };
   }
 
-  // What changed between the two commits, and what the PR's own diff was back then.
-  const previousBase = (await repo.git(["merge-base", options.baseSha, lastReviewed])).trim();
-  const [sinceFiles, previousFiles] = await Promise.all([
-    diffRange(repo, lastReviewed, repo.headSha, { detectMechanical: false }),
-    diffRange(repo, previousBase, lastReviewed, { detectMechanical: false }),
-  ]);
-  const since = new Map(sinceFiles.map((f) => [f.path, f]));
-  const previous = new Map(previousFiles.map((f) => [f.path, f]));
+  // Every baseline commit in use, with what it gives; undefined when it's gone.
+  const wanted = new Set<string>();
+  for (const file of files) {
+    const sha = baselineOf(file.path);
+    if (sha !== undefined) wanted.add(sha);
+  }
+  for (const sha of reviewedAt?.values() ?? (lastReviewed === undefined ? [] : [lastReviewed])) {
+    wanted.add(sha);
+  }
+  const baselines = new Map<string, Baseline | undefined>();
+  for (const sha of wanted) {
+    if (sha === repo.headSha) {
+      // Reviewed at this very head: nothing has changed since.
+      const same = new Map(files.map((f) => [f.path, f]));
+      baselines.set(sha, {
+        since: new Map(),
+        previous: same,
+        previousFiles: files,
+        movedAway: new Map(),
+      });
+    } else {
+      baselines.set(
+        sha,
+        (await repo.hasCommit(sha)) ? await baseline(repo, options.baseSha, sha) : undefined,
+      );
+    }
+  }
 
   const incremental: FileDiff[] = [];
-  const seen = new Set<string>();
-  // Renamed since the last review: the previous diff has the file under its old path, even when
-  // the current PR diff shows it as a plain addition under the new one.
-  for (const moved of sinceFiles) if (moved.oldPath !== undefined) seen.add(moved.oldPath);
+  const unchanged: string[] = [];
+  const gone: string[] = [];
+  let compared = false;
+  const covered = new Set<string>();
+  // Paths the PR changes now, either side.
+  const inPr = new Set(
+    files.flatMap((file) => [file.path, ...(file.oldPath === undefined ? [] : [file.oldPath])]),
+  );
   for (const file of files) {
-    seen.add(file.path);
-    // A file renamed since the last review is under its old path in the previous diff.
-    if (file.oldPath !== undefined) seen.add(file.oldPath);
-    const changed = since.get(file.path);
-    const before = previous.get(file.oldPath ?? file.path) ?? previous.get(file.path);
-    const removed = file.status === "deleted" ? [] : removedTexts(before, file, changed);
-    if (file.status === "deleted") {
-      // Deleted since the last review (it still existed then).
-      if (changed?.status === "deleted")
-        incremental.push({ ...file, changedSinceLastReview: [], removedSinceLastReview: [] });
+    covered.add(file.path);
+    if (file.oldPath !== undefined) covered.add(file.oldPath);
+    const sha = baselineOf(file.path);
+    const base = sha === undefined ? undefined : baselines.get(sha);
+    if (base === undefined) {
+      // Never reviewed, or its last reviewed commit is gone: the whole PR diff.
+      if (sha !== undefined) gone.push(file.path);
+      incremental.push(file);
       continue;
     }
-    const prLines = addedLines(file);
-    const newLines = changed
-      ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
-      : [];
-    const renamedSince = changed?.status === "renamed" && file.status === "renamed";
-    if (newLines.length > 0 || removed.length > 0 || renamedSince) {
-      incremental.push({
-        ...file,
-        changedSinceLastReview: newLines,
-        removedSinceLastReview: removed,
-      });
+    compared = true;
+    const moved = sinceBaseline(file, base);
+    if (moved === undefined) unchanged.push(file.path);
+    else incremental.push(moved);
+  }
+
+  // Files the PR changed at their last review but no longer changes at all (fully reverted).
+  const reverted: { before: FileDiff; removed: string[] }[] = [];
+  for (const [sha, base] of baselines) {
+    if (base === undefined) continue;
+    for (const before of base.previousFiles) {
+      if (baselineOf(before.path) !== sha) continue;
+      const movedTo = base.movedAway.get(before.path);
+      if (covered.has(before.path) || (movedTo !== undefined && inPr.has(movedTo))) continue;
+      covered.add(before.path);
+      compared = true;
+      const removed = before.status === "deleted" ? [] : removedTexts(before, undefined);
+      if (removed.length > 0) reverted.push({ before, removed });
+      else unchanged.push(before.path);
     }
   }
-  // Files the PR changed at the last review but no longer changes at all (fully reverted). Their
-  // blobs are the ones at head (the same as at the merge base), not the last review's, which the
-  // file no longer has.
-  const reverted = previousFiles.flatMap((before) => {
-    if (seen.has(before.path) || before.status === "deleted") return [];
-    const removed = removedTexts(before, undefined);
-    return removed.length > 0 ? [{ before, removed }] : [];
-  });
+  // Their blobs are the ones at head (the same as at the merge base), not the last review's,
+  // which the file no longer has.
   const atHead = await blobsAt(
     repo,
     repo.headSha,
-    reverted.map(({ before }) => before.path),
+    reverted.flatMap(({ before }) =>
+      before.oldPath === undefined ? [before.path] : [before.path, before.oldPath],
+    ),
   );
   for (const { before, removed } of reverted) {
-    const blob = atHead.get(before.path);
+    // A reverted rename is back at its old path.
+    const path = atHead.has(before.path) ? before.path : before.oldPath;
+    const blob = path === undefined ? undefined : atHead.get(path);
+    if (path !== before.path) unchanged.push(before.path);
+    // Added by the PR and dropped again: no file, nothing to review; covered at this head.
+    if (path === undefined || blob === undefined || inPr.has(path)) continue;
+    const rest: FileDiff = { ...before };
+    delete rest.oldPath;
     incremental.push({
-      ...before,
-      status: blob === undefined ? "deleted" : "modified",
+      ...rest,
+      path,
+      status: "modified",
       oldBlob: blob,
       newBlob: blob,
       moved: false,
@@ -433,12 +548,23 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       removedSinceLastReview: removed,
     });
   }
+  // Paths with a record that the PR doesn't change and that weren't in their baseline's diff
+  // either: nothing to review, still covered.
+  for (const path of reviewedAt?.keys() ?? []) {
+    if (covered.has(path)) continue;
+    const sha = reviewedAt?.get(path);
+    if (sha !== undefined && baselines.get(sha) !== undefined) unchanged.push(path);
+  }
+
   return {
-    kind: "incremental",
-    mergeBase,
-    headSha: repo.headSha,
-    lastReviewed,
+    ...result,
+    kind: compared ? "incremental" : "full",
     files: incremental,
-    prFiles: files,
+    unchanged,
+    ...(gone.length > 0
+      ? {
+          fallbackReason: `The commit ${gone.length === 1 ? `${gone[0] ?? ""} was` : `${gone.length} files were`} last reviewed at is no longer in the repository (force-pushed away), so ${gone.length === 1 ? "it is" : "they are"} reviewed in full.`,
+        }
+      : {}),
   };
 }

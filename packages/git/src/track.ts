@@ -45,7 +45,8 @@ export async function trackLines(
   if (lines.length === 0) return [];
   const files = new Map<string, FileDiff>();
   if (fromSha !== toSha) {
-    for (const file of await diffCommits(repo, fromSha, toSha)) {
+    const paths = [...new Set(lines.map((ref) => ref.path))];
+    for (const file of await diffCommits(repo, fromSha, toSha, { paths })) {
       files.set(file.oldPath ?? file.path, file);
     }
   }

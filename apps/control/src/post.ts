@@ -84,10 +84,12 @@ async function standing(
   headSha: string,
 ): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
-  const { changed, atHead } = prPaths(prFiles);
+  const { atHead } = prPaths(prFiles);
+  // Old-side lines are keyed by the file's path on the base side, which differs for renames.
+  const baseSide = new Map(prFiles.map((file) => [file.path, file.oldPath ?? file.path]));
   const deletedLines = new Map(
     prFiles.map((file) => [
-      file.path,
+      file.oldPath ?? file.path,
       new Set(
         file.hunks.flatMap((hunk) =>
           hunk.lines.flatMap((line) =>
@@ -97,76 +99,102 @@ async function standing(
       ),
     ]),
   );
+  const refs = (list: readonly FindingRecord[], path: (record: FindingRecord) => string) =>
+    list.map((record) => ({ path: path(record), line: record.line }));
+  const groupBy = <K>(list: readonly FindingRecord[], key: (record: FindingRecord) => K) => {
+    const groups = new Map<K, FindingRecord[]>();
+    for (const record of list) {
+      const group = groups.get(key(record));
+      if (group === undefined) groups.set(key(record), [record]);
+      else group.push(record);
+    }
+    return groups;
+  };
+
+  // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
+  // followed (the commit it was raised at is gone, or shares no history with the base).
+  const at = new Map<FindingRecord, LineRef | undefined>();
+  const followable = new Map<string, boolean>();
+  for (const sha of new Set(records.map((record) => record.raisedAtSha))) {
+    followable.set(sha, await repo.hasCommit(sha));
+  }
+  // New-side lines: from the head they were raised at to this head.
+  const right = records.filter((r) => r.side === "RIGHT" && followable.get(r.raisedAtSha));
+  for (const [sha, group] of groupBy(right, (record) => record.raisedAtSha)) {
+    const moved = await trackLines(
+      repo,
+      sha,
+      headSha,
+      refs(group, (record) => record.path),
+    );
+    for (const [i, record] of group.entries()) at.set(record, moved[i]);
+  }
+  // Old-side lines: from the base the PR had when they were raised (its merge base with
+  // today's) to today's merge base, by their base-side path; one diff per such base.
+  const left = records.filter((r) => r.side === "LEFT" && followable.get(r.raisedAtSha));
+  const raisedBases = new Map<string, string>();
+  for (const sha of new Set(left.map((record) => record.raisedAtSha))) {
+    // No common history: exit 1, no output.
+    const base = (await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })).trim();
+    if (base !== "") raisedBases.set(sha, base);
+  }
+  const leftFollowed = left.filter((record) => raisedBases.has(record.raisedAtSha));
+  for (const [base, group] of groupBy(leftFollowed, (r) => raisedBases.get(r.raisedAtSha))) {
+    if (base === undefined) continue;
+    const basePath = (record: FindingRecord) => baseSide.get(record.path) ?? record.path;
+    const moved = await trackLines(repo, base, mergeBase, refs(group, basePath));
+    for (const [i, record] of group.entries()) {
+      const place = moved[i];
+      // Stands only while the PR still deletes that line.
+      const deleted = place !== undefined && deletedLines.get(place.path)?.has(place.line);
+      at.set(record, deleted === true ? { path: record.path, line: place.line } : undefined);
+    }
+  }
+
   const open: EarlierFinding[] = [];
   const outdated: string[] = [];
   const reopened: string[] = [];
-  const bySha = new Map<string, FindingRecord[]>();
   for (const record of records) {
-    const group = bySha.get(record.raisedAtSha);
-    if (group === undefined) bySha.set(record.raisedAtSha, [record]);
-    else group.push(record);
-  }
-  const refs = (list: readonly FindingRecord[]) =>
-    list.map((record) => ({ path: record.path, line: record.line }));
-  for (const [sha, group] of bySha) {
-    const right = group.filter((record) => record.side === "RIGHT");
-    const left = group.filter((record) => record.side === "LEFT");
-    const followable = await repo.hasCommit(sha);
-    const movedRight = followable ? await trackLines(repo, sha, headSha, refs(right)) : refs(right);
-    let movedLeft: (LineRef | undefined)[] = refs(left);
-    // Old-side lines are followed from the base the finding was raised against; with no common
-    // history (exit 1, no output) they can't be.
-    let leftFollowable = false;
-    if (followable && left.length > 0) {
-      const raisedBase = (
-        await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })
-      ).trim();
-      leftFollowable = raisedBase !== "";
-      if (leftFollowable) movedLeft = await trackLines(repo, raisedBase, mergeBase, refs(left));
+    const isLeft = record.side === "LEFT";
+    let place: LineRef | undefined;
+    if (at.has(record)) {
+      place = at.get(record);
+      if (place !== undefined && !isLeft && !atHead.has(place.path)) place = undefined;
+    } else {
+      // Not followable: an open finding keeps its place while its file is in the PR.
+      const inPr = isLeft ? baseSide.has(record.path) : atHead.has(record.path);
+      place =
+        record.status === "open" && inPr ? { path: record.path, line: record.line } : undefined;
     }
-    const at = new Map([
-      ...right.map((record, i) => [record, movedRight[i]] as const),
-      ...left.map((record, i) => [record, movedLeft[i]] as const),
-    ]);
-    for (const record of group) {
-      const isLeft = record.side === "LEFT";
-      const place = at.get(record);
-      const inPr = place !== undefined && (isLeft ? changed : atHead).has(place.path);
-      // Followed: the line must still exist (new side) or still be deleted (old side). Not
-      // followable: an open finding keeps its place while its file is in the PR.
-      const followed =
-        place !== undefined &&
-        (!isLeft || (deletedLines.get(place.path)?.has(place.line) ?? false));
-      const canFollow = isLeft ? leftFollowable : followable;
-      const stands = inPr && (canFollow ? followed : record.status === "open");
-      if (!stands) {
-        if (record.status === "open") outdated.push(record.id);
-        continue;
-      }
-      if (record.status === "outdated") reopened.push(record.id);
-      const shift = place.line - record.line;
-      const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
-      const finding: Finding = {
-        rule_category: record.ruleCategory,
-        severity: record.severity,
-        path: place.path,
-        line: place.line,
-        side: record.side,
-        ...(startLine === undefined || startLine < 1 ? {} : { start_line: startLine }),
-        title: record.title,
-        body: record.body,
-        // Not kept: earlier findings are only counted and listed, never posted again.
-        evidence: record.title,
-      };
-      open.push({ finding, fingerprint: record.fingerprint });
+    if (place === undefined) {
+      if (record.status === "open") outdated.push(record.id);
+      continue;
     }
+    if (record.status === "outdated") reopened.push(record.id);
+    const shift = place.line - record.line;
+    const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
+    const finding: Finding = {
+      rule_category: record.ruleCategory,
+      severity: record.severity,
+      path: place.path,
+      line: place.line,
+      side: record.side,
+      ...(startLine === undefined || startLine < 1 ? {} : { start_line: startLine }),
+      title: record.title,
+      body: record.body,
+      // Not kept: earlier findings are only counted and listed, never posted again.
+      evidence: record.title,
+    };
+    open.push({ finding, fingerprint: record.fingerprint });
   }
   return { open, outdated, reopened };
 }
 
 /**
- * Whether the approval we posted last still stands on GitHub. A push can dismiss it as stale,
- * so after one it's checked; unknown (shadow mode, no ID, the read failed) counts as not.
+ * Whether the approval we posted last still stands for this head: GitHub still has it as
+ * APPROVED (it can be dismissed without a push) and it was submitted on this very commit, so a
+ * repo that wants the latest push approved has it. Without a review ID (shadow mode) or a way
+ * to read it, only a run at the same head counts; a failed read counts as not standing.
  */
 async function approvalStands(
   reader: PullReader,
@@ -175,11 +203,12 @@ async function approvalStands(
   headSha: string,
 ): Promise<boolean> {
   if (run.lastReviewEvent !== "APPROVE") return false;
-  // Nothing was pushed since: nothing could have dismissed it.
-  if (run.lastReviewedSha === headSha) return true;
-  if (run.lastReviewId === undefined || reader.reviewState === undefined) return false;
+  if (run.lastReviewId === undefined || reader.review === undefined) {
+    return run.lastReviewedSha === headSha;
+  }
   try {
-    return (await reader.reviewState(target, run.lastReviewId)) === "APPROVED";
+    const review = await reader.review(target, run.lastReviewId);
+    return review.state === "APPROVED" && review.commitId === headSha;
   } catch {
     return false;
   }
@@ -231,11 +260,14 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       token: await github.token(),
       checkout: "none",
     });
-    const prFiles = await diffCommits(repo, prepared.mergeBase, pr.headSha);
-    const tracked = toTrack(records, prFiles);
-    // The commits those findings were raised at, to follow their lines: one request.
-    await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
-    const earlier = await standing(repo, tracked, prFiles, prepared.mergeBase, pr.headSha);
+    let earlier: Awaited<ReturnType<typeof standing>> = { open: [], outdated: [], reopened: [] };
+    if (records.length > 0) {
+      const prFiles = await diffCommits(repo, prepared.mergeBase, pr.headSha);
+      const tracked = toTrack(records, prFiles);
+      // The commits those findings were raised at, to follow their lines: one request.
+      await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
+      earlier = await standing(repo, tracked, prFiles, prepared.mergeBase, pr.headSha);
+    }
     ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {

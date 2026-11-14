@@ -96,12 +96,13 @@ export interface RunStore {
     },
   ): Promise<void>;
   /**
-   * For each path, the version the PR's latest posted (succeeded) run to review it recorded,
-   * and how closely. Only the latest counts: after a fix and a revert, the reverted file's old
-   * blob was reviewed once, but its findings were marked outdated since, so it isn't done.
+   * For each path, what the PR's latest posted (succeeded) run to cover it recorded: the version,
+   * how closely it was read, and that run's head (`reviewedAt`), which the next incremental
+   * review compares the file's PR change with. Only the latest counts: after a fix and a revert,
+   * the reverted file's old blob was reviewed once, but its findings were marked outdated since.
    * Unposted runs' files are left out: their findings were never posted (see `unpostedRuns`).
    */
-  reviewedFiles(pullRequestId: string): Promise<FileRecord[]>;
+  reviewedFiles(pullRequestId: string): Promise<(FileRecord & { reviewedAt: string })[]>;
   /** Records file versions a posted run reviewed. Recording one twice is a no-op. */
   recordFiles(runId: string, files: readonly FileRecord[]): Promise<void>;
   /**
