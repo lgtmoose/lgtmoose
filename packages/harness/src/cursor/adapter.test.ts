@@ -173,29 +173,53 @@ describe("CursorHarness", () => {
     expect(cursorPermissions("/homework").deny).toContain("Read(/home/**)");
   });
 
-  it("sets the checkout's hook configs aside for the run and puts them back", async () => {
-    await mkdir(join(cwd, ".cursor"));
+  it("sets the checkout's .cursor and .claude aside for the run and puts them back", async () => {
+    await mkdir(join(cwd, ".cursor", "rules"), { recursive: true });
     await mkdir(join(cwd, ".claude"));
     await writeFile(join(cwd, ".cursor", "hooks.json"), '{"hooks":{}}');
-    await writeFile(join(cwd, ".cursor", "cli.json"), "{}");
+    await writeFile(join(cwd, ".cursor", "rules", "a.mdc"), "rule");
     await writeFile(join(cwd, ".claude", "settings.json"), "{}");
+    await writeFile(join(cwd, "src.ts"), "");
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
     await run(harness);
     const [call] = await fake!.calls();
-    expect(call?.projectCursorDir).toHaveLength(2);
-    expect(call?.projectCursorDir).toContain("cli.json");
-    expect(call?.projectCursorDir).not.toContain("hooks.json");
+    expect(call?.checkoutEntries).toContain("src.ts");
+    expect(call?.checkoutEntries).not.toContain(".cursor");
+    expect(call?.checkoutEntries).not.toContain(".claude");
+    expect((await readdir(cwd)).sort()).toEqual([".claude", ".cursor", "src.ts"]);
     expect(await readFile(join(cwd, ".cursor", "hooks.json"), "utf8")).toBe('{"hooks":{}}');
-    expect((await readdir(join(cwd, ".cursor"))).sort()).toEqual(["cli.json", "hooks.json"]);
+    expect(await readdir(join(cwd, ".cursor", "rules"))).toEqual(["a.mdc"]);
     expect(await readdir(join(cwd, ".claude"))).toEqual(["settings.json"]);
   });
 
-  it("puts the hook configs back after a failed run too", async () => {
+  it("puts them back after a failed run too", async () => {
     await mkdir(join(cwd, ".cursor"));
     await writeFile(join(cwd, ".cursor", "hooks.json"), "{}");
     const harness = await harnessFor([{ stderr: "boom", exitCode: 1 }]);
     await failure(run(harness));
     expect(await readdir(join(cwd, ".cursor"))).toEqual(["hooks.json"]);
+  });
+
+  it("keeps the run's own failure when the config can't be put back", async () => {
+    await mkdir(join(cwd, ".cursor"));
+    const restoreErrors: unknown[] = [];
+    // The CLI makes a non-empty .cursor, so renaming the original back fails.
+    const harness = await harnessFor(
+      [{ stderr: "You've hit your usage limit", exitCode: 1, touch: ".cursor/state" }],
+      { onRestoreError: (error) => restoreErrors.push(error) },
+    );
+    expect((await failure(run(harness))).kind).toBe("plan_limit");
+    expect(restoreErrors).toHaveLength(1);
+  });
+
+  it("keeps a success when the config can't be put back", async () => {
+    await mkdir(join(cwd, ".claude"));
+    const restoreErrors: unknown[] = [];
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER), touch: ".claude/state" }], {
+      onRestoreError: (error) => restoreErrors.push(error),
+    });
+    expect((await run(harness)).output.findings).toHaveLength(1);
+    expect(restoreErrors).toHaveLength(1);
   });
 
   it("describes the schema in the prompt, the last argument", async () => {
@@ -319,10 +343,10 @@ describe("CursorHarness", () => {
     expect(await fake!.calls()).toEqual([]);
   });
 
-  it("refuses a prompt too long for one argument", async () => {
+  it("refuses a prompt too long for one argument, so the chain moves on", async () => {
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
     const error = await failure(run(harness, { prompt: "x".repeat(MAX_CURSOR_PROMPT_BYTES) }));
-    expect(error.kind).toBe("process");
+    expect(error.kind).toBe("input_too_large");
     expect(await fake!.calls()).toEqual([]);
   });
 

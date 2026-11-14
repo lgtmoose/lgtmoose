@@ -119,6 +119,38 @@ describe("FallbackHarness", () => {
     expect(seen.map((a) => a.outcome)).toEqual(["failed"]);
   });
 
+  it("moves on from a prompt too large for a provider, without cooling it down", async () => {
+    const store = new MemoryCooldownStore();
+    const next = scripted("b", []);
+    const { harness, seen } = chain(
+      [
+        {
+          providerId: "a",
+          harness: scripted("a", [new HarnessError("input_too_large", "too big")]),
+        },
+        { providerId: "b", harness: next },
+      ],
+      store,
+    );
+    const result = await harness.run(RUN);
+    expect(result.providerId).toBe("b");
+    expect(seen.map((a) => a.outcome)).toEqual(["input_too_large", "ok"]);
+    expect((await store.cooledUntil(["a"], NOW)).size).toBe(0);
+    expect(summarizeUsage([seen]).find((u) => u.providerId === "a")).toMatchObject({
+      limitHits: 0,
+      fallbacks: 1,
+    });
+  });
+
+  it("fails as input_too_large when no provider can take the prompt", async () => {
+    const { harness } = chain([
+      { providerId: "a", harness: scripted("a", [new HarnessError("input_too_large", "big")]) },
+    ]);
+    const error = (await harness.run(RUN).catch((e: unknown) => e)) as HarnessError;
+    expect(error.kind).toBe("input_too_large");
+    expect(error.message).toContain("a (input too large)");
+  });
+
   it("says when the first provider is back when every one is limited", async () => {
     const { harness } = chain([
       {

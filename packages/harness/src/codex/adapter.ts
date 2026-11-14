@@ -12,14 +12,15 @@ import {
   type ModelTier,
 } from "../harness.js";
 import { exitText, saveAttemptTranscript, success } from "../attempt.js";
-import { parseAnswer, repairPrompt, truncate } from "../answer.js";
-import { networkEnv } from "../claude-code/auth.js";
+import { parseAnswer, repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
+import { isolatedEnv, networkEnv } from "../env.js";
+import { addUsage } from "../usage.js";
 import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { authJsonSecrets, codexAuth } from "./auth.js";
 import { dropOptionalNulls, strictSchema } from "./schema.js";
-import { addUsage, classifyFailure, parseCodexEvents, type CodexRun } from "./stream.js";
+import { classifyFailure, parseCodexEvents, type CodexRun } from "./stream.js";
 
 export interface CodexHarnessOptions {
   /** Where each attempt's JSONL transcript is saved. */
@@ -382,24 +383,9 @@ function failIfUnusable(
   throw fail("process", `codex exited (${exitText(proc)}) without finishing: ${detail}`);
 }
 
-/**
- * Variables that keep the CLI and git from reading anything but the checkout: a fresh home and
- * CODEX_HOME, and git without user or system config, pager, prompts or lazy fetches.
- */
+/** `isolatedEnv`, plus CODEX_HOME and no colour. */
 function hardeningEnv(home: string, codexHome: string): Record<string, string> {
-  return {
-    HOME: home,
-    CODEX_HOME: codexHome,
-    TMPDIR: join(home, "tmp"),
-    NO_COLOR: "1",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_PAGER: "cat",
-    PAGER: "cat",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_NO_LAZY_FETCH: "1",
-  };
+  return { ...isolatedEnv(home), CODEX_HOME: codexHome, NO_COLOR: "1" };
 }
 
 /**
@@ -408,18 +394,10 @@ function hardeningEnv(home: string, codexHome: string): Record<string, string> {
  * described in the prompt.
  */
 function schemaFor(schema: z.ZodType): { strict?: unknown; json?: unknown; promptSuffix: string } {
-  let json: Record<string, unknown>;
-  try {
-    json = { ...z.toJSONSchema(schema, { io: "input", target: "draft-7" }) };
-    delete json.$schema;
-  } catch {
-    return { promptSuffix: "\n\nReply with only a JSON value, with no other text." };
-  }
+  const json = schemaJson(schema);
+  if (json === undefined) return { promptSuffix: schemaPromptSuffix(undefined) };
   if (json.type === "object") return { strict: strictSchema(json), json, promptSuffix: "" };
-  return {
-    json,
-    promptSuffix: `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`,
-  };
+  return { json, promptSuffix: schemaPromptSuffix(json) };
 }
 
 /** The run's error, marked with why the refreshed credential couldn't be handed back. */

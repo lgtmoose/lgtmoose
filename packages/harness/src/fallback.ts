@@ -53,6 +53,8 @@ export class MemoryCooldownStore implements CooldownStore {
  * What happened on one provider during a run:
  * - `ok`: it produced the output.
  * - `rate_limit`, `plan_limit`, `auth`: it failed that way, so the run moved on (fell back).
+ * - `input_too_large`: it can't take a prompt that big, so the run moved on without cooling it
+ *   down (the next, smaller batch may fit).
  * - `cooling_down`: skipped without a call, because an earlier limit hit hasn't reset yet.
  * - `failed`: any other failure, which ends the run (no fallback for timeouts or bad output).
  */
@@ -60,7 +62,7 @@ export interface ProviderAttempt {
   providerId: string;
   tier: ModelTier;
   model: string | undefined;
-  outcome: "ok" | CooldownReason | "cooling_down" | "failed";
+  outcome: "ok" | CooldownReason | "input_too_large" | "cooling_down" | "failed";
   usage?: HarnessUsage;
   /** When the provider can be used again, for limit hits and skips. */
   cooledUntil?: Date;
@@ -161,6 +163,7 @@ export class FallbackHarness implements Harness {
       this.options.onAttempt?.(attempt);
     };
     let lastLimit: HarnessError | undefined;
+    let lastSkip: HarnessError | undefined;
 
     for (const provider of providers) {
       const model = provider.models?.[tier] ?? (options.model || undefined);
@@ -197,6 +200,18 @@ export class FallbackHarness implements Harness {
         const kind = failure?.kind;
         const message =
           failure === undefined ? String(error) : `${failure.kind}: ${failure.message}`;
+        if (kind === "input_too_large") {
+          record({
+            providerId: provider.providerId,
+            tier,
+            model,
+            outcome: "input_too_large",
+            error: message,
+            transcriptKeys: failure?.transcriptKeys ?? [],
+          });
+          lastSkip = failure;
+          continue;
+        }
         if (failure === undefined || kind === undefined || !FALLBACK_KINDS.has(kind)) {
           record({
             providerId: provider.providerId,
@@ -231,7 +246,7 @@ export class FallbackHarness implements Harness {
       }
     }
 
-    throw this.exhausted(attempts, lastLimit);
+    throw this.exhausted(attempts, lastLimit ?? lastSkip);
   }
 
   /** The error when no provider could take the run: the soonest any of them is back. */
@@ -244,7 +259,7 @@ export class FallbackHarness implements Harness {
     const kind =
       last?.kind ?? (attempts.some((a) => a.outcome === "cooling_down") ? "rate_limit" : "process");
     const tried = attempts
-      .map((a) => `${a.providerId} (${a.outcome.replace("_", " ")})`)
+      .map((a) => `${a.providerId} (${a.outcome.replaceAll("_", " ")})`)
       .join(", ");
     const back = soonest === undefined ? "" : ` The first is back at ${soonest.toISOString()}.`;
     return new HarnessError(kind, `No provider could take the run: ${tried}.${back}`, {

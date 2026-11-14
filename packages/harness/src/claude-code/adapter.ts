@@ -11,20 +11,15 @@ import {
   type HarnessUsage,
 } from "../harness.js";
 import { exitText, saveAttemptTranscript, success } from "../attempt.js";
-import { repairPrompt, truncate } from "../answer.js";
+import { repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
+import { isolatedEnv, networkEnv } from "../env.js";
 import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
-import { claudeAuthEnv, networkEnv } from "./auth.js";
+import { addUsage } from "../usage.js";
+import { claudeAuthEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
-import {
-  addUsage,
-  findResult,
-  isAuthRetry,
-  outputOf,
-  usageOf,
-  type ResultEvent,
-} from "./stream.js";
+import { findResult, isAuthRetry, outputOf, usageOf, type ResultEvent } from "./stream.js";
 
 export interface ClaudeCodeHarnessOptions {
   /** Where each attempt's stream-json transcript is saved. */
@@ -202,9 +197,8 @@ function shellQuote(value: string): string {
  */
 function hardeningEnv(home: string, scrub: boolean): Record<string, string> {
   return {
-    HOME: home,
+    ...isolatedEnv(home),
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
-    TMPDIR: join(home, "tmp"),
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: scrub ? "1" : "0",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     DISABLE_AUTOUPDATER: "1",
@@ -213,13 +207,6 @@ function hardeningEnv(home: string, scrub: boolean): Record<string, string> {
     CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_PAGER: "cat",
-    PAGER: "cat",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_NO_LAZY_FETCH: "1",
   };
 }
 
@@ -275,16 +262,7 @@ export function claudeArgs(options: ClaudeArgsOptions): string[] {
  * the answer too. Anything else is described in the prompt.
  */
 function jsonSchemaFor(schema: z.ZodType): { flag?: string; promptSuffix: string } {
-  let json: Record<string, unknown>;
-  try {
-    // The CLI's validator knows draft 7 and rejects a `$schema` it has no copy of.
-    json = { ...z.toJSONSchema(schema, { io: "input", target: "draft-7" }) };
-    delete json.$schema;
-  } catch {
-    return { promptSuffix: "\n\nReply with only a JSON value, with no other text." };
-  }
-  if (json.type === "object") return { flag: JSON.stringify(json), promptSuffix: "" };
-  return {
-    promptSuffix: `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`,
-  };
+  const json = schemaJson(schema);
+  if (json?.type === "object") return { flag: JSON.stringify(json), promptSuffix: "" };
+  return { promptSuffix: schemaPromptSuffix(json) };
 }

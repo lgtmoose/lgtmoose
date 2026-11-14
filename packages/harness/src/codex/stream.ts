@@ -1,4 +1,5 @@
 import type { HarnessErrorKind, HarnessUsage } from "../harness.js";
+import { addUsage } from "../usage.js";
 
 /**
  * What a `codex exec --json` run printed, from its JSONL events (checked against Codex 0.166):
@@ -88,15 +89,6 @@ function usageOf(usage: CodexUsage | undefined): HarnessUsage {
   if (typeof usage?.output_tokens === "number") out.outputTokens = usage.output_tokens;
   if (typeof usage?.cached_input_tokens === "number") {
     out.cacheReadTokens = usage.cached_input_tokens;
-  }
-  return out;
-}
-
-export function addUsage(a: HarnessUsage, b: HarnessUsage): HarnessUsage {
-  const out: HarnessUsage = { ...a };
-  for (const key of Object.keys(b) as (keyof HarnessUsage)[]) {
-    const value = b[key];
-    if (value !== undefined) out[key] = (out[key] ?? 0) + value;
   }
   return out;
 }

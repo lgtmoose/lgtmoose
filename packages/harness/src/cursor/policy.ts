@@ -59,17 +59,14 @@ export function cursorPermissions(cwd: string): { allow: string[]; deny: string[
 }
 
 /**
- * Hook configs in the checkout. Hooks are commands the CLI itself runs (not tools the deny rules
- * cover), and project hooks load in a trusted workspace, which `--trust` makes the checkout. A
- * PR could add one to run anything, with the key in its environment. Cursor's own file, and
- * Claude Code's settings, whose hooks Cursor can load too
- * (https://cursor.com/docs/agent/hooks).
+ * Config directories in the checkout, set aside for the run. In a trusted workspace (which
+ * headless runs need, with `--trust`) the CLI loads the project's hooks: commands it runs itself,
+ * which the tool deny rules don't cover. A PR could add one to run anything with the key in its
+ * environment (https://cursor.com/docs/agent/hooks). Cursor has no flag to skip project hooks or
+ * config, so the whole of `.cursor/` (hooks, cli.json, mcp.json, rules, sandbox.json) goes, and
+ * `.claude/`, whose settings' hooks Cursor can load too. Their diff is still in the prompt.
  */
-export const CURSOR_PROJECT_HOOK_FILES = [
-  ".cursor/hooks.json",
-  ".claude/settings.json",
-  ".claude/settings.local.json",
-] as const;
+export const CURSOR_PROJECT_CONFIG_DIRS = [".cursor", ".claude"] as const;
 
 /** The run's `cli-config.json`, for a checkout at `cwd`. */
 export function cursorCliConfig(cwd: string): string {

@@ -260,7 +260,7 @@ describe("ClaudeCodeHarness", () => {
     const error = await failure(run(harness, { schema: z.array(z.string()) }));
     expect(error.kind).toBe("invalid_output");
     const [, second] = await (fake as FakeClaude).calls();
-    expect(second?.stdin).toContain("not valid JSON");
+    expect(second?.stdin).toContain("wasn't valid JSON");
   });
 
   it("refuses output that contains the credential, without a retry", async () => {

@@ -3,10 +3,9 @@ import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { parseAnswer, repairPrompt, truncate } from "../answer.js";
+import { parseAnswer, repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
 import { exitText, saveAttemptTranscript, success } from "../attempt.js";
-import { networkEnv } from "../claude-code/auth.js";
-import { addUsage } from "../codex/stream.js";
+import { isolatedEnv, networkEnv } from "../env.js";
 import {
   HarnessError,
   type Harness,
@@ -18,8 +17,9 @@ import {
 import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
+import { addUsage } from "../usage.js";
 import { cursorAuth } from "./auth.js";
-import { CURSOR_PROJECT_HOOK_FILES, cursorCliConfig } from "./policy.js";
+import { CURSOR_PROJECT_CONFIG_DIRS, cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
   cursorUsage,
@@ -43,6 +43,11 @@ export interface CursorHarnessOptions {
   killGraceMs?: number;
   /** Parent of each run's temporary home directory. Defaults to the OS temp directory. */
   tmpRoot?: string;
+  /**
+   * Called when the checkout's set-aside config directories couldn't be put back after the run.
+   * The run's own outcome stands either way: the checkout is the task's own and is thrown away.
+   */
+  onRestoreError?: (error: unknown) => void;
 }
 
 /** Stop a run whose output passes this size. */
@@ -71,8 +76,9 @@ export interface CursorArgsOptions {
  * with one JSON result, ask mode (read-only), the workspace trusted without a prompt, and the
  * sandbox on. Never `--force` (it applies changes and runs commands without asking) and never
  * `--approve-mcps`, so MCP servers in the checkout's `.cursor/mcp.json` don't start. Trusting
- * the workspace would load its hooks, so the run sets them aside first. The prompt
- * comes last, after `--`, so a prompt starting with `-` isn't read as a flag.
+ * the workspace would load its hooks and config, so the run sets those directories aside first
+ * (`CURSOR_PROJECT_CONFIG_DIRS`). The prompt comes last, after `--`, so a prompt starting with
+ * `-` isn't read as a flag.
  */
 export function cursorArgs(options: CursorArgsOptions): string[] {
   return [
@@ -113,12 +119,13 @@ export class CursorHarness implements Harness {
     const model = options.model.trim() || this.options.models?.[tier];
     const secrets = auth.secrets;
     const keys: string[] = [];
-    const firstPrompt = options.prompt + schemaSuffix(options.schema);
+    // No structured-output flag: the schema is described in the prompt, and checked with zod.
+    const firstPrompt = options.prompt + schemaPromptSuffix(schemaJson(options.schema));
     checkPromptSize(firstPrompt, MAX_CURSOR_PROMPT_BYTES, keys);
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
     const setAside: { from: string; to: string }[] = [];
     try {
-      await setAsideHookFiles(options.cwd, setAside);
+      await setAsideProjectConfig(options.cwd, setAside);
       await mkdir(join(home, ".cursor"));
       await mkdir(join(home, "tmp"));
       await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig(options.cwd));
@@ -126,7 +133,8 @@ export class CursorHarness implements Harness {
         PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
         ...networkEnv(source),
         ...auth.env,
-        ...hardeningEnv(home),
+        ...isolatedEnv(home),
+        NO_COLOR: "1",
       };
 
       let sessionId: string | undefined;
@@ -191,27 +199,24 @@ export class CursorHarness implements Harness {
         { transcriptKeys: keys },
       );
     } finally {
-      try {
-        await restoreHookFiles(setAside);
-      } finally {
-        await rm(home, { recursive: true, force: true });
-      }
+      await restoreProjectConfig(setAside, this.options.onRestoreError);
+      await rm(home, { recursive: true, force: true });
     }
   }
 }
 
 /**
- * Renames the checkout's hook configs (`CURSOR_PROJECT_HOOK_FILES`) out of the CLI's way for the
- * run, recording each in `moved` so they can be put back. Fails the run if one can't be moved.
- * The prompt still holds their diff. Not safe for two runs at once on one checkout, which the
- * sandbox never does: each task reviews one batch in its own checkout.
+ * Renames the checkout's config directories (`CURSOR_PROJECT_CONFIG_DIRS`) out of the CLI's way
+ * for the run, recording each in `moved` so they can be put back. Fails the run if one can't be
+ * moved. The prompt still holds their diff. Not safe for two runs at once on one checkout, which
+ * the sandbox never does: each task reviews one batch in its own checkout.
  */
-async function setAsideHookFiles(
+async function setAsideProjectConfig(
   cwd: string,
   moved: { from: string; to: string }[],
 ): Promise<void> {
-  for (const file of CURSOR_PROJECT_HOOK_FILES) {
-    const from = join(cwd, file);
+  for (const dir of CURSOR_PROJECT_CONFIG_DIRS) {
+    const from = join(cwd, dir);
     const exists = await lstat(from).then(
       () => true,
       () => false,
@@ -221,7 +226,7 @@ async function setAsideHookFiles(
     try {
       await rename(from, to);
     } catch (error) {
-      throw new HarnessError("process", `Could not set aside ${file} in the checkout.`, {
+      throw new HarnessError("process", `Could not set aside ${dir} in the checkout.`, {
         cause: error,
       });
     }
@@ -229,23 +234,29 @@ async function setAsideHookFiles(
   }
 }
 
-/** Puts back what `setAsideHookFiles` moved, all it can, then reports any it couldn't. */
-async function restoreHookFiles(moved: readonly { from: string; to: string }[]): Promise<void> {
+/**
+ * Puts back what `setAsideProjectConfig` moved, all it can. A failure goes to `onError` and
+ * doesn't replace the run's outcome.
+ */
+async function restoreProjectConfig(
+  moved: readonly { from: string; to: string }[],
+  onError: ((error: unknown) => void) | undefined,
+): Promise<void> {
   const results = await Promise.allSettled(moved.map(({ from, to }) => rename(to, from)));
-  const failed = results.find((result) => result.status === "rejected");
-  if (failed) {
-    throw new HarnessError("process", "Could not put the checkout's hook configs back.", {
-      cause: failed.reason,
-    });
+  for (const result of results) {
+    if (result.status === "rejected") onError?.(result.reason);
   }
 }
 
-/** Refuses a prompt longer than `limit` bytes, which the kernel may not pass as one argument. */
+/**
+ * Refuses a prompt longer than `limit` bytes, which the kernel may not pass as one argument. The
+ * fallback chain moves on to a provider that takes the prompt on stdin.
+ */
 function checkPromptSize(prompt: string, limit: number, keys: readonly string[]): void {
   const bytes = Buffer.byteLength(prompt);
   if (bytes <= limit) return;
   throw new HarnessError(
-    "process",
+    "input_too_large",
     `The prompt is ${bytes} bytes; the Cursor CLI takes at most ${limit}. Use smaller batches.`,
     { transcriptKeys: keys },
   );
@@ -288,40 +299,4 @@ function failIfUnusable(
     throw fail(kind, `agent stopped: ${detail}`, extra);
   }
   throw fail("process", `agent exited (${exitText(proc)}) without a result: ${detail}`);
-}
-
-/**
- * Variables that keep the CLI and git from reading anything but the checkout: a fresh home (so
- * the only global config is the run's own), no colour, and git without user or system config,
- * pager, prompts or lazy fetches.
- */
-function hardeningEnv(home: string): Record<string, string> {
-  return {
-    HOME: home,
-    TMPDIR: join(home, "tmp"),
-    NO_COLOR: "1",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_PAGER: "cat",
-    PAGER: "cat",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_NO_LAZY_FETCH: "1",
-  };
-}
-
-/**
- * The CLI has no structured-output flag, so the schema is described in the prompt. The answer
- * is still validated with zod.
- */
-function schemaSuffix(schema: z.ZodType): string {
-  try {
-    const json: Record<string, unknown> = {
-      ...z.toJSONSchema(schema, { io: "input", target: "draft-7" }),
-    };
-    delete json.$schema;
-    return `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`;
-  } catch {
-    return "\n\nReply with only a JSON value, with no other text.";
-  }
 }

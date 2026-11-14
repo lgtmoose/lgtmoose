@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { ClaudeCodeHarness, CodexHarness, CursorHarness, type Harness } from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
+import { dropEscapingSymlinks } from "./checkout.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
 
@@ -13,7 +14,19 @@ import { readSandboxEnv } from "./env.js";
 const WORK = "/work";
 const TMP = "/tmp";
 
-function extract(archive: string, dir: string): Promise<void> {
+/** Extracts the checkout, then removes the PR's symlinks that lead outside it. */
+async function extract(archive: string, dir: string): Promise<void> {
+  await untar(archive, dir);
+  const dropped = await dropEscapingSymlinks(dir);
+  if (dropped.length > 0) {
+    log("removed symlinks that lead outside the checkout", {
+      count: dropped.length,
+      paths: dropped.slice(0, 20),
+    });
+  }
+}
+
+function untar(archive: string, dir: string): Promise<void> {
   return new Promise((resolve, reject) => {
     void mkdir(dir, { recursive: true }).then(() => {
       const child = spawn("tar", ["-xzf", archive, "-C", dir, "--no-same-owner"], {
@@ -53,7 +66,15 @@ async function main(): Promise<void> {
       harness: (transcripts): Harness => {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
         if (env.harness === "codex") return new CodexHarness(options);
-        if (env.harness === "cursor-agent") return new CursorHarness(options);
+        if (env.harness === "cursor-agent") {
+          return new CursorHarness({
+            ...options,
+            onRestoreError: (error) =>
+              log("could not put the checkout's .cursor or .claude back", {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+          });
+        }
         return new ClaudeCodeHarness(options);
       },
       workDir: WORK,

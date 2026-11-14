@@ -66,7 +66,7 @@ export {
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
 export {
   CURSOR_PERMISSIONS,
-  CURSOR_PROJECT_HOOK_FILES,
+  CURSOR_PROJECT_CONFIG_DIRS,
   cursorPermissions,
 } from "./cursor/policy.js";
 export { classifyCursorFailure } from "./cursor/result.js";

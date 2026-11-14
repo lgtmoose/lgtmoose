@@ -41,4 +41,17 @@ describe("CURSOR_AGENT_VERSION", () => {
     expect(/^ARG CURSOR_AGENT_VERSION=(\S+)$/m.exec(dockerfile)?.[1]).toBe(CURSOR_AGENT_VERSION);
     expect(dockerfile).toContain("/lab/${CURSOR_AGENT_VERSION}/linux/");
   });
+
+  it("is verified by checksum unless the build opts out explicitly", async () => {
+    const dockerfile = await readFile(
+      join(import.meta.dirname, "../../../infra/sandbox/Dockerfile"),
+      "utf8",
+    );
+    expect(dockerfile).toContain(
+      'sha256sum -c -; \\\n  elif [ "${ALLOW_UNVERIFIED_CURSOR}" = "1" ]',
+    );
+    expect(dockerfile).toMatch(
+      /else \\\n\s+echo "CURSOR_AGENT_SHA256 is not set[^\n]*\n\s+exit 1;/,
+    );
+  });
 });

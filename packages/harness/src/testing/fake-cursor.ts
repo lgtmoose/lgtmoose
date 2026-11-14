@@ -11,6 +11,8 @@ export interface FakeCursorResponse {
   exitCode?: number;
   /** Ignore SIGTERM and never exit. */
   hang?: boolean;
+  /** Writes an empty file at this path in the checkout, making its directories. */
+  touch?: string;
 }
 
 export interface FakeCursorCall {
@@ -19,8 +21,8 @@ export interface FakeCursorCall {
   cwd: string;
   /** `$HOME/.cursor/cli-config.json` as the fake found it. */
   cliConfig?: string;
-  /** The entries of the checkout's `.cursor` directory, if it has one. */
-  projectCursorDir?: string[];
+  /** The entries at the checkout's root, sorted. */
+  checkoutEntries: string[];
 }
 
 /**
@@ -53,10 +55,14 @@ fs.appendFileSync(
     env: process.env,
     cwd: process.cwd(),
     cliConfig: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : undefined,
-    projectCursorDir: fs.existsSync(".cursor") ? fs.readdirSync(".cursor").sort() : undefined,
+    checkoutEntries: fs.readdirSync(".").sort(),
   }) + "\\n",
 );
 const r = responses[Math.min(n, responses.length - 1)];
+if (r.touch) {
+  fs.mkdirSync(path.dirname(r.touch), { recursive: true });
+  fs.writeFileSync(r.touch, "");
+}
 if (r.stdout) process.stdout.write(r.stdout);
 if (r.stderr) process.stderr.write(r.stderr);
 if (r.hang) {

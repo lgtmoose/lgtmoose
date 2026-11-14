@@ -17,12 +17,15 @@ RUN pnpm install --frozen-lockfile --filter "@lgtmoose/sandbox..." \
   && pnpm --filter @lgtmoose/sandbox deploy --legacy --prod /out
 
 # The Cursor CLI isn't on npm. This is the build its installer (https://cursor.com/install)
-# downloads, fetched directly so the version is pinned and the final image needs no curl. Set
-# CURSOR_AGENT_SHA256 to the tarball's checksum for your platform to have the build verify it.
+# downloads, fetched directly so the version is pinned and the final image needs no curl.
+# CURSOR_AGENT_SHA256 is the tarball's checksum for the target platform, and the build fails
+# without it: an unverified binary would run with a model key. It isn't filled in yet (NIC-853
+# records it); until then, a build can pass ALLOW_UNVERIFIED_CURSOR=1 to skip the check.
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS cursor
 
 ARG CURSOR_AGENT_VERSION=2026.11.10-731fb78
 ARG CURSOR_AGENT_SHA256=
+ARG ALLOW_UNVERIFIED_CURSOR=
 ARG TARGETARCH
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -37,6 +40,11 @@ RUN set -eu; \
     "https://downloads.cursor.com/lab/${CURSOR_AGENT_VERSION}/linux/${arch}/agent-cli-package.tar.gz"; \
   if [ -n "${CURSOR_AGENT_SHA256}" ]; then \
     echo "${CURSOR_AGENT_SHA256}  /tmp/agent.tar.gz" | sha256sum -c -; \
+  elif [ "${ALLOW_UNVERIFIED_CURSOR}" = "1" ]; then \
+    echo "warning: the Cursor CLI tarball is not verified (ALLOW_UNVERIFIED_CURSOR=1)" >&2; \
+  else \
+    echo "CURSOR_AGENT_SHA256 is not set; set it, or ALLOW_UNVERIFIED_CURSOR=1 to skip" >&2; \
+    exit 1; \
   fi; \
   mkdir -p /opt/cursor-agent; \
   tar -xzf /tmp/agent.tar.gz -C /opt/cursor-agent --strip-components=1 --no-same-owner; \
