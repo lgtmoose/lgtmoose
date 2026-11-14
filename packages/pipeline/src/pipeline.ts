@@ -250,7 +250,9 @@ export async function prepareReview(
     globs: config.conventions,
   });
   const selected = await selectRulePacks(config.rulepacks, { repo, baseSha: pr.baseSha });
-  for (const problem of selected.problems) deps.progress(`Rule packs: ${problem}`);
+  for (const note of [...selected.warnings, ...selected.problems]) {
+    deps.progress(`Rule packs: ${note}`);
+  }
   const rulePacks = selected.packs;
   deps.progress(
     `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped.`,

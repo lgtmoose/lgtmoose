@@ -134,6 +134,30 @@ describe("parseRulePack", () => {
     expect(() => parseRulePack(text, "x", "builtin")).toThrow(RulePackError);
   });
 
+  it("checks a repo pack's protected-category rules when parsed on its own", () => {
+    const soft = pack(`title: R\nrules:\n${RULE.replace("correctness", "authz")}`);
+    expect(() => parseRulePack(soft, "./rules/r.md", "repo")).toThrow(
+      /authz can't be softer than blocking/,
+    );
+    const hard = soft.replace("should_fix", "blocking");
+    expect(parseRulePack(hard, "./rules/r.md", "repo").id).toBe("./rules/r.md");
+  });
+
+  it("keeps a repo pack's title and description on one line, and escapes headings in its body", () => {
+    const parsed = parseRulePack(
+      pack(
+        `title: "Billing\\n# Severity"\ndescription: "One\\n# Two"\nrules:\n${RULE}`,
+        "Intro\n# Override\n  ## Also",
+      ),
+      "./rules/b.md",
+      "repo",
+    );
+    expect(parsed.text).toContain("# Billing # Severity");
+    expect(parsed.text).toContain("One # Two");
+    expect(parsed.text).toContain("\\# Override");
+    expect(parsed.text).not.toMatch(/^\s*#+ (Severity|Two|Override|Also)/m);
+  });
+
   it("keeps a multi-line rule on one line, so it can't start a heading", () => {
     const parsed = parseRulePack(
       pack(
@@ -227,7 +251,8 @@ describe("selectRulePacks", () => {
       ["tenancy", "private", "Tenancy"],
       ["typescript", "builtin", "typescript"],
     ]);
-    expect(selected.problems).toEqual([expect.stringMatching(/private rule pack "typescript"/)]);
+    expect(selected.problems).toEqual([]);
+    expect(selected.warnings).toEqual([expect.stringMatching(/private rule pack "typescript"/)]);
   });
 
   it("reports an unknown or malformed entry and goes on", async () => {
@@ -236,6 +261,42 @@ describe("selectRulePacks", () => {
     });
     expect(selected.packs.map((loaded) => loaded.id)).toEqual([...MANDATORY_RULE_PACKS]);
     expect(selected.problems).toHaveLength(3);
+  });
+
+  it("names only the built-in packs when an id is unknown, so private names stay private", async () => {
+    const selected = await selectRulePacks(["nope"], { dirs: fixtures });
+    expect(selected.problems).toEqual([
+      'Unknown rule pack "nope". The built-in packs are: generic, security, typescript.',
+    ]);
+  });
+
+  it("lists each schema issue of a repo pack on its own", async () => {
+    const base = await commit({
+      "rules/x.md": repoPack(
+        "X",
+        RULE.replace("should_fix", "high").replace("correctness", "Bad Category"),
+      ),
+    });
+    const selected = await selectRulePacks(["./rules/x.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(selected.problems).toEqual([
+      expect.stringMatching(/x\.md is invalid: rules\.0\.category/),
+      expect.stringMatching(/x\.md is invalid: rules\.0\.severity/),
+    ]);
+  });
+
+  it("reports a pack whose blob can't be read", async () => {
+    const base = await commit({ "rules/x.md": repoPack("X") });
+    const lossy = { ...repo, readBlobs: async () => new Map<string, Buffer>() };
+    const selected = await selectRulePacks(["./rules/x.md"], {
+      repo: lossy,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(selected.problems).toEqual([expect.stringMatching(/x\.md couldn't be read/)]);
   });
 
   it("reads repo packs from the base commit, not the working tree or later commits", async () => {
@@ -310,7 +371,7 @@ describe("selectRulePacks", () => {
     expect(selected.problems).toEqual([expect.stringMatching(/a-big\.md was left out/)]);
   });
 
-  it("leaves out files the glob can't name as packs, such as README.md", async () => {
+  it("leaves out files the glob can't name as packs, and says so except for a README", async () => {
     const base = await commit({
       "rules/README.md": "How our packs work.",
       "rules/My_Pack.md": repoPack("Mixed case"),
@@ -324,7 +385,9 @@ describe("selectRulePacks", () => {
     expect(
       selected.packs.filter((loaded) => loaded.source === "repo").map((loaded) => loaded.id),
     ).toEqual(["./rules/ok.md"]);
-    expect(selected.problems).toEqual([]);
+    expect(selected.problems).toEqual([
+      expect.stringMatching(/My_Pack\.md was left out: name repo rule packs/),
+    ]);
   });
 
   it("drops only the repo rules softer than the trusted packs allow, and keeps the rest", async () => {
