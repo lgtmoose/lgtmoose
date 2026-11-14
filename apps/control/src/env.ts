@@ -129,6 +129,34 @@ export function readReviewSettings(env: Env): ReviewSettings {
 }
 
 /**
+ * How learnings are ranked, from `LGTMOOSE_EMBEDDINGS` (`bedrock:<model>`, `openai:<model>`, or
+ * `none` / unset for keywords) and, for OpenAI, `LGTMOOSE_EMBEDDINGS_SECRET_ID`, the key's
+ * secret. The Workflow stack sets both from `learnings.embeddings`.
+ */
+export type EmbeddingsSettings =
+  | { provider: "none" }
+  | { provider: "bedrock"; model: string }
+  | { provider: "openai"; model: string; secretArn: string };
+
+export function readEmbeddingsSettings(env: Env): EmbeddingsSettings {
+  const value = env.LGTMOOSE_EMBEDDINGS?.trim() ?? "";
+  if (value === "" || value === "none") return { provider: "none" };
+  const at = value.indexOf(":");
+  const provider = at === -1 ? value : value.slice(0, at);
+  const model = at === -1 ? "" : value.slice(at + 1).trim();
+  if (model === "") throw new Error("LGTMOOSE_EMBEDDINGS needs a model: <provider>:<model>.");
+  if (provider === "bedrock") return { provider, model };
+  if (provider === "openai") {
+    const secretArn = env.LGTMOOSE_EMBEDDINGS_SECRET_ID?.trim() ?? "";
+    if (secretArn === "") {
+      throw new Error("LGTMOOSE_EMBEDDINGS_SECRET_ID is needed for OpenAI embeddings.");
+    }
+    return { provider, model, secretArn };
+  }
+  throw new Error(`LGTMOOSE_EMBEDDINGS names an unknown provider: ${provider}.`);
+}
+
+/**
  * One step of the review workflow, from the variables the state machine sets per task
  * (container overrides). Each names the execution, so the run can be found and failed.
  */

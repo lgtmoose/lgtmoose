@@ -224,6 +224,49 @@ export const deployConfigSchema = z
       .describe(
         "Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only.",
       ),
+    /**
+     * Learnings retrieval. `embeddings` ranks a batch's learnings by similarity to its diff:
+     * `bedrock` (Titan Text Embeddings in this account), `openai` (its embeddings API, with the
+     * key stored in `SECRET_NAMES.openAiEmbeddings`), or `none` to rank by keywords with no
+     * network call. Bedrock and OpenAI receive learning text and batch diffs.
+     */
+    learnings: z
+      .object({
+        embeddings: z
+          .discriminatedUnion("provider", [
+            z.object({ provider: z.literal("none") }).strict(),
+            z
+              .object({
+                provider: z.literal("bedrock"),
+                model: z
+                  .string()
+                  .regex(
+                    /^amazon\.titan-embed-text-v2(?::\d+)?$/,
+                    "use a Titan Text Embeddings v2 model ID",
+                  )
+                  .default("amazon.titan-embed-text-v2:0"),
+              })
+              .strict(),
+            z
+              .object({
+                provider: z.literal("openai"),
+                model: z
+                  .string()
+                  .regex(
+                    /^text-embedding-3-(?:small|large)$/,
+                    "use text-embedding-3-small or -large",
+                  )
+                  .default("text-embedding-3-small"),
+              })
+              .strict(),
+          ])
+          .default({ provider: "none" })
+          .describe(
+            "How learnings are ranked against a batch's diff: bedrock or openai embeddings, or none for keywords. The provider receives learning text and diffs.",
+          ),
+      })
+      .strict()
+      .default({ embeddings: { provider: "none" } }),
     tickets: z
       .object({ provider: z.enum(["linear", "jira", "github-issues"]) })
       .strict()

@@ -353,6 +353,44 @@ describe("prepareReview and finishReview with earlier runs", () => {
     return { repo, blobs, baseBlobs, prepare };
   }
 
+  it("gives each batch its learnings, and goes without when retrieval fails", async () => {
+    const { repo } = await setUp();
+    const asked: { paths: readonly string[]; diff: string }[] = [];
+    const learnings = async (batch: { paths: readonly string[]; diff: string }) => {
+      asked.push(batch);
+      return [{ kind: "convention", scope: "repo", text: "Totals are in cents." }];
+    };
+    const github = deps().deps.github;
+    const prepared = await prepareReview(
+      { github, progress: () => {}, learnings },
+      OPTIONS.target,
+      repo,
+      pull(),
+    );
+    const prompts = prepared.jobs.flatMap((job) => job.prompt ?? []);
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(asked).toHaveLength(prompts.length);
+    expect(asked[0]?.diff).toContain('source="diff"');
+    for (const prompt of prompts) expect(prompt).toContain("Totals are in cents.");
+    expect(prepared.reviewerSystem).not.toContain("Totals are in cents.");
+
+    const progress: string[] = [];
+    const failing = await prepareReview(
+      {
+        github,
+        progress: (line) => progress.push(line),
+        learnings: async () => {
+          throw new Error("database down");
+        },
+      },
+      OPTIONS.target,
+      repo,
+      pull(),
+    );
+    expect(failing.jobs.flatMap((job) => job.prompt ?? []).length).toBe(prompts.length);
+    expect(progress).toContain("Learnings left out of a batch: database down");
+  });
+
   it("leaves files out of the prompt when a posted run reviewed the same blob", async () => {
     const { repo, blobs, baseBlobs, prepare } = await setUp();
     const reviewed = ALL.map((path) => ({

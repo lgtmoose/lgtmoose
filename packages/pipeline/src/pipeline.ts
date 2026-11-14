@@ -30,9 +30,11 @@ import {
 import {
   buildReviewerParts,
   clipBatchNotes,
+  renderBatch,
   selectRulePacks,
   placeFindings,
   readConventionFilesAt,
+  type PromptLearning,
   type PullRequestComment,
 } from "@lgtmoose/roles";
 import { GITHUB_COMMENT_LIMIT, SUMMARY_MARKER_ROOM, renderSummary } from "@lgtmoose/summary";
@@ -424,9 +426,23 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The team's learnings for one batch: its files and its rendered diff, to rank against (see
+ * `retrieveLearnings` in @lgtmoose/learnings, which the caller binds to the PR's org and repo).
+ */
+export type LearningsForBatch = (batch: {
+  paths: readonly string[];
+  diff: string;
+}) => Promise<readonly PromptLearning[]>;
+
 export interface PrepareDeps {
   github: PullReader;
   progress(line: string): void;
+  /**
+   * The learnings each batch's prompt gets. Left out, prompts have none. A retrieval that fails
+   * is logged and the batch goes without: a review never fails for its learnings.
+   */
+  learnings?: LearningsForBatch;
 }
 
 /**
@@ -499,22 +515,29 @@ export async function prepareReview(
   };
   // The same for every batch: it doesn't depend on the batch's files.
   let reviewerSystem: string | undefined;
-  const jobs: BatchJob[] = plan.batches.map((batch) => {
+  const jobs: BatchJob[] = [];
+  // One batch at a time: retrieval may call an embeddings provider.
+  for (const batch of plan.batches) {
     const paths = batch.files.map((planned) => planned.file.path);
     if (batch.files.every((planned) => planned.depth === "move")) {
-      return { index: batch.index, files: paths, skipped: true };
+      jobs.push({ index: batch.index, files: paths, skipped: true });
+      continue;
     }
     const todo = batch.files.filter((planned) => !done.has(planned.file.path));
     if (todo.every((planned) => planned.depth === "move")) {
-      return { index: batch.index, files: paths, done: true };
+      jobs.push({ index: batch.index, files: paths, done: true });
+      continue;
     }
+    const reviewBatch = { ...batch, files: todo };
+    const learnings = await batchLearnings(deps, reviewBatch);
     const { system, prompt } = buildReviewerParts({
       ...context,
-      batch: { ...batch, files: todo },
+      ...(learnings.length === 0 ? {} : { learnings }),
+      batch: reviewBatch,
     });
     reviewerSystem = system;
-    return { index: batch.index, files: paths, prompt };
-  });
+    jobs.push({ index: batch.index, files: paths, prompt });
+  }
   return {
     target,
     pr,
@@ -534,6 +557,25 @@ export async function prepareReview(
     unchanged,
     noLongerChanged: diff.noLongerChanged,
   };
+}
+
+/** A batch's learnings from `deps.learnings`; none when there's no retriever or it fails. */
+async function batchLearnings(
+  deps: PrepareDeps,
+  batch: Parameters<typeof renderBatch>[0],
+): Promise<readonly PromptLearning[]> {
+  if (deps.learnings === undefined) return [];
+  try {
+    return await deps.learnings({
+      paths: batch.files.map((planned) => planned.file.path),
+      diff: renderBatch(batch),
+    });
+  } catch (error) {
+    deps.progress(
+      `Learnings left out of a batch: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return [];
+  }
 }
 
 /** What `files_reviewed` records for a path the PR doesn't change at a head it was covered at. */

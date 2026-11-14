@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import { S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
@@ -24,7 +25,9 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
-import type { ControlEnv } from "./env.js";
+import { drizzleLearningStore } from "@lgtmoose/learnings";
+import type { ControlEnv, EmbeddingsSettings } from "./env.js";
+import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
 import { s3ArtifactStore } from "./s3-store.js";
 
@@ -648,7 +651,7 @@ function log(message: string, fields: Record<string, unknown> = {}): void {
  */
 export async function awsControlDeps(
   env: ControlEnv,
-  options: { shadow: boolean },
+  options: { shadow: boolean; embeddings?: EmbeddingsSettings },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
   const app = parseSecret(
@@ -672,6 +675,26 @@ export async function awsControlDeps(
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
   const db = drizzle({ client: pool });
+  const bedrock = new BedrockRuntimeClient({});
+  const embedder = await embedderFor(options.embeddings ?? { provider: "none" }, {
+    bedrock: () => async (modelId, body) => {
+      const reply = await bedrock.send(
+        new InvokeModelCommand({
+          modelId,
+          body,
+          contentType: "application/json",
+          accept: "application/json",
+        }),
+      );
+      return new TextDecoder().decode(reply.body);
+    },
+    // A plain-text key: never echoed.
+    secret: async (arn) => {
+      const { SecretString } = await secrets.send(new GetSecretValueCommand({ SecretId: arn }));
+      if (!SecretString) throw new Error(`Secret ${arn} has no string value.`);
+      return SecretString;
+    },
+  });
   // The App's slug, read once with the App's own JWT.
   let slugOnce: Promise<string> | undefined;
   const slug = () => {
@@ -735,6 +758,7 @@ export async function awsControlDeps(
     },
     archive: tarArchive,
     log,
+    learnings: learningsRetriever(drizzleLearningStore(db), embedder, log),
     close: () => pool.end(),
   };
 }

@@ -23,6 +23,11 @@ export const SECRET_NAMES = {
    * `auth.json`. Tagged with `PROVIDER_CREDENTIAL_TAGS`. See docs/credentials.md.
    */
   provider: (providerId: string) => `${PROVIDER_SECRET_PREFIX}${providerId}`,
+  /**
+   * The OpenAI API key for learnings embeddings (`learnings.embeddings.provider: openai`), as
+   * plain text. Read by the control task only; sandbox tasks never see it.
+   */
+  openAiEmbeddings: "lgtmoose/embeddings/openai",
 } as const;
 
 /** Every provider credential's name starts with this, so they can be listed together. */

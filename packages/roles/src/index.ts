@@ -22,6 +22,8 @@ export {
 export {
   buildReviewerParts,
   buildReviewerPrompt,
+  renderLearnings,
+  type PromptLearning,
   type ReviewerPromptParts,
   type PullRequestComment,
   type PullRequestInfo,

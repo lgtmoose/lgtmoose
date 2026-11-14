@@ -101,6 +101,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowedOrgs: config.allowedOrgs,
     reconcileIntervalMinutes: config.reconcileIntervalMinutes,
     reconcileLookbackHours: config.reconcileLookbackHours,
+    embeddings: config.learnings.embeddings,
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
       isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),

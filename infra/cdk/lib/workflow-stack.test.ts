@@ -620,3 +620,77 @@ describe("reconciler", () => {
     });
   }, 120_000);
 });
+
+describe("learnings embeddings", () => {
+  /** The control container's environment, its task role's statements, and the sandboxes'. */
+  function inspect(from: Template) {
+    const all = from.toJSON().Resources as Resources;
+    const definitions = Object.values(all).filter((r) => r.Type === "AWS::ECS::TaskDefinition");
+    const isControl = (r: Resources[string]) =>
+      (r.Properties.ContainerDefinitions as { Name: string }[])[0]?.Name === "control";
+    const definition = definitions.find(isControl);
+    if (definition === undefined) throw new Error("no control task definition");
+    const [container] = definition.Properties.ContainerDefinitions as {
+      Environment: { Name: string; Value: unknown }[];
+    }[];
+    const env = Object.fromEntries((container?.Environment ?? []).map((e) => [e.Name, e.Value]));
+    const policiesOf = (roleId: string) =>
+      Object.values(all)
+        .filter((r) => r.Type === "AWS::IAM::Policy")
+        .filter((r) =>
+          (r.Properties.Roles as { Ref: string }[]).some((role) => role.Ref === roleId),
+        )
+        .flatMap(
+          (r) =>
+            (
+              r.Properties.PolicyDocument as {
+                Statement: { Action: string | string[]; Resource: unknown }[];
+              }
+            ).Statement,
+        );
+    const granted = policiesOf(getAttId(definition.Properties.TaskRoleArn));
+    const sandboxes = definitions
+      .filter((r) => !isControl(r))
+      .flatMap((r) => [
+        ...policiesOf(getAttId(r.Properties.TaskRoleArn)),
+        ...policiesOf(getAttId(r.Properties.ExecutionRoleArn)),
+      ]);
+    return { env, granted, sandboxes: JSON.stringify(sandboxes) };
+  }
+
+  function build(embeddings: unknown): Template {
+    const config = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token" }],
+      learnings: { embeddings },
+    });
+    return Template.fromStack(buildApp(config, appWithoutBundling()).workflow);
+  }
+
+  it("ranks by keyword by default, with no embeddings access", () => {
+    const { env, granted } = inspect(template);
+    expect(env.LGTMOOSE_EMBEDDINGS).toBe("none");
+    expect(env).not.toHaveProperty("LGTMOOSE_EMBEDDINGS_SECRET_ID");
+    expect(JSON.stringify(granted)).not.toContain("titan-embed");
+  });
+
+  it("lets only the control task call the Titan model it's configured with", () => {
+    const { env, granted, sandboxes } = inspect(build({ provider: "bedrock" }));
+    expect(env.LGTMOOSE_EMBEDDINGS).toBe("bedrock:amazon.titan-embed-text-v2:0");
+    const invoke = granted.filter((s) => actions([s]).includes("bedrock:InvokeModel"));
+    expect(JSON.stringify(invoke)).toContain("foundation-model/amazon.titan-embed-text-v2:0");
+    expect(JSON.stringify(invoke)).not.toContain("*");
+    expect(sandboxes).not.toContain("titan-embed");
+  }, 120_000);
+
+  it("gives the control task the OpenAI key by its secret's name, and only it", () => {
+    const { env, granted, sandboxes } = inspect(build({ provider: "openai" }));
+    expect(env).toMatchObject({
+      LGTMOOSE_EMBEDDINGS: "openai:text-embedding-3-small",
+      LGTMOOSE_EMBEDDINGS_SECRET_ID: SECRET_NAMES.openAiEmbeddings,
+    });
+    const reads = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(JSON.stringify(reads)).toContain(SECRET_NAMES.openAiEmbeddings);
+    expect(sandboxes).not.toContain(SECRET_NAMES.openAiEmbeddings);
+  }, 120_000);
+});

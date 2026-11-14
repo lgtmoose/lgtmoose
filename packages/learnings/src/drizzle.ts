@@ -1,9 +1,28 @@
 import { learningEvents, learnings, type Database } from "@lgtmoose/db";
-import { and, asc, desc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  cosineDistance,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import { toCheckedPermission } from "./policy.js";
 import type { Learning, LearningEvent, LearningStore, NewLearningEvent } from "./store.js";
 
-type Row = typeof learnings.$inferSelect;
+// Every column but the embedding, which only `nearest` needs: 1024 floats a row add up.
+const rowColumns = Object.fromEntries(
+  Object.entries(getTableColumns(learnings)).filter(([name]) => name !== "embedding"),
+) as Omit<ReturnType<typeof getTableColumns<typeof learnings>>, "embedding">;
+
+type Row = Omit<typeof learnings.$inferSelect, "embedding">;
 
 function toLearning(row: Row): Learning {
   return {
@@ -23,6 +42,8 @@ function toLearning(row: Row): Learning {
     authorPermission: toCheckedPermission(row.authorPermission),
     createdAt: row.createdAt,
     retiredAt: row.retiredAt ?? undefined,
+    hits: row.hits,
+    lastUsedAt: row.lastUsedAt ?? undefined,
   };
 }
 
@@ -61,10 +82,10 @@ export function drizzleLearningStore(
             authorPermission: learning.authorPermission,
           })
           .onConflictDoNothing({ target: [learnings.sourceRepo, learnings.sourceCommentId] })
-          .returning();
+          .returning(rowColumns);
         if (row === undefined) {
           const [existing] = await tx
-            .select()
+            .select(rowColumns)
             .from(learnings)
             .where(
               and(
@@ -80,7 +101,7 @@ export function drizzleLearningStore(
       });
     },
     async get(id) {
-      const [row] = await db.select().from(learnings).where(eq(learnings.id, id));
+      const [row] = await db.select(rowColumns).from(learnings).where(eq(learnings.id, id));
       return row === undefined ? undefined : toLearning(row);
     },
     async transition(id, from, to, event) {
@@ -90,7 +111,7 @@ export function drizzleLearningStore(
           .update(learnings)
           .set({ status: to, updatedAt: at, ...(to === "retired" ? { retiredAt: at } : {}) })
           .where(and(eq(learnings.id, id), inArray(learnings.status, [...from])))
-          .returning();
+          .returning(rowColumns);
         if (row === undefined) return undefined;
         await tx.insert(learningEvents).values(eventRows(id, [event]));
         return toLearning(row);
@@ -104,7 +125,7 @@ export function drizzleLearningStore(
       }
       if (status !== undefined) where.push(eq(learnings.status, status));
       const rows = await db
-        .select()
+        .select(rowColumns)
         .from(learnings)
         .where(and(...where))
         .orderBy(desc(learnings.createdAt), desc(learnings.id));
@@ -124,6 +145,67 @@ export function drizzleLearningStore(
         githubCommentId: row.githubCommentId ?? undefined,
         createdAt: row.createdAt,
       }));
+    },
+    async missingEmbeddings(ids, model) {
+      if (ids.length === 0) return [];
+      const rows = await db
+        .select({ id: learnings.id })
+        .from(learnings)
+        .where(
+          and(
+            inArray(learnings.id, [...ids]),
+            or(
+              isNull(learnings.embedding),
+              isNull(learnings.embeddingModel),
+              ne(learnings.embeddingModel, model),
+            ),
+          ),
+        );
+      const missing = new Set(rows.map((row) => row.id));
+      return ids.filter((id) => missing.has(id));
+    },
+    async setEmbedding(id, model, embedding) {
+      await db
+        .update(learnings)
+        .set({ embedding: [...embedding], embeddingModel: model })
+        .where(eq(learnings.id, id));
+    },
+    async nearest(ids, model, embedding, limit) {
+      if (ids.length === 0 || limit <= 0) return [];
+      const distance = cosineDistance(learnings.embedding, [...embedding]);
+      const rows = await db
+        .select({ id: learnings.id })
+        .from(learnings)
+        .where(
+          and(
+            inArray(learnings.id, [...ids]),
+            isNotNull(learnings.embedding),
+            eq(learnings.embeddingModel, model),
+          ),
+        )
+        .orderBy(distance, asc(learnings.id))
+        .limit(limit);
+      return rows.map((row) => row.id);
+    },
+    async recordUse(ids, at) {
+      const unique = [...new Set(ids)];
+      if (unique.length === 0) return;
+      await db
+        .update(learnings)
+        .set({ hits: sql`${learnings.hits} + 1`, lastUsedAt: at })
+        .where(inArray(learnings.id, unique));
+    },
+    async unusedSince(before, limit) {
+      const since = sql`coalesce(${learnings.lastUsedAt}, ${learnings.createdAt})`;
+      const rows = await db
+        .select(rowColumns)
+        .from(learnings)
+        .where(
+          and(eq(learnings.status, "active"), sql`${since} < ${before.toISOString()}::timestamptz`),
+        )
+        .orderBy(since, asc(learnings.id))
+        .limit(limit);
+      return rows.map(toLearning);
     },
   };
 }
