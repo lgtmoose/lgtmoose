@@ -49,6 +49,13 @@ describe("dropEscapingSymlinks", () => {
     expect(await dropEscapingSymlinks(checkout)).toEqual(["docs/sneaky"]);
   });
 
+  it("keeps links into a directory whose name only starts with dots", async () => {
+    await mkdir(join(checkout, "..data"));
+    await writeFile(join(checkout, "..data", "a"), "x");
+    await symlink("..data/a", join(checkout, "link"));
+    expect(await dropEscapingSymlinks(checkout)).toEqual([]);
+  });
+
   it("drops dangling links", async () => {
     await symlink("missing", join(checkout, "gone"));
     expect(await dropEscapingSymlinks(checkout)).toEqual(["gone"]);

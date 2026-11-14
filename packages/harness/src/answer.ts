@@ -51,15 +51,25 @@ export function parseAnswer(
       .map((fence) => fence.body)
       .reverse(),
   ];
+  const errors: string[] = [];
   for (const text of candidates) {
     try {
       return { ok: true, value: JSON.parse(text) };
-    } catch {
-      // Try the next candidate.
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
     }
   }
-  return { ok: false, error: "The answer wasn't valid JSON." };
+  // The last fence's error when there is one (what the model most likely meant as its answer),
+  // else the whole text's.
+  const detail = errors[1] ?? errors[0];
+  // The parser quotes the start of the text, so keep the detail short. The model wrote it, and
+  // adapters redact secrets from any message that leaves the harness.
+  const why = detail === undefined ? "" : `: ${detail.slice(0, MAX_PARSE_DETAIL)}`;
+  return { ok: false, error: `The answer wasn't valid JSON${why}` };
 }
+
+/** Longest JSON.parse message kept in a problem text. */
+const MAX_PARSE_DETAIL = 200;
 
 /** The follow-up turn after an answer failed validation. */
 export function repairPrompt(problems: string): string {

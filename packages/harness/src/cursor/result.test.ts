@@ -54,6 +54,20 @@ describe("classifyCursorFailure", () => {
     });
   });
 
+  it.each([
+    "Upgrade to Pro for higher usage limits.",
+    "Your plan includes included usage of 500 requests.",
+    "TypeError: x is undefined\n    at run (index.js:429:17)",
+    "    at main (cli.js:401:3)",
+  ])("doesn't read %j as a limit", (message) => {
+    expect(classifyCursorFailure(message)).toBeUndefined();
+  });
+
+  it("reads status codes next to HTTP wording", () => {
+    expect(classifyCursorFailure("request failed with status code 429")?.kind).toBe("rate_limit");
+    expect(classifyCursorFailure("HTTP 401")?.kind).toBe("auth");
+  });
+
   it("doesn't blame the key for a proxy's 403", () => {
     expect(classifyCursorFailure("CONNECT tunnel failed, response 403 Forbidden")).toBeUndefined();
   });

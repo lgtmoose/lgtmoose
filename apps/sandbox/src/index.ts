@@ -55,15 +55,7 @@ async function main(): Promise<void> {
       harness: (transcripts): Harness => {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
         if (env.harness === "codex") return new CodexHarness(options);
-        if (env.harness === "cursor-agent") {
-          return new CursorHarness({
-            ...options,
-            onRestoreError: (error) =>
-              log("could not put the checkout's .cursor or .claude back", {
-                error: error instanceof Error ? error.message : String(error),
-              }),
-          });
-        }
+        if (env.harness === "cursor-agent") return new CursorHarness(options);
         return new ClaudeCodeHarness(options);
       },
       workDir: WORK,

@@ -18,10 +18,7 @@ describe("parseAnswer", () => {
   });
 
   it("skips fences tagged with another language, as the Codex parser did", () => {
-    expect(parseAnswer('```js\n{"a":1}\n```')).toEqual({
-      ok: false,
-      error: "The answer wasn't valid JSON.",
-    });
+    expect(parseAnswer('```js\n{"a":1}\n```').ok).toBe(false);
   });
 
   it("accepts CRLF line ends", () => {
@@ -30,11 +27,19 @@ describe("parseAnswer", () => {
   });
 
   it("reports a missing or invalid answer", () => {
-    expect(parseAnswer(undefined).ok).toBe(false);
+    expect(parseAnswer(undefined)).toEqual({ ok: false, error: "There was no answer." });
     expect(parseAnswer("  ").ok).toBe(false);
-    expect(parseAnswer("Here you go: {a: 1}")).toEqual({
-      ok: false,
-      error: "The answer wasn't valid JSON.",
-    });
+    expect(parseAnswer("Here you go: {a: 1}").ok).toBe(false);
+  });
+
+  it("says why the JSON didn't parse, from the last fence, briefly", () => {
+    const fenced = parseAnswer('Answer:\n```json\n{"a": 1,}\n```');
+    expect(fenced.ok).toBe(false);
+    if (fenced.ok) return;
+    expect(fenced.error).toMatch(/^The answer wasn't valid JSON: \S/);
+    expect(fenced.error).not.toContain("Answer:");
+    const long = parseAnswer(`x${"y".repeat(5000)}`);
+    expect(long.ok).toBe(false);
+    if (!long.ok) expect(long.error.length).toBeLessThan(260);
   });
 });

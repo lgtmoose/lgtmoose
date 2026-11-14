@@ -1,11 +1,6 @@
-import { readdir, realpath, unlink } from "node:fs/promises";
-import { isAbsolute, join, relative } from "node:path";
-
-/** Whether `path` is `dir` or inside it. Both are real (resolved) paths. */
-function inside(dir: string, path: string): boolean {
-  const rel = relative(dir, path);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
+import { opendir, realpath, unlink } from "node:fs/promises";
+import { join, relative } from "node:path";
+import { isInside } from "@lgtmoose/harness";
 
 /**
  * Removes every symlink in the extracted checkout that doesn't resolve to a path inside it,
@@ -15,19 +10,25 @@ function inside(dir: string, path: string): boolean {
  * environment, the model credential included. Links that stay inside the checkout are kept.
  *
  * Each link is resolved with realpath (through any other links), so a chain that leaves the
- * checkout is caught however it's built. Directory links aren't followed while walking.
+ * checkout is caught however it's built. The walk reads one directory entry at a time and
+ * doesn't follow directory links.
  */
 export async function dropEscapingSymlinks(checkout: string): Promise<string[]> {
   const root = await realpath(checkout);
-  const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const dropped: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isSymbolicLink()) continue;
-    const path = join(entry.parentPath, entry.name);
-    const target = await realpath(path).catch(() => undefined);
-    if (target !== undefined && inside(root, target)) continue;
-    await unlink(path);
-    dropped.push(relative(root, path));
-  }
+  const walk = async (dir: string): Promise<void> => {
+    for await (const entry of await opendir(dir)) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(path);
+      } else if (entry.isSymbolicLink()) {
+        const target = await realpath(path).catch(() => undefined);
+        if (target !== undefined && isInside(root, target)) continue;
+        await unlink(path);
+        dropped.push(relative(root, path));
+      }
+    }
+  };
+  await walk(root);
   return dropped.sort();
 }

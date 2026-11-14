@@ -19,10 +19,14 @@ export interface LimitFailure {
 const PLAN_LIMIT =
   /hit your usage limit|usage[_ ]limit[_ ]reached|spend cap|quota[_ ]exceeded|usage[_ ]not[_ ]included|insufficient[_ ]quota|purchase more credits/i;
 /** Throttling: the same credential works again shortly. */
-const RATE_LIMIT = /rate[_ -]?limit|too many requests|\b429\b|server[_ ]overloaded/i;
-/** The credential itself was refused. */
+const RATE_LIMIT =
+  /rate[_ -]?limit|too many requests|(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*429\b|server[_ ]overloaded/i;
+/**
+ * The credential itself was refused. Status codes count only next to HTTP wording, here and in
+ * `RATE_LIMIT`, so a line number in a stack trace (`index.js:429:17`) doesn't match.
+ */
 const AUTH_FAILURE =
-  /\b401\b|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials/i;
+  /(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*401\b|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials/i;
 
 const SECONDS: Record<string, number> = {
   s: 1,
@@ -62,10 +66,14 @@ export function classifyFailure(message: string): LimitFailure | undefined {
   else if (RATE_LIMIT.test(message)) kind = "rate_limit";
   else if (AUTH_FAILURE.test(message)) return { kind: "auth" };
   else return undefined;
+  return { kind, ...limitTimes(message) };
+}
+
+/** When a limit the message reports resets: the wait it gives, the time it names, or both. */
+export function limitTimes(message: string): { retryAfterSeconds?: number; resetsAt?: string } {
   const wait = retryAfter(message);
   const at = resetsAt(message);
   return {
-    kind,
     ...(wait === undefined ? {} : { retryAfterSeconds: wait }),
     ...(at === undefined ? {} : { resetsAt: at }),
   };

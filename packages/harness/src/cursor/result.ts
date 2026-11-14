@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { classifyFailure, type LimitFailure } from "../limits.js";
+import { classifyFailure, limitTimes, type LimitFailure } from "../limits.js";
 import type { HarnessUsage } from "../harness.js";
 
 /**
@@ -54,15 +54,19 @@ export function cursorUsage(result: CursorResult | undefined): HarnessUsage {
   return out;
 }
 
-/** A Cursor plan's included usage or spend limit is used up. */
-const PLAN_LIMIT =
-  /usage limit|out of (?:fast )?requests|spend(?:ing)? limit|upgrade (?:your plan|to (?:pro|ultra))|included usage/i;
 /**
- * The key was refused, or the CLI has none. Not a bare 403 or "forbidden": the egress proxy
+ * A Cursor plan's included usage or spend limit is used up: a limit that was hit, not a mention
+ * of one. "Upgrade to Pro for higher usage limits" and "included usage" banners don't match.
+ */
+const PLAN_LIMIT =
+  /(?:hit|reached|exceeded|used up)\s+(?:your|the|its|this)?\s*(?:\w+\s+)?(?:usage|spend(?:ing)?)\s+limit|(?:usage|spend(?:ing)?)\s+limit\s+(?:reached|exceeded|hit)|out of (?:fast )?requests/i;
+/**
+ * The key was refused, or the CLI has none. A 401 only next to HTTP wording, so a line number
+ * in a stack trace (`index.js:401:7`) doesn't match. Not a 403 or "forbidden": the egress proxy
  * refuses a host it doesn't allow with 403 too, and that isn't the key's fault.
  */
 const AUTH_FAILURE =
-  /\b401\b|unauthori[sz]ed|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login/i;
+  /(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*401\b|unauthori[sz]ed|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login/i;
 
 /**
  * Whether a Cursor failure is a plan limit, a rate limit or a refused key, so the fallback chain
@@ -71,9 +75,8 @@ const AUTH_FAILURE =
  * auth wording. Undefined for any other failure.
  */
 export function classifyCursorFailure(message: string): LimitFailure | undefined {
+  if (PLAN_LIMIT.test(message)) return { kind: "plan_limit", ...limitTimes(message) };
   const shared = classifyFailure(message);
-  // Keep any reset time the shared check found.
-  if (PLAN_LIMIT.test(message)) return { ...shared, kind: "plan_limit" };
   if (shared !== undefined) return shared;
   if (AUTH_FAILURE.test(message)) return { kind: "auth" };
   return undefined;

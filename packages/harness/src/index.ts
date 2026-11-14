@@ -59,15 +59,14 @@ export { classifyFailure, type LimitFailure } from "./limits.js";
 export {
   CursorHarness,
   cursorArgs,
+  MAX_CURSOR_ARG_PROMPT_BYTES,
   MAX_CURSOR_PROMPT_BYTES,
   type CursorArgsOptions,
   type CursorHarnessOptions,
 } from "./cursor/adapter.js";
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
-export {
-  CURSOR_PERMISSIONS,
-  CURSOR_PROJECT_CONFIG_DIRS,
-  cursorPermissions,
-} from "./cursor/policy.js";
+export { CURSOR_DENIED_TOOLS, cursorPermissions, DENIED_ROOTS } from "./cursor/policy.js";
 export { classifyCursorFailure } from "./cursor/result.js";
+export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
+export { isInside } from "./paths.js";
 export { CLAUDE_CODE_VERSION, CODEX_VERSION, CURSOR_AGENT_VERSION } from "./version.js";

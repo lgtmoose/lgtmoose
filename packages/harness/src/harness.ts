@@ -3,7 +3,8 @@ import type { z } from "zod";
 export interface HarnessRunOptions<T> {
   /**
    * The full task for the model. Sent on stdin, never on the command line, except to
-   * cursor-agent: its CLI takes the prompt only as an argument. That's acceptable because a
+   * cursor-agent: its CLI takes the prompt only as an argument, so a prompt that fits in one
+   * goes there, and a longer one goes in a task file the model reads. That's acceptable because a
    * sandbox task is single-tenant: the only other processes that could read its argv are the
    * CLI's own, and the prompt is PR content, not a secret. The credential never goes on argv.
    */
@@ -61,7 +62,7 @@ export interface Harness {
  * - `transcript`: the run finished but its transcript couldn't be saved.
  * - `rate_limit`: the provider is throttling requests; the same credential works again soon.
  * - `plan_limit`: the plan's usage or spend limit is used up; try another provider.
- * - `input_too_large`: this CLI can't take a prompt that big (cursor-agent's argument limit);
+ * - `input_too_large`: this harness can't take a prompt that big (cursor-agent's task-file cap);
  *   another provider may.
  *
  * The fallback chain moves to the next provider on `auth`, `rate_limit`, `plan_limit` and

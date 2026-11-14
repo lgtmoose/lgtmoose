@@ -21,8 +21,10 @@ export interface FakeCursorCall {
   cwd: string;
   /** `$HOME/.cursor/cli-config.json` as the fake found it. */
   cliConfig?: string;
-  /** The entries at the checkout's root, sorted. */
+  /** The entries at the root of the directory the CLI ran in, sorted. */
   checkoutEntries: string[];
+  /** The task file the prompt argument points at, when it points at one. */
+  taskFile?: string;
 }
 
 /**
@@ -56,6 +58,10 @@ fs.appendFileSync(
     cwd: process.cwd(),
     cliConfig: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : undefined,
     checkoutEntries: fs.readdirSync(".").sort(),
+    taskFile: (() => {
+      const m = /(\\.lgtmoose-task-[\\w-]+\\/prompt-\\d+\\.md)/.exec(process.argv.at(-1) || "");
+      return m ? fs.readFileSync(m[1], "utf8") : undefined;
+    })(),
   }) + "\\n",
 );
 const r = responses[Math.min(n, responses.length - 1)];
