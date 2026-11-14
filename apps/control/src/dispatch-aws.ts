@@ -6,7 +6,7 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, or } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
@@ -149,7 +149,8 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
             eq(pullRequests.repo, repo),
             eq(pullRequests.number, number),
             eq(reviewRuns.headSha, headSha),
-            eq(reviewRuns.status, "succeeded"),
+            // Posted, or being posted by a run that may yet be stopped or fail as it finishes.
+            or(eq(reviewRuns.status, "succeeded"), isNotNull(reviewRuns.reviewSubmittedAt)),
           ),
         )
         .limit(1);

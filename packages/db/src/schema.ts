@@ -108,6 +108,11 @@ export const reviewRuns = pgTable(
     filesDone: integer("files_done").notNull().default(0),
     costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
     error: text("error"),
+    /**
+     * When the post step started submitting the run's review (null again if GitHub refused
+     * it). Its head counts as reviewed from then on, whatever the run's status.
+     */
+    reviewSubmittedAt: timestamp("review_submitted_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

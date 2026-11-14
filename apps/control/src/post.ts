@@ -312,6 +312,18 @@ export async function post(
     progressEtag = etag;
   };
 
+  // On a takeover, the earlier holder may have posted the review and stopped before saving
+  // that. Then it's posted, whatever has happened to the PR since: record it, never supersede.
+  if (
+    claim.tookOver &&
+    !progress.review &&
+    (await poster.reviewPosted(pull, reviewMarker(runId)))
+  ) {
+    progress.review = true;
+    await save();
+    await deps.runs.markReviewSubmitted(runId, true);
+  }
+
   let stale: string | undefined;
   if (!progress.review) {
     stale = (await running()) ? staleReason(latest, pr.headSha) : "its execution was stopped";
@@ -343,29 +355,31 @@ export async function post(
     });
   try {
     if (!progress.review) {
-      // An earlier holder may have posted it and stopped before saving its progress: only a
-      // claim taken over can have one.
-      const posted = claim.tookOver && (await poster.reviewPosted(pull, reviewMarker(runId)));
-      if (!posted) {
-        try {
-          await poster.submitReview(pull, pr.headSha, payload);
-        } catch (error) {
-          // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise
-          // (a timeout, a 5xx) it may be, and the claim stays until this task has stopped.
-          if (refused(error)) {
-            await deps.store
-              .deleteIfMatch(keys.reviewClaim, claim.etag)
-              .catch((release: unknown) => {
-                deps.log("releasing the review claim failed", {
-                  runId,
-                  error: release instanceof Error ? release.message : String(release),
-                });
-              });
-          }
-          throw error;
+      // Recorded before the review goes up, so the dispatcher counts this head as reviewed
+      // from now on: a reopen while this (maybe stopped) execution posts mustn't start another.
+      await deps.runs.markReviewSubmitted(runId, true);
+      try {
+        await poster.submitReview(pull, pr.headSha, payload);
+      } catch (error) {
+        // Refused, it's not on GitHub: let the next attempt claim it at once, and the head
+        // count as unreviewed again. Otherwise (a timeout, a 5xx) it may be, and the claim
+        // stays until this task has stopped.
+        if (refused(error)) {
+          const log = (what: string) => (failure: unknown) => {
+            deps.log(what, {
+              runId,
+              error: failure instanceof Error ? failure.message : String(failure),
+            });
+          };
+          await deps.store
+            .deleteIfMatch(keys.reviewClaim, claim.etag)
+            .catch(log("releasing the review claim failed"));
+          await deps.runs
+            .markReviewSubmitted(runId, false)
+            .catch(log("clearing the review's submission failed"));
         }
+        throw error;
       }
-      // Posted, by this attempt or by one that died before it saved its progress.
       progress.review = true;
       await save();
     }

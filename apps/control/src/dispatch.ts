@@ -135,7 +135,10 @@ export interface DispatchStore {
   supersedeRun(executionArn: string): Promise<void>;
   /** Marks the execution stopped, so later jobs leave it alone. */
   markStopped(executionArn: string): Promise<void>;
-  /** Whether a run for the PR at this head succeeded: it was reviewed and posted. */
+  /**
+   * Whether a run for the PR at this head has posted its review, or started to: it succeeded,
+   * or its post step began submitting the review (a stopped execution's post may still be at it).
+   */
   reviewed(repo: string, prNumber: number, headSha: string): Promise<boolean>;
 }
 

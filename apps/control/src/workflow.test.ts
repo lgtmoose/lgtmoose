@@ -115,6 +115,7 @@ interface Run extends RunRecord {
   filesTotal?: number;
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
+  reviewSubmitted?: boolean;
 }
 
 function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boolean } } {
@@ -126,6 +127,10 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
     newer,
     async newerRunPosted() {
       return newer.posted;
+    },
+    async markReviewSubmitted(runId, submitted) {
+      const run = runs.get(runId);
+      if (run) run.reviewSubmitted = submitted;
     },
     async startRun(input) {
       const run: Run = {
@@ -505,6 +510,48 @@ describe("post", () => {
     });
     expect(reviews(calls)).toHaveLength(1);
     expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
+  });
+
+  it("records a review a dead holder posted, even after the head has moved on", async () => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    const claim = runKeys(RUN_ID).reviewClaim;
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "STOPPED");
+    // It posted the review and died before saving; a push has come in since.
+    h.reviewsOnGitHub.add(reviewMarker(RUN_ID));
+    setup.head = "f".repeat(40);
+    const taskStatus = (arn: string) => h.deps.taskStatus(arn);
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).not.toContain("submitReview");
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "succeeded", reviewSubmitted: true });
+  });
+
+  it("marks the review submitted before posting it, and clears that if GitHub refuses", async () => {
+    const { h, taskStatus } = await ready();
+    const github = h.deps.github.bind(h.deps);
+    const marks: (boolean | undefined)[] = [];
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => ({
+          ...real.poster(runId, pull),
+          submitReview: async () => {
+            marks.push(h.runs.runs.get(RUN_ID)?.reviewSubmitted);
+            throw new GitHubError(422, "Unprocessable", "POST", "/reviews");
+          },
+        }),
+      };
+    };
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("HTTP 422");
+    expect(marks).toEqual([true]);
+    expect(h.runs.runs.get(RUN_ID)?.reviewSubmitted).toBe(false);
   });
 
   it("leaves an off-ECS holder's claim alone when on ECS", async () => {

@@ -1,5 +1,5 @@
 {
-  "id": "0b55cc50-259e-4ee5-b90e-a1ad17d182f7",
+  "id": "a2942f31-9ded-45ae-a737-2c1cb211065b",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1108,6 +1108,12 @@
         "error": {
           "name": "error",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "review_submitted_at": {
+          "name": "review_submitted_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
