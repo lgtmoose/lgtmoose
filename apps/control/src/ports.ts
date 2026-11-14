@@ -6,8 +6,11 @@ import type { Poster, PullRef } from "@lgtmoose/poster";
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
   /**
-   * Conditional writes, for the review claim. Each returns the object's new ETag, or undefined
-   * when the condition failed. A write racing another of the same key throws.
+   * Conditional writes, for the post step's claim and progress. Each returns the object's new
+   * ETag, or undefined when the condition failed. A write racing another of the same key
+   * throws. A failed condition on an object that holds exactly this body counts as success,
+   * since it answers a retry of a write that was applied; so a body must be unique to its
+   * writer (the claim names its attempt, and saved progress its attempt and write count).
    */
   /** Writes the object only if there's none yet. */
   createText(key: string, body: string): Promise<string | undefined>;

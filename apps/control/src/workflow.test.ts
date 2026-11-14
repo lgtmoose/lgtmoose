@@ -414,8 +414,9 @@ describe("post", () => {
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     const calls = countingPoster(h, { what: "upsertSummaryComment", times: 1 });
-    const attempt = { attempt: { id: "a1", taskArn: undefined } };
-    await expect(post(h.deps, RUN_ID, attempt)).rejects.toThrow("GitHub 502");
+    // Off ECS, as on a laptop: the retry, a new attempt, takes the first one's claim over.
+    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+    await expect(post(h.deps, RUN_ID, offEcs("a1"))).rejects.toThrow("GitHub 502");
     // The review is on GitHub, so the run is recorded, with the summary comment it already had.
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({
       status: "succeeded",
@@ -423,7 +424,7 @@ describe("post", () => {
     });
     // The retry doesn't post the review or the check run again.
     calls.length = 0;
-    expect(await post(h.deps, RUN_ID, attempt)).toMatchObject({ posted: true });
+    expect(await post(h.deps, RUN_ID, offEcs("a2"))).toMatchObject({ posted: true });
     expect(calls).toEqual(["upsertSummaryComment", "labels"]);
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
   });
@@ -434,12 +435,16 @@ describe("post", () => {
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     countingPoster(h, { what: "completeCheckRun", times: 1 });
-    const attempt = { attempt: { id: "a1", taskArn: undefined } };
-    await expect(post(h.deps, RUN_ID, attempt)).rejects.toThrow("GitHub 502");
+    await expect(
+      post(h.deps, RUN_ID, { attempt: { id: "a1", taskArn: undefined } }),
+    ).rejects.toThrow("GitHub 502");
     setup.head = "f".repeat(40);
-    expect(await post(h.deps, RUN_ID, { ...attempt, running: async () => false })).toMatchObject({
-      posted: true,
-    });
+    expect(
+      await post(h.deps, RUN_ID, {
+        attempt: { id: "a2", taskArn: undefined },
+        running: async () => false,
+      }),
+    ).toMatchObject({ posted: true });
   });
 
   const TASK_A = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/aaa";
@@ -500,6 +505,55 @@ describe("post", () => {
     });
     expect(reviews(calls)).toHaveLength(1);
     expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
+  });
+
+  it("leaves an off-ECS holder's claim alone when on ECS", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop" }));
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("off ECS");
+    expect(calls).toEqual([]);
+  });
+
+  it("checks GitHub for the review only when it took a claim over", async () => {
+    const { h, claim, taskStatus } = await ready();
+    let lookups = 0;
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          const reviewPosted = poster.reviewPosted.bind(poster);
+          poster.reviewPosted = async (ref, marker) => {
+            lookups += 1;
+            return reviewPosted(ref, marker);
+          };
+          return poster;
+        },
+      };
+    };
+    await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
+    expect(lookups).toBe(0);
+    // A later attempt that takes over a stopped holder's claim, with no saved review, looks.
+    h.objects.delete(runKeys(RUN_ID).posted);
+    h.tasks.set(TASK_A, "STOPPED");
+    h.reviewsOnGitHub.add(reviewMarker(RUN_ID));
+    await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus });
+    expect(lookups).toBe(1);
+    expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
+  });
+
+  it("records nothing when it doesn't hold the claim", async () => {
+    const { h, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    // The holder has posted the review and is still at the rest.
+    const progress = JSON.stringify({ attempt: "old", writes: 1, review: true });
+    await h.deps.store.createText(runKeys(RUN_ID).posted, progress);
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).rejects.toThrow();
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    expect(h.objects.get(runKeys(RUN_ID).posted)).toBe(progress);
   });
 
   it("lets only one attempt take over a stopped claimer's claim", async () => {

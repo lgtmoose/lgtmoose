@@ -171,23 +171,26 @@ async function holdClaim(
   deps: ControlDeps,
   options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
   claimKey: string,
-): Promise<string> {
+): Promise<{ etag: string; tookOver: boolean }> {
   const mine = JSON.stringify({
     attempt: options.attempt.id,
     ...(options.attempt.taskArn === undefined ? {} : { taskArn: options.attempt.taskArn }),
   });
   const created = await deps.store.createText(claimKey, mine);
-  if (created !== undefined) return created;
+  if (created !== undefined) return { etag: created, tookOver: false };
   const current = await deps.store.getTagged(claimKey);
   // Released since: claim it afresh, once.
   if (current === undefined) {
     const again = await deps.store.createText(claimKey, mine);
-    if (again !== undefined) return again;
+    if (again !== undefined) return { etag: again, tookOver: false };
     throw new Error("Another attempt claimed this run's post just now.");
   }
   const holder = claimSchema.safeParse(parseJson(current.text));
   const holderTask = holder.success ? holder.data.taskArn : undefined;
-  if (holder.success && holderTask === undefined) {
+  // A holder off ECS can't be checked. Off ECS too (a local or dev run), there are no
+  // parallel retries, so it's an earlier run of this one that ended: take it over. On ECS, a
+  // claim from off ECS is someone else's run of the same post: leave it be.
+  if (holder.success && holderTask === undefined && options.attempt.taskArn !== undefined) {
     throw new Error("Another attempt, off ECS, holds this run's post claim.");
   }
   // An unreadable claim has no holder to wait for.
@@ -200,7 +203,7 @@ async function holdClaim(
   const taken = await deps.store.replaceText(claimKey, mine, current.etag);
   if (taken === undefined) throw new Error("Another attempt took over this run's post claim.");
   deps.log("took over the post claim of a stopped attempt", { holderTask });
-  return taken;
+  return { etag: taken, tookOver: true };
 }
 
 /** GitHub refused the request outright: it wasn't carried out, so nothing was posted. */
@@ -284,6 +287,10 @@ export async function post(
   // may never stop this execution (it may not have seen the event that made it stale).
   // What an earlier attempt of this step posted: a retry carries on from there, and once the
   // review is posted the run is recorded whatever happens to the PR meanwhile.
+  // Every write below is the claim holder's alone: an earlier attempt still running makes
+  // this one fail its step until it has stopped. Progress is read once the claim is held, so
+  // its version is the one this attempt saves over.
+  const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim);
   const saved = await deps.store.getTagged(keys.posted);
   const progress = readProgress(saved?.text);
   // Each save is conditional on the version this attempt last wrote (or read), so two
@@ -335,24 +342,25 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
   try {
-    // Every write below is the claim holder's alone: an earlier attempt still running makes
-    // this one fail its step until it has stopped.
-    const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim);
     if (!progress.review) {
-      // An earlier holder may have posted it and stopped before saving its progress.
-      if (!(await poster.reviewPosted(pull, reviewMarker(runId)))) {
+      // An earlier holder may have posted it and stopped before saving its progress: only a
+      // claim taken over can have one.
+      const posted = claim.tookOver && (await poster.reviewPosted(pull, reviewMarker(runId)));
+      if (!posted) {
         try {
           await poster.submitReview(pull, pr.headSha, payload);
         } catch (error) {
           // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise
           // (a timeout, a 5xx) it may be, and the claim stays until this task has stopped.
           if (refused(error)) {
-            await deps.store.deleteIfMatch(keys.reviewClaim, claim).catch((release: unknown) => {
-              deps.log("releasing the review claim failed", {
-                runId,
-                error: release instanceof Error ? release.message : String(release),
+            await deps.store
+              .deleteIfMatch(keys.reviewClaim, claim.etag)
+              .catch((release: unknown) => {
+                deps.log("releasing the review claim failed", {
+                  runId,
+                  error: release instanceof Error ? release.message : String(release),
+                });
               });
-            });
           }
           throw error;
         }
