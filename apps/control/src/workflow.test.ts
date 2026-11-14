@@ -225,17 +225,15 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-interface StoredFinding extends FindingRecord {
-  status: "open" | "outdated";
-}
+type StoredFinding = FindingRecord;
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
 function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
   const rows: StoredFinding[] = [];
   return {
     rows,
-    async openFindings() {
-      return rows.filter((row) => row.status === "open").map(({ status: _, ...row }) => row);
+    async trackedFindings() {
+      return rows.map((row) => ({ ...row }));
     },
     async saveFindings(_pr, _run, headSha, posted) {
       for (const { finding, fingerprint } of posted) {
@@ -259,7 +257,12 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       }
     },
     async markOutdated(ids) {
-      for (const row of rows) if (ids.includes(row.id)) row.status = "outdated";
+      for (const row of rows)
+        if (ids.includes(row.id) && row.status === "open") row.status = "outdated";
+    },
+    async reopen(ids) {
+      for (const row of rows)
+        if (ids.includes(row.id) && row.status === "outdated") row.status = "open";
     },
   };
 }
@@ -670,8 +673,32 @@ describe("later runs", () => {
     const { prepared, posted } = await review(h, 3, [finding()]);
 
     expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
-    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 1 });
+    // The outdated finding's line is back, so it reopens; the model's repeat isn't posted twice.
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("reopens an outdated finding when its line comes back without the file being reviewed", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    const reviewed = headSha;
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("i < items.length; i++", "i <= items.length - 1; i++") },
+      "fix",
+    );
+    // The fix's run has a failed batch (no output), so the head it reviewed isn't recorded.
+    const fixRun = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    await post(h.deps, fixRun.runId);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(h.runs.pr.lastReviewedSha).toBe(reviewed);
+    // Revert the fix: src/total.ts is as it was at the reviewed head, so nothing is in range.
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "revert the fix");
+
+    const { prepared, posted } = await review(h, 3);
+
+    expect(prepared.batches).toEqual([]);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(posted.event).toBe("REQUEST_CHANGES");
   });
 
   it("posts a review when the event changes though the label doesn't", async () => {

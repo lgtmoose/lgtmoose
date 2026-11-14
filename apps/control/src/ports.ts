@@ -47,12 +47,14 @@ export interface FindingRecord {
   body: string;
   /** The head the finding was raised at: its line numbers are for that commit. */
   raisedAtSha: string;
+  /** Outdated findings are followed too: one whose line comes back (a reverted fix) reopens. */
+  status: "open" | "outdated";
 }
 
 /** `findings` and `finding_events`, for our own findings. */
 export interface FindingStore {
-  /** Our findings on the PR that are still open, oldest first. */
-  openFindings(pullRequestId: string): Promise<FindingRecord[]>;
+  /** Our findings on the PR that are open or outdated, oldest first. */
+  trackedFindings(pullRequestId: string): Promise<FindingRecord[]>;
   /**
    * Records a run's new findings as open, raised at `headSha`. A fingerprint already on the PR
    * (say, outdated, then raised again) is reopened at the new place.
@@ -63,8 +65,10 @@ export interface FindingStore {
     headSha: string,
     findings: readonly { finding: Finding; fingerprint: string }[],
   ): Promise<void>;
-  /** Marks findings outdated at `sha`: the lines they're on no longer exist. */
+  /** Marks open findings outdated at `sha`: the lines they're on no longer exist. */
   markOutdated(ids: readonly string[], sha: string): Promise<void>;
+  /** Reopens outdated findings at `sha`: the lines they're on exist again. */
+  reopen(ids: readonly string[], sha: string): Promise<void>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

@@ -206,41 +206,59 @@ describe("drizzleFindingStore", () => {
 
   it("records findings, reopens outdated ones raised again, and leaves declined ones", async () => {
     const run = await start("arn:exec:findings:1", 40);
+    const open = async () =>
+      (await findingStore.trackedFindings(run.pullRequestId)).filter(
+        (record) => record.status === "open",
+      );
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
       { finding: finding("First"), fingerprint: "fp1:a" },
       { finding: finding("Second"), fingerprint: "fp1:b" },
     ]);
-    const open = await findingStore.openFindings(run.pullRequestId);
-    expect(open.map((record) => [record.fingerprint, record.raisedAtSha, record.line])).toEqual([
+    const saved = await open();
+    expect(saved.map((record) => [record.fingerprint, record.raisedAtSha, record.line])).toEqual([
       ["fp1:a", sha("1"), 4],
       ["fp1:b", sha("1"), 4],
     ]);
 
-    const [first, second] = open;
+    const [first, second] = saved;
     await findingStore.markOutdated([first?.id ?? ""], sha("2"));
     await db
       .update(findings)
       .set({ status: "declined" })
       .where(eq(findings.id, second?.id ?? ""));
-    expect(await findingStore.openFindings(run.pullRequestId)).toEqual([]);
+    expect(await open()).toEqual([]);
+    // Outdated ones are still tracked; declined ones aren't.
+    expect(await findingStore.trackedFindings(run.pullRequestId)).toMatchObject([
+      { fingerprint: "fp1:a", status: "outdated" },
+    ]);
 
     // Only the declined one: no row changes, and nothing to record an event for.
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("3"), [
       { finding: finding("Second"), fingerprint: "fp1:b" },
     ]);
-    expect(await findingStore.openFindings(run.pullRequestId)).toEqual([]);
+    expect(await open()).toEqual([]);
 
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("3"), [
       { finding: { ...finding("First"), line: 9 }, fingerprint: "fp1:a" },
       { finding: finding("Second"), fingerprint: "fp1:b" },
     ]);
-    const reopened = await findingStore.openFindings(run.pullRequestId);
-    expect(reopened).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("3"), line: 9 }]);
+    expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("3"), line: 9 }]);
+
+    // Outdated, then reopened in place when its line is back; reopening an open one is a no-op.
+    await findingStore.markOutdated([first?.id ?? ""], sha("4"));
+    await findingStore.reopen([first?.id ?? "", second?.id ?? ""], sha("5"));
+    await findingStore.reopen([first?.id ?? ""], sha("5"));
+    expect(await open()).toMatchObject([{ fingerprint: "fp1:a" }]);
     const events = await db
-      .select({ type: findingEvents.type, sha: findingEvents.sha })
+      .select({ type: findingEvents.type })
       .from(findingEvents)
-      .where(eq(findingEvents.findingId, first?.id ?? ""))
-      .orderBy(findingEvents.createdAt);
-    expect(events.map((event) => event.type).toSorted()).toEqual(["outdated", "raised", "raised"]);
+      .where(eq(findingEvents.findingId, first?.id ?? ""));
+    expect(events.map((event) => event.type).toSorted()).toEqual([
+      "outdated",
+      "outdated",
+      "raised",
+      "raised",
+      "raised",
+    ]);
   });
 });

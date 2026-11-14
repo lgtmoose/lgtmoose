@@ -301,20 +301,23 @@ const INSERT_CHUNK = 500;
 /** Our own findings in `findings`, with a `finding_events` row for each change. */
 export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()): FindingStore {
   return {
-    async openFindings(pullRequestId) {
+    async trackedFindings(pullRequestId) {
       const rows = await db
         .select()
         .from(findings)
         .where(
           and(
             eq(findings.pullRequestId, pullRequestId),
-            eq(findings.status, "open"),
+            inArray(findings.status, ["open", "outdated"]),
             eq(findings.source, "self"),
           ),
         )
         .orderBy(asc(findings.createdAt));
       return rows.flatMap((row) =>
-        row.path === null || row.line === null || row.side === null
+        row.path === null ||
+        row.line === null ||
+        row.side === null ||
+        (row.status !== "open" && row.status !== "outdated")
           ? []
           : [
               {
@@ -329,6 +332,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 title: row.title,
                 body: row.body,
                 raisedAtSha: row.raisedAtSha,
+                status: row.status,
               },
             ],
       );
@@ -387,33 +391,35 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         }
       });
     },
-    async markOutdated(ids, sha) {
-      if (ids.length === 0) return;
-      await db.transaction(async (tx) => {
-        for (let i = 0; i < ids.length; i += INSERT_CHUNK) {
-          const rows = await tx
-            .update(findings)
-            .set({ status: "outdated", updatedAt: now() })
-            .where(
-              and(
-                inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)),
-                eq(findings.status, "open"),
-              ),
-            )
-            .returning({ id: findings.id });
-          if (rows.length === 0) continue;
-          await tx.insert(findingEvents).values(
-            rows.map((row) => ({
-              findingId: row.id,
-              type: "outdated" as const,
-              actor: "self",
-              sha,
-            })),
-          );
-        }
-      });
-    },
+    markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
+    reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
   };
+
+  /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
+  async function moveStatus(
+    ids: readonly string[],
+    from: "open" | "outdated",
+    to: "open" | "outdated",
+    event: "outdated" | "raised",
+    sha: string,
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < ids.length; i += INSERT_CHUNK) {
+        const rows = await tx
+          .update(findings)
+          .set({ status: to, updatedAt: now() })
+          .where(
+            and(inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)), eq(findings.status, from)),
+          )
+          .returning({ id: findings.id });
+        if (rows.length === 0) continue;
+        await tx
+          .insert(findingEvents)
+          .values(rows.map((row) => ({ findingId: row.id, type: event, actor: "self", sha })));
+      }
+    });
+  }
 }
 
 /** Writes a gzip tarball of `dir`, hidden files included. */

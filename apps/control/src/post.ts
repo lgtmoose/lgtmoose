@@ -42,19 +42,21 @@ function costOf(report: ReviewReport): number | undefined {
 }
 
 /**
- * Splits the PR's open findings into those still standing at `headSha`, moved to where their
- * lines are now, and those whose lines no longer exist (changed, deleted, or the PR no longer
- * changes the file): outdated. A finding on the old side stands while the PR still changes its
- * file. When the commit a finding was raised at is gone (force-pushed away), its lines can't be
- * followed, so it stands at its old place while the PR still changes the file.
+ * Splits the PR's tracked findings into those standing at `headSha`, moved to where their lines
+ * are now, and those whose lines don't exist there (changed, deleted, or the PR no longer
+ * changes the file). Open findings that no longer stand are `outdated`; outdated ones that stand
+ * again, such as after a fix is reverted, are `reopened`. A finding on the old side stands while
+ * the PR still changes its file. When the commit a finding was raised at is gone (force-pushed
+ * away), its lines can't be followed: an open one stands at its old place while the PR still
+ * changes the file, and an outdated one stays outdated.
  */
 async function standing(
   repo: Repo,
   records: readonly FindingRecord[],
   mergeBase: string,
   headSha: string,
-): Promise<{ open: EarlierFinding[]; outdated: string[] }> {
-  if (records.length === 0) return { open: [], outdated: [] };
+): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
+  if (records.length === 0) return { open: [], outdated: [], reopened: [] };
   const prFiles = await diffCommits(repo, mergeBase, headSha);
   // Old-side lines are in the PR while it changes the file (deleting it included); new-side
   // lines only while the file is still there at head.
@@ -62,6 +64,7 @@ async function standing(
   const atHead = new Set(prFiles.flatMap((file) => (file.status === "deleted" ? [] : [file.path])));
   const open: EarlierFinding[] = [];
   const outdated: string[] = [];
+  const reopened: string[] = [];
   const bySha = new Map<string, FindingRecord[]>();
   for (const record of records) {
     const group = bySha.get(record.raisedAtSha);
@@ -84,10 +87,15 @@ async function standing(
       const place =
         record.side === "RIGHT" ? at.get(record) : { path: record.path, line: record.line };
       const inPr = record.side === "RIGHT" ? atHead : changed;
-      if (place === undefined || !inPr.has(place.path)) {
-        outdated.push(record.id);
+      const stands =
+        place !== undefined &&
+        inPr.has(place.path) &&
+        (record.status === "open" || followable || record.side === "LEFT");
+      if (!stands) {
+        if (record.status === "open") outdated.push(record.id);
         continue;
       }
+      if (record.status === "outdated") reopened.push(record.id);
       const shift = place.line - record.line;
       const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
       const finding: Finding = {
@@ -105,7 +113,7 @@ async function standing(
       open.push({ finding, fingerprint: record.fingerprint });
     }
   }
-  return { open, outdated };
+  return { open, outdated, reopened };
 }
 
 /**
@@ -114,7 +122,8 @@ async function standing(
  * summary comment and the status label. In shadow mode the poster records instead.
  *
  * Our findings from earlier runs that are still open count towards the decision; those whose
- * lines are gone are marked outdated. An incremental run that found nothing new, and whose
+ * lines are gone are marked outdated, and outdated ones whose lines are back are reopened. An
+ * incremental run that found nothing new, and whose
  * decision is the review event and label already on the PR (other than an approval), posts no
  * review, but still updates the check run, the summary and the label, and records the head as
  * reviewed.
@@ -139,10 +148,11 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   const pull: PullRef = { owner: target.owner, repo: target.repo, pull: target.number };
   const github = await deps.github(manifest.installationId);
   const poster = github.poster(runId, pull);
-  const records = await deps.findings.openFindings(run.pullRequestId);
+  const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
   let outdated: string[];
+  let reopened: string[];
   try {
     // Blobs only, for the cited code: no checkout. The commits earlier findings were raised at
     // are fetched too, to follow their lines.
@@ -155,7 +165,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       checkout: "none",
     });
     const earlier = await standing(repo, records, prepared.mergeBase, pr.headSha);
-    outdated = earlier.outdated;
+    ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
       earlier: earlier.open,
@@ -205,6 +215,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
 
   // Outdated first: a finding raised again at its new place (same fingerprint) is reopened.
   await deps.findings.markOutdated(outdated, pr.headSha);
+  await deps.findings.reopen(reopened, pr.headSha);
   await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
   await deps.runs.recordFiles(runId, report.reviewedFiles);
   // A failed batch's files weren't reviewed: the next incremental run starts from the last
@@ -224,6 +235,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     complete: report.complete,
     reviewed: !quiet,
     outdated: outdated.length,
+    reopened: reopened.length,
   });
   return {
     runId,
