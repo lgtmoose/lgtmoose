@@ -22,6 +22,7 @@ import type { Construct } from "constructs";
 import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
 import type { Profile } from "./network-stack.js";
 import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
+import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -77,6 +78,11 @@ export interface WorkflowStackProps extends StackProps {
   githubAppSecret: ISecret;
   /** Provider id → its credential secret, for providers that have one (not Bedrock). */
   providerSecrets: ReadonlyMap<string, ISecret>;
+  /**
+   * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
+   * (`sandboxBuildArgs`). Off by default.
+   */
+  allowUnverifiedCursor?: boolean;
 }
 
 /**
@@ -110,7 +116,10 @@ export class WorkflowStack extends Stack {
     this.cluster = new Cluster(this, "Cluster", { vpc: props.vpc });
 
     const controlImage = image("apps/control/Dockerfile");
-    const sandboxImage = image("infra/sandbox/Dockerfile");
+    const sandboxImage = image(
+      "infra/sandbox/Dockerfile",
+      sandboxBuildArgs(props.providers, props.allowUnverifiedCursor ?? false),
+    );
 
     this.controlTaskDefinition = this.taskDefinition("Control", {
       cpu: 1024,
@@ -279,7 +288,10 @@ export class WorkflowStack extends Stack {
   }
 }
 
-/** An image CDK builds from the repository root with the given Dockerfile. */
-function image(file: string): ContainerImage {
-  return ContainerImage.fromAsset(REPO_ROOT, { file, platform: Platform.LINUX_ARM64 });
+/**
+ * An image CDK builds from the repository root with the given Dockerfile, for arm64 (see
+ * `IMAGE_ARCH`).
+ */
+function image(file: string, buildArgs: Record<string, string> = {}): ContainerImage {
+  return ContainerImage.fromAsset(REPO_ROOT, { file, platform: Platform.LINUX_ARM64, buildArgs });
 }

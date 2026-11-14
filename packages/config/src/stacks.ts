@@ -48,4 +48,10 @@ export const CDK_CONTEXT = {
    * database secret, the bucket and its objects go too. RDS's CloudWatch logs expire on their own.
    */
   purge: "lgtmoose:purge",
+  /**
+   * Builds the sandbox image with the Cursor CLI although its checksum isn't recorded yet. The
+   * same as `LGTMOOSE_ALLOW_UNVERIFIED_CURSOR=1`; without either, a cursor-agent provider fails
+   * synth until the checksum is in packages/harness/src/version.ts.
+   */
+  allowUnverifiedCursor: "lgtmoose:allowUnverifiedCursor",
 } as const;

@@ -69,4 +69,9 @@ export { CURSOR_DENIED_TOOLS, cursorPermissions, DENIED_ROOTS } from "./cursor/p
 export { classifyCursorFailure } from "./cursor/result.js";
 export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
 export { isInside } from "./paths.js";
-export { CLAUDE_CODE_VERSION, CODEX_VERSION, CURSOR_AGENT_VERSION } from "./version.js";
+export {
+  CLAUDE_CODE_VERSION,
+  CODEX_VERSION,
+  CURSOR_AGENT_SHA256,
+  CURSOR_AGENT_VERSION,
+} from "./version.js";

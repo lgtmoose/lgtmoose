@@ -16,21 +16,30 @@ RUN pnpm install --frozen-lockfile --filter "@lgtmoose/sandbox..." \
   && pnpm --filter "@lgtmoose/sandbox..." run build \
   && pnpm --filter @lgtmoose/sandbox deploy --legacy --prod /out
 
-# The Cursor CLI isn't on npm. This is the build its installer (https://cursor.com/install)
-# downloads, fetched directly so the version is pinned and the final image needs no curl.
-# CURSOR_AGENT_SHA256 is the tarball's checksum for the target platform, and the build fails
-# without it: an unverified binary would run with a model key. It isn't filled in yet (NIC-853
-# records it); until then, a build can pass ALLOW_UNVERIFIED_CURSOR=1 to skip the check.
+# The Cursor CLI, installed only when the Workflow stack passes INSTALL_CURSOR_AGENT=1 (some
+# provider uses cursor-agent), with CURSOR_AGENT_VERSION and the target platform's
+# CURSOR_AGENT_SHA256 from packages/harness/src/version.ts. It isn't on npm: this is the build
+# its installer (https://cursor.com/install) downloads, fetched directly so the version is pinned
+# and the final image needs no curl. Without a checksum the build fails, since an unverified
+# binary would run with a model key, unless ALLOW_UNVERIFIED_CURSOR=1 is passed too. Without
+# INSTALL_CURSOR_AGENT this stage leaves an empty directory and downloads nothing.
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS cursor
 
-ARG CURSOR_AGENT_VERSION=2026.11.10-731fb78
+ARG INSTALL_CURSOR_AGENT=
+ARG CURSOR_AGENT_VERSION=
 ARG CURSOR_AGENT_SHA256=
 ARG ALLOW_UNVERIFIED_CURSOR=
 ARG TARGETARCH
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends curl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
+  mkdir -p /opt/cursor-agent; \
+  if [ "${INSTALL_CURSOR_AGENT}" != "1" ]; then exit 0; fi; \
+  if [ -z "${CURSOR_AGENT_VERSION}" ]; then \
+    echo "INSTALL_CURSOR_AGENT=1 needs CURSOR_AGENT_VERSION" >&2; \
+    exit 1; \
+  fi; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends curl ca-certificates; \
+  rm -rf /var/lib/apt/lists/*; \
   case "${TARGETARCH:-amd64}" in \
     amd64) arch=x64 ;; \
     arm64) arch=arm64 ;; \
@@ -46,7 +55,6 @@ RUN set -eu; \
     echo "CURSOR_AGENT_SHA256 is not set; set it, or ALLOW_UNVERIFIED_CURSOR=1 to skip" >&2; \
     exit 1; \
   fi; \
-  mkdir -p /opt/cursor-agent; \
   tar -xzf /tmp/agent.tar.gz -C /opt/cursor-agent --strip-components=1 --no-same-owner; \
   chmod -R go-w /opt/cursor-agent; \
   test -x /opt/cursor-agent/cursor-agent
@@ -70,11 +78,15 @@ RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
   && npm cache clean --force \
   && codex --version
 
-# On the read-only root filesystem the CLI can't update itself. `agent --version` checks it runs.
+# Empty unless the cursor stage installed the CLI. On the read-only root filesystem it can't
+# update itself. `agent --version` checks it runs.
+ARG INSTALL_CURSOR_AGENT=
 COPY --from=cursor /opt/cursor-agent /opt/cursor-agent
-RUN ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/agent \
-  && ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent \
-  && HOME=/tmp agent --version
+RUN if [ "${INSTALL_CURSOR_AGENT}" = "1" ]; then \
+    ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/agent \
+    && ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent \
+    && HOME=/tmp agent --version; \
+  fi
 
 ENV DISABLE_AUTOUPDATER=1 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
