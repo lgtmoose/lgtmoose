@@ -15,6 +15,8 @@ export const workflowJobSchema = z.object({
     .string()
     .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
     .optional(),
+  /** When the job's event happened (see `ReviewJob.eventAt`): orders a PR's runs. */
+  eventAt: z.iso.datetime().optional(),
 });
 
 export type WorkflowJob = z.infer<typeof workflowJobSchema>;

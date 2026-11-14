@@ -1,5 +1,5 @@
 {
-  "id": "bfd97a8d-7581-4d81-ab1d-123305eeb8de",
+  "id": "c8ac759e-c61f-456a-8733-2e65176e0f85",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1108,6 +1108,12 @@
         "error": {
           "name": "error",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "event_at": {
+          "name": "event_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

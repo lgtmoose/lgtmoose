@@ -22,8 +22,9 @@ afterAll(async () => {
   await client.close();
 });
 
-function start(executionArn: string, number = 1, headSha = "a".repeat(40)) {
+function start(executionArn: string, number = 1, headSha = "a".repeat(40), eventAt?: Date) {
   return store.startRun({
+    ...(eventAt === undefined ? {} : { eventAt }),
     installationId: 5,
     repo: "acme/shop",
     number,
@@ -32,6 +33,12 @@ function start(executionArn: string, number = 1, headSha = "a".repeat(40)) {
     baseSha: "b".repeat(40),
     executionArn,
   });
+}
+
+async function loaded(runId: string) {
+  const run = await store.getRun(runId);
+  if (run === undefined) throw new Error(`no run ${runId}`);
+  return run;
 }
 
 async function runRow(runId: string) {
@@ -99,11 +106,11 @@ describe("drizzleRunStore", () => {
   it("leaves the PR to a newer run that already posted", async () => {
     const older = await start("arn:exec:10", 10);
     const newer = await start("arn:exec:11", 10);
-    expect(await store.newerRunPosted(older.runId)).toBe(false);
+    expect(await store.newerRunPosted(await loaded(older.runId))).toBe(false);
     await store.succeedRun(newer.runId, posted("b".repeat(40), 7));
     // The older run can tell before it writes the PR's summary or label.
-    expect(await store.newerRunPosted(older.runId)).toBe(true);
-    expect(await store.newerRunPosted(newer.runId)).toBe(false);
+    expect(await store.newerRunPosted(await loaded(older.runId))).toBe(true);
+    expect(await store.newerRunPosted(await loaded(newer.runId))).toBe(false);
     await store.succeedRun(older.runId, posted("a".repeat(40), 6));
     expect(await runRow(older.runId)).toMatchObject({ status: "succeeded" });
     expect(await prRow(newer.pullRequestId)).toMatchObject({
@@ -134,18 +141,56 @@ describe("drizzleRunStore", () => {
     const older = await start("arn:exec:16", 16);
     const newer = await start("arn:exec:17", 16);
     await store.coverRun(newer.runId, { filesDone: 1, costUsd: undefined });
-    expect(await store.newerRunPosted(older.runId)).toBe(false);
+    expect(await store.newerRunPosted(await loaded(older.runId))).toBe(false);
     await store.succeedRun(older.runId, posted("a".repeat(40), 8));
     expect(await prRow(older.pullRequestId)).toMatchObject({ summaryCommentId: 8 });
   });
 
-  it("asks about newer runs at the same head only, when told to", async () => {
-    const older = await start("arn:exec:18", 18, "a".repeat(40));
-    const newer = await start("arn:exec:19", 18, "c".repeat(40));
-    await store.succeedRun(newer.runId, posted("c".repeat(40), 9));
-    // The summary and label are the PR's: the newer run's. The check run is the head's.
-    expect(await store.newerRunPosted(older.runId)).toBe(true);
-    expect(await store.newerRunPosted(older.runId, { sameHead: true })).toBe(false);
+  it("orders a PR's runs by their event time, not by when their rows were made", async () => {
+    // The later push's run was made first (its prepare was quicker).
+    const later = await start("arn:exec:18", 18, "c".repeat(40), new Date("2026-11-14T00:00:02Z"));
+    const earlier = await start(
+      "arn:exec:19",
+      18,
+      "a".repeat(40),
+      new Date("2026-11-14T00:00:01Z"),
+    );
+    await store.succeedRun(later.runId, posted("c".repeat(40), 9));
+    // The earlier event's run defers to the later one, though its row is newer.
+    expect(await store.newerRunPosted(await loaded(earlier.runId))).toBe(true);
+    expect(await store.newerRunPosted(await loaded(later.runId))).toBe(false);
+    await store.succeedRun(earlier.runId, posted("a".repeat(40), 9));
+    expect(await prRow(later.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
+    expect(await loaded(later.runId)).toMatchObject({
+      headSha: "c".repeat(40),
+      lastReviewedSha: "c".repeat(40),
+      order: new Date("2026-11-14T00:00:02Z"),
+    });
+  });
+
+  it("records a covered run's PR outputs on the PR, unless a newer run posted", async () => {
+    const run = await start("arn:exec:21", 21, "d".repeat(40), new Date("2026-11-14T00:00:05Z"));
+    await store.coverRun(run.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      pr: { headSha: "d".repeat(40), statusLabel: "label d", summaryCommentId: 12 },
+    });
+    expect(await runRow(run.runId)).toMatchObject({ status: "covered" });
+    expect(await prRow(run.pullRequestId)).toMatchObject({
+      lastReviewedSha: "d".repeat(40),
+      statusLabel: "label d",
+      summaryCommentId: 12,
+    });
+    // A run for a later event has posted: a covered run's outputs don't overwrite its record.
+    const newer = await start("arn:exec:22", 21, "e".repeat(40), new Date("2026-11-14T00:00:09Z"));
+    await store.succeedRun(newer.runId, posted("e".repeat(40), 13));
+    const old = await start("arn:exec:23", 21, "d".repeat(40), new Date("2026-11-14T00:00:06Z"));
+    await store.coverRun(old.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      pr: { headSha: "d".repeat(40), statusLabel: "label d", summaryCommentId: 12 },
+    });
+    expect(await prRow(run.pullRequestId)).toMatchObject({ lastReviewedSha: "e".repeat(40) });
   });
 
   it("supersedes only a queued or running run", async () => {

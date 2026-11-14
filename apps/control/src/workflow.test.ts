@@ -129,6 +129,7 @@ interface Run extends RunRecord {
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
   covered?: boolean;
+  coverResult?: Parameters<RunStore["coverRun"]>[1];
 }
 
 function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boolean } } {
@@ -141,15 +142,18 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
     async newerRunPosted() {
       return newer.posted;
     },
-    async coverRun(runId) {
+    async coverRun(runId, result) {
       const run = runs.get(runId);
-      if (run) Object.assign(run, { status: "covered", covered: true });
+      if (run) Object.assign(run, { status: "covered", covered: true, coverResult: result });
     },
     async startRun(input) {
       const run: Run = {
         runId: RUN_ID,
         pullRequestId: "pr-1",
         summaryCommentId: 41,
+        headSha: input.headSha,
+        lastReviewedSha: undefined,
+        order: input.eventAt ?? new Date(0),
         status: "running",
         executionArn: input.executionArn,
       };
@@ -476,6 +480,7 @@ describe("post", () => {
 
   const TASK_A = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/aaa";
   const TASK_B = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/bbb";
+  const TASK_C = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/ccc";
   const as = (taskArn: string, id = taskArn): { attempt: PostAttempt } => ({
     attempt: { id, taskArn },
   });
@@ -647,7 +652,7 @@ describe("post", () => {
     await h.deps.store.createText(pullKey, JSON.stringify({ attempt: "other", taskArn: TASK_A }));
     h.tasks.set(TASK_A, "RUNNING");
     await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow(
-      "this head's review",
+      "this head's post",
     );
     expect(reviews(calls)).toEqual([]);
     // It posted and stopped: this run finds its review and posts none.
@@ -749,14 +754,96 @@ describe("post", () => {
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
   });
 
-  it("writes its check run unless a newer run at the same head has posted", async () => {
+  it("holds the head's claim for its whole post, so another run at the head waits", async () => {
     const { h, calls, taskStatus } = await ready();
-    // A newer run posted at another head: the summary and label are its, the check run ours.
-    h.runs.newerRunPosted = async (_runId, options) => options?.sameHead !== true;
-    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
-      posted: true,
+    secondRun(h, RUN_2);
+    // The first run's review goes up, then its check run fails: it keeps the head's claim
+    // (its task still running) until its retry finishes or it stops.
+    const github = h.deps.github.bind(h.deps);
+    let failCheck = true;
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          return {
+            ...poster,
+            labels: poster.labels.bind(poster),
+            startCheckRun: poster.startCheckRun.bind(poster),
+            upsertSummaryComment: poster.upsertSummaryComment.bind(poster),
+            markersAt: poster.markersAt.bind(poster),
+            submitReview: async (ref, commitId, payload) => {
+              h.addReview(commitId, markerIn(payload.body));
+              return poster.submitReview(ref, commitId, payload);
+            },
+            completeCheckRun: async (ref, input) => {
+              if (failCheck) throw new Error("GitHub 502");
+              return poster.completeCheckRun(ref, input);
+            },
+          };
+        },
+      };
+    };
+    h.tasks.set(TASK_A, "RUNNING");
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("GitHub 502");
+    // The second run can't start writing at this head between the first run's writes.
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "this head's post",
+    );
+    expect(calls.filter((call) => call !== "submitReview")).toEqual([]);
+    // The first run's retry finishes, and lets the head go.
+    failCheck = false;
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_ID, as(TASK_C))).toMatchObject({ posted: true });
+    expect(h.objects.has(headKeys("acme/shop", 7, headSha).reviewClaim)).toBe(false);
+  });
+
+  it("brings the PR up to the covering run's summary and label when it's at this head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    // The covering run wrote its summary and label, but deferred its record to this run,
+    // whose event is later (a reopen).
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({
+        attempt: "x",
+        writes: 3,
+        review: true,
+        summary: true,
+        summaryBody: "their summary",
+        label: true,
+        labelTarget: "Approved",
+      }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
     });
-    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    const [summary] = shadowRecords(h.objects, "summary-comment");
+    expect(summary).toMatchObject({ body: "their summary" });
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
+  });
+
+  it("leaves the PR alone when covered and the PR's record is already at this head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 1, review: true, summaryBody: "theirs" }),
+    );
+    // The covering run recorded the PR at this head itself.
+    const second = h.runs.runs.get(RUN_2);
+    if (second) second.lastReviewedSha = headSha;
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(calls).toEqual([]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
   });
 
   it("lets another run's off-ECS head claim expire before taking it over", async () => {
@@ -803,7 +890,7 @@ describe("post", () => {
     expect(calls).toEqual([]);
   });
 
-  it("looks the head's reviews up once per post, and twice on a takeover", async () => {
+  it("looks the head's reviews up once per post, takeover or not", async () => {
     const { h, claim, taskStatus } = await ready();
     let lookups = 0;
     const github = h.deps.github.bind(h.deps);
@@ -825,12 +912,11 @@ describe("post", () => {
     };
     await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
     expect(lookups).toBe(1);
-    // A takeover also looks for its own run's review before the staleness check; the check
-    // that decides whether to submit is made afresh, holding the head's claim.
+    // A takeover reuses the one listing, for its own review and for whether it's covered.
     h.objects.delete(runKeys(RUN_ID).posted);
     h.tasks.set(TASK_A, "STOPPED");
     await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus });
-    expect(lookups).toBe(3);
+    expect(lookups).toBe(2);
     expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
   });
 
@@ -1026,14 +1112,15 @@ describe("post", () => {
     expect(calls).toEqual([]);
   });
 
-  it("leaves the check run, summary and label to a newer run that already posted", async () => {
+  it("leaves the summary and label to a run for a later event that already posted", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     const calls = countingPoster(h);
     h.runs.newer.posted = true;
     expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
-    expect(calls).toEqual(["submitReview"]);
+    // The check run is the head's: this run holds the head, so it's written.
+    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
   });
 
   it("leaves the label to a newer run that posts while the summary is written", async () => {
@@ -1044,12 +1131,12 @@ describe("post", () => {
     let checks = 0;
     h.runs.newerRunPosted = async () => {
       checks += 1;
-      // The newer run finishes posting after this run's check-run and summary checks.
-      return checks > 2;
+      // The newer run finishes posting after this run's summary check.
+      return checks > 1;
     };
     expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
     expect(calls).toEqual(["submitReview", "completeCheckRun", "upsertSummaryComment"]);
-    expect(checks).toBe(3);
+    expect(checks).toBe(2);
   });
 
   it("records what it posted when it's stopped while posting", async () => {

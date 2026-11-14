@@ -97,6 +97,9 @@ interface PostProgress {
   summary?: boolean;
   summaryCommentId?: number;
   label?: boolean;
+  /** What it wrote to the PR, so a run its review covers can bring the PR up to it. */
+  summaryBody?: string;
+  labelTarget?: string;
 }
 
 const postProgressSchema = z.object({
@@ -108,7 +111,18 @@ const postProgressSchema = z.object({
   summary: z.boolean().optional(),
   summaryCommentId: z.number().int().positive().optional(),
   label: z.boolean().optional(),
+  summaryBody: z.string().optional(),
+  labelTarget: z.string().optional(),
 });
+
+/** Another run's saved progress, read for what it wrote; unreadable, it's taken as nothing. */
+function readTheirs(text: string | undefined): PostProgress | undefined {
+  try {
+    return text === undefined ? undefined : readProgress(text);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * An earlier attempt's progress. Progress that's there but can't be read fails the step: a
@@ -351,14 +365,26 @@ export async function post(
     await work.remove();
   }
 
-  // Why the run no longer counts, if it doesn't. Marked superseded here, since the dispatcher
-  // may never stop this execution (it may not have seen the event that made it stale).
-  // What an earlier attempt of this step posted: a retry carries on from there, and once the
-  // review is posted the run is recorded whatever happens to the PR meanwhile.
-  // Every write below is the claim holder's alone: an earlier attempt still running makes
-  // this one fail its step until it has stopped. Progress is read once the claim is held, so
-  // its version is the one this attempt saves over.
+  // Two claims, both held before the first write to GitHub. The run's: attempts of this run
+  // take turns, so only one writes or saves progress. The head's: runs at this head take turns
+  // for the whole post (review, check run, summary, label and the record), so two runs at one
+  // head never interleave; it's let go once the run is recorded. Progress is read once both are
+  // held, so its version is the one this attempt saves over.
   const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim, runId);
+  const headClaim = headKeys(
+    `${target.owner}/${target.repo}`,
+    target.number,
+    pr.headSha,
+  ).reviewClaim;
+  const head = await holdClaim(deps, { attempt, taskStatus }, headClaim, runId, "this head's post");
+  const releaseLogged = (key: string, etag: string) =>
+    deps.store.deleteIfMatch(key, etag).catch((release: unknown) => {
+      deps.log("releasing a claim failed", {
+        runId,
+        key,
+        error: release instanceof Error ? release.message : String(release),
+      });
+    });
   const saved = await deps.store.getTagged(keys.posted);
   const progress = readProgress(saved?.text);
   // Each save is conditional on the version this attempt last wrote (or read), so two
@@ -380,22 +406,32 @@ export async function post(
     progressEtag = etag;
   };
 
-  // On a takeover, the earlier holder may have posted and stopped before saving that. Then
+  // Our reviews on the head, from any run: listed once per post.
+  let listing: Promise<MarkedReview[]> | undefined;
+  const headReviews = () => {
+    listing ??= poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+    return listing;
+  };
+  const ownMarker = `${REVIEW_MARKER_PREFIX}${runId}:`;
+  const ownReview = async () =>
+    (await headReviews()).some((review) => review.marker.startsWith(ownMarker));
+
+  // An earlier attempt may have posted this run's review and stopped before saving that. Then
   // it's posted, whatever has happened to the PR since: record it, never supersede.
-  if (claim.tookOver && !progress.review) {
-    const reviews = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-    if (reviews.some((review) => review.marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`))) {
-      progress.review = true;
-      await save();
-    }
+  if (!progress.review && (await ownReview())) {
+    progress.review = true;
+    await save();
   }
 
+  // Why the run no longer counts, if it doesn't. Marked superseded here, since the dispatcher
+  // may never stop this execution (it may not have seen the event that made it stale).
   let stale: string | undefined;
   if (!progress.review) {
     stale = (await running()) ? staleReason(latest, pr.headSha) : "its execution was stopped";
   }
   if (stale !== undefined) {
     await deps.runs.supersedeRun(runId);
+    await releaseLogged(headClaim, head.etag);
     deps.log("not posted", { runId, reason: stale });
     const findings = report.inline.length + report.body.length;
     return { runId, posted: false, event: report.decision.event, complete: false, findings };
@@ -410,78 +446,92 @@ export async function post(
     nitCap: config.gate.nit_cap,
     marker: reviewMarker(runId, report.complete),
   });
-  const releaseLogged = (key: string, etag: string) =>
-    deps.store.deleteIfMatch(key, etag).catch((release: unknown) => {
-      deps.log("releasing a claim failed", {
-        runId,
-        key,
-        error: release instanceof Error ? release.message : String(release),
-      });
-    });
-  /**
-   * Submits the review unless our reviews on the head already cover it, from this run or any
-   * other (a stopped run whose post finished, a retry, an overlapping execution): then that's
-   * the head's review, and the run records it and carries on. Done holding the head's claim, so
-   * two runs at one head can't both find nothing and both submit.
-   */
-  const submitOnce = async (): Promise<string | undefined> => {
-    const headClaim = headKeys(
-      `${target.owner}/${target.repo}`,
-      target.number,
-      pr.headSha,
-    ).reviewClaim;
-    const head = await holdClaim(
-      deps,
-      { attempt, taskStatus },
-      headClaim,
-      runId,
-      "this head's review",
-    );
-    let coveredBy: string | undefined;
-    try {
-      const reviews = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-      const own = reviews.some((review) =>
-        review.marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`),
-      );
-      // This run's own review (an earlier attempt posted it) is this run's: nothing to cover.
-      coveredBy = own ? undefined : headCovered(reviews, report.complete)?.marker;
-      if (own) deps.log("this run's review is already up", { runId });
-      else if (coveredBy === undefined) await poster.submitReview(pull, pr.headSha, payload);
-      else deps.log("the head already has our review; not posting another", { runId, coveredBy });
-    } catch (error) {
-      // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
-      // timeout, a 5xx) it may be, and the claims stay until this task has stopped, when the
-      // next attempt takes them over and looks.
-      if (refused(error)) {
-        await releaseLogged(keys.reviewClaim, claim.etag);
-        await releaseLogged(headClaim, head.etag);
-      }
-      throw error;
-    }
-    // Done at this head: the next run's check finds the review.
-    await releaseLogged(headClaim, head.etag);
-    return coveredBy;
-  };
+  const counts = { filesDone: report.plan.reviewed, costUsd: costOf(report) };
   const record = () =>
     deps.runs.succeedRun(runId, {
-      filesDone: report.plan.reviewed,
-      costUsd: costOf(report),
+      ...counts,
       headSha: pr.headSha,
       // The label it set, or meant to: the reconciler re-syncs a label that didn't take.
       statusLabel: decision.label,
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
+  /** The summary comment, written (or found by its marker and edited) with `body`. */
+  const writeSummary = async (body: string) => {
+    const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
+    const comment = await poster.upsertSummaryComment(pull, body, summaryId, SUMMARY_MARKER);
+    const id = comment.id ?? summaryId;
+    if (id !== undefined) progress.summaryCommentId = id;
+    progress.summary = true;
+    progress.summaryBody = body;
+    await save();
+  };
+  const writeLabel = async (target: string) => {
+    const labels = await syncStatusLabel(poster.labels(pull), {
+      target,
+      statusLabels: statusLabels(config),
+    });
+    if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
+    progress.label = true;
+    progress.labelTarget = target;
+    await save();
+  };
+  /**
+   * Records the covered run. When its head is still the PR's and the PR's record isn't there
+   * yet (the covering run's own record deferred to this newer run, say), it brings the PR up
+   * to the head: the covering run's summary and label, from that run's saved progress, and
+   * the record. Never its own decision, which wasn't posted.
+   */
+  const cover = async (coveredBy: string) => {
+    const coveringRun = coveredBy.slice(REVIEW_MARKER_PREFIX.length).split(":")[0] ?? "";
+    const current = latest.headSha === pr.headSha && run.lastReviewedSha !== pr.headSha;
+    const theirs =
+      current && !(await deps.runs.newerRunPosted(run))
+        ? readTheirs(await deps.store.getText(runKeys(coveringRun).posted))
+        : undefined;
+    if (theirs?.summaryBody === undefined) {
+      await deps.runs.coverRun(runId, counts);
+      return;
+    }
+    if (!progress.summary) await writeSummary(theirs.summaryBody);
+    if (theirs.labelTarget !== undefined && !progress.label) await writeLabel(theirs.labelTarget);
+    await deps.runs.coverRun(runId, {
+      ...counts,
+      pr: {
+        headSha: pr.headSha,
+        statusLabel: theirs.labelTarget,
+        summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
+      },
+    });
+  };
   try {
     if (!progress.review) {
-      const coveredBy = await submitOnce();
+      // Our review on the head covers this run when it's complete, or when this run wouldn't
+      // be complete either (see `headCovered`). Holding the head's claim, nobody adds one
+      // between this look and the submit.
+      const coveredBy = headCovered(await headReviews(), report.complete)?.marker;
+      if (coveredBy === undefined) {
+        try {
+          await poster.submitReview(pull, pr.headSha, payload);
+        } catch (error) {
+          // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
+          // timeout, a 5xx) it may be, and the claims stay until this task has stopped, when
+          // the next attempt takes them over and looks.
+          if (refused(error)) {
+            await releaseLogged(keys.reviewClaim, claim.etag);
+            await releaseLogged(headClaim, head.etag);
+          }
+          throw error;
+        }
+      } else {
+        deps.log("the head already has our review; not posting another", { runId, coveredBy });
+        progress.coveredBy = coveredBy;
+      }
       progress.review = true;
-      if (coveredBy !== undefined) progress.coveredBy = coveredBy;
       await save();
     }
     if (progress.coveredBy !== undefined) {
-      // Another run's review is the head's: its check run, summary and label are the PR's. This
-      // run's decision, never posted, mustn't contradict them.
-      await deps.runs.coverRun(runId, { filesDone: report.plan.reviewed, costUsd: costOf(report) });
+      await cover(progress.coveredBy);
+      await releaseLogged(headClaim, head.etag);
       deps.log("covered", { runId, coveredBy: progress.coveredBy });
       return {
         runId,
@@ -492,12 +542,8 @@ export async function post(
         findings: report.inline.length + report.body.length,
       };
     }
-    if (
-      decision.conclusion !== undefined &&
-      !progress.checkRun &&
-      // The check run is the head's: only a newer run at this head makes it moot.
-      !(await deps.runs.newerRunPosted(runId, { sameHead: true }))
-    ) {
+    // The check run is the head's, and this run holds the head: it's this run's to write.
+    if (decision.conclusion !== undefined && !progress.checkRun) {
       await poster.completeCheckRun(pull, {
         headSha: pr.headSha,
         conclusion: decision.conclusion,
@@ -510,47 +556,22 @@ export async function post(
       progress.checkRun = true;
       await save();
     }
-    // The summary comment and the label are the PR's, not this head's: once a newer run has
-    // posted they're its, and an older run finishing late leaves them alone.
-    // Checked right before each write: a newer run may finish posting in between.
-    if (!progress.summary && !(await deps.runs.newerRunPosted(runId))) {
-      const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
-      // Found by its marker when there's no stored ID, so a retry edits the comment an
-      // earlier attempt created.
-      const comment = await poster.upsertSummaryComment(
-        pull,
-        report.summary,
-        summaryId,
-        SUMMARY_MARKER,
-      );
-      const id = comment.id ?? summaryId;
-      if (id !== undefined) progress.summaryCommentId = id;
-      progress.summary = true;
-      await save();
+    // The summary comment and the label are the PR's: once a run for a later event has
+    // posted they're its, and this one leaves them alone. Checked right before each write.
+    if (!progress.summary && !(await deps.runs.newerRunPosted(run))) {
+      await writeSummary(report.summary);
     }
-    if (
-      decision.label !== undefined &&
-      !progress.label &&
-      !(await deps.runs.newerRunPosted(runId))
-    ) {
-      const labels = await syncStatusLabel(poster.labels(pull), {
-        target: decision.label,
-        statusLabels: statusLabels(config),
-      });
-      if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
-      progress.label = true;
-      await save();
+    if (decision.label !== undefined && !progress.label && !(await deps.runs.newerRunPosted(run))) {
+      await writeLabel(decision.label);
     }
   } catch (error) {
     // The review is on GitHub: record the run, with the summary comment if it got that far, so
-    // a later run edits that comment and doesn't review the head again. Then fail the step,
-    // whose retry finishes the rest.
+    // a later run edits that comment and doesn't review the head again. Covered, it records
+    // as covered, never over the PR's record. Then fail the step, whose retry finishes the
+    // rest.
     if (progress.review) {
-      // Covered, it records as covered, never over the PR's record.
       const finish =
-        progress.coveredBy === undefined
-          ? record()
-          : deps.runs.coverRun(runId, { filesDone: report.plan.reviewed, costUsd: costOf(report) });
+        progress.coveredBy === undefined ? record() : deps.runs.coverRun(runId, counts);
       await finish.catch((recordError: unknown) => {
         deps.log("recording a partly posted run failed", {
           runId,
@@ -562,6 +583,7 @@ export async function post(
   }
 
   await record();
+  await releaseLogged(headClaim, head.etag);
   deps.log("posted", { runId, event: decision.event, complete: report.complete });
   return {
     runId,

@@ -18,4 +18,5 @@ CREATE TABLE "pull_request_dispatches" (
 	CONSTRAINT "pull_request_dispatches_repo_number_pk" PRIMARY KEY("repo","number")
 );
 --> statement-breakpoint
+ALTER TABLE "review_runs" ADD COLUMN "event_at" timestamp with time zone;--> statement-breakpoint
 CREATE INDEX "dispatched_executions_active_idx" ON "dispatched_executions" USING btree ("repo","number") WHERE "dispatched_executions"."stopped_at" is null;

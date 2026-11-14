@@ -32,6 +32,15 @@ export interface RunRecord {
   pullRequestId: string;
   /** The summary comment to edit, from an earlier run of this PR. */
   summaryCommentId: number | undefined;
+  /** The head the run reviews. */
+  headSha: string;
+  /** The head the PR's record is at: the last posted review's. */
+  lastReviewedSha: string | undefined;
+  /**
+   * Where the run stands among the PR's runs: its event time, or (without one) when its row
+   * was made. A run later in this order is newer.
+   */
+  order: Date;
 }
 
 /** `review_runs` and `pull_requests` in the database. */
@@ -45,6 +54,8 @@ export interface RunStore {
     headSha: string;
     baseSha: string;
     executionArn: string;
+    /** When the job's event happened, which orders the PR's runs. */
+    eventAt?: Date;
   }): Promise<RunRecord>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   setFilesTotal(runId: string, filesTotal: number): Promise<void>;
@@ -68,14 +79,27 @@ export interface RunStore {
    * Whether a run of the same PR created after this one has succeeded. Its summary comment and
    * label are then the PR's, and an older run mustn't write over them.
    */
-  newerRunPosted(runId: string, options?: { sameHead?: boolean }): Promise<boolean>;
+  newerRunPosted(run: RunRecord): Promise<boolean>;
   /**
    * Marks the run covered: it posted nothing, since another run's review already covered its
    * head. The PR's record is left to the run that posted.
    */
   coverRun(
     runId: string,
-    result: { filesDone: number; costUsd: number | undefined },
+    result: {
+      filesDone: number;
+      costUsd: number | undefined;
+      /**
+       * The covering run's PR-level outputs, when this run applied them to the PR (its head
+       * is the PR's, and the record wasn't there yet): recorded on the PR too, unless a newer
+       * run has posted.
+       */
+      pr?: {
+        headSha: string;
+        statusLabel: string | undefined;
+        summaryCommentId: number | undefined;
+      };
+    },
   ): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;

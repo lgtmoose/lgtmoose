@@ -22,7 +22,7 @@ import {
   installationTokenProvider,
   appJwt,
 } from "@lgtmoose/poster";
-import { and, eq, gt, inArray } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
@@ -177,10 +177,12 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 type Db = PgDatabase<PgQueryResultHKT>;
 
 /** Whether a run of the PR created after `run` has succeeded: posted its review. */
+/** A run's place among its PR's runs: its event time, else when its row was made. */
+const runOrder = sql<Date>`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`;
+
 async function newerRunPosted(
   db: Pick<Db, "select">,
-  run: { pullRequestId: string; createdAt: Date; headSha: string },
-  sameHead = false,
+  run: { pullRequestId: string; order: Date },
 ): Promise<boolean> {
   // `succeeded` only: a covered run posted nothing, so it never stands in for the run that did.
   const [newer] = await db
@@ -190,12 +192,39 @@ async function newerRunPosted(
       and(
         eq(reviewRuns.pullRequestId, run.pullRequestId),
         eq(reviewRuns.status, "succeeded"),
-        gt(reviewRuns.createdAt, run.createdAt),
-        ...(sameHead ? [eq(reviewRuns.headSha, run.headSha)] : []),
+        gt(runOrder, run.order),
       ),
     )
     .limit(1);
   return newer !== undefined;
+}
+
+/**
+ * Records a posted run's outputs on its PR, unless a newer run of the PR has posted. The PR's
+ * row is locked first, so two runs finishing at once take turns, and the newer-run check sees
+ * the other's committed status (each statement reads afresh under READ COMMITTED).
+ */
+async function recordOnPr(
+  tx: Pick<Db, "select" | "update">,
+  run: { pullRequestId: string; order: Date },
+  pr: { headSha: string; statusLabel: string | undefined; summaryCommentId: number | undefined },
+  now: () => Date,
+): Promise<void> {
+  await tx
+    .select({ id: pullRequests.id })
+    .from(pullRequests)
+    .where(eq(pullRequests.id, run.pullRequestId))
+    .for("update");
+  if (await newerRunPosted(tx, run)) return;
+  await tx
+    .update(pullRequests)
+    .set({
+      lastReviewedSha: pr.headSha,
+      statusLabel: pr.statusLabel ?? null,
+      summaryCommentId: pr.summaryCommentId ?? null,
+      updatedAt: now(),
+    })
+    .where(eq(pullRequests.id, run.pullRequestId));
 }
 
 /** `review_runs` and `pull_requests` with drizzle. */
@@ -206,13 +235,24 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         runId: reviewRuns.id,
         pullRequestId: reviewRuns.pullRequestId,
         summaryCommentId: pullRequests.summaryCommentId,
+        headSha: reviewRuns.headSha,
+        lastReviewedSha: pullRequests.lastReviewedSha,
+        eventAt: reviewRuns.eventAt,
+        createdAt: reviewRuns.createdAt,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
       .where(eq(reviewRuns.id, runId));
     return row === undefined
       ? undefined
-      : { ...row, summaryCommentId: row.summaryCommentId ?? undefined };
+      : {
+          runId: row.runId,
+          pullRequestId: row.pullRequestId,
+          summaryCommentId: row.summaryCommentId ?? undefined,
+          headSha: row.headSha,
+          lastReviewedSha: row.lastReviewedSha ?? undefined,
+          order: row.eventAt ?? row.createdAt,
+        };
   }
 
   return {
@@ -261,15 +301,13 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           kind: pull.lastReviewedSha === null ? "first" : "full",
           status: "running",
           executionArn: input.executionArn,
+          eventAt: input.eventAt ?? null,
           startedAt: now(),
         })
         .returning({ id: reviewRuns.id });
-      if (run === undefined) throw new Error("The review run wasn't recorded.");
-      return {
-        runId: run.id,
-        pullRequestId: pull.id,
-        summaryCommentId: pull.summaryCommentId ?? undefined,
-      };
+      const recorded = run === undefined ? undefined : await record(run.id);
+      if (recorded === undefined) throw new Error("The review run wasn't recorded.");
+      return recorded;
     },
     getRun: record,
     async setFilesTotal(runId, filesTotal) {
@@ -287,55 +325,31 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
-          .returning({
-            pullRequestId: reviewRuns.pullRequestId,
-            createdAt: reviewRuns.createdAt,
-            headSha: reviewRuns.headSha,
-          });
+          .returning({ pullRequestId: reviewRuns.pullRequestId, order: runOrder });
         if (run === undefined) throw new Error(`No review run ${runId}.`);
-        // Two runs of a PR finishing at once take turns here, so the newer-run check below
-        // sees the other's committed status (each statement reads afresh under READ COMMITTED).
-        await tx
-          .select({ id: pullRequests.id })
-          .from(pullRequests)
-          .where(eq(pullRequests.id, run.pullRequestId))
-          .for("update");
         // The PR's record is the newest posted run's: an older run that finished posting later
         // (stopped mid-post, say) leaves it to the newer one.
-        if (await newerRunPosted(tx, run)) return;
-        await tx
-          .update(pullRequests)
-          .set({
-            lastReviewedSha: result.headSha,
-            statusLabel: result.statusLabel ?? null,
-            summaryCommentId: result.summaryCommentId ?? null,
-            updatedAt: now(),
-          })
-          .where(eq(pullRequests.id, run.pullRequestId));
+        await recordOnPr(tx, run, result, now);
       });
     },
     async coverRun(runId, result) {
-      await db
-        .update(reviewRuns)
-        .set({
-          status: "covered",
-          filesDone: result.filesDone,
-          costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
-          finishedAt: now(),
-        })
-        .where(eq(reviewRuns.id, runId));
+      await db.transaction(async (tx) => {
+        const [run] = await tx
+          .update(reviewRuns)
+          .set({
+            status: "covered",
+            filesDone: result.filesDone,
+            costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
+            finishedAt: now(),
+          })
+          .where(eq(reviewRuns.id, runId))
+          .returning({ pullRequestId: reviewRuns.pullRequestId, order: runOrder });
+        if (run === undefined) throw new Error(`No review run ${runId}.`);
+        if (result.pr !== undefined) await recordOnPr(tx, run, result.pr, now);
+      });
     },
-    async newerRunPosted(runId, options = {}) {
-      const [run] = await db
-        .select({
-          pullRequestId: reviewRuns.pullRequestId,
-          createdAt: reviewRuns.createdAt,
-          headSha: reviewRuns.headSha,
-        })
-        .from(reviewRuns)
-        .where(eq(reviewRuns.id, runId));
-      if (run === undefined) throw new Error(`No review run ${runId}.`);
-      return newerRunPosted(db, run, options.sameHead);
+    async newerRunPosted(run) {
+      return newerRunPosted(db, run);
     },
     async failRun(executionArn, error) {
       // A run that already finished (or was superseded) keeps its status.
