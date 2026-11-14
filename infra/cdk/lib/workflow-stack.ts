@@ -1,5 +1,6 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CfnOutput, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import type { ISecurityGroup, IVpc, SubnetSelection } from "aws-cdk-lib/aws-ec2";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import {
@@ -15,15 +16,30 @@ import {
   type ContainerDefinition,
 } from "aws-cdk-lib/aws-ecs";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
+import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
 import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
+import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import { providerModelEnv, STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
+import { bedrockStatements } from "./bedrock.js";
 import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
+import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
+
+/**
+ * The dispatcher's limit per batch. It's well under the job queue's visibility timeout (five
+ * minutes), as Lambda wants for a queue source, so a slow batch isn't delivered twice.
+ */
+export const DISPATCH_TIMEOUT = Duration.seconds(45);
+/** Dispatcher instances at once. Jobs are small; more PRs at once only wait a little. */
+export const DISPATCH_CONCURRENCY = 5;
 
 /** Where tasks may write: the root filesystem is read-only. */
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
@@ -77,11 +93,21 @@ export interface WorkflowStackProps extends StackProps {
   githubAppSecret: ISecret;
   /** Provider id → its credential secret, for providers that have one (not Bedrock). */
   providerSecrets: ReadonlyMap<string, ISecret>;
+  /** The gateway's FIFO job queue, which the dispatcher consumes. */
+  jobQueue: IQueue;
+  /** The job queue's dead-letter queue, where the dispatcher puts messages that aren't jobs. */
+  deadLetterQueue: IQueue;
+  /**
+   * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
+   * (`sandboxBuildArgs`). Off by default.
+   */
+  allowUnverifiedCursor?: boolean;
 }
 
 /**
- * The review workflow: an ECS cluster, the control task, one sandbox task per model provider, and
- * the Step Functions state machine that runs them (`ReviewWorkflow`).
+ * The review workflow: an ECS cluster, the control task, one sandbox task per model provider,
+ * the Step Functions state machine that runs them (`ReviewWorkflow`), and the dispatcher Lambda
+ * that starts and supersedes its executions from the job queue.
  *
  * - The control task holds the GitHub App credentials and the database, and never runs a model.
  * - A sandbox task holds one provider's credential and no GitHub token. Its role has no S3
@@ -101,6 +127,7 @@ export class WorkflowStack extends Stack {
   /** Provider id → its sandbox task definition. */
   readonly sandboxTaskDefinitions: ReadonlyMap<string, FargateTaskDefinition>;
   readonly reviewWorkflow: ReviewWorkflow;
+  readonly dispatchFunction: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -110,7 +137,10 @@ export class WorkflowStack extends Stack {
     this.cluster = new Cluster(this, "Cluster", { vpc: props.vpc });
 
     const controlImage = image("apps/control/Dockerfile");
-    const sandboxImage = image("infra/sandbox/Dockerfile");
+    const sandboxImage = image(
+      "infra/sandbox/Dockerfile",
+      sandboxBuildArgs(props.providers, props.allowUnverifiedCursor ?? false),
+    );
 
     this.controlTaskDefinition = this.taskDefinition("Control", {
       cpu: 1024,
@@ -135,6 +165,16 @@ export class WorkflowStack extends Stack {
     props.githubAppSecret.grantRead(controlRole);
     props.databaseSecret.grantRead(controlRole);
     props.artifactBucket.grantReadWrite(controlRole);
+    // Post's review claim names the claiming task; a later attempt asks whether it still runs.
+    controlRole.addToPrincipalPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ecs:DescribeTasks"],
+        resources: [
+          `arn:${this.partition}:ecs:${this.region}:${this.account}:task/${this.cluster.clusterName}/*`,
+        ],
+      }),
+    );
 
     const sandboxes = new Map<string, FargateTaskDefinition>();
     const sandboxContainers = new Map<string, ContainerDefinition>();
@@ -155,6 +195,7 @@ export class WorkflowStack extends Stack {
           HTTPS_PROXY: props.proxyUrl,
           NO_PROXY: noProxy(this.region),
           AWS_REGION: this.region,
+          ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't
         // read any secret.
@@ -162,7 +203,11 @@ export class WorkflowStack extends Stack {
           ? {}
           : { secrets: { LGTMOOSE_PROVIDER_CREDENTIAL: EcsSecret.fromSecretsManager(secret) } }),
       });
-      if (provider.auth === "bedrock") this.grantBedrock(definition);
+      if (provider.auth === "bedrock") {
+        for (const statement of bedrockStatements(provider, this.partition, this.account)) {
+          definition.taskRole.addToPrincipalPolicy(statement);
+        }
+      }
       sandboxes.set(provider.id, definition);
       sandboxContainers.set(provider.id, sandboxContainer);
     }
@@ -185,6 +230,8 @@ export class WorkflowStack extends Stack {
       sandboxSecurityGroup: props.sandboxSecurityGroup,
       maxConcurrency: props.maxConcurrency,
     });
+
+    this.dispatchFunction = this.dispatcher(props, retention);
 
     const subnetIds = (selection: SubnetSelection) =>
       Fn.join(",", props.vpc.selectSubnets(selection).subnetIds);
@@ -211,6 +258,52 @@ export class WorkflowStack extends Stack {
         ),
       ),
     });
+  }
+
+  /**
+   * The dispatcher: jobs from the queue become executions (`dispatch` in @lgtmoose/control). It
+   * runs in the app subnets with the control security group to mark stopped runs in the
+   * database; it holds no GitHub or model credential. A job that keeps failing goes to the
+   * queue's dead-letter queue, whose alarm is in the API stack.
+   */
+  private dispatcher(props: WorkflowStackProps, retention: RetentionDays): NodejsFunction {
+    const stateMachine = this.reviewWorkflow.stateMachine;
+    const fn = lgtmooseFunction(this, "DispatchFunction", {
+      entry: DISPATCH_HANDLER,
+      description: "Starts and supersedes review workflow executions from the job queue.",
+      memorySize: 256,
+      timeout: DISPATCH_TIMEOUT,
+      vpc: props.vpc,
+      vpcSubnets: props.controlSubnets,
+      securityGroups: [props.controlSecurityGroup],
+      environment: {
+        STATE_MACHINE_ARN: stateMachine.stateMachineArn,
+        DEAD_LETTER_QUEUE_URL: props.deadLetterQueue.queueUrl,
+        DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
+        DATABASE_NAME: props.databaseName,
+        // Lets Node verify the RDS server certificate.
+        NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
+      },
+      bundling: { externalModules: ["pg-native"] },
+      logGroup: new LogGroup(this, "DispatchLogs", {
+        retention,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    props.databaseSecret.grantRead(fn);
+    props.deadLetterQueue.grantSendMessages(fn);
+    stateMachine.grantStartExecution(fn);
+    stateMachine.grantExecution(fn, "states:StopExecution", "states:DescribeExecution");
+    fn.addEventSource(
+      new SqsEventSource(props.jobQueue, {
+        batchSize: 10,
+        // A failed job and the ones after it are retried; the rest of the batch isn't.
+        reportBatchItemFailures: true,
+        // Each instance holds a database connection; the lean database has few to spare.
+        maxConcurrency: DISPATCH_CONCURRENCY,
+      }),
+    );
+    return fn;
   }
 
   private taskDefinition(
@@ -264,22 +357,12 @@ export class WorkflowStack extends Stack {
     }
     return container;
   }
-
-  private grantBedrock(definition: FargateTaskDefinition): void {
-    definition.taskRole.addToPrincipalPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources: [
-          `arn:${this.partition}:bedrock:*::foundation-model/*`,
-          `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      }),
-    );
-  }
 }
 
-/** An image CDK builds from the repository root with the given Dockerfile. */
-function image(file: string): ContainerImage {
-  return ContainerImage.fromAsset(REPO_ROOT, { file, platform: Platform.LINUX_ARM64 });
+/**
+ * An image CDK builds from the repository root with the given Dockerfile, for arm64 (see
+ * `IMAGE_ARCH`).
+ */
+function image(file: string, buildArgs: Record<string, string> = {}): ContainerImage {
+  return ContainerImage.fromAsset(REPO_ROOT, { file, platform: Platform.LINUX_ARM64, buildArgs });
 }

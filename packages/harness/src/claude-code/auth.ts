@@ -9,6 +9,46 @@ export interface ClaudeAuthEnv {
   env: Record<string, string>;
   /** Values to keep out of transcripts, errors and output. */
   secrets: string[];
+  /**
+   * A Google service-account key given inline (`GOOGLE_APPLICATION_CREDENTIALS_JSON`). The
+   * harness writes it into the run's private home with mode 0600, points
+   * GOOGLE_APPLICATION_CREDENTIALS at it, and removes it with the home after the run.
+   */
+  googleCredentials?: string;
+}
+
+/** Where a sandbox task hands Vertex its service-account key: the key file's JSON itself. */
+export const GOOGLE_CREDENTIALS_JSON = "GOOGLE_APPLICATION_CREDENTIALS_JSON";
+
+/** The service-account key's fields used here; the rest is passed on as is. */
+interface ServiceAccountKey {
+  project_id?: unknown;
+  private_key?: unknown;
+}
+
+/** Reads an inline key, or says why it isn't one. Never quotes any of it. */
+function parseServiceAccountKey(text: string): ServiceAccountKey {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HarnessError("auth", `${GOOGLE_CREDENTIALS_JSON} isn't valid JSON.`);
+  }
+  // The same check as `lgtmoose auth vertex`.
+  const key = parsed as Record<string, unknown> | null;
+  if (
+    key === null ||
+    typeof key !== "object" ||
+    key.type !== "service_account" ||
+    typeof key.client_email !== "string" ||
+    typeof key.private_key !== "string"
+  ) {
+    throw new HarnessError(
+      "auth",
+      `${GOOGLE_CREDENTIALS_JSON} isn't a service-account key: it needs type "service_account", client_email and private_key.`,
+    );
+  }
+  return key as ServiceAccountKey;
 }
 
 type Source = Readonly<Record<string, string | undefined>>;
@@ -115,6 +155,16 @@ export function claudeAuthEnv(source: Source): ClaudeAuthEnv {
 
   if (isOn(source.CLAUDE_CODE_USE_VERTEX)) {
     const env = { ...common, ...pick(source, VERTEX_VARS, VERTEX_PREFIX) };
+    const inline = source[GOOGLE_CREDENTIALS_JSON]?.trim();
+    let key: ServiceAccountKey | undefined;
+    if (inline) {
+      key = parseServiceAccountKey(inline);
+      // The inline key wins over a key file named in the environment.
+      delete env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (!env.ANTHROPIC_VERTEX_PROJECT_ID && typeof key.project_id === "string") {
+        env.ANTHROPIC_VERTEX_PROJECT_ID = key.project_id;
+      }
+    }
     const missing = ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"].filter((name) => !env[name]);
     if (missing.length > 0) {
       throw new HarnessError(
@@ -122,7 +172,18 @@ export function claudeAuthEnv(source: Source): ClaudeAuthEnv {
         `Vertex is selected (CLAUDE_CODE_USE_VERTEX), so ${missing.join(" and ")} must be set.`,
       );
     }
-    return withSecrets("vertex", env);
+    const auth = withSecrets("vertex", env);
+    if (inline === undefined || inline === "") return auth;
+    // The key as parsed (real newlines) and as escaped inside JSON text.
+    const privateKey =
+      typeof key?.private_key === "string"
+        ? [key.private_key, JSON.stringify(key.private_key).slice(1, -1)]
+        : [];
+    return {
+      ...auth,
+      secrets: [...auth.secrets, inline, ...privateKey],
+      googleCredentials: inline,
+    };
   }
 
   // In print mode Claude Code prefers an API key over an OAuth token, so pass only one.
@@ -140,20 +201,4 @@ export function claudeAuthEnv(source: Source): ClaudeAuthEnv {
     "auth",
     "No model credential found. Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK with AWS credentials and AWS_REGION, or CLAUDE_CODE_USE_VERTEX with Google credentials.",
   );
-}
-
-/** Network settings the sandbox may need to reach the model API through its egress proxy. */
-export const NETWORK_VARS = [
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-  "NO_PROXY",
-  "no_proxy",
-  "NODE_EXTRA_CA_CERTS",
-  "SSL_CERT_FILE",
-];
-
-export function networkEnv(source: Source): Record<string, string> {
-  return pick(source, NETWORK_VARS);
 }

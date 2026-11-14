@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { SECRET_NAMES } from "@lgtmoose/config";
-import { loadDeployConfig } from "../paths.js";
+import { CLI, loadDeployConfig } from "../paths.js";
 import { newState, startCallbackServer, DEFAULT_TIMEOUT_MS } from "./callback-server.js";
 import { renderConfigFile } from "./config-file.js";
 import type { CreatedApp, GitHubApi } from "./github.js";
@@ -16,10 +16,11 @@ import { isPromptCancel, type Prompter } from "./prompter.js";
 import {
   readExistingApp,
   storeAppSecrets,
-  readWebhookSecret,
+  checkWebhookSecret,
   type ExistingApp,
   type SetupSecretStore,
 } from "./secret-store.js";
+import { errorMessage } from "../errors.js";
 
 /** The filesystem calls setup makes. */
 export interface SetupFiles {
@@ -84,7 +85,7 @@ async function createApp(inputs: SetupInputs, deps: SetupDeps): Promise<CreatedA
 
 async function chooseApp(
   existing: ExistingApp | undefined,
-  store: SetupSecretStore,
+  webhook: string | undefined,
   inputs: SetupInputs,
   deps: SetupDeps,
   yes: boolean,
@@ -94,7 +95,7 @@ async function chooseApp(
     `${SECRET_NAMES.githubApp} in ${inputs.region} already holds GitHub App ${describeApp(existing)}.\n`,
   );
   const problem =
-    existing.slug === undefined ? undefined : (await readWebhookSecret(store, existing)).problem;
+    existing.slug === undefined ? undefined : checkWebhookSecret(webhook, existing).problem;
   if (problem !== undefined) {
     // Keeping it would deploy a gateway that rejects every delivery, so only offer a new App.
     deps.out(`${problem}\n`);
@@ -136,7 +137,12 @@ async function setUpApp(
 ): Promise<{ slug: string | undefined }> {
   const store = deps.secrets(inputs.region);
   const existing = await readExistingApp(store);
-  const choice = await chooseApp(existing, store, inputs, deps, yes);
+  // Read once, before anything is created. The new App's private key exists only until
+  // storeAppSecrets writes it, so both secrets must be writable first: readExistingApp read
+  // the App secret, and this read throws SecretScheduledForDeletion for a webhook secret that
+  // can't be created again yet.
+  const webhook = await store.read(SECRET_NAMES.githubWebhook);
+  const choice = await chooseApp(existing, webhook, inputs, deps, yes);
 
   if (choice === "keep") {
     deps.out("Keeping the existing App.\n");
@@ -159,6 +165,7 @@ async function setUpApp(
       webhookCreatedActive: true,
     },
     webhookSecret,
+    { previousWebhook: webhook },
   );
   deps.out(`\nCreated GitHub App "${app.slug}" (App ID ${app.id}).\n`);
   deps.out(
@@ -187,7 +194,7 @@ async function readExistingConfig(deps: SetupDeps): Promise<ExistingConfig> {
     if (config === undefined) return { kind: "none" };
     return { kind: "parsed", region: config.region, allowedOrgs: config.allowedOrgs };
   } catch (error) {
-    return { kind: "unreadable", reason: error instanceof Error ? error.message : String(error) };
+    return { kind: "unreadable", reason: errorMessage(error) };
   }
 }
 
@@ -265,10 +272,10 @@ function nextSteps(slug: string | undefined): string {
   return `
 Next steps:
   1. Connect a model provider. Bedrock works with no key; for others run
-     pnpm lgtmoose auth <claude|codex|cursor|api-key>   (coming in NIC-824)
+     ${CLI} auth <claude|codex|cursor|api-key>
   2. Deploy, which also points the App's webhook at your gateway. Until then the webhook
      aims at a placeholder and GitHub's deliveries are lost, so install after deploying:
-     pnpm lgtmoose deploy
+     ${CLI} deploy
   3. ${install}
 `;
 }
@@ -304,7 +311,7 @@ export async function runSetup(
     return { exitCode: 0, stdout: nextSteps(slug), stderr: "" };
   } catch (error) {
     if (isPromptCancel(error)) return { exitCode: 130, stdout: "", stderr: "Setup cancelled.\n" };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return { exitCode: 1, stdout: "", stderr: `Setup failed: ${message}\n` };
   }
 }

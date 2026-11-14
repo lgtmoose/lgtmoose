@@ -86,7 +86,8 @@ export function fifoId(id: string): string {
 /**
  * Jobs on the SQS FIFO queue. The deduplication ID is the delivery ID, so SQS drops a
  * redelivery inside its 5-minute window. That's only a first line: GitHub redeliveries can come
- * much later, so the dispatcher dedupes again on the delivery ID against the database.
+ * much later, so the dispatcher dedupes again: it names each review execution after the PR's
+ * head, and Step Functions refuses a second execution with the same name.
  */
 export function sqsJobQueue(options: { client: SqsSender; queueUrl: string }): JobQueue {
   return {

@@ -1,9 +1,10 @@
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { describe, expect, it } from "vitest";
 import { annotationsFor } from "./check-run.js";
+import { MAX_MARKER_LENGTH, SUMMARY_MARKER_ROOM } from "@lgtmoose/summary";
 import { GitHubClient, GitHubError } from "./github.js";
 import { GitHubPoster } from "./poster.js";
-import { buildReview } from "./review.js";
+import { buildReview, reviewMarkerComment } from "./review.js";
 import { ShadowPoster } from "./shadow.js";
 import { fakeFetch, fileDiff, finding } from "./testing/fixtures.js";
 
@@ -51,6 +52,21 @@ describe("GitHubClient", () => {
         auth: `Bearer ${TOKEN}`,
       });
     }
+  });
+
+  it("gives up on a request that takes longer than its timeout", async () => {
+    const hang: typeof fetch = (_url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: hang, timeoutMs: 20 });
+    await expect(github.request("POST", "/x", {})).rejects.toThrow();
+  });
+
+  it("throws on a 2xx whose body isn't JSON, rather than give back nothing", async () => {
+    const empty: typeof fetch = async () => new Response("", { status: 201 });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: empty });
+    await expect(github.request("POST", "/x", {})).rejects.toThrow("without a JSON body");
   });
 
   it("follows pages until a short one", async () => {
@@ -227,6 +243,250 @@ describe("GitHubPoster", () => {
         details_url: "https://github.com/acme/app/pull/7#issuecomment-1",
       },
     });
+  });
+
+  it("reuses the check run with its external ID, else creates it with one", async () => {
+    const input = {
+      headSha: "abc",
+      conclusion: "success" as const,
+      title: "No changes needed",
+      summary: "ok",
+      annotations: [],
+      externalId: "run-1",
+    };
+    const found = poster([
+      {
+        status: 200,
+        body: {
+          check_runs: [
+            { id: 3, external_id: "other" },
+            { id: 4, external_id: "run-1" },
+          ],
+        },
+      },
+    ]);
+    expect(await found.poster.completeCheckRun(PULL, input)).toBe(4);
+    expect(found.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "GET https://api.github.com/repos/acme/app/commits/abc/check-runs?check_name=LGTMoose&filter=all&per_page=100&page=1",
+    ]);
+    const created = poster([
+      { status: 200, body: { check_runs: [] } },
+      { status: 201, body: { id: 9 } },
+    ]);
+    expect(await created.poster.completeCheckRun(PULL, input)).toBe(9);
+    expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
+  });
+
+  it("lists our App's check runs on the head with their annotation counts", async () => {
+    const { poster: p, calls } = poster([
+      {
+        status: 200,
+        body: {
+          check_runs: [
+            { id: 4, external_id: "run-1", app: { id: 99 }, output: { annotations_count: 3 } },
+            { id: 5, external_id: null, app: { id: 99 } },
+          ],
+        },
+      },
+    ]);
+    expect(await p.checkRunsOn(PULL, "abc")).toEqual([{ externalId: "run-1", annotations: 3 }]);
+    expect(calls[0]?.url).toContain("/commits/abc/check-runs?check_name=LGTMoose&filter=all");
+  });
+
+  it("ignores a check run forged with our name and a run's external ID", async () => {
+    // A workflow in the PR, with its GITHUB_TOKEN's checks: write, made this one.
+    const forged = { id: 6, external_id: "run-1", app: { id: 15368 } };
+    const listing = { status: 200, body: { check_runs: [forged] } };
+    const github = (responses: { status: number; body?: unknown }[]) => {
+      const fake = fakeFetch(responses);
+      const client = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+      return { poster: new GitHubPoster(client, { appId: 99 }), calls: fake.calls };
+    };
+    expect(await github([listing]).poster.checkRunsOn(PULL, "abc")).toEqual([]);
+    // Nor does completing our check run take the forged one over: it creates ours.
+    const created = github([listing, { status: 201, body: { id: 9 } }]);
+    const input = {
+      headSha: "abc",
+      conclusion: "success" as const,
+      title: "t",
+      summary: "s",
+      annotations: [],
+      externalId: "run-1",
+    };
+    expect(await created.poster.completeCheckRun(PULL, input)).toBe(9);
+    expect(created.calls[1]).toMatchObject({ method: "POST" });
+  });
+
+  it("sends the annotation pages an earlier attempt didn't get to", async () => {
+    const annotations = Array.from({ length: 120 }, (_, i) => ({
+      path: "a.ts",
+      start_line: i + 1,
+      end_line: i + 1,
+      annotation_level: "warning" as const,
+      title: "t",
+      message: `m${i}`,
+    }));
+    const { poster: p, calls } = poster([
+      // The earlier attempt created the run with its first page, then died.
+      {
+        status: 200,
+        body: { check_runs: [{ id: 4, external_id: "run-1", output: { annotations_count: 50 } }] },
+      },
+      { status: 200, body: { id: 4 } },
+      { status: 200, body: { id: 4 } },
+    ]);
+    await p.completeCheckRun(PULL, {
+      headSha: "abc",
+      conclusion: "neutral",
+      title: "t",
+      summary: "s",
+      annotations,
+      externalId: "run-1",
+    });
+    const sent = calls.slice(1).map((c) => {
+      const output = (c.body as { output: { annotations: { message: string }[] } }).output;
+      return [c.method, output.annotations[0]?.message, output.annotations.length];
+    });
+    expect(sent).toEqual([
+      ["PATCH", "m50", 50],
+      ["PATCH", "m100", 20],
+    ]);
+  });
+
+  it("finds the summary comment by its marker when there's no stored ID", async () => {
+    const { poster: p, calls } = poster([
+      {
+        status: 200,
+        body: [
+          { id: 5, body: "someone else" },
+          // Someone quoting the marker: not ours, so never edited.
+          { id: 8, body: "> <!-- lgtmoose-summary -->", user: { type: "User" } },
+          { id: 6, body: "x\n\n<!-- lgtmoose-summary -->", user: { type: "Bot" } },
+        ],
+      },
+      { status: 200, body: { id: 6 } },
+      { status: 200, body: [] },
+      { status: 201, body: { id: 7 } },
+    ]);
+    expect(await p.upsertSummaryComment(PULL, "body", undefined, "lgtmoose-summary")).toEqual({
+      id: 6,
+      created: false,
+    });
+    expect(calls[1]).toMatchObject({
+      method: "PATCH",
+      url: "https://api.github.com/repos/acme/app/issues/comments/6",
+      body: { body: "body\n\n<!-- lgtmoose-summary -->" },
+    });
+    expect(await p.upsertSummaryComment(PULL, "body", undefined, "lgtmoose-summary")).toEqual({
+      id: 7,
+      created: true,
+    });
+  });
+
+  it("matches only the App's own comment when it knows the App's ID", async () => {
+    const fake = fakeFetch([
+      {
+        status: 200,
+        body: [
+          {
+            id: 5,
+            body: "<!-- lgtmoose-summary -->",
+            user: { type: "Bot" },
+            performed_via_github_app: { id: 1 },
+          },
+          {
+            id: 6,
+            body: "<!-- lgtmoose-summary -->",
+            user: { type: "Bot" },
+            performed_via_github_app: { id: 42 },
+          },
+        ],
+      },
+      { status: 200, body: { id: 6 } },
+    ]);
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+    const p = new GitHubPoster(github, { appId: 42 });
+    expect(await p.upsertSummaryComment(PULL, "b", undefined, "lgtmoose-summary")).toEqual({
+      id: 6,
+      created: false,
+    });
+  });
+
+  it("creates a new summary comment when editing the old one is refused", async () => {
+    const { poster: p, calls } = poster([
+      { status: 403, body: { message: "Forbidden" } },
+      { status: 201, body: { id: 9 } },
+    ]);
+    expect(await p.upsertSummaryComment(PULL, "b", 5, "lgtmoose-summary")).toEqual({
+      id: 9,
+      created: true,
+    });
+    expect(calls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
+  });
+
+  it("rethrows a 403 that's a rate limit instead of creating a second comment", async () => {
+    for (const reply of [
+      { message: "You have exceeded a secondary rate limit." },
+      { message: "API rate limit exceeded for installation." },
+    ]) {
+      const { poster: p, calls } = poster([{ status: 403, body: reply }]);
+      await expect(p.upsertSummaryComment(PULL, "b", 5, "lgtmoose-summary")).rejects.toThrow(
+        "HTTP 403",
+      );
+      expect(calls.map((c) => c.method)).toEqual(["PATCH"]);
+    }
+    const limited: typeof fetch = async () =>
+      new Response(JSON.stringify({ message: "Forbidden" }), {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0" },
+      });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: limited });
+    const error = await github.request("PATCH", "/x", {}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ status: 403, rateLimited: true });
+  });
+
+  it("finds a review of ours on a commit, from any run, matching the App's bot user", async () => {
+    const ours = { login: "lgtmoose[bot]", type: "Bot" };
+    const reviews = [
+      {
+        commit_id: "c1",
+        body: "<!-- lgtmoose-run:r1 -->",
+        user: { login: "other[bot]", type: "Bot" },
+      },
+      { commit_id: "c2", body: "> <!-- lgtmoose-run:r2 -->", user: { login: "dev", type: "User" } },
+      { commit_id: "c3", state: "COMMENTED", body: "x\n\n<!-- lgtmoose-run:r3 -->", user: ours },
+      { commit_id: "c4", body: "no marker", user: ours },
+    ];
+    const fake = fakeFetch(Array.from({ length: 5 }, () => ({ status: 200, body: reviews })));
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+    const p = new GitHubPoster(github, { appSlug: async () => "lgtmoose" });
+    expect(await p.markersAt(PULL, "c1", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c2", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c3", "lgtmoose-run:")).toEqual([
+      { marker: "lgtmoose-run:r3", state: "COMMENTED" },
+    ]);
+    expect(await p.markersAt(PULL, "c4", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c9", "lgtmoose-run:")).toEqual([]);
+  });
+
+  it("leaves room in the summary for the longest marker", async () => {
+    const longest = "m".repeat(MAX_MARKER_LENGTH);
+    const { poster: p, calls } = poster([{ status: 200, body: { id: 1 } }]);
+    await p.upsertSummaryComment(PULL, "x".repeat(65_536 - SUMMARY_MARKER_ROOM), 1, longest);
+    const body = (calls[0]?.body as { body: string } | undefined)?.body ?? "";
+    expect(body.length).toBe(65_536);
+    expect(() => reviewMarkerComment(`${longest}m`)).toThrow();
+  });
+
+  it("fits the summary comment's marker in the room the summary leaves", async () => {
+    const { poster: p, calls } = poster([{ status: 200, body: { id: 1 } }]);
+    await p.upsertSummaryComment(PULL, "x".repeat(65_536 - 100), 1, "lgtmoose-summary");
+    const body = (calls[0]?.body as { body: string } | undefined)?.body ?? "";
+    expect(body.endsWith("<!-- lgtmoose-summary -->")).toBe(true);
+    // A body with no room for it is a caller's bug, not something to cut silently.
+    await expect(
+      p.upsertSummaryComment(PULL, "x".repeat(65_536), 1, "lgtmoose-summary"),
+    ).rejects.toThrow("too long");
   });
 
   it("edits the summary comment in place, or creates it when it's gone", async () => {

@@ -28,12 +28,15 @@ interface Setup {
   run?: "ok" | "timeout";
   status?: number;
   input?: object;
+  /** What removing symlinks finds. */
+  links?: string[];
 }
 
 function setup(options: Setup = {}) {
   const puts = new Map<string, string>();
   const runs: HarnessRunOptions<unknown>[] = [];
   const extracted: string[] = [];
+  const dropped: string[] = [];
   const downloaded: Uint8Array[] = [];
   const objects: Record<string, unknown> = {
     "/runs/urls.json": {
@@ -86,11 +89,17 @@ function setup(options: Setup = {}) {
     extract: async (_archive, dir) => {
       extracted.push(dir);
     },
+    dropSymlinks: async (dir) => {
+      // Only after the checkout is there, and before the harness runs.
+      if (!extracted.includes(dir) || runs.length > 0) throw new Error("out of order");
+      dropped.push(dir);
+      return options.links ?? [];
+    },
     harness,
     workDir: "/work",
     log: (message, fields) => logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   };
-  return { deps, puts, runs, extracted, downloaded, logs };
+  return { deps, puts, runs, extracted, dropped, downloaded, logs };
 }
 
 describe("runSandboxBatch", () => {
@@ -111,6 +120,16 @@ describe("runSandboxBatch", () => {
     expect(s.puts.get("/runs/t1.jsonl")).toBe("{}\n");
     // A transcript with no URL is dropped, not written anywhere.
     expect(s.puts.size).toBe(2);
+  });
+
+  it("removes symlinks after extracting and before the harness runs", async () => {
+    const s = setup({ links: ["docs/env"] });
+    await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.dropped).toEqual(["/work/checkout"]);
+    expect(s.runs).toHaveLength(1);
+    expect(
+      s.logs.some((line) => line.includes("removed symlinks") && line.includes("docs/env")),
+    ).toBe(true);
   });
 
   it("writes a model failure as the batch's error", async () => {
@@ -152,13 +171,27 @@ describe("credentialEnv", () => {
     expect(credentialEnv("codex", "chatgpt-login", "{}")).toEqual({ CODEX_AUTH_JSON: "{}" });
     expect(credentialEnv("codex", "access-token", "a")).toEqual({ CODEX_ACCESS_TOKEN: "a" });
     expect(credentialEnv("codex", "api-key", "k")).toEqual({ CODEX_API_KEY: "k" });
+    expect(credentialEnv("cursor-agent", "api-key", "k")).toEqual({ CURSOR_API_KEY: "k" });
+    expect(credentialEnv("cursor-agent", "service-account", "k")).toEqual({
+      CURSOR_API_KEY: "k",
+    });
+    expect(credentialEnv("agent-sdk", "api-key", "k")).toEqual({ ANTHROPIC_API_KEY: "k" });
+    expect(credentialEnv("agent-sdk", "bedrock", undefined)).toEqual({
+      CLAUDE_CODE_USE_BEDROCK: "1",
+    });
+    for (const harness of ["claude-code", "agent-sdk"]) {
+      expect(credentialEnv(harness, "vertex", '{"type":"service_account"}')).toEqual({
+        CLAUDE_CODE_USE_VERTEX: "1",
+        GOOGLE_APPLICATION_CREDENTIALS_JSON: '{"type":"service_account"}',
+      });
+    }
   });
 
   it("refuses a missing credential and unsupported providers, without the value", () => {
     expect(() => credentialEnv("claude-code", "api-key", " ")).toThrow("isn't set");
     for (const [harness, auth] of [
-      ["claude-code", "vertex"],
-      ["cursor-agent", "api-key"],
+      ["claude-code", "chatgpt-login"],
+      ["agent-sdk", "oauth-token"],
     ] as const) {
       const error = (() => {
         try {
@@ -187,5 +220,23 @@ describe("harnessEnv", () => {
         { ANTHROPIC_API_KEY: "secret" },
       ),
     ).toEqual({ PATH: "/bin", HTTPS_PROXY: "http://proxy:3128", ANTHROPIC_API_KEY: "secret" });
+  });
+
+  it("passes the task's model pins and Vertex settings", () => {
+    expect(
+      harnessEnv(
+        {
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          CLOUD_ML_REGION: "global",
+          ANTHROPIC_VERTEX_PROJECT_ID: "acme",
+          GOOGLE_APPLICATION_CREDENTIALS: "/elsewhere.json",
+        },
+        {},
+      ),
+    ).toEqual({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      CLOUD_ML_REGION: "global",
+      ANTHROPIC_VERTEX_PROJECT_ID: "acme",
+    });
   });
 });

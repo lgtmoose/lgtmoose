@@ -1,9 +1,88 @@
 {
-  "id": "43ec0bb2-f69c-41e9-a6aa-98358f058660",
+  "id": "3c9bb445-b947-4d12-8a3b-f85ea36d97d2",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.dispatched_executions": {
+      "name": "dispatched_executions",
+      "schema": "",
+      "columns": {
+        "execution_arn": {
+          "name": "execution_arn",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "repo": {
+          "name": "repo",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "number": {
+          "name": "number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "head_sha": {
+          "name": "head_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event_at": {
+          "name": "event_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stopped_at": {
+          "name": "stopped_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "dispatched_executions_active_idx": {
+          "name": "dispatched_executions_active_idx",
+          "columns": [
+            {
+              "expression": "repo",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"dispatched_executions\".\"stopped_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.feedback": {
       "name": "feedback",
       "schema": "",
@@ -116,12 +195,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "base_blob_sha": {
-          "name": "base_blob_sha",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "depth": {
           "name": "depth",
@@ -312,12 +385,6 @@
         },
         "path": {
           "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "base_path": {
-          "name": "base_path",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -797,6 +864,55 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.pull_request_dispatches": {
+      "name": "pull_request_dispatches",
+      "schema": "",
+      "columns": {
+        "repo": {
+          "name": "repo",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "number": {
+          "name": "number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_event_at": {
+          "name": "last_event_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "pull_request_dispatches_repo_number_pk": {
+          "name": "pull_request_dispatches_repo_number_pk",
+          "columns": ["repo", "number"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.pull_requests": {
       "name": "pull_requests",
       "schema": "",
@@ -864,18 +980,6 @@
         },
         "summary_comment_id": {
           "name": "summary_comment_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_review_event": {
-          "name": "last_review_event",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_review_id": {
-          "name": "last_review_id",
           "type": "bigint",
           "primaryKey": false,
           "notNull": false
@@ -1007,6 +1111,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "event_at": {
+          "name": "event_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wrote_pr": {
+          "name": "wrote_pr",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "started_at": {
           "name": "started_at",
           "type": "timestamp with time zone",
@@ -1084,9 +1201,7 @@
         "declined",
         "dispute_answered",
         "resolved",
-        "outdated",
-        "escalated",
-        "unresolved"
+        "outdated"
       ]
     },
     "public.finding_source": {
@@ -1127,7 +1242,7 @@
     "public.run_status": {
       "name": "run_status",
       "schema": "public",
-      "values": ["queued", "running", "succeeded", "failed", "superseded"]
+      "values": ["queued", "running", "succeeded", "failed", "superseded", "covered"]
     },
     "public.severity": {
       "name": "severity",

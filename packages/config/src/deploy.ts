@@ -18,8 +18,31 @@ const AUTH_METHODS = [...new Set(Object.values(HARNESS_AUTH).flat())] as [
   ...AuthMethod[],
 ];
 
-/** Auth methods that use a person's subscription. Setup asks for confirmation before storing these. */
-export const PLAN_AUTH_METHODS: readonly AuthMethod[] = ["oauth-token", "chatgpt-login"];
+/**
+ * Auth methods that use a person's subscription, so `lgtmoose auth` asks for confirmation
+ * before storing them. A Codex access token is a ChatGPT plan's token: it signs in through
+ * chatgpt.com, like a ChatGPT sign-in.
+ */
+export const PLAN_AUTH_METHODS: readonly AuthMethod[] = [
+  "oauth-token",
+  "chatgpt-login",
+  "access-token",
+];
+
+/**
+ * Whether a provider's credential belongs to a person's subscription plan: a plan auth method,
+ * or a Cursor user API key, which bills to that user's Cursor plan. A Cursor service-account
+ * key belongs to the team.
+ */
+export function isPlanCredential(provider: { harness: Harness; auth: AuthMethod }): boolean {
+  return (
+    PLAN_AUTH_METHODS.includes(provider.auth) ||
+    (provider.harness === "cursor-agent" && provider.auth === "api-key")
+  );
+}
+
+/** What a provider `id` may look like. Also the last part of its secret's name. */
+export const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
 export const ROLES = [
   "reviewer",
@@ -56,13 +79,32 @@ export const DEFAULT_TIER_MODELS: Readonly<
 
 const providerSchema = z
   .object({
-    id: z
-      .string()
-      .regex(/^[a-z][a-z0-9-]{0,31}$/, "use lowercase letters, digits and hyphens (max 32)"),
+    id: z.string().regex(PROVIDER_ID_PATTERN, "use lowercase letters, digits and hyphens (max 32)"),
     harness: z.enum(HARNESSES),
     auth: z.enum(AUTH_METHODS),
     /** Models per tier, overriding `DEFAULT_TIER_MODELS` for this provider's harness. */
     models: z.partialRecord(z.enum(TIERS), modelName).optional(),
+    /**
+     * Google Cloud settings for `vertex` auth. The service-account key itself is the stored
+     * credential (`lgtmoose auth`); its `project_id` is used when `projectId` is left out.
+     */
+    vertex: z
+      .object({
+        /** CLOUD_ML_REGION: `global`, a multi-region (`us`, `eu`) or a region (`us-east5`). */
+        region: z
+          .string()
+          .regex(
+            /^(global|us|eu|[a-z]+-[a-z]+\d+)$/,
+            "use global, us, eu or a region like us-east5",
+          )
+          .default("global"),
+        projectId: z
+          .string()
+          .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/, "use a Google Cloud project ID")
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((provider, ctx) => {
@@ -72,6 +114,13 @@ const providerSchema = z
         code: "custom",
         path: ["auth"],
         message: `${provider.harness} doesn't support "${provider.auth}". Use one of: ${allowed.join(", ")}`,
+      });
+    }
+    if (provider.vertex !== undefined && provider.auth !== "vertex") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["vertex"],
+        message: 'vertex settings apply only to auth: "vertex"',
       });
     }
   });

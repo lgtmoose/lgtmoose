@@ -3,6 +3,7 @@ import {
   CDK_CONTEXT,
   STACK_NAMES,
   egressAllowlist,
+  modelFor,
   resolveRoles,
   type DeployConfig,
   type ProviderConfig,
@@ -12,6 +13,7 @@ import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
 import { ProxyStack } from "./proxy-stack.js";
+import { ALLOW_UNVERIFIED_CURSOR_ENV } from "./sandbox-image.js";
 import { WorkflowStack } from "./workflow-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
@@ -94,6 +96,11 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     databaseName: DATABASE_NAME,
     githubAppSecret: data.githubAppSecret,
     providerSecrets: data.providerSecrets,
+    jobQueue: api.jobQueue,
+    deadLetterQueue: api.deadLetterQueue,
+    allowUnverifiedCursor:
+      process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
+      isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),
   });
   workflow.addDependency(data);
   // Sandbox tasks can only reach model APIs once the proxy runs.
@@ -103,9 +110,9 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
 }
 
 /**
- * The reviewer's model: the provider's standard tier, else Claude Code's Sonnet alias (its CLI
- * needs a model name) or, for other harnesses, their own default.
+ * The reviewer's model: the provider's standard tier, else the harness default (`sonnet` for
+ * Claude Code and the Agent SDK) or, for other harnesses, their CLI's own default.
  */
 export function reviewerModel(provider: ProviderConfig): string {
-  return provider.models?.standard ?? (provider.harness === "claude-code" ? "sonnet" : "");
+  return modelFor(provider, "standard") ?? "";
 }

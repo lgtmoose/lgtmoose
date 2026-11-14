@@ -7,6 +7,21 @@ import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
+  /**
+   * Conditional writes, for the post step's claim and progress. Each returns the object's new
+   * ETag, or undefined when the condition failed. A write racing another of the same key
+   * throws. A failed condition on an object that holds exactly this body counts as success,
+   * since it answers a retry of a write that was applied; so a body must be unique to its
+   * writer (the claim names its attempt, and saved progress its attempt and write count).
+   */
+  /** Writes the object only if there's none yet. */
+  createText(key: string, body: string): Promise<string | undefined>;
+  /** Overwrites the object only if it's still the version with `etag`. */
+  replaceText(key: string, body: string, etag: string): Promise<string | undefined>;
+  /** The object's text and ETag, or undefined when there's no such object. */
+  getTagged(key: string): Promise<{ text: string; etag: string } | undefined>;
+  /** Deletes the object only if it's still the version with `etag`; else leaves it. */
+  deleteIfMatch(key: string, etag: string): Promise<void>;
   /** Uploads a local file, such as the checkout archive. */
   putFile(key: string, path: string, contentType: string): Promise<void>;
   /** The object's text, or undefined when there's no such object. */
@@ -27,6 +42,10 @@ export interface RunRecord {
   lastReviewEvent: ReviewEvent | undefined;
   /** That review's GitHub ID; undefined in shadow mode. */
   lastReviewId: number | undefined;
+  /** The head the run reviews. */
+  headSha: string;
+  /** The execution the run belongs to. */
+  executionArn: string | undefined;
 }
 
 /** A file version a run reviewed. */
@@ -128,6 +147,8 @@ export interface RunStore {
     headSha: string;
     baseSha: string;
     executionArn: string;
+    /** When the job's event happened, which orders the PR's runs. */
+    eventAt?: Date;
   }): Promise<RunRecord>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** Records what the run reviews: how many files, and whether only since `fromSha`. */
@@ -155,7 +176,10 @@ export interface RunStore {
    * picked up.
    */
   unpostedRuns(pullRequestId: string, exceptRunId: string, limit: number): Promise<string[]>;
-  /** Marks the run finished and records what it set on the PR. */
+  /**
+   * Marks the run succeeded (it posted) and records what it set on the PR, unless a newer run
+   * of the PR has already succeeded: the PR's record is the newest posted run's.
+   */
   succeedRun(
     runId: string,
     result: {
@@ -166,16 +190,44 @@ export interface RunStore {
        * review. Recorded even when a batch failed: its files have no record at this head, so
        * the next run reviews them (see `prepareReview`).
        */
-      reviewedSha: string;
+      headSha: string;
+      /** The label it set or set out to; undefined leaves the PR's recorded one alone. */
       statusLabel: string | undefined;
       summaryCommentId: number | undefined;
       /** The review this run posted: its event and ID. Undefined when it posted none. */
-      review: { event: ReviewEvent; id: number | undefined } | undefined;
+      review?: { event: ReviewEvent; id: number | undefined } | undefined;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */
   failRun(executionArn: string, error: string): Promise<void>;
-  /** Marks a run superseded: a newer head was pushed before it started. */
+  /**
+   * Whether a run of the same PR for a later event has written PR-level state: it succeeded,
+   * or it was covered and wrote the PR's outputs (`coverRun` with `pr`). Its summary comment
+   * and label are then the PR's, and an older run mustn't write over them.
+   */
+  newerRunPosted(run: RunRecord): Promise<boolean>;
+  /**
+   * Marks the run covered: it posted no review, since another run's review already covered its
+   * head. Without `pr`, the PR's record is left to the run that posted.
+   */
+  coverRun(
+    runId: string,
+    result: {
+      filesDone: number;
+      costUsd: number | undefined;
+      /**
+       * The covering run's PR-level outputs this run wrote: recorded on the PR too, unless a
+       * newer run has written PR-level state, and the run then counts as having written it.
+       */
+      pr?: {
+        headSha: string;
+        /** The label it set or set out to; undefined leaves the PR's recorded one alone. */
+        statusLabel: string | undefined;
+        summaryCommentId: number | undefined;
+      };
+    },
+  ): Promise<void>;
+  /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
 }
 

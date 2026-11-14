@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { addUsage, findResult, isAuthRetry, outputOf, usageOf } from "./stream.js";
+import { addUsage } from "../usage.js";
+import { findResult, isAuthRetry, outputOf, usageOf } from "./stream.js";
 
 describe("findResult", () => {
   it("finds the last result event and skips other lines", () => {

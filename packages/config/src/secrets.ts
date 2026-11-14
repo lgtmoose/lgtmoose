@@ -16,9 +16,36 @@ export const SECRET_NAMES = {
    * internet-facing gateway can verify deliveries without being able to act as the App.
    */
   githubWebhook: "lgtmoose/github-webhook-secret",
-  /** One per provider that needs a stored credential. */
-  provider: (providerId: string) => `lgtmoose/provider/${providerId}`,
+  /**
+   * One per provider that needs a stored credential, written by `lgtmoose auth`. The value is
+   * the credential as plain text, exactly what the sandbox reads from
+   * `LGTMOOSE_PROVIDER_CREDENTIAL`: a token or key, or for a Codex ChatGPT sign-in the whole
+   * `auth.json`. Tagged with `PROVIDER_CREDENTIAL_TAGS`. See docs/credentials.md.
+   */
+  provider: (providerId: string) => `${PROVIDER_SECRET_PREFIX}${providerId}`,
 } as const;
+
+/** Every provider credential's name starts with this, so they can be listed together. */
+export const PROVIDER_SECRET_PREFIX = "lgtmoose/provider/";
+
+/**
+ * Tag keys on each provider credential. They describe the secret without its value, so the
+ * credential broker and `lgtmoose auth list` can tell what a secret holds without reading it.
+ */
+export const PROVIDER_CREDENTIAL_TAGS = {
+  /** Always `lgtmoose`, on every secret LGTMoose writes. */
+  app: "app",
+  /** Always `PROVIDER_CREDENTIAL_KIND`. */
+  kind: "lgtmoose:kind",
+  /** The provider's `id` in lgtmoose.config.ts. */
+  provider: "lgtmoose:provider",
+  /** Its `harness`, such as `codex`. */
+  harness: "lgtmoose:harness",
+  /** Its `auth`, such as `chatgpt-login`. */
+  auth: "lgtmoose:auth",
+} as const;
+
+export const PROVIDER_CREDENTIAL_KIND = "provider-credential";
 
 /** Bedrock uses the task's IAM role; every other auth method needs a stored credential. */
 export function providerNeedsSecret(provider: Pick<ProviderConfig, "auth">): boolean {

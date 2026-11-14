@@ -1,14 +1,15 @@
 import { parseArgs } from "node:util";
+import type { AuthDeps } from "./auth/auth.js";
 import type { DeployDeps } from "./deploy/deploy.js";
 import type { ReviewEnvironmentFactory } from "./review/review.js";
 import type { SetupDeps } from "./setup/setup.js";
 
 export const VERSION = "0.0.0";
 
-/** Commands planned for M1–M3. Each one is a stub until its ticket lands. */
+/** Every command, with the one-line summary help shows. */
 export const COMMANDS = {
   setup: "Create the GitHub App and write lgtmoose.config.ts",
-  auth: "Connect a model provider: claude, codex, cursor, bedrock, api-key (NIC-824)",
+  auth: "Store a model provider's credential: claude, codex, cursor, bedrock, api-key, list, remove",
   deploy: "Deploy every CDK stack and point the App's webhook at it",
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
@@ -33,6 +34,8 @@ export interface RunResult {
 export interface RunOptions {
   /** Builds setup's I/O. Tests pass fakes; by default it's AWS, GitHub and a real terminal. */
   setupDeps?: () => Promise<SetupDeps>;
+  /** Builds auth's I/O, the same way. */
+  authDeps?: () => Promise<AuthDeps>;
   /** Builds deploy and destroy's I/O, the same way. */
   deployDeps?: () => Promise<DeployDeps>;
   /** Builds the review dry run's I/O from its flags: GitHub, git and Claude Code by default. */
@@ -47,6 +50,12 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     const getDeps =
       options.setupDeps ?? (async () => (await import("./setup/deps.js")).defaultSetupDeps());
     return runSetup(argv.slice(1), getDeps);
+  }
+  if (argv[0] === "auth") {
+    const { runAuth } = await import("./auth/auth.js");
+    const getDeps =
+      options.authDeps ?? (async () => (await import("./auth/deps.js")).defaultAuthDeps());
+    return runAuth(argv.slice(1), getDeps);
   }
   if (argv[0] === "deploy" || argv[0] === "destroy") {
     const { runDeploy, runDestroy } = await import("./deploy/deploy.js");
@@ -90,9 +99,10 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     };
   }
 
+  // Every command is handled above when it comes first, so options came before it.
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `"${command}" isn't built yet. ${COMMANDS[command as Command]}\n`,
+    stderr: `Put options after the command: lgtmoose ${command} --help\n`,
   };
 }

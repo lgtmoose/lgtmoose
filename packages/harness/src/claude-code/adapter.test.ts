@@ -212,7 +212,8 @@ describe("ClaudeCodeHarness", () => {
   it("makes one repair retry in the same session, with the validation errors", async () => {
     const harness = await harnessFor([
       { lines: [resultLine({ structured_output: { findings: [{ path: "a.ts", line: 1.5 }] } })] },
-      { lines: [resultLine({ structured_output: { findings: [finding] } })] },
+      // Claude Code restores the session's cost on resume: 0.40 includes the first 0.25.
+      { lines: [resultLine({ structured_output: { findings: [finding] }, total_cost_usd: 0.4 })] },
     ]);
     const result = await run(harness);
     expect(result.output).toEqual({ findings: [finding] });
@@ -222,7 +223,7 @@ describe("ClaudeCodeHarness", () => {
       "transcripts/run-1/2.jsonl",
     ]);
     expect(result.usage?.inputTokens).toBe(200);
-    expect(result.usage?.costUsd).toBe(0.5);
+    expect(result.usage?.costUsd).toBe(0.4);
 
     const [first, second] = await (fake as FakeClaude).calls();
     const sessionId = flagValues(first?.argv ?? [], "--session-id")[0];
@@ -260,7 +261,7 @@ describe("ClaudeCodeHarness", () => {
     const error = await failure(run(harness, { schema: z.array(z.string()) }));
     expect(error.kind).toBe("invalid_output");
     const [, second] = await (fake as FakeClaude).calls();
-    expect(second?.stdin).toContain("not valid JSON");
+    expect(second?.stdin).toContain("wasn't valid JSON");
   });
 
   it("refuses output that contains the credential, without a retry", async () => {

@@ -22,6 +22,8 @@ import {
   StateMachine,
   Succeed,
   Timeout,
+  Wait,
+  WaitTime,
   type IChainable,
 } from "aws-cdk-lib/aws-stepfunctions";
 import {
@@ -41,6 +43,14 @@ const RUN_PREFIX = "runs/";
 
 /** How long the prepare step (clone, plan, upload) and the post step may take. */
 export const CONTROL_STEP_TIMEOUT = Duration.minutes(30);
+/**
+ * Prepare and post wait for a task token, so a control task that died without reporting would
+ * hold its step for the whole timeout. They send a heartbeat as soon as they start and then
+ * every 30 s (`HEARTBEAT_INTERVAL_MS` in @lgtmoose/control); this long without one fails the
+ * step. The clock starts when the task is scheduled, so it covers a cold Fargate start too
+ * (pulling the image, starting the container).
+ */
+export const TASK_HEARTBEAT = Duration.minutes(5);
 /** The model's own limit on one batch, which the control task passes to the sandbox. */
 export const BATCH_TIMEOUT = Duration.minutes(20);
 /** Image pull, checkout download and extraction on top of the model's limit. */
@@ -56,6 +66,13 @@ const URL_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(15));
  * function assuming another role) allows at most one hour.
  */
 const PRESIGNER_SESSION = Duration.hours(1);
+
+/** How often, and from how far apart, a failed post step is retried. */
+export const POST_RETRIES = 3;
+export const POST_RETRY_INTERVAL = Duration.minutes(1);
+
+/** The task-token error for a failed post step (`POST_FAILED` in @lgtmoose/control). */
+const POST_FAILED = "Lgtmoose.PostFailed";
 
 /** RunTask failing to start a task: no capacity, throttling. Safe to retry for any step. */
 const ECS_START_ERRORS = ["ECS.AmazonECSException", "ECS.ServerException"];
@@ -76,20 +93,25 @@ export interface ReviewWorkflowProps {
 }
 
 /**
- * The review workflow, one execution per review job (the execution input is the `ReviewJob`):
+ * The review workflow, one execution per review job. The dispatcher starts it with the
+ * `ReviewJob` and `debounceSeconds` as input (`WorkflowInput` in @lgtmoose/control):
  *
+ * 0. Debounce: wait `debounceSeconds` (a minute for a push, none for an opened PR). A newer push
+ *    in that time stops the execution here, before anything is cloned.
  * 1. Prepare (control task, waits for its task token): records the run, clones and plans the
  *    PR, uploads the checkout and each batch's input, and returns the batches.
  * 2. Superseded? A newer push has its own execution: stop here.
  * 3. Batches (map, `maxConcurrency` at once): presign the batch's URLs, then run the reviewer's
  *    sandbox task on it. A batch that still fails after its retries is left without an output,
  *    which the post step counts as a failed batch: the review is incomplete and can't approve.
- * 4. Post (control task): reads the outputs and posts one review, the check run, the summary
- *    and the status label (or records them in shadow mode).
+ * 4. Post (control task, waits for its task token, so a stop can't cut it short): reads the
+ *    outputs and posts one review, the check run, the summary and the status label (or
+ *    records them in shadow mode).
  *
  * Any step failing for good runs the control task's fail step, which marks the run failed and
  * posts nothing more, and the execution fails. An execution stopped from outside (StopExecution)
- * skips it: whatever stops one must mark its run itself.
+ * skips it: the dispatcher marks the run superseded before it stops one, and a prepare or post
+ * task still running then marks the run when its task token turns out dead.
  *
  * Extension points (M4): the cross-file and verify passes go between the batches and post, as
  * steps in `afterBatches`; each reads and writes the run's objects like the batches do.
@@ -125,6 +147,9 @@ export class ReviewWorkflow extends Construct {
         ],
         resultPath,
         taskTimeout: Timeout.duration(CONTROL_STEP_TIMEOUT),
+        ...(pattern === IntegrationPattern.WAIT_FOR_TASK_TOKEN
+          ? { heartbeatTimeout: Timeout.duration(TASK_HEARTBEAT) }
+          : {}),
       });
 
     const prepare = runControl(
@@ -254,17 +279,34 @@ export class ReviewWorkflow extends Construct {
       [
         { name: "LGTMOOSE_COMMAND", value: "post" },
         { name: "LGTMOOSE_RUN_ID", value: JsonPath.stringAt("$.prepared.runId") },
+        { name: "LGTMOOSE_TASK_TOKEN", value: JsonPath.taskToken },
       ],
-      IntegrationPattern.RUN_JOB,
+      // Not `.sync`: stopping the execution (a newer push, the PR closed) would stop the task
+      // halfway through posting. With a task token it finishes, and its review, for an older
+      // head, is followed by the next run's.
+      IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       JsonPath.DISCARD,
     );
-    // Posting twice would post two reviews: only retry when the task never started.
+    // The task never started: safe to retry at once.
     post.addRetry({
       errors: ECS_START_ERRORS,
       maxAttempts: 3,
       interval: Duration.seconds(30),
       backoffRate: 2,
       jitterStrategy: JitterType.FULL,
+    });
+    // A GitHub write failed, or the task died: post records its progress in the run's
+    // objects, and claims the review (naming its ECS task) before posting it, so a retry
+    // carries on from there and never posts a second review. A retry that finds the claim held
+    // by a task still running fails until that task has stopped; one that missed its heartbeat
+    // stops at its next beat, or ECS stops it. No jitter, so the retries surely span more than
+    // the heartbeat timeout: 1 + 2 + 4 = 7 minutes.
+    post.addRetry({
+      errors: [POST_FAILED, Errors.HEARTBEAT_TIMEOUT],
+      maxAttempts: POST_RETRIES,
+      interval: POST_RETRY_INTERVAL,
+      backoffRate: 2,
+      jitterStrategy: JitterType.NONE,
     });
 
     const failRun = runControl(
@@ -297,14 +339,21 @@ export class ReviewWorkflow extends Construct {
     /** M4: cross-file and verify go here, between the batches and post. */
     const afterBatches: IChainable = post;
 
-    const definition = prepare.next(
-      new Choice(this, "Superseded?")
-        .when(
-          Condition.booleanEquals("$.prepared.superseded", true),
-          new Succeed(this, "Superseded", { comment: "A newer push has its own review." }),
-        )
-        .otherwise(batches.next(afterBatches)),
-    );
+    const debounce = new Wait(this, "Debounce", {
+      comment: "A newer push in the meantime stops this execution before it clones.",
+      time: WaitTime.secondsPath("$.debounceSeconds"),
+    });
+
+    const definition = debounce
+      .next(prepare)
+      .next(
+        new Choice(this, "Superseded?")
+          .when(
+            Condition.booleanEquals("$.prepared.superseded", true),
+            new Succeed(this, "Superseded", { comment: "A newer push has its own review." }),
+          )
+          .otherwise(batches.next(afterBatches)),
+      );
 
     const logs = new LogGroup(this, "Logs", {
       retention: props.retention,
@@ -322,7 +371,12 @@ export class ReviewWorkflow extends Construct {
         includeExecutionData: false,
       },
     });
-    // Prepare reports through its task token.
+    // Prepare and post report through their task tokens, and check whether their execution
+    // was stopped when a token no longer counts.
     this.stateMachine.grantTaskResponse(props.control.taskDefinition.taskRole);
+    this.stateMachine.grantExecution(
+      props.control.taskDefinition.taskRole,
+      "states:DescribeExecution",
+    );
   }
 }

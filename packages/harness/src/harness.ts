@@ -1,8 +1,20 @@
 import type { z } from "zod";
 
 export interface HarnessRunOptions<T> {
-  /** The full task for the model. Sent on stdin, never on the command line. */
+  /**
+   * The full task for the model. Sent on stdin, never on the command line, except to
+   * cursor-agent: its CLI takes the prompt only as an argument, so a prompt that fits in one
+   * goes there, and a longer one goes in a task file the model reads. That's acceptable because a
+   * sandbox task is single-tenant: the only other processes that could read its argv are the
+   * CLI's own, and the prompt is PR content, not a secret. The credential never goes on argv.
+   */
   prompt: string;
+  /**
+   * Instructions that are the same on every batch (the role's rules and rule packs). The
+   * agent-sdk harness sends them as a cached system prompt; the CLI harnesses put them before
+   * `prompt` (see `fullPrompt`).
+   */
+  system?: string;
   /** The checkout to review. The model can read only inside it. */
   cwd: string;
   /** What the model must return. Its output is parsed and validated with this. */
@@ -18,6 +30,11 @@ export interface HarnessRunOptions<T> {
    * (see `MODEL_TIERS`). `model` still wins when the harness gets one.
    */
   tier?: ModelTier;
+}
+
+/** The task for a harness without a system prompt: `system` (when given), then `prompt`. */
+export function fullPrompt(options: Pick<HarnessRunOptions<unknown>, "prompt" | "system">): string {
+  return options.system === undefined ? options.prompt : `${options.system}\n\n${options.prompt}`;
 }
 
 /** Model tiers from the deploy config: cheap and quick, the default, and the strongest. */
@@ -56,11 +73,21 @@ export interface Harness {
  * - `transcript`: the run finished but its transcript couldn't be saved.
  * - `rate_limit`: the provider is throttling requests; the same credential works again soon.
  * - `plan_limit`: the plan's usage or spend limit is used up; try another provider.
+ * - `input_too_large`: this harness can't take a prompt that big (cursor-agent's task-file cap);
+ *   another provider may.
  *
- * The fallback chain moves to the next provider on `auth`, `rate_limit` and `plan_limit`.
+ * The fallback chain moves to the next provider on `auth`, `rate_limit`, `plan_limit` and
+ * `input_too_large`, and cools a provider down for the first three only.
  */
 export type HarnessErrorKind =
-  "timeout" | "invalid_output" | "process" | "auth" | "transcript" | "rate_limit" | "plan_limit";
+  | "timeout"
+  | "invalid_output"
+  | "process"
+  | "auth"
+  | "transcript"
+  | "rate_limit"
+  | "plan_limit"
+  | "input_too_large";
 
 /** A failed run. Callers fail the batch. The message never contains a credential. */
 export class HarnessError extends Error {

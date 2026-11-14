@@ -16,6 +16,11 @@ export interface SandboxDeps {
   writeFile(path: string, body: ReadableStream<Uint8Array>): Promise<void>;
   /** Extracts a gzip tarball into `dir`, which it creates. */
   extract(archive: string, dir: string): Promise<void>;
+  /**
+   * Removes every symlink in the checkout (see `dropSymlinks`), returning
+   * their paths. Runs before the harness sees the checkout.
+   */
+  dropSymlinks(dir: string): Promise<string[]>;
   /** The harness for this task's provider, saving transcripts to `transcripts`. */
   harness(transcripts: TranscriptStore): Harness;
   /** A writable directory for the checkout. */
@@ -78,6 +83,14 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
   if (download.body === null) throw new Error("The checkout download has no body.");
   await deps.writeFile(archive, download.body);
   await deps.extract(archive, checkout);
+  // Read rules match the path the model asks for, not where a link leads.
+  const dropped = await deps.dropSymlinks(checkout);
+  if (dropped.length > 0) {
+    deps.log("removed symlinks from the checkout", {
+      count: dropped.length,
+      paths: dropped.slice(0, 20),
+    });
+  }
 
   const outcome = await runBatch(
     deps.harness(presignedTranscripts(deps, urls)),

@@ -3,7 +3,12 @@ import { createReadStream } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
@@ -17,13 +22,16 @@ import {
   GitHubPoster,
   ShadowPoster,
   installationTokenProvider,
+  appJwt,
 } from "@lgtmoose/poster";
 import { and, asc, desc, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { alias } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
 import type { ControlEnv } from "./env.js";
+import { errorName } from "./sfn.js";
 import type {
   ArtifactStore,
   ControlDeps,
@@ -32,6 +40,49 @@ import type {
   RunStore,
   TaskTokens,
 } from "./ports.js";
+
+/** Longest a GitHub request may take: well under the post step's 5-minute heartbeat timeout. */
+export const GITHUB_TIMEOUT_MS = 60_000;
+
+/**
+ * A conditional PutObject: the new ETag, or undefined when the condition failed (412). A 409
+ * (another conditional write of the key in flight) throws, for the caller to retry.
+ *
+ * A 412 can also answer the SDK's own retry of a write S3 already applied. So on a 412 the
+ * object is read back: if it holds exactly our body, the write was ours. Callers make bodies
+ * unique to the writer (an attempt ID, a write count), so another writer's can't match.
+ */
+async function conditionalPut(
+  client: Pick<S3Client, "send">,
+  input: { Bucket: string; Key: string; Body: string; IfNoneMatch?: string; IfMatch?: string },
+): Promise<string | undefined> {
+  try {
+    const reply = await client.send(
+      new PutObjectCommand({ ...input, ContentType: "application/json" }),
+    );
+    if (reply.ETag === undefined) throw new Error(`S3 returned no ETag for ${input.Key}.`);
+    return reply.ETag;
+  } catch (error) {
+    if (errorName(error) !== "PreconditionFailed") throw error;
+    const stored = await getTagged(client, input.Bucket, input.Key);
+    return stored?.text === input.Body ? stored.etag : undefined;
+  }
+}
+
+async function getTagged(
+  client: Pick<S3Client, "send">,
+  bucket: string,
+  key: string,
+): Promise<{ text: string; etag: string } | undefined> {
+  try {
+    const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    if (object.ETag === undefined) throw new Error(`S3 returned no ETag for ${key}.`);
+    return { text: (await object.Body?.transformToString("utf8")) ?? "", etag: object.ETag };
+  } catch (error) {
+    if (errorName(error) === "NoSuchKey") return undefined;
+    throw error;
+  }
+}
 
 /** The artifact bucket over S3. */
 export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore {
@@ -45,6 +96,22 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
           ContentType: "application/json",
         }),
       );
+    },
+    async createText(key, body) {
+      return conditionalPut(client, { Bucket: bucket, Key: key, Body: body, IfNoneMatch: "*" });
+    },
+    async replaceText(key, body, etag) {
+      return conditionalPut(client, { Bucket: bucket, Key: key, Body: body, IfMatch: etag });
+    },
+    getTagged: (key) => getTagged(client, bucket, key),
+    async deleteIfMatch(key, etag) {
+      try {
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key, IfMatch: etag }));
+      } catch (error) {
+        // Changed or gone since: someone else's now, or no one's.
+        const name = errorName(error);
+        if (name !== "PreconditionFailed" && name !== "NoSuchKey") throw error;
+      }
     },
     async putFile(key, path, contentType) {
       const { size } = await stat(path);
@@ -63,7 +130,7 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
         const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
         return (await object.Body?.transformToString("utf8")) ?? "";
       } catch (error) {
-        if (error instanceof Error && error.name === "NoSuchKey") return undefined;
+        if (errorName(error) === "NoSuchKey") return undefined;
         throw error;
       }
     },
@@ -121,6 +188,81 @@ type Db = PgDatabase<PgQueryResultHKT>;
 
 const REVIEW_EVENTS: readonly ReviewEvent[] = ["APPROVE", "COMMENT", "REQUEST_CHANGES"];
 
+/** `review_runs` again, for the run a query compares the others with. */
+const self = alias(reviewRuns, "self");
+/** A run's place among its PR's runs: its event time, else when its row was made. */
+const orderOf = (runs: typeof reviewRuns | typeof self) =>
+  sql<Date>`coalesce(${runs.eventAt}, ${runs.createdAt})`;
+const runOrder = orderOf(reviewRuns);
+
+async function newerRunPosted(
+  db: Pick<Db, "select">,
+  run: { runId: string; pullRequestId: string },
+): Promise<boolean> {
+  // Another run that wrote PR-level state: it succeeded, or it was covered and wrote the PR's
+  // outputs. A covered run that wrote nothing doesn't count: it never stands in for the run
+  // that posted.
+  const [newer] = await db
+    .select({ id: reviewRuns.id })
+    .from(reviewRuns)
+    .where(
+      and(
+        eq(reviewRuns.pullRequestId, run.pullRequestId),
+        ne(reviewRuns.id, run.runId),
+        eq(reviewRuns.wrotePr, true),
+        // Against the run's own row, at Postgres's precision: its order read back into a Date
+        // (or a driver's string) can be coarser than the column.
+        gt(
+          runOrder,
+          sql`(${db
+            .select({ order: orderOf(self) })
+            .from(self)
+            .where(eq(self.id, run.runId))})`,
+        ),
+      ),
+    )
+    .limit(1);
+  return newer !== undefined;
+}
+
+/**
+ * Records a posted run's outputs on its PR, unless a newer run of the PR has posted. The PR's
+ * row is locked first, so two runs finishing at once take turns, and the newer-run check sees
+ * the other's committed status (each statement reads afresh under READ COMMITTED).
+ */
+async function recordOnPr(
+  tx: Pick<Db, "select" | "update">,
+  run: { runId: string; pullRequestId: string },
+  pr: {
+    headSha: string;
+    /** The PR's label; undefined leaves the recorded one as it is. */
+    statusLabel: string | undefined;
+    summaryCommentId: number | undefined;
+    /** The review the run posted; undefined leaves the PR's last review as it is. */
+    review?: { event: ReviewEvent; id: number | undefined } | undefined;
+  },
+  now: () => Date,
+): Promise<void> {
+  await tx
+    .select({ id: pullRequests.id })
+    .from(pullRequests)
+    .where(eq(pullRequests.id, run.pullRequestId))
+    .for("update");
+  if (await newerRunPosted(tx, run)) return;
+  await tx
+    .update(pullRequests)
+    .set({
+      lastReviewedSha: pr.headSha,
+      ...(pr.review === undefined
+        ? {}
+        : { lastReviewEvent: pr.review.event, lastReviewId: pr.review.id ?? null }),
+      ...(pr.statusLabel === undefined ? {} : { statusLabel: pr.statusLabel }),
+      summaryCommentId: pr.summaryCommentId ?? null,
+      updatedAt: now(),
+    })
+    .where(eq(pullRequests.id, run.pullRequestId));
+}
+
 /** `review_runs` and `pull_requests` with drizzle. */
 export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): RunStore {
   async function record(runId: string): Promise<RunRecord | undefined> {
@@ -133,6 +275,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         statusLabel: pullRequests.statusLabel,
         lastReviewEvent: pullRequests.lastReviewEvent,
         lastReviewId: pullRequests.lastReviewId,
+        headSha: reviewRuns.headSha,
+        executionArn: reviewRuns.executionArn,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
@@ -147,6 +291,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           statusLabel: row.statusLabel ?? undefined,
           lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
           lastReviewId: row.lastReviewId ?? undefined,
+          headSha: row.headSha,
+          executionArn: row.executionArn ?? undefined,
         };
   }
 
@@ -192,6 +338,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           kind: pull.lastReviewedSha === null ? "first" : "incremental",
           status: "running",
           executionArn: input.executionArn,
+          eventAt: input.eventAt ?? null,
           startedAt: now(),
         })
         .returning({ id: reviewRuns.id });
@@ -263,31 +410,45 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       return rows.map((row) => row.id);
     },
     async succeedRun(runId, result) {
-      const run = await record(runId);
-      if (run === undefined) throw new Error(`No review run ${runId}.`);
       await db.transaction(async (tx) => {
-        await tx
+        // It posted, so it succeeded, even if it was superseded or failed while posting.
+        const [run] = await tx
           .update(reviewRuns)
           .set({
             status: "succeeded",
+            wrotePr: true,
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),
           })
-          .where(eq(reviewRuns.id, runId));
-        await tx
-          .update(pullRequests)
-          .set({
-            lastReviewedSha: result.reviewedSha,
-            ...(result.review === undefined
-              ? {}
-              : { lastReviewEvent: result.review.event, lastReviewId: result.review.id ?? null }),
-            statusLabel: result.statusLabel ?? null,
-            summaryCommentId: result.summaryCommentId ?? null,
-            updatedAt: now(),
-          })
-          .where(eq(pullRequests.id, run.pullRequestId));
+          .where(eq(reviewRuns.id, runId))
+          .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });
+        if (run === undefined) throw new Error(`No review run ${runId}.`);
+        // The PR's record is the newest posted run's: an older run that finished posting later
+        // (stopped mid-post, say) leaves it to the newer one.
+        await recordOnPr(tx, run, result, now);
       });
+    },
+    async coverRun(runId, result) {
+      await db.transaction(async (tx) => {
+        const [run] = await tx
+          .update(reviewRuns)
+          .set({
+            status: "covered",
+            // Once set, kept: a later call without `pr` (a retry) doesn't undo what was written.
+            ...(result.pr === undefined ? {} : { wrotePr: true }),
+            filesDone: result.filesDone,
+            costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
+            finishedAt: now(),
+          })
+          .where(eq(reviewRuns.id, runId))
+          .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });
+        if (run === undefined) throw new Error(`No review run ${runId}.`);
+        if (result.pr !== undefined) await recordOnPr(tx, run, result.pr, now);
+      });
+    },
+    async newerRunPosted(run) {
+      return newerRunPosted(db, run);
     },
     async failRun(executionArn, error) {
       // A run that already finished (or was superseded) keeps its status.
@@ -302,10 +463,11 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         );
     },
     async supersedeRun(runId) {
+      // A run that already finished (or failed) keeps its status.
       await db
         .update(reviewRuns)
         .set({ status: "superseded", finishedAt: now() })
-        .where(eq(reviewRuns.id, runId));
+        .where(and(eq(reviewRuns.id, runId), inArray(reviewRuns.status, ["queued", "running"])));
     },
   };
 }
@@ -608,6 +770,23 @@ export async function awsControlDeps(
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
   const db = drizzle({ client: pool });
+  // The App's slug, read once with the App's own JWT.
+  let slugOnce: Promise<string> | undefined;
+  const slug = () => {
+    slugOnce ??= new GitHubClient({
+      token: async () => appJwt(app.appId, app.privateKey),
+      timeoutMs: GITHUB_TIMEOUT_MS,
+    })
+      .request<{ slug?: unknown }>("GET", "/app")
+      .then((reply) => {
+        if (typeof reply.slug !== "string") throw new Error("GET /app returned no slug.");
+        return reply.slug;
+      });
+    slugOnce.catch(() => {
+      slugOnce = undefined;
+    });
+    return slugOnce;
+  };
 
   return {
     store,
@@ -619,8 +798,10 @@ export async function awsControlDeps(
         appId: app.appId,
         privateKey: app.privateKey,
         installationId,
+        timeoutMs: GITHUB_TIMEOUT_MS,
       });
-      const client = new GitHubClient({ token });
+      // Bounded well under the post step's heartbeat timeout: a hung write fails the attempt.
+      const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         // GitHub Apps can call GraphQL with the installation token.
@@ -637,7 +818,11 @@ export async function awsControlDeps(
                 log,
                 labelReader: new GitHubLabelClient(client, pull),
               })
-            : new GitHubPoster(client),
+            : new GitHubPoster(client, {
+                appId: app.appId,
+                // Its bot is `<slug>[bot]`: how its own reviews are told from others'.
+                appSlug: slug,
+              }),
       };
     },
     clone: cloneAtSha,

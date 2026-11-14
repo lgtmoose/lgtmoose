@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { containsSecret, redact, valueContainsSecret } from "./redact.js";
+import { containsSecret, redact, StreamRedactor, valueContainsSecret } from "./redact.js";
 
 const KEY = "sk-ant-api03-AbCdEf123456";
 
@@ -45,5 +45,26 @@ describe("valueContainsSecret", () => {
 
   it("ignores output without it", () => {
     expect(valueContainsSecret({ findings: [{ title: "ok", line: 3 }] }, [KEY])).toBe(false);
+  });
+});
+
+describe("StreamRedactor", () => {
+  const secret = "sk-test-0123456789abcdef";
+
+  it("redacts a secret split across chunks, in any of its forms", () => {
+    const base64 = Buffer.from(secret).toString("base64");
+    const text = `before ${secret} middle ${base64} after`;
+    for (const size of [1, 3, 7, 50]) {
+      const redactor = new StreamRedactor([secret]);
+      let out = "";
+      for (let i = 0; i < text.length; i += size) out += redactor.push(text.slice(i, i + size));
+      out += redactor.end();
+      expect(out).toBe("before *** middle *** after");
+    }
+  });
+
+  it("passes text through untouched without secrets", () => {
+    const redactor = new StreamRedactor([]);
+    expect(redactor.push("abc") + redactor.end()).toBe("abc");
   });
 });

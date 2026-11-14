@@ -1,11 +1,19 @@
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { accessSync, constants, createWriteStream, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
-import { ClaudeCodeHarness, CodexHarness, type Harness } from "@lgtmoose/harness";
+import {
+  AgentSdkHarness,
+  ClaudeCodeHarness,
+  CodexHarness,
+  CursorHarness,
+  type Harness,
+} from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
+import { dropSymlinks } from "./checkout.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
 
@@ -25,6 +33,22 @@ function extract(archive: string, dir: string): Promise<void> {
       );
     }, reject);
   });
+}
+
+/** The first executable named `name` on `path`, if any. */
+function onPath(name: string, path: string | undefined): string | undefined {
+  for (const dir of (path ?? "").split(":")) {
+    if (dir === "") continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (!statSync(candidate).isFile()) continue;
+      return candidate;
+    } catch {
+      // Not here.
+    }
+  }
+  return undefined;
 }
 
 function log(message: string, fields: Record<string, unknown> = {}): void {
@@ -50,10 +74,22 @@ async function main(): Promise<void> {
       writeFile: (path, body) =>
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
-      harness: (transcripts): Harness =>
-        env.harness === "codex"
-          ? new CodexHarness({ transcripts, env: harnessVars, tmpRoot: TMP })
-          : new ClaudeCodeHarness({ transcripts, env: harnessVars, tmpRoot: TMP }),
+      dropSymlinks,
+      harness: (transcripts): Harness => {
+        const options = { transcripts, env: harnessVars, tmpRoot: TMP };
+        if (env.harness === "codex") return new CodexHarness(options);
+        if (env.harness === "cursor-agent") return new CursorHarness(options);
+        if (env.harness === "agent-sdk") {
+          // The image's pinned claude (CLAUDE_CODE_VERSION), which the SDK version tracks.
+          // Never the SDK's bundled binary, whose version the policy wasn't checked against.
+          const claude = onPath("claude", process.env.PATH);
+          if (claude === undefined) {
+            throw new Error("The agent-sdk harness needs the image's claude on PATH.");
+          }
+          return new AgentSdkHarness({ ...options, binaryPath: claude });
+        }
+        return new ClaudeCodeHarness(options);
+      },
       workDir: WORK,
       log,
     },

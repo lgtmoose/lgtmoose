@@ -8,7 +8,7 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 
 - **Review every PR** as a GitHub App: inline comments, a summary, a status label and a required check run.
 - **Learn from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database and synced back to the repo for review.
-- **Run on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor plan credentials where the vendor's terms allow it. Different providers can do different jobs, and it falls back to the next one when a plan runs out.
+- **Run on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor plan credentials where the vendor's terms allow it ([what each vendor's terms say](docs/providers.md)). Different providers can do different jobs, and it falls back to the next one when a plan runs out.
 - **Stay in your account.** The model runs in a sandbox with no GitHub token and network access only to its model API. Plain code, not the model, posts reviews, decides and writes memory.
 
 ## Quickstart (planned)
@@ -16,7 +16,7 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 ```bash
 git clone https://github.com/lgtmoose/lgtmoose && cd lgtmoose && pnpm install
 pnpm lgtmoose setup     # creates the GitHub App, stores its keys in AWS Secrets Manager
-pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key
+pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key · vertex
 pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
 
@@ -28,6 +28,37 @@ pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App'
 - `cloudformation:DescribeStacks`
 - `secretsmanager:GetSecretValue`, `CreateSecret` and `PutSecretValue` on `lgtmoose/*` (setup writes them)
 - `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
+- For `auth`: `secretsmanager:CreateSecret`, `UpdateSecret`, `TagResource` (also needed to create a tagged secret), `RestoreSecret`, `DeleteSecret` and `DescribeSecret` on `lgtmoose/provider/*`, and `secretsmanager:ListSecrets`, which can't be limited to a resource
+- For `auth bedrock`: `bedrock:ListFoundationModels`, `bedrock:GetFoundationModelAvailability` and `bedrock:ListInferenceProfiles`. Model aliases such as `sonnet` are only hinted at: Claude Code picks the model at runtime, so pin model ids in `models` to have them checked
+
+`auth` stores each provider's credential as `lgtmoose/provider/<id>`. See [docs/credentials.md](docs/credentials.md).
+
+### Bedrock with AWS credits (the default)
+
+If your AWS account has credits, run the models on Amazon Bedrock in the same account. There's no API key to store or rotate: sandbox tasks call Bedrock with their IAM task role, and the bill goes to the account.
+
+1. In the Bedrock console for your region, request access to the Anthropic models you want.
+2. Use a Bedrock provider in `lgtmoose.config.ts`, and pin each tier to a model id or inference profile:
+
+   ```ts
+   providers: [
+     {
+       id: "bedrock",
+       harness: "claude-code", // or "agent-sdk"
+       auth: "bedrock",
+       models: {
+         fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+         standard: "us.anthropic.claude-sonnet-4-6",
+         deep: "us.anthropic.claude-opus-4-8",
+       },
+     },
+   ],
+   ```
+
+3. Run `pnpm lgtmoose auth bedrock`. It checks each tier can be called in the region and lists the ids you can pin.
+4. Run `pnpm lgtmoose deploy`.
+
+Pinning matters for two reasons. Without pins, Claude Code picks the newest model of each family at runtime, so the task role may call any Anthropic model and profile. With all three tiers pinned, the task role may call only those models and their inference profiles. See [docs/credentials.md](docs/credentials.md#bedrock-with-aws-credits) for the details, Vertex AI and the `agent-sdk` harness.
 
 ### Upgrading
 

@@ -1,13 +1,15 @@
 import type { DeployConfig, ProviderConfig } from "./deploy.js";
+import { vertexHost } from "./models.js";
 
 /**
  * The hosts a provider's CLI talks to, by harness and auth method. Sandbox tasks reach the
  * internet only through the egress proxy, which allows exactly these hosts (plus the config's
  * `extraEgressHosts`), on port 443. Exact names only: the proxy has no wildcards.
  *
- * `{region}` is the deploy region. Vertex AI picks its own region (CLOUD_ML_REGION): the global
- * endpoint is listed, and a regional one (`us-east5-aiplatform.googleapis.com`) goes in
- * `extraEgressHosts`.
+ * `{region}` is the deploy region. `{vertex}` is the Vertex AI host for the provider's
+ * `vertex.region` (`vertexHost`). Bedrock also needs its control-plane host: Claude Code lists the
+ * account's inference profiles there to resolve model IDs
+ * (https://code.claude.com/docs/en/amazon-bedrock#cross-region-inference-profile-prefixes).
  */
 const PROVIDER_HOSTS: Record<
   ProviderConfig["harness"],
@@ -16,13 +18,13 @@ const PROVIDER_HOSTS: Record<
   "claude-code": {
     "oauth-token": ["api.anthropic.com"],
     "api-key": ["api.anthropic.com"],
-    bedrock: ["bedrock-runtime.{region}.amazonaws.com"],
-    vertex: ["aiplatform.googleapis.com", "oauth2.googleapis.com"],
+    bedrock: ["bedrock-runtime.{region}.amazonaws.com", "bedrock.{region}.amazonaws.com"],
+    vertex: ["{vertex}", "oauth2.googleapis.com"],
   },
   "agent-sdk": {
     "api-key": ["api.anthropic.com"],
-    bedrock: ["bedrock-runtime.{region}.amazonaws.com"],
-    vertex: ["aiplatform.googleapis.com", "oauth2.googleapis.com"],
+    bedrock: ["bedrock-runtime.{region}.amazonaws.com", "bedrock.{region}.amazonaws.com"],
+    vertex: ["{vertex}", "oauth2.googleapis.com"],
   },
   // Codex signed in with ChatGPT uses the ChatGPT backend and refreshes its token with OpenAI's
   // auth service; with an API key it uses the platform API. Check these against the pinned Codex
@@ -32,17 +34,21 @@ const PROVIDER_HOSTS: Record<
     "access-token": ["chatgpt.com", "auth.openai.com"],
     "api-key": ["api.openai.com"],
   },
-  // Not yet checked against the cursor-agent CLI (NIC-822): confirm when that adapter lands.
+  // Cursor's network configuration docs (https://cursor.com/docs/enterprise/network-configuration)
+  // name api2.cursor.sh for most API traffic and api5.cursor.sh for agent requests. Its Tab
+  // (api3, api4, gcpp) and codebase-search (repo42) hosts aren't used by a headless review.
+  // Not yet seen in real cursor-agent traffic: confirm with the AWS smoke test (NIC-853).
   "cursor-agent": {
-    "api-key": ["api2.cursor.sh"],
-    "service-account": ["api2.cursor.sh"],
+    "api-key": ["api2.cursor.sh", "api5.cursor.sh"],
+    "service-account": ["api2.cursor.sh", "api5.cursor.sh"],
   },
 };
 
 /** The hosts one provider needs, with the region filled in. */
 export function providerEgressHosts(provider: ProviderConfig, region: string): string[] {
   const hosts = PROVIDER_HOSTS[provider.harness][provider.auth] ?? [];
-  return hosts.map((host) => host.replace("{region}", region));
+  const vertex = vertexHost(provider.vertex?.region ?? "global");
+  return hosts.map((host) => host.replace("{region}", region).replace("{vertex}", vertex));
 }
 
 /**

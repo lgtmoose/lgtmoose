@@ -68,6 +68,12 @@ export interface CheckRunInput {
    * add to a run's annotations, so don't pass a run that already has them.
    */
   existingId?: number;
+  /**
+   * Makes creating the run idempotent: GitHub keeps it as the run's `external_id`, and a run
+   * of this check on the head with this ID is reused instead of creating another (say, the
+   * post step's run ID, so a retry doesn't add a second check run).
+   */
+  externalId?: string;
 }
 
 /** The output object for one request, with at most one page of annotations. */

@@ -6,23 +6,36 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { severityRank, type Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
-import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@lgtmoose/pipeline";
-import { ShadowPoster } from "@lgtmoose/poster";
+import {
+  headKeys,
+  runKeys,
+  type BatchOutput,
+  type PullReader,
+  type PullRequest,
+} from "@lgtmoose/pipeline";
+import { GitHubError, ShadowPoster, type MarkedReview, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
 import type { ReviewThread } from "./threads.js";
 import type {
   ArtifactStore,
-  ControlDeps,
   FileRecord,
   FindingRecord,
   FindingStore,
   RunRecord,
   RunStore,
 } from "./ports.js";
-import { post } from "./post.js";
+import {
+  OFF_ECS_CLAIM_TTL_MS,
+  SUMMARY_MARKER,
+  coveringReviews,
+  markerRun,
+  post,
+  reviewMarker,
+  type PostAttempt,
+} from "./post.js";
 import { RESUME_RUNS, prepare, readManifest, type RunManifest } from "./prepare.js";
-import { PREPARE_FAILED, runCommand } from "./run.js";
+import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
 const exec = promisify(execFile);
 /** Hooks that set up real repositories (clones, commits, pushes) can be slow under load. */
@@ -131,6 +144,8 @@ interface Run extends RunRecord {
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
   files: FileRecord[];
+  covered?: boolean;
+  coverResult?: Parameters<RunStore["coverRun"]>[1];
 }
 
 /** Run IDs in the order runs start: RUN_ID first. */
@@ -138,8 +153,14 @@ const runId = (n: number) =>
   n === 0 ? RUN_ID : `0b6f6d8e-3c1a-4c3e-9a51-${String(n).padStart(12, "0")}`;
 
 /** One PR's runs, like `drizzleRunStore` keeps them. */
-function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecord> } {
+function memoryRuns(): RunStore & {
+  runs: Map<string, Run>;
+  pr: Partial<RunRecord>;
+  newer: { posted: boolean };
+} {
   const runs = new Map<string, Run>();
+  /** Whether a newer run of the PR has posted, as the test sets it. */
+  const newer = { posted: false };
   const pr: Partial<RunRecord> = { summaryCommentId: 41 };
   const current = (run: Run): Run =>
     Object.assign(run, {
@@ -152,6 +173,14 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   return {
     runs,
     pr,
+    newer,
+    async newerRunPosted() {
+      return newer.posted;
+    },
+    async coverRun(runId, result) {
+      const run = runs.get(runId);
+      if (run) Object.assign(run, { status: "covered", covered: true, coverResult: result });
+    },
     async startRun(input) {
       for (const run of runs.values())
         if (run.executionArn === input.executionArn) return current(run);
@@ -163,6 +192,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         statusLabel: undefined,
         lastReviewEvent: undefined,
         lastReviewId: undefined,
+        headSha: input.headSha,
         status: "running",
         executionArn: input.executionArn,
         files: [],
@@ -185,7 +215,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       for (const run of runs.values()) {
         if (run.status !== "succeeded" || run.result === undefined) continue;
         for (const file of run.files) {
-          latest.set(file.path, { ...file, reviewedAt: run.result.reviewedSha });
+          latest.set(file.path, { ...file, reviewedAt: run.result.headSha });
         }
       }
       return [...latest.values()];
@@ -212,7 +242,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       if (!run) return;
       Object.assign(run, { status: "succeeded", result });
       Object.assign(pr, {
-        lastReviewedSha: result.reviewedSha,
+        lastReviewedSha: result.headSha,
         ...(result.review === undefined
           ? {}
           : { lastReviewEvent: result.review.event, lastReviewId: result.review.id }),
@@ -227,9 +257,9 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         }
       }
     },
-    async supersedeRun(id) {
-      const run = runs.get(id);
-      if (run) run.status = "superseded";
+    async supersedeRun(runId) {
+      const run = runs.get(runId);
+      if (run?.status === "running") run.status = "superseded";
     },
   };
 }
@@ -342,6 +372,8 @@ interface Setup {
   commentIds?: boolean;
   /** What GitHub says about any review; unset for a reader that can't tell. */
   review?: () => { state: string; commitId: string };
+  /** The PR's state when it's read. */
+  state?: string;
 }
 
 function harness(setup: Setup = {}) {
@@ -353,12 +385,44 @@ function harness(setup: Setup = {}) {
     failed: [],
   };
   const installations: number[] = [];
+  // ETags for the conditional writes: a new one on every write of a key.
+  const etags = new Map<string, string>();
+  let version = 0;
+  const tagged = (key: string, body: string) => {
+    version += 1;
+    objects.set(key, body);
+    etags.set(key, `"v${version}"`);
+    return `"v${version}"`;
+  };
   const store: ArtifactStore = {
     async putText(key, body) {
       objects.set(key, body);
     },
     async putFile(key, path) {
       files.set(key, await readFile(path));
+    },
+    // Like `conditionalPut` in aws.ts: a failed condition on an object holding exactly this
+    // body counts as our own earlier write.
+    async createText(key, body) {
+      if (objects.has(key)) return objects.get(key) === body ? etags.get(key) : undefined;
+      return tagged(key, body);
+    },
+    async replaceText(key, body, etag) {
+      if (etags.get(key) === etag && objects.has(key)) return tagged(key, body);
+      return objects.get(key) === body ? etags.get(key) : undefined;
+    },
+    async getTagged(key) {
+      const text = objects.get(key);
+      if (text === undefined) return undefined;
+      // An object a test put there directly gets its ETag on first read.
+      if (!etags.has(key)) etags.set(key, `"set-${key}"`);
+      return { text, etag: etags.get(key) ?? "" };
+    },
+    async deleteIfMatch(key, etag) {
+      if (etags.get(key) === etag) {
+        objects.delete(key);
+        etags.delete(key);
+      }
     },
     async getText(key) {
       return objects.get(key);
@@ -373,8 +437,16 @@ function harness(setup: Setup = {}) {
   const fetched: string[][] = [];
   const { review: reviewOf } = setup;
   let nextComment = 1000;
+  /** Our reviews' markers "on GitHub" by commit, as the tests put them there. */
+  const reviewsOnGitHub = new Map<string, MarkedReview[]>();
+  /** The external IDs of our check runs "on GitHub", as the post or the test put them there. */
+  const checkRunsOnGitHub = new Set<string>();
+  /** How many annotations each of those has, when not none. */
+  const checkRunAnnotations = new Map<string, number>();
+  /** ECS task statuses by ARN, as the test sets them. */
+  const tasks = new Map<string, string>();
   const reader: PullReader = {
-    pull: async () => pull(setup.head ?? headSha),
+    pull: async () => ({ ...pull(setup.head ?? headSha), state: setup.state ?? "open" }),
     comments: async () => [],
     ...(reviewOf === undefined
       ? {}
@@ -385,7 +457,15 @@ function harness(setup: Setup = {}) {
           },
         }),
   };
-  const deps: ControlDeps = {
+  const execution = { status: "RUNNING" as string | undefined };
+  const heartbeats = { count: 0 };
+  const deps: StepDeps = {
+    executionStatus: async () => execution.status,
+    taskArn: async () => undefined,
+    taskStatus: async (arn) => tasks.get(arn) ?? "MISSING",
+    heartbeat: async () => {
+      heartbeats.count += 1;
+    },
     store,
     runs,
     findings,
@@ -408,13 +488,30 @@ function harness(setup: Setup = {}) {
             store: { put: (key, body) => store.putText(key, body) },
             runId,
           });
-          if (setup.commentIds !== true) return shadow;
-          return Object.assign(Object.create(shadow) as ShadowPoster, {
-            async submitReview(...args: Parameters<ShadowPoster["submitReview"]>) {
-              const review = await shadow.submitReview(...args);
+          if (setup.commentIds === true) {
+            const submit = shadow.submitReview.bind(shadow);
+            shadow.submitReview = async (...args) => {
+              const review = await submit(...args);
               return { ...review, commentIds: review.payload.comments.map(() => nextComment++) };
-            },
-          });
+            };
+          }
+          // As if the reviews were on GitHub, for the tests that put them there.
+          shadow.markersAt = async (_pull, commitId) => [...(reviewsOnGitHub.get(commitId) ?? [])];
+          shadow.checkRunsOn = async () =>
+            [...checkRunsOnGitHub].map((externalId) => ({
+              externalId,
+              annotations: checkRunAnnotations.get(externalId) ?? 0,
+            }));
+          const completeCheckRun = shadow.completeCheckRun.bind(shadow);
+          shadow.completeCheckRun = async (ref, input) => {
+            const done = await completeCheckRun(ref, input);
+            if (input.externalId !== undefined) {
+              checkRunsOnGitHub.add(input.externalId);
+              checkRunAnnotations.set(input.externalId, input.annotations.length);
+            }
+            return done;
+          };
+          return shadow;
         },
       };
     },
@@ -453,6 +550,20 @@ function harness(setup: Setup = {}) {
     fetched,
     setup,
     reviewReads,
+    execution,
+    heartbeats,
+    reviewsOnGitHub,
+    checkRunsOnGitHub,
+    checkRunAnnotations,
+    /**
+     * Puts a review of ours with this marker on the commit, and, `finished`, its run's check
+     * run too: that run finished the head.
+     */
+    addReview: (commitId: string, marker: string, state = "COMMENTED", finished = true) => {
+      reviewsOnGitHub.set(commitId, [...(reviewsOnGitHub.get(commitId) ?? []), { marker, state }]);
+      if (finished) checkRunsOnGitHub.add(markerRun(marker));
+    },
+    tasks,
   };
 }
 
@@ -460,6 +571,11 @@ const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
 
 function output(overrides: Partial<BatchOutput> = {}): BatchOutput {
   return { version: 1, index: 0, findings: [finding()], transcriptKeys: [], ...overrides };
+}
+
+/** The run marker at the end of a review body. */
+function markerIn(body: string): string {
+  return /<!-- (lgtmoose-run:[^ ]+) -->/.exec(body)?.[1] ?? "";
 }
 
 function shadowRecords(objects: Map<string, string>, what: string): Record<string, unknown>[] {
@@ -512,6 +628,986 @@ describe("prepare", () => {
 });
 
 describe("post", () => {
+  const shadowed = (h: ReturnType<typeof harness>) =>
+    [...h.objects.keys()].filter((key) => key.startsWith("shadow/"));
+
+  it.each([
+    ["the PR's head moved on", { head: "f".repeat(40) }, true],
+    ["the PR is closed", { state: "closed" }, true],
+    ["its execution was stopped", {}, false],
+  ])("posts nothing and records nothing when %s", async (reason, change, running) => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    Object.assign(setup, change);
+    const result = await post(h.deps, RUN_ID, { running: async () => running });
+    expect(result).toMatchObject({ posted: false });
+    expect(shadowed(h)).toEqual([]);
+    // Superseded, with nothing recorded for the PR.
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+    expect(h.runs.runs.get(RUN_ID)).not.toHaveProperty("result");
+    expect(h.logs).toContain("not posted");
+    expect(reason).toBeTruthy();
+  });
+
+  /** Counts the poster's calls, and fails the first `fail` calls of the named one. */
+  function countingPoster(
+    h: ReturnType<typeof harness>,
+    fail?: { what: keyof Poster; times: number },
+  ) {
+    const calls: string[] = [];
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const real = await github(installationId);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          const wrap =
+            <K extends keyof Poster>(what: K) =>
+            async (...args: Parameters<Poster[K]>) => {
+              calls.push(what);
+              if (fail?.what === what && fail.times > 0) {
+                fail.times -= 1;
+                throw new Error("GitHub 502");
+              }
+              return (poster[what] as (...a: Parameters<Poster[K]>) => unknown)(...args);
+            };
+          return {
+            ...poster,
+            submitReview: wrap("submitReview"),
+            completeCheckRun: wrap("completeCheckRun"),
+            upsertSummaryComment: wrap("upsertSummaryComment"),
+            startCheckRun: wrap("startCheckRun"),
+            labels: (ref) => {
+              calls.push("labels");
+              return poster.labels(ref);
+            },
+          } as Poster;
+        },
+      };
+    };
+    return calls;
+  }
+
+  it("records the review when a later write fails, and a retry finishes the rest", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h, { what: "upsertSummaryComment", times: 1 });
+    // Off ECS, as on a laptop: the retry, a new attempt, takes the first one's claim over.
+    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+    await expect(post(h.deps, RUN_ID, offEcs("a1"))).rejects.toThrow("GitHub 502");
+    // The review is on GitHub, so the run is recorded, with the summary comment it already had.
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({
+      status: "succeeded",
+      result: { headSha, summaryCommentId: 41 },
+    });
+    // The retry doesn't post the review or the check run again.
+    calls.length = 0;
+    expect(await post(h.deps, RUN_ID, offEcs("a2"))).toMatchObject({ posted: true });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
+  it("carries on a retry whose review is posted even if the head moved meanwhile", async () => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    countingPoster(h, { what: "completeCheckRun", times: 1 });
+    await expect(
+      post(h.deps, RUN_ID, { attempt: { id: "a1", taskArn: undefined } }),
+    ).rejects.toThrow("GitHub 502");
+    setup.head = "f".repeat(40);
+    expect(
+      await post(h.deps, RUN_ID, {
+        attempt: { id: "a2", taskArn: undefined },
+        running: async () => false,
+      }),
+    ).toMatchObject({ posted: true });
+  });
+
+  const TASK_A = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/aaa";
+  const TASK_B = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/bbb";
+  const TASK_C = "arn:aws:ecs:eu-west-1:123456789012:task/lgtmoose/ccc";
+  const as = (taskArn: string, id = taskArn): { attempt: PostAttempt } => ({
+    attempt: { id, taskArn },
+  });
+  async function ready(setup: Setup = {}) {
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    const taskStatus = (arn: string) => h.deps.taskStatus(arn);
+    return { h, calls, claim: runKeys(RUN_ID).reviewClaim, taskStatus };
+  }
+  const reviews = (calls: string[]) => calls.filter((call) => call === "submitReview");
+
+  it("posts the review once when a retry overlaps the attempt it replaced", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    h.tasks.set(TASK_A, "RUNNING");
+    h.tasks.set(TASK_B, "RUNNING");
+    // Both attempts read no saved progress, as when they overlap: the first claims the review,
+    // the second finds the claim held by a running task and backs off.
+    const getTagged = h.deps.store.getTagged.bind(h.deps.store);
+    h.deps.store.getTagged = async (key) =>
+      key === runKeys(RUN_ID).posted ? undefined : getTagged(key);
+    const [first, second] = await Promise.allSettled([
+      post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus }),
+      post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus }),
+    ]);
+    expect(reviews(calls)).toHaveLength(1);
+    expect([first.status, second.status].sort()).toEqual(["fulfilled", "rejected"]);
+    const holder = (JSON.parse(h.objects.get(claim) ?? "{}") as { taskArn?: string }).taskArn;
+    expect([TASK_A, TASK_B]).toContain(holder);
+  });
+
+  it("finds a review on GitHub that a stopped claimer posted", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    h.objects.set(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("waits for a running claimer, and takes the claim over once its task has stopped", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "task RUNNING",
+    );
+    expect(reviews(calls)).toEqual([]);
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+    expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
+  });
+
+  it("records a review a dead holder posted, even after the head has moved on", async () => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    const claim = runKeys(RUN_ID).reviewClaim;
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "STOPPED");
+    // It posted the review and died before saving; a push has come in since.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    setup.head = "f".repeat(40);
+    const taskStatus = (arn: string) => h.deps.taskStatus(arn);
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).not.toContain("submitReview");
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "succeeded" });
+  });
+
+  /** A second run of the same PR at the same head, ready to post. */
+  function secondRun(h: ReturnType<typeof harness>, runId: string) {
+    const first = h.runs.runs.get(RUN_ID);
+    if (first === undefined) throw new Error("prepare first");
+    h.runs.runs.set(runId, { ...first, runId, status: "running" });
+    h.objects.set(runKeys(runId).prepared, h.objects.get(runKeys(RUN_ID).prepared) ?? "");
+    h.objects.set(runKeys(runId).batchOutput(0), JSON.stringify(output()));
+  }
+  const RUN_2 = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a22";
+  const RUN_3 = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a33";
+  /** The covering run's saved progress once it has written its check run and summary. */
+  const theirOutputs = {
+    attempt: "x",
+    writes: 3,
+    review: true,
+    checkRun: true,
+    summary: true,
+    summaryBody: "their summary",
+    label: true,
+  };
+
+  it("posts nothing of its own when the covering run wrote the head's outputs", async () => {
+    // A stopped run's post finished after the PR was reopened; the reopen's retry is a new run.
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    // The covering run wrote its outputs and recorded the PR at this head.
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, labelTarget: "Approved" }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: false,
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    // No review or check run, and no summary or label from a decision that was never posted:
+    // their summary and label, put back on the PR (idempotent when they're there already).
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    const [summary] = shadowRecords(h.objects, "summary-comment");
+    expect(summary).toMatchObject({ body: "their summary" });
+    // Succeeded, without touching the PR's record (that's the posting run's).
+    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered", covered: true });
+    expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
+    // A retry of it carries on covered, writing nothing more.
+    calls.length = 0;
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("lets a retry post when an attempt timed out without posting", async () => {
+    const { h, taskStatus } = await ready();
+    const calls = countingPoster(h, { what: "submitReview", times: 1 });
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("GitHub 502");
+    h.tasks.set(TASK_A, "STOPPED");
+    // Nothing reached GitHub, so the head has no review of ours: the retry posts it.
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(2);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
+  it("posts a complete review over an incomplete COMMENT one", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // An earlier run's batches failed: its review is incomplete.
+    h.addReview(headSha, reviewMarker(RUN_ID, false), "COMMENTED");
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+      complete: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+    const [review] = shadowRecords(h.objects, "review");
+    expect(JSON.stringify(review)).toContain(`<!-- ${reviewMarker(RUN_2, true)} -->`);
+  });
+
+  it("doesn't approve past an incomplete run's blocking finding", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    const prepared = h.objects.get(runKeys(RUN_ID).prepared) ?? "";
+    // The first run is incomplete (a second batch never wrote its output) and posts a blocking
+    // finding.
+    const manifest = JSON.parse(prepared) as RunManifest;
+    manifest.review.jobs.push({ index: 1, files: ["src/total.ts"], prompt: "never run" });
+    h.objects.set(runKeys(RUN_ID).prepared, JSON.stringify(manifest));
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const first = await post(h.deps, RUN_ID, as(TASK_A));
+    expect(first).toMatchObject({ posted: true, complete: false, event: "REQUEST_CHANGES" });
+    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
+    h.addReview(headSha, reviewMarker(RUN_ID, false), "CHANGES_REQUESTED");
+
+    // A complete run at the same head finds nothing new: it posts its own review, and the
+    // incomplete run's finding still holds the decision.
+    secondRun(h, RUN_2);
+    h.objects.set(runKeys(RUN_2).prepared, prepared);
+    h.objects.set(runKeys(RUN_2).batchOutput(0), JSON.stringify(output({ findings: [] })));
+    const second = await post(h.deps, RUN_2, as(TASK_B));
+    expect(second).toMatchObject({ posted: true, complete: true, event: "REQUEST_CHANGES" });
+    expect(second.coveredBy).toBeUndefined();
+  });
+
+  it("lists the reviews that could cover a run by their completeness and state", () => {
+    const review = (complete: boolean, state = "COMMENTED", run = RUN_ID) => ({
+      marker: reviewMarker(run, complete),
+      state,
+    });
+    expect(coveringReviews([], true)).toEqual([]);
+    expect(coveringReviews([review(true)], true)).toEqual([review(true)]);
+    expect(coveringReviews([review(true)], false)).toEqual([review(true)]);
+    expect(coveringReviews([review(false)], true)).toEqual([]);
+    expect(coveringReviews([review(false)], false)).toEqual([review(false)]);
+    // Whatever it decided: its findings count in the complete run's decision.
+    expect(coveringReviews([review(false, "CHANGES_REQUESTED")], true)).toEqual([]);
+    // The complete ones first.
+    expect(coveringReviews([review(false), review(true, "COMMENTED", RUN_2)], false)).toEqual([
+      review(true, "COMMENTED", RUN_2),
+      review(false),
+    ]);
+  });
+
+  it("takes turns with another run at the same head, through the head's claim", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // Another run at this head holds the head's claim, its task still running.
+    const pullKey = headKeys("acme/shop", 7, headSha).reviewClaim;
+    await h.deps.store.createText(pullKey, JSON.stringify({ attempt: "other", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "this head's post",
+    );
+    expect(reviews(calls)).toEqual([]);
+    // It posted and stopped: this run finds its review and posts none.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(reviews(calls)).toEqual([]);
+    // And this run lets go of the head's claim once it's done there.
+    expect(h.objects.has(pullKey)).toBe(false);
+  });
+
+  it("posts a second review when the run whose review is on the head never finished it", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // The first run's review goes up, then its check run fails; the second run comes along.
+    const github = h.deps.github.bind(h.deps);
+    let checkRuns = 0;
+    const checkIds: (string | undefined)[] = [];
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          return {
+            ...poster,
+            labels: poster.labels.bind(poster),
+            startCheckRun: poster.startCheckRun.bind(poster),
+            upsertSummaryComment: poster.upsertSummaryComment.bind(poster),
+            markersAt: poster.markersAt.bind(poster),
+            submitReview: async (ref, commitId, payload) => {
+              h.addReview(commitId, markerIn(payload.body), "CHANGES_REQUESTED", false);
+              return poster.submitReview(ref, commitId, payload);
+            },
+            completeCheckRun: async (ref, input) => {
+              checkRuns += 1;
+              checkIds.push(input.externalId);
+              if (checkRuns === 1) throw new Error("GitHub 502");
+              return poster.completeCheckRun(ref, input);
+            },
+          };
+        },
+      };
+    };
+    const first = post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
+    await expect(first).rejects.toThrow("GitHub 502");
+    // The first run's check run never got in, so its review doesn't cover the second run,
+    // which posts one of its own, and its own check run, summary and label.
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(h.reviewsOnGitHub.get(headSha)?.map((review) => review.marker)).toEqual([
+      reviewMarker(RUN_ID, true),
+      reviewMarker(RUN_2, true),
+    ]);
+    expect(checkIds).toEqual([RUN_ID, RUN_2]);
+    expect(reviews(calls)).toHaveLength(2);
+    expect(h.runs.runs.get(RUN_2)?.status).toBe("succeeded");
+  });
+
+  it("takes over an off-ECS claim, of either kind, once it has expired", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    const old = Date.now() - OFF_ECS_CLAIM_TTL_MS - 1;
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop", claimedAt: old }));
+    const headClaim = headKeys("acme/shop", 7, headSha).reviewClaim;
+    await h.deps.store.createText(headClaim, JSON.stringify({ attempt: "laptop", claimedAt: old }));
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+    expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_A });
+  });
+
+  it("records a covered run as covered even when that fails the first time", async () => {
+    const { h, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    const coverRun = h.runs.coverRun.bind(h.runs);
+    let tries = 0;
+    h.runs.coverRun = async (runId, result) => {
+      tries += 1;
+      if (tries === 1) throw new Error("database blip");
+      return coverRun(runId, result);
+    };
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("blip");
+    // Never recorded as posted over the PR's record.
+    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered" });
+    expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
+  });
+
+  it("takes its own run's review, found under the head's claim, as its own", async () => {
+    const { h, calls, taskStatus } = await ready();
+    // An earlier attempt of this run posted and died before saving; no takeover is involved
+    // (its claim was released), so it's the head's check that finds it.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toEqual([]);
+    expect(calls).toContain("completeCheckRun");
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
+  it("holds the head's claim for its whole post, so another run at the head waits", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // The first run's review goes up, then its check run fails: it keeps the head's claim
+    // (its task still running) until its retry finishes or it stops.
+    const github = h.deps.github.bind(h.deps);
+    let failCheck = true;
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          return {
+            ...poster,
+            labels: poster.labels.bind(poster),
+            startCheckRun: poster.startCheckRun.bind(poster),
+            upsertSummaryComment: poster.upsertSummaryComment.bind(poster),
+            markersAt: poster.markersAt.bind(poster),
+            submitReview: async (ref, commitId, payload) => {
+              h.addReview(commitId, markerIn(payload.body), "COMMENTED", false);
+              return poster.submitReview(ref, commitId, payload);
+            },
+            completeCheckRun: async (ref, input) => {
+              if (failCheck) throw new Error("GitHub 502");
+              return poster.completeCheckRun(ref, input);
+            },
+          };
+        },
+      };
+    };
+    h.tasks.set(TASK_A, "RUNNING");
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("GitHub 502");
+    // The second run can't start writing at this head between the first run's writes.
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "this head's post",
+    );
+    expect(calls.filter((call) => call !== "submitReview")).toEqual([]);
+    // The first run's retry finishes, and lets the head go.
+    failCheck = false;
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_ID, as(TASK_C))).toMatchObject({ posted: true });
+    expect(h.objects.has(headKeys("acme/shop", 7, headSha).reviewClaim)).toBe(false);
+  });
+
+  it("brings the PR up to the covering run's summary and label when it's at this head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    // The covering run wrote its summary and label, but deferred its record to this run,
+    // whose event is later (a reopen).
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, labelTarget: "Approved" }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    const [summary] = shadowRecords(h.objects, "summary-comment");
+    expect(summary).toMatchObject({ body: "their summary" });
+    expect(h.runs.runs.get(RUN_2)?.status).toBe("covered");
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
+  });
+
+  it("posts its own review when the covering run never finished the head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // The other run posted its review and died: no check run, and its retries are spent.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED", false);
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 1, review: true }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).toEqual(["submitReview", "completeCheckRun", "upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.status).toBe("succeeded");
+  });
+
+  it("is covered by a run that finished the head, past one that didn't", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    secondRun(h, RUN_3);
+    // RUN_ID's run died after its review; RUN_2 posted another and finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    h.addReview(headSha, reviewMarker(RUN_2, true));
+    expect(await post(h.deps, RUN_3, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_2, true),
+    });
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("goes by the covering run's readable progress over a check run on GitHub", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // Its check run is on GitHub, but its progress says it didn't finish it (it died mid-way
+    // through the annotation pages, say): not finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 1, review: true }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
+  it("takes a check run sent in full, though never saved as done, as finishing the head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // The covering run saved how many annotations its check run was to have, sent them all,
+    // and died before saving that it was done.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 2, review: true, checkRunAnnotations: 2 }),
+    );
+    h.checkRunsOnGitHub.add(RUN_ID);
+    h.checkRunAnnotations.set(RUN_ID, 2);
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("doesn't take a check run with annotations still to come as finishing the head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 2, review: true, checkRunAnnotations: 120 }),
+    );
+    h.checkRunsOnGitHub.add(RUN_ID);
+    h.checkRunAnnotations.set(RUN_ID, 50);
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
+  it("finds the covering run's check run on GitHub when its progress is gone", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // No posted.json (it expires): the check run under that run's external ID says it finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    // Covered, with nothing to bring the PR up to: no summary or label of theirs to copy.
+    expect(calls).toEqual([]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
+    // Unreadable progress goes the same way.
+    secondRun(h, RUN_3);
+    await h.deps.store.createText(runKeys(RUN_ID).posted, "not json");
+    expect(await post(h.deps, RUN_3, { ...as(TASK_C), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("records a covered run on the PR once it has written the PR's summary, even failing", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, labelTarget: "Approved" }),
+    );
+    // The database blips before the label: the summary is written, the label isn't.
+    const newer = h.runs.newerRunPosted.bind(h.runs);
+    let looks = 0;
+    h.runs.newerRunPosted = async (run) => {
+      looks += 1;
+      if (looks === 3) throw new Error("database blip");
+      return newer(run);
+    };
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("blip");
+    expect(calls).toEqual(["upsertSummaryComment"]);
+    // Recorded with the label it set out to write, never none.
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
+    // Its retry, with the covering run's progress gone meanwhile, still owes the label and
+    // writes it.
+    h.objects.delete(runKeys(RUN_ID).posted);
+    h.tasks.set(TASK_B, "STOPPED");
+    await post(h.deps, RUN_2, { ...as(TASK_C), taskStatus });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
+  });
+
+  it("leaves the PR to a covering run that may still be retried", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    // It wrote its check run and summary, but not yet its label, and its execution runs on:
+    // its retry writes that, and would leave it to this newer run if this run wrote anything.
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false, decisionLabel: "Requires Changes" }),
+    );
+    const executionStatus = async () => "RUNNING";
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus, executionStatus });
+    expect(calls).toEqual([]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
+  });
+
+  it("sets the label the covering run's decision called for when it never set it", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false, decisionLabel: "Requires Changes" }),
+    );
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Requires Changes" },
+    });
+  });
+
+  it("sets no label of its own when the covering run's decision set none", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false }),
+    );
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
+    // Their summary only: this run's own decision was never posted.
+    expect(calls).toEqual(["upsertSummaryComment"]);
+    const result = h.runs.runs.get(RUN_2)?.coverResult;
+    expect(result).toMatchObject({ pr: { headSha } });
+    // Recorded without a label, which leaves the PR's recorded one as it is.
+    expect(result?.pr?.statusLabel).toBeUndefined();
+  });
+
+  it("lets another run's off-ECS head claim expire before taking it over", async () => {
+    const { h, calls } = await ready();
+    const headClaim = headKeys("acme/shop", 7, headSha).reviewClaim;
+    const laptop = { attempt: { id: "mine", taskArn: undefined } };
+    // Fresh, from another run: even an off-ECS attempt waits.
+    await h.deps.store.createText(
+      headClaim,
+      JSON.stringify({ attempt: "other", runId: RUN_2, claimedAt: Date.now() }),
+    );
+    await expect(post(h.deps, RUN_ID, laptop)).rejects.toThrow("off ECS");
+    expect(reviews(calls)).toEqual([]);
+    // Expired: taken over.
+    const stale = Date.now() - OFF_ECS_CLAIM_TTL_MS - 1;
+    const read = await h.deps.store.getTagged(headClaim);
+    await h.deps.store.replaceText(
+      headClaim,
+      JSON.stringify({ attempt: "other", runId: RUN_2, claimedAt: stale }),
+      read?.etag ?? "",
+    );
+    expect(
+      await post(h.deps, RUN_ID, { attempt: { id: "mine-2", taskArn: undefined } }),
+    ).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
+  it("treats an off-ECS claim without a time as fresh", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop", runId: RUN_ID }));
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("off ECS");
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves an off-ECS holder's claim alone when on ECS", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(
+      claim,
+      JSON.stringify({ attempt: "laptop", claimedAt: Date.now() }),
+    );
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("off ECS");
+    expect(calls).toEqual([]);
+  });
+
+  it("looks the head's reviews up once per post, takeover or not", async () => {
+    const { h, claim, taskStatus } = await ready();
+    let lookups = 0;
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          const markersAt = poster.markersAt.bind(poster);
+          poster.markersAt = async (ref, commitId, prefix) => {
+            lookups += 1;
+            expect(prefix).toBe("lgtmoose-run:");
+            return markersAt(ref, commitId, prefix);
+          };
+          return poster;
+        },
+      };
+    };
+    await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
+    expect(lookups).toBe(1);
+    // A takeover reuses the one listing, for its own review and for whether it's covered.
+    h.objects.delete(runKeys(RUN_ID).posted);
+    h.tasks.set(TASK_A, "STOPPED");
+    await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus });
+    expect(lookups).toBe(2);
+    expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_B });
+  });
+
+  it("records nothing when it doesn't hold the claim", async () => {
+    const { h, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    // The holder has posted the review and is still at the rest.
+    const progress = JSON.stringify({ attempt: "old", writes: 1, review: true });
+    await h.deps.store.createText(runKeys(RUN_ID).posted, progress);
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).rejects.toThrow();
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    expect(h.objects.get(runKeys(RUN_ID).posted)).toBe(progress);
+  });
+
+  it("lets only one attempt take over a stopped claimer's claim", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "STOPPED");
+    // Another attempt takes it over between this one's read and its write.
+    const { store } = h.deps;
+    const getTagged = store.getTagged.bind(store);
+    store.getTagged = async (key) => {
+      const read = await getTagged(key);
+      if (read !== undefined) {
+        await store.replaceText(key, JSON.stringify({ attempt: "x", taskArn: TASK_B }), read.etag);
+      }
+      return read;
+    };
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B, "mine"), taskStatus })).rejects.toThrow(
+      "took over",
+    );
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("releases its claim when GitHub refuses the review, and keeps it when unsure", async () => {
+    const { h, claim, taskStatus } = await ready();
+    const github = h.deps.github.bind(h.deps);
+    let failure: Error = new GitHubError(422, "Unprocessable", "POST", "/reviews");
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => ({
+          ...real.poster(runId, pull),
+          submitReview: async () => {
+            throw failure;
+          },
+        }),
+      };
+    };
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow();
+    expect(h.objects.has(claim)).toBe(false);
+    // A timeout: the review may be on GitHub, so the claim stays for a later attempt to check.
+    failure = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow();
+    expect(h.objects.has(claim)).toBe(true);
+  });
+
+  it("keeps GitHub's refusal as the error when releasing the claim fails too", async () => {
+    const { h, taskStatus } = await ready();
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => ({
+          ...real.poster(runId, pull),
+          submitReview: async () => {
+            throw new GitHubError(422, "Unprocessable", "POST", "/reviews");
+          },
+        }),
+      };
+    };
+    h.deps.store.deleteIfMatch = async () => {
+      throw new Error("S3 down");
+    };
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("HTTP 422");
+    expect(h.logs).toContain("releasing a claim failed");
+  });
+
+  it("takes over a claim whose holder's task ECS has deleted", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "DELETED");
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
+  it("marks its review so a retry can find it", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    await post(h.deps, RUN_ID);
+    const [review] = shadowRecords(h.objects, "review");
+    expect(JSON.stringify(review)).toContain(`<!-- ${reviewMarker(RUN_ID, true)} -->`);
+  });
+
+  it("fails its step rather than overwrite progress another attempt saved", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    // Another attempt saves progress after this one read it.
+    const { store } = h.deps;
+    const getTagged = store.getTagged.bind(store);
+    store.getTagged = async (key) => {
+      const read = await getTagged(key);
+      if (key === runKeys(RUN_ID).posted) await store.createText(key, JSON.stringify({}));
+      return read;
+    };
+    await expect(post(h.deps, RUN_ID)).rejects.toThrow("saved this post's progress");
+    // Its first save (its decision's label, before the review) fails: nothing is posted.
+    expect(calls).toEqual([]);
+  });
+
+  it("saves progress that names its attempt and counts its writes", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    await post(h.deps, RUN_ID, as(TASK_A, "attempt-1"));
+    expect(JSON.parse(h.objects.get(runKeys(RUN_ID).posted) ?? "{}")).toMatchObject({
+      attempt: "attempt-1",
+      // The decision's label, the review, its findings, the check run, the summary, the label.
+      writes: 6,
+      findings: true,
+      decisionLabel: expect.any(String),
+      checkRunAnnotations: expect.any(Number),
+      review: true,
+      checkRun: true,
+      summary: true,
+    });
+  });
+
+  it("waits for a live earlier attempt before writing anything, the review posted or not", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    // It posted the review and saved that, and is still sending annotations.
+    await h.deps.store.createText(runKeys(RUN_ID).posted, JSON.stringify({ review: true }));
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "task RUNNING",
+    );
+    expect(calls).toEqual([]);
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).not.toContain("submitReview");
+  });
+
+  it("creates its check run and summary comment idempotently", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const seen: { externalId?: string; marker?: string } = {};
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          return {
+            ...poster,
+            submitReview: poster.submitReview.bind(poster),
+            labels: poster.labels.bind(poster),
+            startCheckRun: poster.startCheckRun.bind(poster),
+            completeCheckRun: async (ref, input) => {
+              if (input.externalId !== undefined) seen.externalId = input.externalId;
+              return poster.completeCheckRun(ref, input);
+            },
+            upsertSummaryComment: async (ref, body, commentId, marker) => {
+              if (marker !== undefined) seen.marker = marker;
+              return poster.upsertSummaryComment(ref, body, commentId, marker);
+            },
+          };
+        },
+      };
+    };
+    await post(h.deps, RUN_ID);
+    // GitHubPoster reuses the check run with this external ID, and the comment with this marker.
+    expect(seen).toEqual({ externalId: RUN_ID, marker: SUMMARY_MARKER });
+  });
+
+  it("fails rather than start over when its saved progress can't be read", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    for (const bad of ["{", JSON.stringify({ review: "yes" })]) {
+      h.objects.set(runKeys(RUN_ID).posted, bad);
+      await expect(post(h.deps, RUN_ID)).rejects.toThrow("saved progress");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves the summary and label to a run for a later event that already posted", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    h.runs.newer.posted = true;
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    // The check run is the head's: this run holds the head, so it's written.
+    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+  });
+
+  it("leaves the label to a newer run that posts while the summary is written", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    let checks = 0;
+    h.runs.newerRunPosted = async () => {
+      checks += 1;
+      // The newer run finishes posting after this run's summary check.
+      return checks > 1;
+    };
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(calls).toEqual(["submitReview", "completeCheckRun", "upsertSummaryComment"]);
+    expect(checks).toBe(2);
+  });
+
+  it("records what it posted when it's stopped while posting", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    let checks = 0;
+    const result = await post(h.deps, RUN_ID, {
+      running: async () => {
+        checks += 1;
+        return checks === 1;
+      },
+    });
+    // Checked once, before the first write; after that it records what it posted.
+    expect(checks).toBe(1);
+    expect(result).toMatchObject({ posted: true });
+    expect(shadowed(h).length).toBeGreaterThan(0);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
   it("posts the batches' findings as one review and records the run", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
@@ -521,6 +1617,7 @@ describe("post", () => {
 
     expect(result).toEqual({
       runId: RUN_ID,
+      posted: true,
       event: "REQUEST_CHANGES",
       complete: true,
       findings: 1,
@@ -534,7 +1631,7 @@ describe("post", () => {
     expect(comment).toMatchObject({ comment_id: 41 });
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({
       status: "succeeded",
-      result: { filesDone: 1, reviewedSha: headSha, review: { event: "REQUEST_CHANGES" } },
+      result: { filesDone: 1, headSha, review: { event: "REQUEST_CHANGES" } },
     });
   });
 
@@ -1541,6 +2638,251 @@ describe("runCommand", () => {
       { runId: RUN_ID, superseded: false, batches: [{ index: 0 }] },
     ]);
     expect(h.tokens.failed).toEqual([]);
+  });
+
+  const dead = () => Object.assign(new Error("Task Timed Out"), { name: "TaskTimedOut" });
+  const prepareCommand = {
+    command: "prepare" as const,
+    executionArn: EXECUTION,
+    job: JSON.stringify(JOB),
+    taskToken: "t",
+  };
+
+  it("marks the run superseded when its execution was stopped during prepare", async () => {
+    const h = harness();
+    h.execution.status = "ABORTED";
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+
+    // Any other error is the task's to fail with.
+    h.deps.tokens.succeed = async () => {
+      throw new Error("throttled");
+    };
+    await expect(runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true })).rejects.toThrow(
+      "throttled",
+    );
+  });
+
+  it("leaves the run to the retry when prepare's own attempt timed out", async () => {
+    const h = harness();
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    // An execution that ended by its own steps keeps what they recorded.
+    h.execution.status = "FAILED";
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+  });
+
+  it("marks the run failed when prepare failed and its execution was stopped", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.execution.status = "ABORTED";
+    h.deps.tokens.fail = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, { ...prepareCommand, job: "{}" }, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: PREPARE_FAILED });
+  });
+
+  it("beats at once, keeps beating after a failed beat, and stops on a dead token", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    // Stopped: the step finishes its work, and reports nothing on the dead token.
+    h.execution.status = "ABORTED";
+    const errors = [new Error("throttled"), dead()];
+    let beats = 0;
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      const error = errors.shift();
+      if (error) throw error;
+    };
+    const running = runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    const atStart = beats;
+    await running;
+    // One beat before any work, a throttled beat that didn't stop them, then the dead token.
+    expect(atStart).toBe(1);
+    expect(beats).toBe(2);
+    expect(h.logs.filter((line) => line === "heartbeat failed")).toHaveLength(2);
+    expect(h.tokens.succeeded).toHaveLength(1);
+  });
+
+  it("gives the step up when its token dies on a running execution: a retry has it", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    let beats = 0;
+    let died: () => void = () => undefined;
+    const tokenDied = new Promise<void>((resolve) => {
+      died = resolve;
+    });
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      if (beats === 1) return;
+      died();
+      throw dead();
+    };
+    // The clone waits until the token has died, so the step is mid-work when it does.
+    let cloned = false;
+    const clone = h.deps.clone.bind(h.deps);
+    h.deps.clone = async (options) => {
+      await tokenDied;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cloned = true;
+      return clone(options);
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(cloned).toBe(false);
+    expect(h.logs).toContain("gave up the step: a retry has taken over");
+    // Nothing reported on the token, and the retry's outcome isn't touched.
+    expect(h.tokens.succeeded).toEqual([]);
+    expect(h.tokens.failed).toEqual([]);
+  });
+
+  /** The token dies on the second heartbeat, while the clone waits for it. */
+  function dyingMidClone(h: ReturnType<typeof harness>) {
+    h.deps.heartbeatIntervalMs = 5;
+    h.deps.statusRetryMs = 1;
+    let beats = 0;
+    let died: () => void = () => undefined;
+    const tokenDied = new Promise<void>((resolve) => {
+      died = resolve;
+    });
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      if (beats === 1) return;
+      died();
+      throw dead();
+    };
+    const clone = h.deps.clone.bind(h.deps);
+    const state = { cloned: false };
+    h.deps.clone = async (options) => {
+      await tokenDied;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      state.cloned = true;
+      return clone(options);
+    };
+    return state;
+  }
+
+  it("carries on with the step when its execution's status can't be had", async () => {
+    const h = harness();
+    const state = dyingMidClone(h);
+    let checks = 0;
+    h.deps.executionStatus = async () => {
+      checks += 1;
+      throw new Error("throttled");
+    };
+    // The work finishes: the claim, not giving up, guards against a retry that overlaps it.
+    await expect(
+      runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true }),
+    ).resolves.toBeUndefined();
+    expect(checks).toBeGreaterThanOrEqual(3);
+    expect(state.cloned).toBe(true);
+    expect(h.logs).not.toContain("gave up the step: a retry has taken over");
+  });
+
+  it("checks the status again when reporting on a dead token", async () => {
+    const h = harness();
+    h.deps.statusRetryMs = 1;
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    let checks = 0;
+    h.deps.executionStatus = async () => {
+      checks += 1;
+      if (checks < 2) throw new Error("throttled");
+      return "ABORTED";
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+  });
+
+  it("finishes the step when a retried check confirms its execution was stopped", async () => {
+    const h = harness();
+    dyingMidClone(h);
+    let checks = 0;
+    h.deps.executionStatus = async () => {
+      checks += 1;
+      if (checks < 3) throw new Error("throttled");
+      return "ABORTED";
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.logs).not.toContain("gave up the step: a retry has taken over");
+    expect(h.tokens.succeeded).toHaveLength(1);
+  });
+
+  it("sends heartbeats while a step runs, and stops when it's done", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    const beats = h.heartbeats.count;
+    expect(beats).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.heartbeats.count).toBe(beats);
+  });
+
+  it("fails the post step's token when it can't read its own task ARN", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.deps.taskArn = async () => {
+      throw new Error("The task metadata endpoint answered 500.");
+    };
+    await runCommand(
+      h.deps,
+      { command: "post", executionArn: EXECUTION, runId: RUN_ID, taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.tokens.failed).toEqual([
+      { error: POST_FAILED, cause: expect.stringContaining("500") },
+    ]);
+  });
+
+  it("reports post on its task token, so stopping the execution can't cut it short", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output({ findings: [] })));
+    const postCommand = { command: "post" as const, executionArn: EXECUTION, runId: RUN_ID };
+    await runCommand(h.deps, { ...postCommand, taskToken: "p" }, { ...SETTINGS, shadow: true });
+    expect(h.tokens.succeeded.at(-1)).toEqual({});
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+
+    // A failing post on a stopped execution leaves a finished run as it is.
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    h.execution.status = "ABORTED";
+    await runCommand(
+      h.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000001", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    ).catch(() => undefined);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+
+    // A failed post fails its token instead of throwing; stopped, it fails the run itself.
+    h.execution.status = "RUNNING";
+    await runCommand(
+      h.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000000", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.tokens.failed.at(-1)).toMatchObject({ error: POST_FAILED });
+    const other = harness();
+    await prepare(other.deps, JOB, EXECUTION, SETTINGS);
+    other.execution.status = "ABORTED";
+    other.deps.tokens.fail = async () => {
+      throw dead();
+    };
+    await runCommand(
+      other.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000000", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(other.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: POST_FAILED });
   });
 
   it("fails prepare's task token instead of throwing", async () => {
