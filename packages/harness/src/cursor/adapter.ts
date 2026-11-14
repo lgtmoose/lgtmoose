@@ -121,7 +121,7 @@ export class CursorHarness implements Harness {
       await setAsideHookFiles(options.cwd, setAside);
       await mkdir(join(home, ".cursor"));
       await mkdir(join(home, "tmp"));
-      await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig());
+      await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig(options.cwd));
       const env: Record<string, string> = {
         PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
         ...networkEnv(source),

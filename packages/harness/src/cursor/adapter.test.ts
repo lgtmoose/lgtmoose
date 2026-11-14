@@ -13,7 +13,7 @@ import {
   MAX_CURSOR_PROMPT_BYTES,
   type CursorHarnessOptions,
 } from "./adapter.js";
-import { CURSOR_PERMISSIONS } from "./policy.js";
+import { CURSOR_PERMISSIONS, cursorPermissions } from "./policy.js";
 
 const API_KEY = "key_cursor_test_0123456789abcdef";
 
@@ -153,10 +153,24 @@ describe("CursorHarness", () => {
     await run(harness);
     const [call] = await fake!.calls();
     const config = JSON.parse(call?.cliConfig ?? "{}") as { permissions?: unknown };
-    expect(config.permissions).toEqual(CURSOR_PERMISSIONS);
+    expect(config.permissions).toEqual(cursorPermissions(cwd));
     expect(CURSOR_PERMISSIONS.deny).toEqual(
       expect.arrayContaining(["Write(**)", "Shell(*)", "WebFetch(*)", "Mcp(*:*)"]),
     );
+  });
+
+  it("denies reads outside the checkout, but never of the checkout itself", () => {
+    const sandbox = cursorPermissions("/work/repo").deny;
+    // The CLI's own environment holds the key; its home and temp dirs hold its state.
+    expect(sandbox).toEqual(
+      expect.arrayContaining(["Read(/proc/**)", "Read(/tmp/**)", "Read(/home/**)", "Read(~/**)"]),
+    );
+    const laptop = cursorPermissions("/home/dev/src/../repo").deny;
+    expect(laptop).toContain("Read(/proc/**)");
+    expect(laptop).not.toContain("Read(/home/**)");
+    expect(cursorPermissions("/tmp/x").deny).not.toContain("Read(/tmp/**)");
+    // A sibling whose name only starts the same is still denied.
+    expect(cursorPermissions("/homework").deny).toContain("Read(/home/**)");
   });
 
   it("sets the checkout's hook configs aside for the run and puts them back", async () => {
