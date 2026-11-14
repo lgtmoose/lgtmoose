@@ -106,7 +106,12 @@ export async function readConventionFiles(
 }
 
 /** A regular file in a git tree: a blob with a normal file mode (not a symlink or submodule). */
-const REGULAR_FILE = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.+)$/;
+export const REGULAR_FILE = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.+)$/;
+
+/** Code-unit order for paths, so it doesn't depend on the locale. */
+export function byCodeUnit(a: string, b: string): number {
+  return Number(a > b) - Number(a < b);
+}
 
 /**
  * Reads the repo's convention files as they are at a commit, such as the PR's base, from git
@@ -134,7 +139,7 @@ export async function readConventionFilesAt(
     if (patterns.some((pattern) => matchesGlob(path, pattern))) matches.push({ path, blob });
   }
   // Code-unit order, as readConventionFiles sorts, so it doesn't depend on the locale.
-  matches.sort((a, b) => Number(a.path > b.path) - Number(a.path < b.path));
+  matches.sort((a, b) => byCodeUnit(a.path, b.path));
 
   const wanted = matches.slice(0, maxFiles);
   const blobs = await repo.readBlobs(wanted.map((match) => match.blob));

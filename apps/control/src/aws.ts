@@ -313,6 +313,11 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           .set({
             status: "succeeded",
             wrotePr: true,
+            // What it set on the PR, for the reconciler to restore (see the columns).
+            ...(result.statusLabel === undefined ? {} : { statusLabel: result.statusLabel }),
+            ...(result.review === undefined
+              ? {}
+              : { reviewEvent: result.review.event, reviewId: result.review.id ?? null }),
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),
@@ -333,6 +338,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             status: "covered",
             // Once set, kept: a later call without `pr` (a retry) doesn't undo what was written.
             ...(result.pr === undefined ? {} : { wrotePr: true }),
+            ...(result.pr?.statusLabel === undefined ? {} : { statusLabel: result.pr.statusLabel }),
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),

@@ -98,6 +98,9 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     providerSecrets: data.providerSecrets,
     jobQueue: api.jobQueue,
     deadLetterQueue: api.deadLetterQueue,
+    allowedOrgs: config.allowedOrgs,
+    reconcileIntervalMinutes: config.reconcileIntervalMinutes,
+    reconcileLookbackHours: config.reconcileLookbackHours,
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
       isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),

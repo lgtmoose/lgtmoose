@@ -29,7 +29,7 @@ import {
 } from "@lgtmoose/planner";
 import {
   buildReviewerPrompt,
-  loadRulePacks,
+  selectRulePacks,
   placeFindings,
   readConventionFilesAt,
   type PullRequestComment,
@@ -180,6 +180,8 @@ export interface PreparedReview {
   files: FileDiff[];
   plan: Plan;
   conventionFilesOmitted: string[];
+  /** Rule-pack entries or rules left out, and why (see `selectRulePacks`). */
+  rulePackProblems?: string[];
   /** One entry per planned batch, in order. */
   jobs: BatchJob[];
   /**
@@ -448,7 +450,11 @@ export async function prepareReview(
   const conventions = await readConventionFilesAt(repo, pr.baseSha, {
     globs: config.conventions,
   });
-  const rulePacks = await loadRulePacks(config.rulepacks);
+  const selected = await selectRulePacks(config.rulepacks, { repo, baseSha: pr.baseSha });
+  for (const note of [...selected.warnings, ...selected.problems]) {
+    deps.progress(`Rule packs: ${note}`);
+  }
+  const rulePacks = selected.packs;
   // A file whose earlier review can't be compared with (its commit is gone) is reviewed afresh,
   // as on a first review: an earlier record of its blob doesn't make it done. Duplicates of what
   // that review posted are dropped against our comments on the PR.
@@ -494,6 +500,7 @@ export async function prepareReview(
     files,
     plan,
     conventionFilesOmitted: conventions.omitted,
+    rulePackProblems: selected.problems,
     jobs,
     kind: diff.kind,
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
@@ -817,6 +824,7 @@ export async function finishReview(
       },
       findings: open,
       conventionFilesOmitted: prepared.conventionFilesOmitted,
+      rulePackProblems: prepared.rulePackProblems ?? [],
       findingsOverLimit: overLimit,
       noLongerChanged: prepared.noLongerChanged,
     },

@@ -27,6 +27,15 @@ function issuesOf(input: unknown) {
 }
 
 describe("parseDeployConfig", () => {
+  it("wants the reconciler's lookback to cover at least its interval", () => {
+    expect(
+      issuesOf({ ...minimal, reconcileIntervalMinutes: 120, reconcileLookbackHours: 1 }),
+    ).toEqual([expect.objectContaining({ path: "reconcileLookbackHours" })]);
+    expect(
+      parseDeployConfig({ ...minimal, reconcileIntervalMinutes: 60, reconcileLookbackHours: 1 }),
+    ).toMatchObject({ reconcileLookbackHours: 1 });
+  });
+
   it("fills defaults for a minimal config", () => {
     expect(parseDeployConfig(minimal)).toEqual({
       region: "us-east-1",
@@ -35,6 +44,8 @@ describe("parseDeployConfig", () => {
       providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
       roles: {},
       maxConcurrency: 4,
+      reconcileIntervalMinutes: 30,
+      reconcileLookbackHours: 24,
       shadow: true,
       extraEgressHosts: [],
       dashboard: true,

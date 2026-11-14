@@ -497,3 +497,66 @@ describe("dispatcher", () => {
     expect(actions(granted)).not.toContain("states:ListExecutions");
   });
 });
+
+describe("reconciler", () => {
+  function reconciler() {
+    const entry = Object.entries(resources).find(
+      ([, r]) =>
+        r.Type === "AWS::Lambda::Function" &&
+        JSON.stringify(r.Properties.Environment).includes("JOB_QUEUE_URL"),
+    );
+    if (entry === undefined) throw new Error("no reconciler function");
+    return entry;
+  }
+
+  it("runs every 30 minutes by default, without retries", () => {
+    const [id] = reconciler();
+    template.hasResourceProperties("AWS::Scheduler::Schedule", {
+      ScheduleExpression: "rate(30 minutes)",
+      State: "ENABLED",
+      Target: {
+        Arn: { "Fn::GetAtt": [id, "Arn"] },
+        RetryPolicy: { MaximumRetryAttempts: 0 },
+      },
+    });
+  });
+
+  it("runs one at a time in the VPC, with the allowed orgs and shadow mode", () => {
+    const [, fn] = reconciler();
+    expect(fn.Properties.VpcConfig).toBeDefined();
+    expect(fn.Properties.ReservedConcurrentExecutions).toBe(1);
+    const env = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(env).toMatchObject({
+      ALLOWED_ORGS: "lgtmoose",
+      LGTMOOSE_SHADOW: "true",
+      RECONCILE_LOOKBACK_HOURS: "24",
+    });
+  });
+
+  it("may send to the job queue and read the database and App secrets, and nothing else", () => {
+    const [, fn] = reconciler();
+    const granted = statements(getAttId(fn.Properties.Role));
+    const sends = granted.filter((s) => actions([s]).includes("sqs:SendMessage"));
+    expect(sends.map((s) => JSON.stringify(s.Resource))).toEqual([
+      expect.stringContaining("JobQueue"),
+    ]);
+    const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(secrets).toHaveLength(2);
+    expect(actions(granted).some((a) => a.startsWith("s3:") || a.startsWith("states:"))).toBe(
+      false,
+    );
+    expect(actions(granted)).not.toContain("sqs:ReceiveMessage");
+  });
+
+  it("takes its interval from the config", () => {
+    const config = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token" }],
+      reconcileIntervalMinutes: 15,
+    });
+    const other = Template.fromStack(buildApp(config, appWithoutBundling()).workflow);
+    other.hasResourceProperties("AWS::Scheduler::Schedule", {
+      ScheduleExpression: "rate(15 minutes)",
+    });
+  }, 120_000);
+});

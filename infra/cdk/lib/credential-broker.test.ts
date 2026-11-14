@@ -185,7 +185,7 @@ describe("credential broker", () => {
       "secretsmanager:DescribeSecret",
       "secretsmanager:ListSecretVersionIds",
     ]);
-    stack.template.hasResourceProperties("AWS::Events::Rule", {
+    stack.template.hasResourceProperties("AWS::Scheduler::Schedule", {
       ScheduleExpression: "rate(6 hours)",
     });
     // One alarm per stored credential: none for Bedrock, which has none.
