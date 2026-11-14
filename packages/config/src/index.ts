@@ -30,5 +30,11 @@ export {
 } from "./repo.js";
 export { egressAllowlist, providerEgressHosts } from "./egress.js";
 export { jsonSchemas, serializeSchema } from "./json-schema.js";
-export { SECRET_NAMES, providerNeedsSecret } from "./secrets.js";
+export {
+  PROVIDER_CREDENTIAL_KIND,
+  PROVIDER_CREDENTIAL_TAGS,
+  PROVIDER_SECRET_PREFIX,
+  SECRET_NAMES,
+  providerNeedsSecret,
+} from "./secrets.js";
 export { CDK_CONTEXT, STACK_NAMES, STACK_OUTPUTS } from "./stacks.js";

@@ -1,0 +1,106 @@
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { checkAuthJson, codexLogin, CodexLoginError, LoginInterrupted } from "./codex-login.js";
+import type { InteractiveRunner, SignalTrap } from "./process.js";
+
+const AUTH_JSON = JSON.stringify({ tokens: { refresh_token: "SECRET-REFRESH" } });
+const noTrap: SignalTrap = () => () => {};
+
+let tmpRoot: string;
+beforeEach(async () => {
+  tmpRoot = await mkdtemp(join(tmpdir(), "lgtmoose-codex-test-"));
+});
+afterEach(async () => {
+  await rm(tmpRoot, { recursive: true, force: true });
+});
+
+describe("codexLogin", () => {
+  it("logs in to a private CODEX_HOME that keeps auth in a file, and removes it", async () => {
+    let seen: { mode: number; config: string } | undefined;
+    const run: InteractiveRunner = async (_command, args, { env }) => {
+      const home = env?.CODEX_HOME ?? "";
+      seen = {
+        mode: (await stat(home)).mode & 0o777,
+        config: await readFile(join(home, "config.toml"), "utf8"),
+      };
+      expect(args).toEqual(["login"]);
+      await writeFile(join(home, "auth.json"), AUTH_JSON);
+      return 0;
+    };
+    const untrapped: string[] = [];
+    const trap: SignalTrap = () => () => untrapped.push("off");
+    const result = await codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot });
+    expect(result).toBe(AUTH_JSON);
+    expect(seen).toEqual({ mode: 0o700, config: 'cli_auth_credentials_store = "file"\n' });
+    expect(untrapped).toEqual(["off"]);
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
+  it("removes the directory when codex fails or writes nothing", async () => {
+    const failing: InteractiveRunner = async (_c, _a, { env }) => {
+      await writeFile(join(env?.CODEX_HOME ?? "", "auth.json"), AUTH_JSON);
+      return 2;
+    };
+    await expect(
+      codexLogin({ run: failing, trapSignals: noTrap, deviceAuth: false, tmpRoot }),
+    ).rejects.toThrow("exited with code 2");
+    await expect(
+      codexLogin({ run: async () => 0, trapSignals: noTrap, deviceAuth: false, tmpRoot }),
+    ).rejects.toThrow("wrote no auth.json");
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
+  it("stops on a signal, still removing the directory", async () => {
+    let fire: (() => void) | undefined;
+    let force: (() => void) | undefined;
+    const trap: SignalTrap = (onSignal, forceCleanup) => {
+      fire = onSignal;
+      force = forceCleanup;
+      return () => {};
+    };
+    const run: InteractiveRunner = async (_c, _a, { env, signal }) => {
+      await writeFile(join(env?.CODEX_HOME ?? "", "auth.json"), AUTH_JSON);
+      fire?.();
+      expect(signal?.aborted).toBe(true);
+      return null;
+    };
+    await expect(codexLogin({ run, trapSignals: trap, deviceAuth: true, tmpRoot })).rejects.toThrow(
+      LoginInterrupted,
+    );
+    expect(await readdir(tmpRoot)).toEqual([]);
+    // The second-signal path removes the directory synchronously, and is safe after cleanup.
+    expect(() => force?.()).not.toThrow();
+  });
+
+  it("the forced cleanup removes the directory on its own", async () => {
+    const trap: SignalTrap = (_onSignal, forceCleanup) => {
+      forceCleanup();
+      return () => {};
+    };
+    const run: InteractiveRunner = async (_c, _a, { env }) => {
+      // Gone already: the second signal removed it.
+      await expect(stat(env?.CODEX_HOME ?? "")).rejects.toThrow();
+      return null;
+    };
+    await expect(
+      codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot }),
+    ).rejects.toThrow();
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+});
+
+describe("checkAuthJson", () => {
+  it("accepts a ChatGPT sign-in and rejects anything else without quoting it", () => {
+    expect(() => checkAuthJson(AUTH_JSON)).not.toThrow();
+    expect(() => checkAuthJson("{not json SECRET")).toThrow(CodexLoginError);
+    const apiKeyOnly = JSON.stringify({ OPENAI_API_KEY: "sk-SECRET" });
+    expect(() => checkAuthJson(apiKeyOnly)).toThrow("auth api-key --provider openai");
+    try {
+      checkAuthJson(apiKeyOnly);
+    } catch (error) {
+      expect(String(error)).not.toContain("SECRET");
+    }
+  });
+});

@@ -21,10 +21,12 @@ describe("lgtmoose CLI", () => {
     expect(result.stderr).toContain('Unknown command "frobnicate"');
   });
 
-  it("says which ticket builds a planned command", async () => {
-    const result = await run(["auth"]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("NIC-824");
+  it("hands auth its own flags and help, without loading AWS", async () => {
+    const authDeps = vi.fn();
+    const result = await run(["auth", "--help"], { authDeps });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: lgtmoose auth");
+    expect(authDeps).not.toHaveBeenCalled();
   });
 
   it("hands setup its own flags and help", async () => {
