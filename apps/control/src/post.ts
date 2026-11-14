@@ -52,15 +52,21 @@ function costOf(report: ReviewReport): number | undefined {
 }
 
 /**
- * The findings to follow to the new head: open ones, and outdated ones only while the PR still
- * changes their file (so they could stand again), under that name or, renamed since, under
- * another. Outdated findings on files the PR left alone stay as they are, which keeps the work
- * from growing with the PR's age.
+ * A finding to follow: one of our records, with its status when it's one `standing` may move
+ * (open or outdated). Closed ones (resolved or declined by a person) have none.
  */
-function toTrack(
-  records: readonly FindingRecord[],
+type TrackedRecord = Omit<FindingRecord, "status"> & { status?: FindingRecord["status"] };
+
+/**
+ * The findings to follow to the new head: those `followAll` picks, and the rest only while the
+ * PR still changes their file, under that name or, renamed since, under another. Findings on
+ * files the PR left alone stay as they are, which keeps the work from growing with the PR's age.
+ */
+function toTrack<T extends TrackedRecord>(
+  records: readonly T[],
   changes: readonly ChangedPath[],
-): FindingRecord[] {
+  followAll: (record: T) => boolean,
+): T[] {
   const { changed, atHead } = prPaths(changes);
   // Old names of files the PR renames and keeps: still changed by it, under the new name.
   const renamedFrom = new Set(
@@ -70,7 +76,7 @@ function toTrack(
   );
   return records.filter(
     (record) =>
-      record.status === "open" ||
+      followAll(record) ||
       (record.side === "RIGHT" ? atHead : changed).has(record.path) ||
       renamedFrom.has(record.path),
   );
@@ -89,7 +95,7 @@ function prPaths(changes: readonly ChangedPath[]): { changed: Set<string>; atHea
  * `followed` there from the commit it was raised at, or not.
  */
 function recordToEarlier(
-  record: Omit<FindingRecord, "status">,
+  record: TrackedRecord,
   place: LineRef = { path: record.path, line: record.line },
   followed = true,
 ): EarlierFinding {
@@ -126,26 +132,30 @@ const FOLLOW_AT_ONCE = 4;
  * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
  * when it was raised (its merge base with today's) to today's merge base, and stands while the
  * PR still deletes that line. When the commit a finding was raised at is gone (force-pushed
- * away), its lines can't be followed: an open one stands at its old place while the PR still
- * changes the file, and an outdated one stays outdated.
+ * away), its lines can't be followed: one `keepInPlace` picks stands at its old place while the
+ * PR still changes the file; the others don't stand. Only open ones go `outdated` and only
+ * outdated ones are `reopened`; a record with no status (a closed one) just stands or not.
  */
 async function standing(
   repo: Repo,
-  records: readonly FindingRecord[],
+  records: readonly TrackedRecord[],
   changes: readonly ChangedPath[],
   mergeBase: string,
   headSha: string,
+  keepInPlace: (record: TrackedRecord) => boolean,
 ): Promise<{ open: (EarlierFinding & { id: string })[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
   const { atHead } = prPaths(changes);
   // Old-side lines are keyed by the file's path on the base side, which differs for renames.
   const baseSide = new Map(changes.map((file) => [file.path, file.oldPath ?? file.path]));
-  const refs = (list: readonly FindingRecord[], path: (record: FindingRecord) => string) =>
+  // A base-side path's file at head: its new name when the PR renames it.
+  const headPath = new Map(changes.map((file) => [file.oldPath ?? file.path, file.path]));
+  const refs = (list: readonly TrackedRecord[], path: (record: TrackedRecord) => string) =>
     list.map((record) => ({ path: path(record), line: record.line }));
 
   // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
   // followed (the commit it was raised at is gone, or shares no history with the base).
-  const at = new Map<FindingRecord, LineRef | undefined>();
+  const at = new Map<TrackedRecord, LineRef | undefined>();
   // One check for every commit the findings were raised at.
   const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
   // New-side lines: from the head they were raised at to this head.
@@ -168,7 +178,7 @@ async function standing(
   // stand while the PR still deletes that line, so only their files' patches are read.
   const left = records.filter((r) => r.side === "LEFT" && present.has(r.raisedAtSha));
   if (left.length > 0) {
-    const basePath = (record: FindingRecord) => baseSide.get(record.path) ?? record.path;
+    const basePath = (record: TrackedRecord) => baseSide.get(record.path) ?? record.path;
     const patches = await diffCommits(repo, mergeBase, headSha, {
       paths: [...new Set(left.flatMap((record) => [record.path, basePath(record)]))],
     });
@@ -196,9 +206,15 @@ async function standing(
       const moved = await trackLines(repo, base, mergeBase, refs(group, basePath));
       for (const [i, record] of group.entries()) {
         const place = moved[i];
-        // Stands only while the PR still deletes that line.
+        // Stands only while the PR still deletes that line, on the file's name at head (it may
+        // have been renamed since).
         const deleted = place !== undefined && deletedLines.get(place.path)?.has(place.line);
-        at.set(record, deleted === true ? { path: record.path, line: place.line } : undefined);
+        at.set(
+          record,
+          deleted === true
+            ? { path: headPath.get(place.path) ?? place.path, line: place.line }
+            : undefined,
+        );
       }
     });
   }
@@ -213,10 +229,9 @@ async function standing(
       place = at.get(record);
       if (place !== undefined && !isLeft && !atHead.has(place.path)) place = undefined;
     } else {
-      // Not followable: an open finding keeps its place while its file is in the PR.
+      // Not followable: one kept in place keeps it while its file is in the PR.
       const inPr = isLeft ? baseSide.has(record.path) : atHead.has(record.path);
-      place =
-        record.status === "open" && inPr ? { path: record.path, line: record.line } : undefined;
+      place = keepInPlace(record) && inPr ? { path: record.path, line: record.line } : undefined;
     }
     if (place === undefined) {
       if (record.status === "open") outdated.push(record.id);
@@ -329,17 +344,23 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     if (records.length + closedRecords.length > 0) {
       // Which files the PR changes: names only, no patches or contents.
       const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
-      // Closed ones are followed like outdated ones, only while the PR still changes their file,
-      // and placed like open ones: kept at their recorded place when their commit is gone, out
-      // when their line is (they're never marked outdated).
-      const closedTracked = toTrack(
-        closedRecords.map((record) => ({ ...record, status: "outdated" as const })),
-        changes,
-      ).map((record) => ({ ...record, status: "open" as const }));
-      const tracked = [...toTrack(records, changes), ...closedTracked];
+      // Open ones are always followed; outdated and closed ones only while the PR still changes
+      // their file. Open and closed ones are kept at their recorded place when their commit is
+      // gone; closed ones are never marked outdated or reopened.
+      const tracked: TrackedRecord[] = [
+        ...toTrack(records, changes, (record) => record.status === "open"),
+        ...toTrack(closedRecords, changes, () => false),
+      ];
       // The commits those findings were raised at, to follow their lines: one request.
       await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
-      const all = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
+      const all = await standing(
+        repo,
+        tracked,
+        changes,
+        prepared.mergeBase,
+        pr.headSha,
+        (record) => record.status === "open" || closedIds.has(record.id),
+      );
       const followed = new Map(
         all.open.filter((entry) => closedIds.has(entry.id)).map((entry) => [entry.id, entry]),
       );
@@ -349,8 +370,8 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       });
       earlier = {
         open: all.open.filter((entry) => !closedIds.has(entry.id)),
-        outdated: all.outdated.filter((id) => !closedIds.has(id)),
-        reopened: all.reopened.filter((id) => !closedIds.has(id)),
+        outdated: all.outdated,
+        reopened: all.reopened,
       };
     }
     ({ outdated, reopened } = earlier);

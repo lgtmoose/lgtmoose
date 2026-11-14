@@ -1169,6 +1169,29 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
+  it("places an old-side finding under the file's new name after the PR renames it", async () => {
+    const h = harness();
+    // The PR deletes the return, and is reviewed; then it renames the file.
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("  return sum;\n", "") },
+      "drop return",
+    );
+    const left = finding({
+      side: "LEFT",
+      line: 6,
+      title: "Return was removed",
+      evidence: "return sum;",
+    });
+    await review(h, 1, [left]);
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit({}, "rename");
+
+    // Raised again under the new name: the same finding, not posted again.
+    const again = await review(h, 2, [{ ...left, path: "src/sum.ts" }]);
+    expect(again.posted).toMatchObject({ findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "open", path: "src/total.ts" }]);
+  });
+
   it("skips following findings when there are none", async () => {
     const h = harness();
     await review(h, 1);
