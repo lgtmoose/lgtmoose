@@ -12,9 +12,9 @@ import { workflowJobSchema } from "./job.js";
  *
  * - A job older than that is stale and does nothing: it neither starts nor stops anything.
  * - A push, open or ready job starts an execution named after the PR and its head
- *   (`executionName`), so a second start for the same head is a no-op. An open or ready job
- *   for a head that has no succeeded run and no running execution (the PR was closed during
- *   its review, then reopened; or the review failed) starts a retry.
+ *   (`executionName`), so a second start for the same head is a no-op. A job for a head that
+ *   has no succeeded run and no running execution (the PR was closed during its review and
+ *   reopened, the review failed, or a force-push went back to a stopped head) starts a retry.
  * - It then stops the PR's executions started by older jobs, marking each run superseded
  *   first (StopExecution skips the workflow's fail step). Jobs with the same event time both
  *   run: whole-second times can't order them, and each prepare step checks the PR's real head.
@@ -93,7 +93,10 @@ export function debounceSeconds(job: Pick<ReviewJob, "kind">): number {
   return job.kind === "pr_updated" ? PUSH_DEBOUNCE_SECONDS : 0;
 }
 
-/** When the job's event happened: GitHub's time, or the gateway's for a job without one. */
+/**
+ * When the job's event happened: GitHub's time, or the gateway's for a job without one (queued
+ * before jobs carried it). The gateway's is later than GitHub's, so such a job counts as new.
+ */
 export function eventTime(job: { eventAt?: string; receivedAt: string }): Date {
   return new Date(job.eventAt ?? job.receivedAt);
 }
@@ -207,9 +210,8 @@ async function review(
   let name = executionName(job.repo, job.prNumber, job.headSha);
   let { started, executionArn } = await startExecution(deps, job, name, eventAt);
   let action: "started" | "retried" = "started";
-  // A push for a head that already has an execution is a duplicate; so is an open or ready
-  // job for a head that was reviewed, or is being.
-  if (!started && job.kind !== "pr_updated" && (await needsRetry(deps, job, name))) {
+  // A job for a head that was reviewed, or is being, is a duplicate.
+  if (!started && (await needsRetry(deps, job, name))) {
     name = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
     ({ started, executionArn } = await startExecution(deps, job, name, eventAt));
     action = "retried";
@@ -222,9 +224,10 @@ async function review(
 }
 
 /**
- * An open or ready job for a head that already had an execution needs another only when the
- * head was never reviewed and its execution isn't running: the PR was closed mid-review and
- * reopened, or the review failed. A succeeded retry counts as reviewed.
+ * A job for a head that already had an execution needs another only when the head was never
+ * reviewed and its execution isn't running: the PR was closed mid-review and reopened, the
+ * review failed, or a force-push went back to a head whose review a later push stopped. A
+ * succeeded retry counts as reviewed. Ordering keeps a stale redelivery from getting here.
  */
 async function needsRetry(
   deps: DispatchDeps,

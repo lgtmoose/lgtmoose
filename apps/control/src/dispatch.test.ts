@@ -285,7 +285,7 @@ describe("dispatch", () => {
     expect(await dispatch(f.deps, reopened)).toMatchObject({ action: "duplicate", name: retry });
   });
 
-  it("doesn't retry a head that a retry reviewed, or a push", async () => {
+  it("doesn't retry a head that a run reviewed, or one still running", async () => {
     const f = fakeDeps();
     await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
     await dispatch(f.deps, job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" }));
@@ -293,10 +293,28 @@ describe("dispatch", () => {
     f.reviewedHeads.add(NEW);
     const again = job({ kind: "pr_ready", eventAt: T3, deliveryId: "d-ready" });
     expect(await dispatch(f.deps, again)).toMatchObject({ action: "duplicate" });
-    f.reviewedHeads.clear();
-    const push = job({ eventAt: "2026-11-14T00:00:04.000Z", deliveryId: "d-push" });
-    expect(await dispatch(f.deps, push)).toMatchObject({ action: "duplicate" });
     expect(f.executions.size).toBe(1);
+    // A second job for a head whose execution still runs is a duplicate too.
+    const g = fakeDeps();
+    await dispatch(g.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
+    const ready = job({ kind: "pr_ready", eventAt: T3, deliveryId: "d-ready" });
+    expect(await dispatch(g.deps, ready)).toMatchObject({ action: "duplicate", stopped: [] });
+    expect(g.status(nameOf(NEW))).toBe("RUNNING");
+  });
+
+  it("reviews a head again after a force-push back to it, when a later push stopped it", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-1" }));
+    await dispatch(f.deps, job({ eventAt: T2, deliveryId: "d-2" }));
+    const back = job({ headSha: OLD, eventAt: T3, deliveryId: "d-3" });
+    const retry = nameOf(OLD, "d-3");
+    expect(await dispatch(f.deps, back)).toEqual({
+      action: "retried",
+      executionArn: arn(retry),
+      stopped: [arn(nameOf(NEW))],
+    });
+    expect(f.status(retry)).toBe("RUNNING");
+    expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
   it("falls back to the gateway's time for a job without an event time", async () => {
