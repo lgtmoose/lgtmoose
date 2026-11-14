@@ -165,6 +165,15 @@ describe("renderSummary", () => {
     expect(summary).toContain("No longer changed by the PR");
     expect(summary).toContain("src\\/auth\\.ts");
     expect(summary).not.toContain("<!--");
+
+    const many = renderSummary(
+      input({
+        noLongerChanged: [{ path: "a.ts", lines: Array.from({ length: 8 }, (_, i) => `l${i}()`) }],
+      }),
+    );
+    expect(many).toContain("l4\\(\\)");
+    expect(many).not.toContain("l5\\(\\)");
+    expect(many).toContain("…and 3 more");
   });
 
   it("says the label is unchanged when the decision was skipped for an older commit", () => {

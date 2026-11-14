@@ -311,9 +311,7 @@ const TRIVIAL = /^[\s{}()[\];,.]*$/;
 const words = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9_$]+/g) ?? []);
 
 /** Share of words two lines have in common (Jaccard). 1 for identical word sets. */
-function similarity(a: string, b: string): number {
-  const left = words(a);
-  const right = words(b);
+function overlap(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
   if (left.size === 0 && right.size === 0) return 1;
   let shared = 0;
   for (const word of left) if (right.has(word)) shared += 1;
@@ -324,26 +322,53 @@ function similarity(a: string, b: string): number {
 const REWORDED = 0.5;
 
 /**
+ * Words that mark a guard: a dropped line with one is never taken for a rewording, so a removed
+ * check is always shown.
+ */
+const GUARD = /\b(throw|return|auth\w*|admin\w*|permission\w*|check\w*|verify\w*|require\w*)\b/i;
+
+/**
+ * Texts of lines reworded since the review: in `since` (the file's diff from then to now), a
+ * deleted line in a hunk that adds a line keeping at least half its words. Lines with a guard
+ * word don't count.
+ */
+function rewordedIn(since: FileDiff | undefined): Set<string> {
+  const reworded = new Set<string>();
+  for (const hunk of since?.hunks ?? []) {
+    const added = hunk.lines.filter((line) => line.kind === "add").map((line) => words(line.text));
+    if (added.length === 0) continue;
+    for (const line of hunk.lines) {
+      if (line.kind !== "del" || GUARD.test(line.text)) continue;
+      const own = words(line.text);
+      if (added.some((other) => overlap(own, other) >= REWORDED)) reworded.add(line.text);
+    }
+  }
+  return reworded;
+}
+
+/**
  * The lines a file's PR change added at an earlier review (`before`) that its PR change now
  * (`current`, undefined when the PR no longer changes it) no longer adds: what a reader should
- * look at, such as a removed check. Trivial lines are left out, and so are rewordings: a
- * dropped line with a similar line among those the file adds now and didn't then.
+ * look at, such as a removed check. Trivial lines are left out, and so are rewordings: a line
+ * replaced, in the same hunk of `since` (the file's diff from that review to now), by a line
+ * keeping half its words, unless it holds a guard word.
  */
 export function noLongerAdded(
   before: FileDiff | undefined,
   current: FileDiff | undefined,
+  since?: FileDiff,
 ): string[] {
-  const then = addedTexts(before);
   const now = addedTexts(current);
-  // What a dropped line may have turned into.
-  const fresh = [...now].flatMap(([text, n]) => (n > (then.get(text) ?? 0) ? [text] : []));
-  const removed: string[] = [];
-  for (const [text, count] of then) {
-    if (TRIVIAL.test(text)) continue;
-    if (fresh.some((line) => similarity(text, line) >= REWORDED)) continue;
-    for (let i = now.get(text) ?? 0; i < count; i++) removed.push(text);
+  const dropped: [string, number][] = [];
+  for (const [text, count] of addedTexts(before)) {
+    const kept = now.get(text) ?? 0;
+    if (kept < count && !TRIVIAL.test(text)) dropped.push([text, count - kept]);
   }
-  return removed;
+  if (dropped.length === 0) return [];
+  const reworded = rewordedIn(since);
+  return dropped.flatMap(([text, n]) =>
+    reworded.has(text) ? [] : Array.from({ length: n }, () => text),
+  );
 }
 
 /** What one baseline commit gives: the PR's diff back then, and what changed since. */
@@ -404,7 +429,7 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
   }
   // The PR's diff of the file back then.
   const before = base.previous.get(file.path);
-  const removed = noLongerAdded(before, file);
+  const removed = noLongerAdded(before, file, changed);
   const prLines = addedLines(file);
   const newLines = changed
     ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
@@ -499,7 +524,6 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     handled.add(path);
   };
   const gone = new Set<string>();
-  let compared = false;
   for (const file of files) {
     const base = baseOf(file.path);
     // Names involved: ones it was renamed from since a review, and the PR's own rename's
@@ -521,7 +545,7 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       // Still list what it stopped adding since then, from its diff under each earlier name;
       // rewordings drop out against what changed since.
       const removed = [file.path, ...new Set(otherNames)].flatMap((name) =>
-        noLongerAdded(baseOf(name)?.previous.get(name), file),
+        noLongerAdded(baseOf(name)?.previous.get(name), file, baseOf(name)?.since.get(file.path)),
       );
       plan(withRemoved(file, removed), otherNames);
       continue;
@@ -532,7 +556,6 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       plan(file);
       continue;
     }
-    compared = true;
     const moved = sinceBaseline(file, base);
     if (moved === undefined) cover(file.path);
     else plan(moved);
@@ -548,21 +571,24 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     if (base === undefined) continue;
     for (const before of base.previousFiles) {
       if (reviewedAt.get(before.path) !== sha || handled.has(before.path)) continue;
-      compared = true;
-      const current = [base.movedAway.get(before.path), before.oldPath]
-        .map((name) => (name === undefined ? undefined : prFileAt.get(name)))
-        .find((file) => file !== undefined);
-      const dropped = before.status === "deleted" ? [] : noLongerAdded(before, current);
+      // A rename's target still in the PR was found by `renamedFrom` above; what's left is a
+      // file back at the name it had before a rename the PR made then.
+      const current = before.oldPath === undefined ? undefined : prFileAt.get(before.oldPath);
+      // A file the PR added and dropped again exists neither at base nor at head: nothing in it
+      // to mention. A deletion the PR undid restores the base's file: nothing either.
+      const silent =
+        current === undefined && (before.status === "added" || before.status === "deleted");
+      const dropped = silent
+        ? []
+        : noLongerAdded(before, current, current && base.since.get(current.path));
       if (current === undefined) {
         if (dropped.length > 0) noLongerChanged.push({ path: before.path, lines: dropped });
         cover(before.path);
         continue;
       }
       const earlier = planned.get(current.path) ?? current;
-      plan(withRemoved(earlier, [...(earlier.removedSinceLastReview ?? []), ...dropped]), [
-        ...(earlier.alsoReviewedAs ?? []),
-        before.path,
-      ]);
+      const lines = [...new Set([...(earlier.removedSinceLastReview ?? []), ...dropped])];
+      plan(withRemoved(earlier, lines), [...(earlier.alsoReviewedAs ?? []), before.path]);
     }
   }
   // Records for paths the PR doesn't change and that weren't in their baseline's diff: nothing
@@ -588,28 +614,16 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   const anyBaseline = [...baselines.values()].some((base) => base !== undefined);
   return {
     ...result,
-    kind: compared || anyBaseline ? "incremental" : "full",
+    kind: anyBaseline ? "incremental" : "full",
     files: [...planned.values()],
     unchanged: [...unchanged],
     noLongerChanged,
-    ...fallback(anyBaseline, readInFull),
+    ...fallback(readInFull),
   };
 }
 
-/**
- * Why files are reviewed in full that had an earlier review: every earlier review's commit is
- * gone (force-pushed away), or some files' are.
- */
-function fallback(
-  anyBaseline: boolean,
-  readInFull: readonly string[],
-): { fallbackReason?: string } {
-  if (!anyBaseline) {
-    return {
-      fallbackReason:
-        "The commits of every earlier review are no longer in the repository (force-pushed away), so this is a full review.",
-    };
-  }
+/** Why files that had an earlier review are read in full: their review's commit is gone. */
+function fallback(readInFull: readonly string[]): { fallbackReason?: string } {
   if (readInFull.length === 0) return {};
   return {
     fallbackReason:
