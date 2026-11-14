@@ -1,3 +1,4 @@
+import { HARNESS_AUTH, isPlanCredential, type AuthMethod, type Harness } from "@lgtmoose/config";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -161,20 +162,39 @@ describe("auth", () => {
     expect(getDeps).not.toHaveBeenCalled();
   });
 
-  it("tailors the plan-credential warning to each vendor and points at docs/providers.md", () => {
-    const claude = planCredentialWarning({ harness: "claude-code" });
+  it("tailors the plan-credential warning to the credential and points at docs/providers.md", () => {
+    const claude = planCredentialWarning({ harness: "claude-code", auth: "oauth-token" });
     expect(claude).toContain(PLAN_CREDENTIAL_HEADER);
     expect(claude).toContain("auth api-key --provider anthropic");
-    expect(claude).toContain("monthly API credits");
-    const codex = planCredentialWarning({ harness: "codex" });
-    expect(codex).toContain("auth api-key --provider openai");
-    expect(codex).toContain("Codex access token");
-    const cursor = planCredentialWarning({ harness: "cursor-agent" });
+    expect(claude).toContain("commercial terms");
+    const login = planCredentialWarning({ harness: "codex", auth: "chatgpt-login" });
+    expect(login).toContain("auth codex --access-token");
+    // Storing an access token doesn't recommend an access token.
+    const token = planCredentialWarning({ harness: "codex", auth: "access-token" });
+    expect(token).toContain("acts as the workspace user who created it");
+    expect(token).not.toContain("auth codex --access-token");
+    const cursor = planCredentialWarning({ harness: "cursor-agent", auth: "api-key" });
     expect(cursor).toContain('"service-account"');
-    for (const text of [claude, codex, cursor]) expect(text).toContain("docs/providers.md");
-    // Each vendor's advice names only its own alternatives.
+    for (const text of [claude, login, token, cursor]) {
+      expect(text).toContain("docs/providers.md");
+      expect(text).toContain("Bedrock, or an Anthropic or OpenAI API key");
+    }
     expect(claude).not.toContain("Codex");
-    expect(codex).not.toContain("Console organization");
+  });
+
+  it("gives advice for every plan credential isPlanCredential recognises", () => {
+    for (const [harness, auths] of Object.entries(HARNESS_AUTH) as [
+      Harness,
+      readonly AuthMethod[],
+    ][]) {
+      for (const auth of auths) {
+        if (!isPlanCredential({ harness, auth })) continue;
+        const text = planCredentialWarning({ harness, auth });
+        // The vendor advice sits between the shared opening and closing lines.
+        const middle = text.split("installed on.\n")[1]?.split("Bedrock, or an")[0] ?? "";
+        expect(middle.trim(), `${harness}/${auth}`).not.toBe("");
+      }
+    }
   });
 
   it("claude: warns, confirms, runs setup-token, then stores the pasted token", async () => {

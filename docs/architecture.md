@@ -27,7 +27,7 @@ Each vendor's official CLI runs headless behind a small adapter, restricted to r
 - `cursor-agent`: user or service-account API key
 - `agent-sdk`: Claude Agent SDK in-process, for API-key and Bedrock users
 
-Check each vendor's current terms before using plan credentials. `lgtmoose setup` defaults to Bedrock or an API key.
+Before using a plan credential, read [Providers](providers.md): what each vendor's terms say, with sources, and the recommended credential per vendor. `lgtmoose setup` starts with a Bedrock provider, which needs no stored key.
 
 ### Providers, tiers and fallback
 

@@ -65,29 +65,40 @@ export interface CommandResult {
 export const PLAN_CREDENTIAL_HEADER =
   "Warning: this stores a credential tied to one person's subscription plan.";
 
-const PLAN_CREDENTIAL_ADVICE: Record<string, string> = {
-  "claude-code": `Anthropic's consumer terms forbid making your account available to anyone else, and
-nothing says a bot may review other people's pull requests on one person's plan. An API key is
-the documented way to automate: create one in your Max, Ultra or Team plan's linked Console
-organization and the plan's monthly API credits cover it:
-  ${CLI} auth api-key --provider anthropic
-Bedrock needs no key at all.`,
-  codex: `OpenAI's terms forbid sharing account credentials or making your account available to
+/** A plan credential `isPlanCredential` recognises, as harness/auth. */
+type PlanCredentialKind =
+  "claude-code/oauth-token" | "codex/chatgpt-login" | "codex/access-token" | "cursor-agent/api-key";
+
+const PLAN_CREDENTIAL_ADVICE: Record<PlanCredentialKind, string> = {
+  "claude-code/oauth-token": `Pro and Max plans fall under Anthropic's consumer terms, which forbid making your
+account available to anyone else; Team and Enterprise fall under its commercial terms.
+Neither says a bot may review other people's pull requests on one person's seat. Anthropic
+documents API keys for automation. On a Max, Ultra or Team plan, a key from the plan's linked
+Console organization draws on the plan's monthly API credits first:
+  ${CLI} auth api-key --provider anthropic`,
+  "codex/chatgpt-login": `OpenAI's terms forbid sharing account credentials or making your account available to
 others. OpenAI recommends an API key for automation:
   ${CLI} auth api-key --provider openai
 On ChatGPT Business or Enterprise, a Codex access token created for the bot is the documented
-alternative.`,
-  "cursor-agent": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't
-be shared. Cursor's service accounts (Enterprise) are made for automation: set the provider's
+alternative (${CLI} auth codex --access-token).`,
+  "codex/access-token": `A Codex access token acts as the workspace user who created it. OpenAI documents it for
+trusted runners on Business and Enterprise workspaces: create it for the bot, not a person,
+and keep the deployment private. An API key avoids the question:
+  ${CLI} auth api-key --provider openai`,
+  "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't be
+shared. Cursor's service accounts (Enterprise) are made for automation: set the provider's
 auth to "service-account".`,
 };
 
 /** The warning for one plan credential. */
-export function planCredentialWarning(provider: Pick<ProviderConfig, "harness">): string {
-  const advice = PLAN_CREDENTIAL_ADVICE[provider.harness] ?? "";
+export function planCredentialWarning(provider: Pick<ProviderConfig, "harness" | "auth">): string {
+  const kind = `${provider.harness}/${provider.auth}`;
+  const advice =
+    kind in PLAN_CREDENTIAL_ADVICE ? `${PLAN_CREDENTIAL_ADVICE[kind as PlanCredentialKind]}\n` : "";
   return (
     `\n${PLAN_CREDENTIAL_HEADER}\nLGTMoose will use it to review everyone's pull requests in ` +
-    `the repositories the App is installed on.\n${advice}${advice === "" ? "" : "\n"}` +
+    `the repositories the App is installed on.\n${advice}` +
+    "Bedrock, or an Anthropic or OpenAI API key, avoids the question.\n" +
     "Details and sources: docs/providers.md. Go on only if your plan's terms allow this use.\n\n"
   );
 }
