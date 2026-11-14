@@ -1243,6 +1243,46 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(again.posted).toMatchObject({ findings: 0 });
   });
 
+  it("follows a resolved finding when the base renames its file and the PR is rebased", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    await review(h, 1, [finding()]);
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    // Main renames the file; the PR is rebased onto it, its change now in src/sum.ts.
+    await git(work, "checkout", "--quiet", "main");
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    baseSha = await commit({}, "main: rename");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "rebase", "--quiet", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    headSha = await git(work, "rev-parse", "HEAD");
+
+    // Raised again under the new name: the person's decision still wins.
+    const again = await review(h, 2, [finding({ path: "src/sum.ts" })]);
+    expect(again.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+  });
+
+  it("follows a resolved finding on a file the PR added and then renamed", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    headSha = await commit({ "src/rates.ts": "export const rate = 1 / 0;\n" }, "add rates");
+    const added = finding({
+      path: "src/rates.ts",
+      line: 1,
+      title: "Rate divides by zero",
+      evidence: "1 / 0",
+    });
+    await review(h, 1, [added]);
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    await git(work, "mv", "src/rates.ts", "src/rate.ts");
+    headSha = await commit({}, "rename rates");
+
+    const again = await review(h, 2, [{ ...added, path: "src/rate.ts" }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+  });
+
   it("skips following findings when there are none", async () => {
     const h = harness();
     await review(h, 1);

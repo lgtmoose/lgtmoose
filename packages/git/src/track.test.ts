@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cloneAtSha } from "./clone.js";
-import { changedPaths, diffCommits } from "./diff.js";
+import { changedPaths, diffCommits, pathsOf, rawDiff } from "./diff.js";
 import { FixtureRepo } from "./testing/fixture.js";
 import { trackLine, trackLines } from "./track.js";
 
@@ -68,6 +68,34 @@ describe("trackLines", () => {
       ],
     );
     expect(result).toEqual([{ path: "new.ts", line: 4 }, undefined, { path: "same.ts", line: 3 }]);
+  });
+
+  it("reuses a file list it's given instead of reading it again", async () => {
+    await fixture.write({ "old.ts": lines(10) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    const to = await fixture.commit("after");
+    const cloned = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const raws: string[][] = [];
+    const repo = {
+      ...cloned,
+      git: (args: readonly string[], options?: Parameters<typeof cloned.git>[1]) => {
+        if (args.includes("--raw")) raws.push([...args]);
+        return cloned.git(args, options);
+      },
+    };
+    const raw = await rawDiff(repo, from, to);
+    expect(pathsOf(raw)).toEqual([{ path: "new.ts", oldPath: "old.ts", status: "renamed" }]);
+    expect(await trackLines(repo, from, to, [{ path: "old.ts", line: 4 }], raw)).toEqual([
+      { path: "new.ts", line: 4 },
+    ]);
+    // One file list for both.
+    expect(raws).toHaveLength(1);
   });
 });
 

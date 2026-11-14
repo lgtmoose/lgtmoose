@@ -1,5 +1,5 @@
 import type { Repo } from "./clone.js";
-import { diffCommits, type FileDiff } from "./diff.js";
+import { diffCommits, type FileDiff, type RawDiff } from "./diff.js";
 
 /** A line of a file at some commit. */
 export interface LineRef {
@@ -41,12 +41,17 @@ export async function trackLines(
   fromSha: string,
   toSha: string,
   lines: readonly LineRef[],
+  /** `fromSha..toSha`'s file list from `rawDiff`, when it's been read already. */
+  raw?: RawDiff,
 ): Promise<(LineRef | undefined)[]> {
   if (lines.length === 0) return [];
   const files = new Map<string, FileDiff>();
   if (fromSha !== toSha) {
     const paths = [...new Set(lines.map((ref) => ref.path))];
-    for (const file of await diffCommits(repo, fromSha, toSha, { paths })) {
+    for (const file of await diffCommits(repo, fromSha, toSha, {
+      paths,
+      ...(raw === undefined ? {} : { raw }),
+    })) {
       files.set(file.oldPath ?? file.path, file);
     }
   }

@@ -96,7 +96,8 @@ const STATUS: Record<string, FileStatus> = {
 
 const GITLINK = "160000";
 
-interface RawEntry {
+/** One entry of `git diff --raw`. Read through `ChangedPath`s; kept whole to reuse a diff. */
+export interface RawEntry {
   status: FileStatus;
   oldMode: string;
   newMode: string;
@@ -202,6 +203,7 @@ async function diffRange(
   {
     detectMechanical = true,
     paths,
+    raw: reused,
   }: {
     detectMechanical?: boolean;
     /**
@@ -209,20 +211,27 @@ async function diffRange(
      * comes from the whole diff, and only the patch is limited (to both sides' paths).
      */
     paths?: readonly string[];
+    /** This range's file list from `rawDiff`, so it isn't read again. */
+    raw?: RawDiff;
   } = {},
 ): Promise<FileDiff[]> {
+  const reuse = reused !== undefined && reused.from === from && reused.to === to;
+  const readRaw = async () =>
+    reuse && reused !== undefined
+      ? [...reused.entries]
+      : parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]));
   let entries: RawEntry[];
   let patch: string;
   if (paths === undefined) {
     const [raw, text] = await Promise.all([
-      repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]),
+      readRaw(),
       repo.git([...DIFF_FLAGS, "--unified=3", from, to]),
     ]);
-    entries = parseRaw(raw);
+    entries = raw;
     patch = text;
   } else {
     const wanted = new Set(paths);
-    entries = parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to])).filter(
+    entries = (await readRaw()).filter(
       (entry) => wanted.has(entry.oldPath) || wanted.has(entry.newPath),
     );
     const sides = [...new Set(entries.flatMap((entry) => [entry.oldPath, entry.newPath]))];
@@ -290,13 +299,29 @@ export interface ChangedPath {
   status: FileStatus;
 }
 
+/** The file list of `from..to` (`git diff --raw`), to read once and reuse. */
+export interface RawDiff {
+  readonly from: string;
+  readonly to: string;
+  readonly entries: readonly RawEntry[];
+}
+
+/** Reads `from..to`'s file list once: for `pathsOf`, `diffCommits` and `trackLines`. */
+export async function rawDiff(repo: Repo, from: string, to: string): Promise<RawDiff> {
+  return { from, to, entries: parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to])) };
+}
+
 /**
  * The files `from..to` changes, with renames found, from `git diff --raw` alone: no patch and
  * no file contents, so it's cheap however big the diff is.
  */
 export async function changedPaths(repo: Repo, from: string, to: string): Promise<ChangedPath[]> {
-  const entries = parseRaw(await repo.git([...DIFF_FLAGS, "--raw", "-z", from, to]));
-  return entries.map((entry) => {
+  return pathsOf(await rawDiff(repo, from, to));
+}
+
+/** The files a `rawDiff` changes. */
+export function pathsOf(raw: RawDiff): ChangedPath[] {
+  return raw.entries.map((entry) => {
     const path = keyOf(entry);
     return {
       path,
@@ -314,7 +339,7 @@ export function diffCommits(
   repo: Repo,
   from: string,
   to: string,
-  options: { paths?: readonly string[] } = {},
+  options: { paths?: readonly string[]; raw?: RawDiff } = {},
 ): Promise<FileDiff[]> {
   return diffRange(repo, from, to, { detectMechanical: false, ...options });
 }

@@ -5,6 +5,8 @@
 export { cloneAtSha, githubCloneUrl, type CloneOptions, type Repo } from "./clone.js";
 export {
   changedPaths,
+  pathsOf,
+  rawDiff,
   diffCommits,
   noLongerAdded,
   readingDepth,
@@ -13,6 +15,7 @@ export {
   reviewDiff,
   type ReadingDepth,
   type ChangedPath,
+  type RawDiff,
   type DiffOptions,
   type FileDiff,
   type FileStatus,
