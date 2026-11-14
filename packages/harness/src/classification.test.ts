@@ -101,6 +101,17 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   ["code=429 msg=slow", R, R],
   ['{ code: 429, message: "slow down" }', R, R],
   ["{ status: 401, statusText: 'nope' }", A, A],
+  // "status" with ":" or "=" is a key-value field, like statusCode (round 9).
+  ["status:429", R, R],
+  ["status : 401", A, A],
+  ['status: "429"', R, R],
+  ["status: 429 - rate limited", R, R],
+  ["status: 429 (rate limited)", R, R],
+  ["status: 429 rows", R, R],
+  // An object literal needs its "{" on the same line, not just a comma in prose (round 9).
+  ["queued 12 files, code: 429 skipped", N, N],
+  ["{ name: 'x',\n code: 429 }", N, N],
+  ["{ name: 'x', code: 429 }", R, R],
   // Status fields and words.
   ["statusCode: 429", R, R],
   ['"statusCode": 401', A, A],
@@ -149,7 +160,6 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   // word after the code that isn't a status text makes it a count (rounds 7 and 8).
   ["status 429 rows", N, N],
   ["status 429 from server", N, N],
-  ["status: 429 rows", N, N],
   // A bare "error" or "code" prefix only at the end of the line or before a status text.
   ["found error 401.", N, N],
   ["Error: 429, Passed: 12", N, N],
@@ -248,6 +258,13 @@ const GENERIC: readonly (readonly [string, boolean])[] = [
   ["An error occurred. Error code: 13.", true],
   ["Request failed. Correlation ID: abc-123", true],
   ["Request failed. Error code: 429.", false],
+  // A named error code may be the cause; only numeric non-HTTP codes are hints (round 9).
+  ["Request failed. Error code: model_not_found.", false],
+  ["Request failed. Error code: context_length_exceeded", false],
+  // An ID hint needs a colon and an id-like value (round 9).
+  ["Request failed. Request ID invalid.", false],
+  ["Request failed. Request ID: abc.", false],
+  ["Request failed. Request ID: 3f2a9c1e-77b0-4d2e.", true],
   // Sentences split at line breaks too (round 8).
   ["Request failed\nPlease try again", true],
   ["Request failed\nThe model is overloaded", false],
@@ -272,6 +289,8 @@ const REPORTED: readonly (readonly [string | undefined, string | undefined, Kind
   ["Request failed", "Rate limit reached for requests", N],
   ["The model returned malformed tool calls.", "HTTPError: 401", N],
   [undefined, undefined, N],
+  // Codex's failure event without a message is an empty report (round 9).
+  ["", "HTTPError: 401", A],
 ];
 
 describe.each(REPORTED)("reported %j with stderr %j", (reported, stderr, kind) => {

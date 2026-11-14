@@ -193,6 +193,7 @@ describe("CodexHarness", () => {
     ["Request failed", "HTTPError: 401", "auth"],
     ["Request failed", "You've hit your usage limit", "process"],
     ["sandbox error: something broke", "HTTPError: 401", "process"],
+    [undefined, "HTTPError: 401", "auth"],
   ] as const)(
     "reads stderr's machine signals behind a generic failure event: %j with %j is %s",
     async (message, stderr, kind) => {

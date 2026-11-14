@@ -101,9 +101,10 @@ const ERROR_PREFIX = /^(?:[a-z]*error\s*:\s*)+/i;
 const GENERIC_ERROR =
   /^(?:request failed|unknown error|internal error|error|failed|an? (?:unexpected |unknown |internal )?error(?: occurred| has occurred)?|something went wrong)$/i;
 /**
- * Sentences that say nothing about the cause: what to do next, or only an identifier ("Request
- * ID: 1234", "Trace ID: abc", "Error code: 13"). An error code that is an HTTP status (4xx, 5xx)
- * isn't a hint: it may be the cause.
+ * Sentences that say nothing about the cause: what to do next, or only an identifier: an ID
+ * with a colon and an id-like value ("Request ID: 1234", "Trace ID: 9f8e7d"), or a numeric
+ * error code that isn't an HTTP status ("Error code: 13"). A named code
+ * ("context_length_exceeded") or an HTTP status may be the cause, so it isn't a hint.
  */
 const HINT = new RegExp(
   [
@@ -111,8 +112,8 @@ const HINT = new RegExp(
     String.raw`see .{0,200} for (?:more )?details`,
     String.raw`check the logs(?: for (?:more )?details)?`,
     String.raw`contact support`,
-    String.raw`(?:request|trace|correlation|span) id:? ?[\w-]{1,100}`,
-    String.raw`error code:? ?(?![45]\d\d\b)[\w-]{1,40}`,
+    String.raw`(?:request|trace|correlation|span) id: ?(?=[\w-]*\d|[0-9a-f-]{8,}$)[\w-]{1,100}`,
+    String.raw`error code:? ?(?![45]\d\d\b)\d{1,10}`,
   ]
     .map((form) => `^(?:${form})$`)
     .join("|"),

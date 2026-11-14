@@ -65,7 +65,8 @@ export function parseCodexEvents(stdout: string): CodexRun {
         break;
       }
       case "turn.failed": {
-        run.failure = text(record(event.error)?.message) ?? "the turn failed";
+        // No message: an empty report, which counts as generic, so stderr may explain it.
+        run.failure = text(record(event.error)?.message) ?? "";
         break;
       }
       case "error": {

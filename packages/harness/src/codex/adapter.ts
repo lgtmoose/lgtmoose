@@ -376,7 +376,7 @@ function failIfUnusable(
   if (proc.stopped === "output_limit")
     throw fail("process", "codex wrote more output than allowed.");
   if (run.completed && run.failure === undefined) return;
-  const detail = run.failure ?? (proc.stderr.trim() || "no output");
+  const detail = run.failure || proc.stderr.trim() || "no output";
   // Wording only in Codex's own failure event; stderr for machine signals, without a failure
   // event or behind a generic one, as for Cursor.
   const limit = classifyReportedFailure(run.failure, proc.stderr, classifyFailure);

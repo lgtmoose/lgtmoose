@@ -30,13 +30,14 @@ const LINE_END = String.raw`(?=[ \t]*(?:$|${STATUS_TEXT}))`;
  * - "HTTP 429", "HTTP/1.1 401", "HTTP error 429", "HTTP 401 from upstream";
  * - the code with its status text: "401 Unauthorized", "429 (Too Many Requests)";
  * - an error class and a colon: "RateLimitError: 429 Rate limit reached", "HTTPError: 401";
- * - key-value fields: "statusCode: 429", "status_code=401", "errorCode: 429", "status=429",
- *   "code=401", `"status": 429`, and `{ code: 429, … }` in an object literal.
+ * - key-value fields: "status: 429", "status:429", `status: "429"`, "statusCode: 429",
+ *   "status_code=401", "errorCode: 429", "code=401", `"code": 429`, and `{ code: 429, … }` in an
+ *   object literal opened on the same line.
  *
  * Weak forms follow the count rule: the code must end its clause or carry a status text, so
  * "status 429 rows" and "search returned 429 results" don't count:
  * - after "returned", "responded with", "failed with", "status" or "status code": "server
- *   returned 401", "responded with 429, retrying", "status: 429", "status code 429";
+ *   returned 401", "responded with 429, retrying", "status 429", "status code 429";
  * - after a bare "error" or "code", or an error class without a colon, only at the end of the
  *   line or before a status text: "Error: 401", "code: 429", "HTTPError 401", "Response code 401
  *   (Unauthorized)"; not "found error 401." or "Error: 429, Passed: 12".
@@ -46,12 +47,12 @@ const FORMS: readonly RegExp[] = [
   /\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b/gi,
   new RegExp(String.raw`\b(\d{3}) ${STATUS_TEXT}`, "gi"),
   /\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b/g,
-  /\b(?:statusCode|status_code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b/gi,
-  /\b(?:status|code) ?= ?"?(\d{3})\b/gi,
+  /\b(?:status|statusCode|status_code|errorCode|error_code)"?\s*[:=]\s*"?(\d{3})\b/gi,
+  /\bcode\s*=\s*"?(\d{3})\b/gi,
   /"(?:status|code)" ?: ?"?(\d{3})\b/gi,
-  /[{,]\s*(?:status|code)\s*:\s*(\d{3})\b/gi,
+  /\{[^{}\n]*?\b(?:status|code)\s*:\s*(\d{3})\b/gi,
   new RegExp(
-    String.raw`\b(?:returned|responded with|failed with|status code:?|status:?) (\d{3})${CLAUSE_END}`,
+    String.raw`\b(?:returned|responded with|failed with|status code:?|status) (\d{3})${CLAUSE_END}`,
     "gim",
   ),
   new RegExp(
