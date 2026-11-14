@@ -4,7 +4,7 @@ import {
   type ListInferenceProfilesCommand,
 } from "@aws-sdk/client-bedrock";
 import { describe, expect, it } from "vitest";
-import { awsBedrockAccess, type BedrockSender } from "./bedrock.js";
+import { awsBedrockAccess, bedrockDetail, type BedrockSender } from "./bedrock.js";
 
 const AVAILABLE = {
   regionAvailability: "AVAILABLE",
@@ -125,6 +125,30 @@ describe("awsBedrockAccess", () => {
       { text: "model access not granted", fix: "access" },
       { text: "agreement pending", fix: "wait" },
     ]);
+  });
+
+  it("adds Bedrock's own reason to an agreement in error, cleaned and cut short", async () => {
+    const client: BedrockSender = {
+      send: (command) =>
+        command instanceof ListFoundationModelsCommand
+          ? Promise.resolve({ modelSummaries: [{ modelId: "anthropic.err" }] })
+          : Promise.resolve({
+              ...AVAILABLE,
+              agreementAvailability: {
+                status: "ERROR",
+                errorMessage: "Offer\n\u001b[31mexpired\t ",
+              },
+            }),
+    };
+    const [model] = await awsBedrockAccess(client, "eu-west-2").anthropicModels();
+    expect(model?.problems).toEqual([
+      { text: "agreement error (Offer [31mexpired)", fix: "access" },
+    ]);
+    expect(bedrockDetail(undefined)).toBe("");
+    expect(bedrockDetail(" \n ")).toBe("");
+    const long = bedrockDetail("x".repeat(500));
+    expect(long).toHaveLength(" ()".length + 200);
+    expect(long.endsWith("…)")).toBe(true);
   });
 
   it("treats one model Bedrock won't describe as that model's problem", async () => {

@@ -647,6 +647,20 @@ describe("auth", () => {
     );
   });
 
+  it("bedrock: a profile pin of an on-demand-only model is wrong, even when profiles can't be listed", async () => {
+    const config = pinned({ fast: `us.${HAIKU}`, standard: SONNET, deep: OPUS });
+    const result = await harness({
+      config,
+      models: [model(HAIKU, { inferenceTypes: ["ON_DEMAND"] }), model(SONNET), model(OPUS)],
+      noProfileList: true,
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      `fast (us.${HAIKU}): us.${HAIKU}: has no inference profile; use ${HAIKU}`,
+    );
+    expect(result.stderr).toContain("  - Fix the id in bedrock.models.fast.");
+  });
+
   it("bedrock: a global. id is checked against the list too", async () => {
     const config = pinned({ fast: `global.${HAIKU}`, standard: SONNET, deep: OPUS });
     const result = await harness({

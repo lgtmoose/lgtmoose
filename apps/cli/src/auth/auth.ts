@@ -834,6 +834,9 @@ function idVerdict(
   let unchecked = false;
   if (prefix === undefined) {
     if (!supports(access, "ON_DEMAND")) wrongPin("can only be called through an inference profile");
+  } else if (!supports(access, "INFERENCE_PROFILE")) {
+    // Bedrock says it has no profiles at all: any profile id is wrong, listed or not.
+    wrongPin("has no inference profile");
   } else if (facts.profiles === undefined) {
     unchecked = true;
   } else if (!facts.profiles.some((profile) => profile.id === subject && profile.modelId === id)) {

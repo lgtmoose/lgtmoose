@@ -97,6 +97,28 @@ export interface BedrockSender {
   }>;
 }
 
+/** The longest piece of Bedrock's own wording put in a problem. */
+const DETAIL_LIMIT = 200;
+
+/**
+ * Bedrock's explanation, as ` (…)` on one line: control characters and runs of whitespace
+ * become single spaces, and it's cut to DETAIL_LIMIT characters. Empty when there is none.
+ */
+export function bedrockDetail(message: string | undefined): string {
+  if (message === undefined) return "";
+  let clean = "";
+  for (const char of message) {
+    const code = char.codePointAt(0) ?? 0;
+    clean += code < 0x20 || code === 0x7f ? " " : char;
+  }
+  clean = clean.replace(/\s+/g, " ").trim();
+  if (clean === "") return "";
+  if (clean.length <= DETAIL_LIMIT) return ` (${clean})`;
+  // Cut by code units, without leaving half a surrogate pair at the end.
+  const cut = clean.slice(0, DETAIL_LIMIT - 1).replace(/[\uD800-\uDBFF]$/, "");
+  return ` (${cut}…)`;
+}
+
 /** Context-window variants such as `…-v1:0:200k` share their base model's access. */
 export const CONTEXT_VARIANT = /:\d+k$/;
 
@@ -172,8 +194,12 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
           }
           const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
           if (agreement !== "AVAILABLE") {
+            const why =
+              agreement === "ERROR"
+                ? bedrockDetail(availability.agreementAvailability?.errorMessage)
+                : "";
             problems.push({
-              text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
+              text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}${why}`,
               // A pending agreement is on its way; anything else needs accepting.
               fix: agreement === "PENDING" ? "wait" : "access",
             });
