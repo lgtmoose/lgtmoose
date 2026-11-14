@@ -128,10 +128,14 @@ describe("readReconcileEnv", () => {
       githubAppSecretArn: "arn:app",
       allowedOrgs: ["acme", "beta"],
       shadow: true,
+      lookbackHours: 24,
     });
-    expect(readReconcileEnv({ ...env, LGTMOOSE_SHADOW: "false" })).toMatchObject({
-      shadow: false,
-    });
+    expect(
+      readReconcileEnv({ ...env, LGTMOOSE_SHADOW: "false", RECONCILE_LOOKBACK_HOURS: "6" }),
+    ).toMatchObject({ shadow: false, lookbackHours: 6 });
+    expect(() => readReconcileEnv({ ...env, RECONCILE_LOOKBACK_HOURS: "1.5" })).toThrow(
+      "RECONCILE_LOOKBACK_HOURS",
+    );
   });
 
   it("names missing variables, and an allowed-orgs list with no org in it", () => {

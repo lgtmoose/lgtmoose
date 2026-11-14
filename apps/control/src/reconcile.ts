@@ -11,7 +11,11 @@ import { SKIP_LABEL, reviewJobGroupId, type ReviewJob } from "@lgtmoose/core";
  * by a bot, its owner allowed):
  *
  * - Not recorded, or its head is one no run has started for: a review job is queued (a missed
- *   push). The dispatcher dedupes it against an execution already running for that head.
+ *   push), but only for a PR updated within the lookback window (`lookbackMs`). An older one
+ *   counts as `skippedStale`: a missed webhook is recent, and a first run after a deploy (or a
+ *   newly added repository) mustn't review every old open PR. That also stops a PR the
+ *   dispatcher drops without recording from being queued forever. The dispatcher dedupes a
+ *   queued job against an execution already running for that head.
  * - Its head has a posted run, but the PR's record is another head's (a force-push back to a
  *   reviewed commit, which the dispatcher treats as a duplicate): the PR's record and status
  *   label are put back to that run's.
@@ -119,6 +123,8 @@ export interface ReconcileDeps {
   allowedOrgs: readonly string[];
   /** Labels are left alone in shadow mode: runs don't write them either. */
   shadow: boolean;
+  /** Reviews are queued only for PRs updated this recently (milliseconds). */
+  lookbackMs: number;
   log(message: string, fields?: Record<string, unknown>): void;
   now?: () => Date;
 }
@@ -137,6 +143,8 @@ export interface ReconcileCounts {
   statesResynced: number;
   /** PRs whose head has a run that hasn't posted (running or failed). */
   unreviewed: number;
+  /** Unrecorded PRs and missed heads left alone: not updated within the lookback window. */
+  skippedStale: number;
   /** Installations, repositories or PRs that couldn't be checked, and failed label syncs. */
   errors: number;
 }
@@ -149,6 +157,7 @@ function emptyCounts(): ReconcileCounts {
     labelsResynced: 0,
     statesResynced: 0,
     unreviewed: 0,
+    skippedStale: 0,
     errors: 0,
   };
 }
@@ -263,8 +272,9 @@ async function reconcilePull(
   const { deps, counts, repo } = context;
   const fields = { repo, prNumber: pull.number, headSha: pull.headSha };
   if (record === undefined) {
-    await queueReview(context, pull, "pr_opened");
-    deps.log("reconcile: queued a review for a PR never recorded", fields);
+    if (await queueReview(context, pull, "pr_opened")) {
+      deps.log("reconcile: queued a review for a PR never recorded", fields);
+    }
     return;
   }
   if (record.lastReviewedSha === pull.headSha) {
@@ -287,8 +297,7 @@ async function reconcilePull(
     } else if (record.headSha === pull.headSha) {
       // A run started for this head and hasn't posted: running, or failed.
       counts.unreviewed += 1;
-    } else {
-      await queueReview(context, pull, "pr_updated");
+    } else if (await queueReview(context, pull, "pr_updated")) {
       deps.log("reconcile: queued a review for a missed head", {
         ...fields,
         recordedHead: record.headSha,
@@ -335,7 +344,15 @@ async function queueReview(
   context: RepoContext,
   pull: OpenPull,
   kind: "pr_opened" | "pr_updated",
-): Promise<void> {
+): Promise<boolean> {
+  // Only a PR updated within the lookback window: older ones weren't missed just now. An
+  // unreadable time counts as old.
+  const now = (context.deps.now?.() ?? new Date()).getTime();
+  const updated = Date.parse(pull.updatedAt);
+  if (!(now - updated <= context.deps.lookbackMs)) {
+    context.counts.skippedStale += 1;
+    return false;
+  }
   const deliveryId = reconcileDeliveryId(
     `${context.repo.toLowerCase()}#${pull.number}@${pull.headSha}`,
   );
@@ -347,6 +364,7 @@ async function queueReview(
     },
   );
   context.counts.missedHeads += 1;
+  return true;
 }
 
 async function resyncLabel(context: RepoContext, pull: OpenPull, target: string): Promise<void> {
@@ -383,6 +401,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     labelsResynced: "LabelsResynced",
     statesResynced: "StatesResynced",
     unreviewed: "Unreviewed",
+    skippedStale: "SkippedStale",
     errors: "ReconcileErrors",
   };
   const entries = Object.entries(names) as [keyof ReconcileCounts, string][];

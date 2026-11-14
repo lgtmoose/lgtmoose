@@ -519,7 +519,11 @@ describe("reconciler", () => {
     expect(fn.Properties.VpcConfig).toBeDefined();
     expect(fn.Properties.ReservedConcurrentExecutions).toBe(1);
     const env = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(env).toMatchObject({ ALLOWED_ORGS: "lgtmoose", LGTMOOSE_SHADOW: "true" });
+    expect(env).toMatchObject({
+      ALLOWED_ORGS: "lgtmoose",
+      LGTMOOSE_SHADOW: "true",
+      RECONCILE_LOOKBACK_HOURS: "24",
+    });
   });
 
   it("may send to the job queue and read the database and App secrets, and nothing else", () => {

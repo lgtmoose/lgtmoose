@@ -98,6 +98,7 @@ function setup(options: Setup = {}) {
     },
     allowedOrgs: ["Acme"],
     shadow: options.shadow ?? false,
+    lookbackMs: 24 * 3_600_000,
     log: (message) => logs.push(message),
     now: () => new Date("2026-11-14T12:00:00Z"),
   };
@@ -134,6 +135,50 @@ describe("reconcile", () => {
     });
     expect(await reconcile(deps)).toMatchObject({ missedHeads: 1 });
     expect(sent[0]?.job).toMatchObject({ kind: "pr_updated", headSha: HEAD });
+  });
+
+  it("queues no review for an unrecorded PR not updated within the lookback", async () => {
+    // Now is 2026-11-14T12:00Z; the window is 24 hours.
+    const { deps, sent } = setup({ pulls: [pull({ updatedAt: "2026-11-13T11:59:00Z" })] });
+    expect(await reconcile(deps)).toMatchObject({ missedHeads: 0, skippedStale: 1 });
+    expect(sent).toEqual([]);
+  });
+
+  it("queues no review for a missed head not updated within the lookback", async () => {
+    const { deps, sent } = setup({
+      pulls: [pull({ updatedAt: "2026-10-01T00:00:00Z" })],
+      records: new Map([[7, recorded({ headSha: OLD, lastReviewedSha: OLD })]]),
+    });
+    expect(await reconcile(deps)).toMatchObject({ missedHeads: 0, skippedStale: 1 });
+    expect(sent).toEqual([]);
+  });
+
+  it("still syncs labels and restores records of PRs older than the lookback", async () => {
+    const old = "2026-10-01T00:00:00Z";
+    const { deps, synced, restores } = setup({
+      pulls: [
+        pull({ number: 7, updatedAt: old, labels: [] }),
+        pull({ number: 8, updatedAt: old, labels: [] }),
+      ],
+      records: new Map([
+        [7, recorded({ statusLabel: "LGTM" })],
+        [8, recorded({ id: "pr-2", headSha: OLD, lastReviewedSha: OLD })],
+      ]),
+      posted: {
+        runId: "run-x",
+        headSha: HEAD,
+        statusLabel: "Requires Changes",
+        reviewEvent: undefined,
+        reviewId: undefined,
+      },
+    });
+    expect(await reconcile(deps)).toMatchObject({
+      labelsResynced: 2,
+      statesResynced: 1,
+      skippedStale: 0,
+    });
+    expect(synced.map((entry) => entry.number)).toEqual([7, 8]);
+    expect(restores).toHaveLength(1);
   });
 
   it("queues nothing for a head a run started for that hasn't posted", async () => {
@@ -307,6 +352,7 @@ describe("metricsLine", () => {
           labelsResynced: 2,
           statesResynced: 0,
           unreviewed: 1,
+          skippedStale: 4,
           errors: 0,
         },
         new Date(1000),
@@ -316,7 +362,12 @@ describe("metricsLine", () => {
     };
     expect(line._aws.Timestamp).toBe(1000);
     expect(line._aws.CloudWatchMetrics[0]?.Namespace).toBe("LGTMoose");
-    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(7);
-    expect(line).toMatchObject({ OpenPullRequests: 3, MissedHeads: 1, LabelsResynced: 2 });
+    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(8);
+    expect(line).toMatchObject({
+      OpenPullRequests: 3,
+      MissedHeads: 1,
+      LabelsResynced: 2,
+      SkippedStale: 4,
+    });
   });
 });

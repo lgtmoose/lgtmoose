@@ -107,6 +107,8 @@ export interface WorkflowStackProps extends StackProps {
   allowedOrgs: readonly string[];
   /** Minutes between reconciler runs. */
   reconcileIntervalMinutes: number;
+  /** Hours back the reconciler queues reviews for. */
+  reconcileLookbackHours: number;
   /**
    * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
    * (`sandboxBuildArgs`). Off by default.
@@ -342,6 +344,7 @@ export class WorkflowStack extends Stack {
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         LGTMOOSE_SHADOW: String(props.shadow),
+        RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

@@ -123,6 +123,13 @@
       "minimum": 5,
       "maximum": 1440
     },
+    "reconcileLookbackHours": {
+      "default": 24,
+      "description": "Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 720
+    },
     "shadow": {
       "default": true,
       "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",

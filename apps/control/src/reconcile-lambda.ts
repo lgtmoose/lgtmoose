@@ -46,6 +46,7 @@ function reconcileDeps(): Promise<ReconcileDeps> {
       queue: sqsReconcileQueue(new SQSClient({}), env.jobQueueUrl),
       allowedOrgs: env.allowedOrgs,
       shadow: env.shadow,
+      lookbackMs: env.lookbackHours * 3_600_000,
       log,
     };
   })().catch((error: unknown) => {

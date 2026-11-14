@@ -143,6 +143,8 @@ describe("sqsReconcileQueue", () => {
       queue,
       allowedOrgs: ["acme"],
       shadow: true,
+      lookbackMs: 3_600_000,
+      now: () => new Date("2026-11-14T10:30:00Z"),
       log: () => {},
     });
     expect(sent).toHaveLength(1);
