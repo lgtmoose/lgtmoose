@@ -123,7 +123,8 @@ export interface GitHubPosterOptions {
    * `<slug>[bot]`.
    */
   appId?: number;
-  appSlug?: string;
+  /** Asked only when a review is looked up, so steps that never do skip the request. */
+  appSlug?: () => Promise<string>;
 }
 
 /** A review as the reviews endpoint lists it. */
@@ -147,21 +148,19 @@ export class GitHubPoster implements Poster {
     return comment.user?.type === "Bot";
   }
 
-  /** Whether the App's bot wrote the review (or, without its slug, a bot did). */
-  private ourReview(review: ListedReview): boolean {
-    if (review.user?.type !== "Bot") return false;
-    return (
-      this.options.appSlug === undefined || review.user.login === `${this.options.appSlug}[bot]`
-    );
-  }
-
   async reviewPosted(pull: PullRef, marker: string): Promise<boolean> {
     const comment = reviewMarkerComment(marker);
+    // The App's bot (or, without its slug, any bot): anyone can quote a marker.
+    const bot =
+      this.options.appSlug === undefined ? undefined : `${await this.options.appSlug()}[bot]`;
     const reviews = await this.github.list<ListedReview>(
       `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
     );
     return reviews.some(
-      (review) => this.ourReview(review) && review.body?.includes(comment) === true,
+      (review) =>
+        review.user?.type === "Bot" &&
+        (bot === undefined || review.user.login === bot) &&
+        review.body?.includes(comment) === true,
     );
   }
 

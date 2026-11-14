@@ -323,7 +323,7 @@ describe("GitHubPoster", () => {
       { status: 200, body: reviews },
     ]);
     const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
-    const p = new GitHubPoster(github, { appSlug: "lgtmoose" });
+    const p = new GitHubPoster(github, { appSlug: async () => "lgtmoose" });
     expect(await p.reviewPosted(PULL, "lgtmoose-run:r1")).toBe(false);
     expect(await p.reviewPosted(PULL, "lgtmoose-run:r2")).toBe(false);
     expect(await p.reviewPosted(PULL, "lgtmoose-run:r3")).toBe(true);

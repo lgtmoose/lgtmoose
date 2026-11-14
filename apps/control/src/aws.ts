@@ -420,8 +420,6 @@ export async function awsControlDeps(
       });
       // Bounded well under the post step's heartbeat timeout: a hung write fails the attempt.
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
-      // The App's bot is `<slug>[bot]`: how its own reviews are told from others'.
-      const appSlug = options.shadow ? undefined : await slug();
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         token,
@@ -435,7 +433,8 @@ export async function awsControlDeps(
               })
             : new GitHubPoster(client, {
                 appId: app.appId,
-                ...(appSlug === undefined ? {} : { appSlug }),
+                // Its bot is `<slug>[bot]`: how its own reviews are told from others'.
+                appSlug: slug,
               }),
       };
     },
