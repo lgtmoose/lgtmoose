@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
-import type { FileDiff } from "@lgtmoose/git";
+import { REMOVED_LINES_SHOWN, readingDepth, type FileDiff, type ReadingDepth } from "@lgtmoose/git";
 import {
   DEFAULT_SKIP,
   TEST_GLOBS,
@@ -12,8 +12,8 @@ import {
 } from "./classify.js";
 import { BINARY_LOCKFILE_NOTE, lockfileNotes } from "./lockfile.js";
 
-/** How closely to read a file. "move" and "mechanical" files only need a glance. */
-export type ReadingDepth = "full" | "move" | "mechanical";
+// How closely to read a file: one rule, in @lgtmoose/git, which the incremental diff uses too.
+export { readingDepth, type ReadingDepth } from "@lgtmoose/git";
 
 /** Tiers 1 to 7 come from `tiers` globs; 1 is read first. */
 export type Tier = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof OTHER_TIER | typeof TEST_TIER;
@@ -151,19 +151,14 @@ const byPath = (a: string, b: string) => {
   return 0;
 };
 
-export function readingDepth(file: FileDiff): ReadingDepth {
-  if (file.moved) return "move";
-  if (file.mechanical) return "mechanical";
-  return "full";
-}
-
 /**
  * How many diff lines a file puts into the prompt, which is what batches are sized by. A file
  * the PR no longer changes at all (no hunks) still lists lines removed since the last review.
  */
 export function changedLines(file: FileDiff): number {
-  if (file.hunks.length === 0) return file.removedSinceLastReview?.length ?? 0;
-  let count = 0;
+  // Lines removed since the last review are in the prompt too, up to the shown limit.
+  const removed = file.removedSinceLastReview?.length ?? 0;
+  let count = Math.min(removed, REMOVED_LINES_SHOWN) + (removed > REMOVED_LINES_SHOWN ? 1 : 0);
   for (const hunk of file.hunks) {
     for (const line of hunk.lines) if (line.kind !== "context") count += 1;
   }

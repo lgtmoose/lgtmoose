@@ -31,6 +31,29 @@ describe("GitHubClient", () => {
     await expect(github.request("GET", "/user")).rejects.toThrow("Bad credentials");
   });
 
+  it("sends GraphQL to the API base's GraphQL endpoint, for github.com and Enterprise", async () => {
+    for (const [apiUrl, url] of [
+      [undefined, "https://api.github.com/graphql"],
+      ["https://ghe.example.com/api/v3", "https://ghe.example.com/api/graphql"],
+      ["https://ghe.example.com/api/v3/", "https://ghe.example.com/api/graphql"],
+    ] as const) {
+      const fake = fakeFetch([{ status: 200, body: { data: { ok: true } } }]);
+      const github = new GitHubClient({
+        token: async () => TOKEN,
+        fetch: fake.fetch,
+        ...(apiUrl === undefined ? {} : { apiUrl }),
+      });
+      expect(github.graphqlUrl).toBe(url);
+      expect(await github.graphql("query { ok }", { n: 1 })).toEqual({ data: { ok: true } });
+      expect(fake.calls[0]).toMatchObject({
+        method: "POST",
+        url,
+        body: { query: "query { ok }", variables: { n: 1 } },
+        auth: `Bearer ${TOKEN}`,
+      });
+    }
+  });
+
   it("gives up on a request that takes longer than its timeout", async () => {
     const hang: typeof fetch = (_url, init) =>
       new Promise((_, reject) => {
@@ -79,6 +102,77 @@ describe("GitHubPoster", () => {
       body: { commit_id: "abc", event: "REQUEST_CHANGES", comments: [expect.any(Object)] },
       auth: `Bearer ${TOKEN}`,
     });
+  });
+
+  it("reads back each inline comment's ID, matched by place", async () => {
+    const [comment] = review.comments;
+    if (comment === undefined) throw new Error("expected a comment");
+    const { poster: p, calls } = poster([
+      { status: 200, body: { id: 11 } },
+      {
+        status: 200,
+        body: [
+          { id: 900, path: "other.ts", side: "RIGHT", line: comment.line },
+          { id: 901, path: comment.path, side: comment.side, line: comment.line },
+        ],
+      },
+    ]);
+    const posted = await p.submitReview(PULL, "abc", review);
+    expect(posted.commentIds).toEqual([901]);
+
+    // Outdated already (the PR moved on): no line, only the original one.
+    const { poster: o } = poster([
+      { status: 200, body: { id: 13 } },
+      {
+        status: 200,
+        body: [
+          {
+            id: 902,
+            path: comment.path,
+            side: null,
+            line: null,
+            original_side: comment.side,
+            original_line: comment.line,
+          },
+        ],
+      },
+    ]);
+    expect((await o.submitReview(PULL, "abc", review)).commentIds).toEqual([902]);
+
+    // Moved by a push meanwhile: the original line is the posted one.
+    const { poster: m } = poster([
+      { status: 200, body: { id: 14 } },
+      {
+        status: 200,
+        body: [
+          {
+            id: 903,
+            path: comment.path,
+            side: comment.side,
+            line: comment.line + 5,
+            original_side: comment.side,
+            original_line: comment.line,
+          },
+          {
+            id: 904,
+            path: comment.path,
+            side: comment.side,
+            line: comment.line,
+            original_side: comment.side,
+            original_line: comment.line - 2,
+          },
+        ],
+      },
+    ]);
+    expect((await m.submitReview(PULL, "abc", review)).commentIds).toEqual([903]);
+    expect(calls[1]).toMatchObject({
+      method: "GET",
+      url: "https://api.github.com/repos/acme/app/pulls/7/reviews/11/comments?per_page=100&page=1",
+    });
+
+    // The review is posted either way: an ID that can't be read is left out.
+    const { poster: q } = poster([{ status: 200, body: { id: 12 } }, { status: 500 }]);
+    expect((await q.submitReview(PULL, "abc", review)).commentIds).toEqual([undefined]);
   });
 
   it("moves comments into the body and retries once when GitHub refuses a position", async () => {

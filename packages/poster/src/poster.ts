@@ -18,6 +18,11 @@ export interface PostedReview {
   movedToBody: boolean;
   /** The payload that was posted (after the retry, when there was one). */
   payload: ReviewPayload;
+  /**
+   * Each of `payload.comments`' review-comment ID on GitHub, in the same order; undefined where
+   * it couldn't be read (and always in shadow mode). Used to follow the comment's thread.
+   */
+  commentIds: (number | undefined)[];
 }
 
 export interface SummaryCommentResult {
@@ -209,17 +214,60 @@ export class GitHubPoster implements Poster {
         body: sent.body,
         comments: sent.comments,
       });
+    let review: { id: number };
+    let posted = payload;
     try {
-      const review = await send(payload);
-      return { id: review.id, movedToBody: false, payload };
+      review = await send(payload);
     } catch (error) {
       // 422 usually means a comment position GitHub won't take (the diff changed, a line
       // outside a hunk). It doesn't say which, so all comments go into the body, once.
       if (!isStatus(error, 422) || payload.comments.length === 0) throw error;
-      const retry = withCommentsInBody(payload);
-      const review = await send(retry);
-      return { id: review.id, movedToBody: true, payload: retry };
+      posted = withCommentsInBody(payload);
+      review = await send(posted);
     }
+    return {
+      id: review.id,
+      movedToBody: posted !== payload,
+      payload: posted,
+      commentIds: await this.commentIds(`${path}/${review.id}/comments`, posted),
+    };
+  }
+
+  /**
+   * The review's comment IDs, matched to the payload's comments by place (path, side, line), in
+   * order. The original line and side are the posted commit's, which is what the payload gave;
+   * the current ones are GitHub's move of them to the PR's head (none once outdated), used only
+   * when there's no original. The review is already posted: if they can't be read, they're left
+   * undefined.
+   */
+  private async commentIds(path: string, payload: ReviewPayload): Promise<(number | undefined)[]> {
+    if (payload.comments.length === 0) return [];
+    let listed: {
+      id: number;
+      path: string;
+      side?: string | null;
+      line?: number | null;
+      original_side?: string | null;
+      original_line?: number | null;
+    }[];
+    try {
+      listed = await this.github.list(path);
+    } catch {
+      return payload.comments.map(() => undefined);
+    }
+    const used = new Set<number>();
+    return payload.comments.map((comment) => {
+      const match = listed.find(
+        (item) =>
+          !used.has(item.id) &&
+          item.path === comment.path &&
+          (item.original_side ?? item.side ?? "RIGHT") === comment.side &&
+          (item.original_line ?? item.line) === comment.line,
+      );
+      if (match === undefined) return undefined;
+      used.add(match.id);
+      return match.id;
+    });
   }
 
   async startCheckRun(pull: PullRef, headSha: string): Promise<number> {

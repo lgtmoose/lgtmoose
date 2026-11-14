@@ -1,0 +1,171 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cloneAtSha } from "./clone.js";
+import { changedPaths, diffCommits, pathsOf, rawDiff } from "./diff.js";
+import { FixtureRepo } from "./testing/fixture.js";
+import { trackLine, trackLines } from "./track.js";
+
+let fixture: FixtureRepo;
+beforeEach(async () => {
+  fixture = await FixtureRepo.create();
+});
+afterEach(async () => {
+  await fixture.destroy();
+});
+
+const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+
+async function track(
+  before: Record<string, string>,
+  change: () => Promise<void>,
+  refs: { path: string; line: number }[],
+) {
+  await fixture.write(before);
+  const from = await fixture.commit("before");
+  await change();
+  const to = await fixture.commit("after");
+  const repo = await cloneAtSha({
+    url: fixture.url,
+    dir: await fixture.cloneDir(),
+    headSha: to,
+    otherShas: [from],
+  });
+  return trackLines(repo, from, to, refs);
+}
+
+describe("trackLines", () => {
+  it("moves lines past insertions and deletions, and loses changed or deleted lines", async () => {
+    const text = lines(30)
+      .replace("line 2\n", "line 2\nnew a\nnew b\n")
+      .replace("line 10\n", "line 10 changed\n")
+      .replace("line 20\n", "");
+    const result = await track({ "a.ts": lines(30) }, () => fixture.write({ "a.ts": text }), [
+      { path: "a.ts", line: 1 },
+      { path: "a.ts", line: 5 },
+      { path: "a.ts", line: 10 },
+      { path: "a.ts", line: 20 },
+      { path: "a.ts", line: 25 },
+    ]);
+    expect(result).toEqual([
+      { path: "a.ts", line: 1 },
+      { path: "a.ts", line: 7 },
+      undefined,
+      undefined,
+      { path: "a.ts", line: 26 },
+    ]);
+  });
+
+  it("follows renames and loses lines of deleted files", async () => {
+    const result = await track(
+      { "old.ts": lines(10), "gone.ts": lines(5), "same.ts": lines(5) },
+      async () => {
+        await fixture.move("old.ts", "new.ts");
+        await fixture.remove("gone.ts");
+      },
+      [
+        { path: "old.ts", line: 4 },
+        { path: "gone.ts", line: 2 },
+        { path: "same.ts", line: 3 },
+      ],
+    );
+    expect(result).toEqual([{ path: "new.ts", line: 4 }, undefined, { path: "same.ts", line: 3 }]);
+  });
+
+  it("reuses a file list it's given instead of reading it again", async () => {
+    await fixture.write({ "old.ts": lines(10) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    const to = await fixture.commit("after");
+    const cloned = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const raws: string[][] = [];
+    const repo = {
+      ...cloned,
+      git: (args: readonly string[], options?: Parameters<typeof cloned.git>[1]) => {
+        if (args.includes("--raw")) raws.push([...args]);
+        return cloned.git(args, options);
+      },
+    };
+    const raw = await rawDiff(repo, from, to);
+    expect(pathsOf(raw)).toEqual([{ path: "new.ts", oldPath: "old.ts", status: "renamed" }]);
+    expect(await trackLines(repo, from, to, [{ path: "old.ts", line: 4 }], raw)).toEqual([
+      { path: "new.ts", line: 4 },
+    ]);
+    // One file list for both.
+    expect(raws).toHaveLength(1);
+  });
+});
+
+describe("changedPaths", () => {
+  it("lists what a diff changes, renames included, without patches", async () => {
+    await fixture.write({ "old.ts": lines(10), "gone.ts": lines(2), "edit.ts": lines(3) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    await fixture.remove("gone.ts");
+    await fixture.write({ "edit.ts": lines(4), "added.ts": "x\n" });
+    const to = await fixture.commit("after");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const changes = await changedPaths(repo, from, to);
+    expect(changes.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([
+      { path: "added.ts", status: "added" },
+      { path: "edit.ts", status: "modified" },
+      { path: "gone.ts", status: "deleted" },
+      { path: "new.ts", oldPath: "old.ts", status: "renamed" },
+    ]);
+  });
+});
+
+describe("diffCommits with paths", () => {
+  it("diffs only the files asked for, renames included", async () => {
+    await fixture.write({ "old.ts": lines(10), "other.ts": lines(3) });
+    const from = await fixture.commit("before");
+    await fixture.move("old.ts", "new.ts");
+    await fixture.write({ "other.ts": lines(4) });
+    const to = await fixture.commit("after");
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: to,
+      otherShas: [from],
+    });
+    const files = await diffCommits(repo, from, to, { paths: ["old.ts"] });
+    expect(files.map((file) => [file.path, file.oldPath, file.status])).toEqual([
+      ["new.ts", "old.ts", "renamed"],
+    ]);
+  });
+});
+
+describe("trackLine", () => {
+  const file = (
+    hunks: { oldStart: number; oldLines: number; newStart: number; newLines: number }[],
+  ) => ({
+    path: "a.ts",
+    status: "modified" as const,
+    oldBlob: "a",
+    newBlob: "b",
+    submodule: false,
+    moved: false,
+    mechanical: false,
+    binary: false,
+    hunks: hunks.map((hunk) => ({ ...hunk, section: "", lines: [] })),
+  });
+
+  it("treats a pure insertion's start as the line it follows", () => {
+    // Two lines inserted after line 4.
+    const insert = file([{ oldStart: 4, oldLines: 0, newStart: 5, newLines: 2 }]);
+    expect(trackLine(insert, 4)).toBe(4);
+    expect(trackLine(insert, 5)).toBe(7);
+  });
+
+  it("keeps a line when the diff doesn't touch the file", () => {
+    expect(trackLine(undefined, 9)).toBe(9);
+  });
+});

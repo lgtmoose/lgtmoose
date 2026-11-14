@@ -11,9 +11,11 @@ import {
 } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { pullRequests, reviewRuns } from "@lgtmoose/db";
+import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
+import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
+import { graphQlThreadReader } from "./threads.js";
 import {
   GitHubClient,
   GitHubLabelClient,
@@ -22,7 +24,7 @@ import {
   installationTokenProvider,
   appJwt,
 } from "@lgtmoose/poster";
-import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
@@ -30,7 +32,14 @@ import pg from "pg";
 import { z } from "zod";
 import type { ControlEnv } from "./env.js";
 import { errorName } from "./sfn.js";
-import type { ArtifactStore, ControlDeps, RunRecord, RunStore, TaskTokens } from "./ports.js";
+import type {
+  ArtifactStore,
+  ControlDeps,
+  FindingStore,
+  RunRecord,
+  RunStore,
+  TaskTokens,
+} from "./ports.js";
 
 /** Longest a GitHub request may take: well under the post step's 5-minute heartbeat timeout. */
 export const GITHUB_TIMEOUT_MS = 60_000;
@@ -177,6 +186,8 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 /** Any drizzle Postgres database: node-postgres in the task, PGlite in tests. */
 type Db = PgDatabase<PgQueryResultHKT>;
 
+const REVIEW_EVENTS: readonly ReviewEvent[] = ["APPROVE", "COMMENT", "REQUEST_CHANGES"];
+
 /** `review_runs` again, for the run a query compares the others with. */
 const self = alias(reviewRuns, "self");
 /** A run's place among its PR's runs: its event time, else when its row was made. */
@@ -227,6 +238,8 @@ async function recordOnPr(
     /** The PR's label; undefined leaves the recorded one as it is. */
     statusLabel: string | undefined;
     summaryCommentId: number | undefined;
+    /** The review the run posted; undefined leaves the PR's last review as it is. */
+    review?: { event: ReviewEvent; id: number | undefined } | undefined;
   },
   now: () => Date,
 ): Promise<void> {
@@ -240,6 +253,9 @@ async function recordOnPr(
     .update(pullRequests)
     .set({
       lastReviewedSha: pr.headSha,
+      ...(pr.review === undefined
+        ? {}
+        : { lastReviewEvent: pr.review.event, lastReviewId: pr.review.id ?? null }),
       ...(pr.statusLabel === undefined ? {} : { statusLabel: pr.statusLabel }),
       summaryCommentId: pr.summaryCommentId ?? null,
       updatedAt: now(),
@@ -255,6 +271,10 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         runId: reviewRuns.id,
         pullRequestId: reviewRuns.pullRequestId,
         summaryCommentId: pullRequests.summaryCommentId,
+        lastReviewedSha: pullRequests.lastReviewedSha,
+        statusLabel: pullRequests.statusLabel,
+        lastReviewEvent: pullRequests.lastReviewEvent,
+        lastReviewId: pullRequests.lastReviewId,
         headSha: reviewRuns.headSha,
         executionArn: reviewRuns.executionArn,
       })
@@ -267,6 +287,10 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           runId: row.runId,
           pullRequestId: row.pullRequestId,
           summaryCommentId: row.summaryCommentId ?? undefined,
+          lastReviewedSha: row.lastReviewedSha ?? undefined,
+          statusLabel: row.statusLabel ?? undefined,
+          lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
+          lastReviewId: row.lastReviewId ?? undefined,
           headSha: row.headSha,
           executionArn: row.executionArn ?? undefined,
         };
@@ -303,19 +327,15 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             updatedAt: now(),
           },
         })
-        .returning({
-          id: pullRequests.id,
-          lastReviewedSha: pullRequests.lastReviewedSha,
-          summaryCommentId: pullRequests.summaryCommentId,
-        });
+        .returning({ id: pullRequests.id, lastReviewedSha: pullRequests.lastReviewedSha });
       if (pull === undefined) throw new Error("The pull request wasn't recorded.");
       const [run] = await db
         .insert(reviewRuns)
         .values({
           pullRequestId: pull.id,
           headSha: input.headSha,
-          // Every run reviews the whole PR until incremental reviews land.
-          kind: pull.lastReviewedSha === null ? "first" : "full",
+          // Until the prepare step has diffed the PR (see `setPlan`).
+          kind: pull.lastReviewedSha === null ? "first" : "incremental",
           status: "running",
           executionArn: input.executionArn,
           eventAt: input.eventAt ?? null,
@@ -327,8 +347,67 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       return recorded;
     },
     getRun: record,
-    async setFilesTotal(runId, filesTotal) {
-      await db.update(reviewRuns).set({ filesTotal }).where(eq(reviewRuns.id, runId));
+    async setPlan(runId, plan) {
+      await db
+        .update(reviewRuns)
+        .set({ filesTotal: plan.filesTotal, kind: plan.kind, fromSha: plan.fromSha ?? null })
+        .where(eq(reviewRuns.id, runId));
+    },
+    async reviewedFiles(pullRequestId) {
+      // The latest posted run's record of each path.
+      const rows = await db
+        .selectDistinctOn([filesReviewed.path], {
+          path: filesReviewed.path,
+          blobSha: filesReviewed.blobSha,
+          baseBlobSha: filesReviewed.baseBlobSha,
+          depth: filesReviewed.depth,
+          reviewedAt: reviewRuns.headSha,
+        })
+        .from(filesReviewed)
+        .innerJoin(reviewRuns, eq(filesReviewed.runId, reviewRuns.id))
+        .where(and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")))
+        .orderBy(filesReviewed.path, desc(reviewRuns.createdAt), desc(filesReviewed.createdAt));
+      // Runs never record "skipped"; the enum has it for files the planner left out.
+      return rows.flatMap((row) =>
+        row.depth === "skipped"
+          ? []
+          : [{ ...row, baseBlobSha: row.baseBlobSha ?? undefined, depth: row.depth }],
+      );
+    },
+    async recordFiles(runId, files) {
+      for (let i = 0; i < files.length; i += INSERT_CHUNK) {
+        await db
+          .insert(filesReviewed)
+          .values(
+            files
+              .slice(i, i + INSERT_CHUNK)
+              .map((file) => ({ runId, ...file, baseBlobSha: file.baseBlobSha ?? null })),
+          )
+          .onConflictDoNothing();
+      }
+    },
+    async unpostedRuns(pullRequestId, exceptRunId, limit) {
+      const [posted] = await db
+        .select({ at: max(reviewRuns.createdAt) })
+        .from(reviewRuns)
+        .where(
+          and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")),
+        );
+      const since = posted?.at ?? undefined;
+      const rows = await db
+        .select({ id: reviewRuns.id })
+        .from(reviewRuns)
+        .where(
+          and(
+            eq(reviewRuns.pullRequestId, pullRequestId),
+            ne(reviewRuns.id, exceptRunId),
+            ne(reviewRuns.status, "succeeded"),
+            ...(since === undefined ? [] : [gt(reviewRuns.createdAt, since)]),
+          ),
+        )
+        .orderBy(desc(reviewRuns.createdAt))
+        .limit(limit);
+      return rows.map((row) => row.id);
     },
     async succeedRun(runId, result) {
       await db.transaction(async (tx) => {
@@ -393,6 +472,251 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
   };
 }
 
+/** Rows per insert, to stay well under Postgres's limit on bound parameters. */
+const INSERT_CHUNK = 500;
+
+/** Our own findings in `findings`, with a `finding_events` row for each change. */
+export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()): FindingStore {
+  return {
+    async closedFindings(pullRequestId) {
+      const rows = await db
+        .select()
+        .from(findings)
+        .where(
+          and(
+            eq(findings.pullRequestId, pullRequestId),
+            inArray(findings.status, ["resolved_by_human", "declined"]),
+            eq(findings.source, "self"),
+          ),
+        )
+        .orderBy(asc(findings.createdAt));
+      return rows.flatMap((row) =>
+        row.path === null || row.line === null || row.side === null
+          ? []
+          : [
+              {
+                id: row.id,
+                fingerprint: row.fingerprint,
+                ruleCategory: row.ruleCategory,
+                severity: row.severity,
+                path: row.path,
+                line: row.line,
+                startLine: row.startLine ?? undefined,
+                side: row.side,
+                title: row.title,
+                body: row.body,
+                raisedAtSha: row.raisedAtSha,
+                githubCommentId: row.githubCommentId ?? undefined,
+                basePath: row.basePath ?? undefined,
+              },
+            ],
+      );
+    },
+    async trackedFindings(pullRequestId) {
+      const rows = await db
+        .select()
+        .from(findings)
+        .where(
+          and(
+            eq(findings.pullRequestId, pullRequestId),
+            inArray(findings.status, ["open", "outdated"]),
+            eq(findings.source, "self"),
+          ),
+        )
+        .orderBy(asc(findings.createdAt));
+      return rows.flatMap((row) =>
+        row.path === null ||
+        row.line === null ||
+        row.side === null ||
+        (row.status !== "open" && row.status !== "outdated")
+          ? []
+          : [
+              {
+                id: row.id,
+                fingerprint: row.fingerprint,
+                ruleCategory: row.ruleCategory,
+                severity: row.severity,
+                path: row.path,
+                line: row.line,
+                startLine: row.startLine ?? undefined,
+                side: row.side,
+                title: row.title,
+                body: row.body,
+                raisedAtSha: row.raisedAtSha,
+                status: row.status,
+                githubCommentId: row.githubCommentId ?? undefined,
+                basePath: row.basePath ?? undefined,
+              },
+            ],
+      );
+    },
+    async saveFindings(pullRequestId, runId, headSha, posted) {
+      if (posted.length === 0) return;
+      await db.transaction(async (tx) => {
+        for (let i = 0; i < posted.length; i += INSERT_CHUNK) {
+          const rows = await tx
+            .insert(findings)
+            .values(
+              posted
+                .slice(i, i + INSERT_CHUNK)
+                .map(({ finding, fingerprint, githubCommentId, basePath }) => ({
+                  pullRequestId,
+                  runId,
+                  fingerprint,
+                  ruleCategory: finding.rule_category,
+                  severity: finding.severity,
+                  path: finding.path,
+                  line: finding.line,
+                  startLine: finding.start_line ?? null,
+                  side: finding.side,
+                  title: finding.title,
+                  body: finding.body,
+                  raisedAtSha: headSha,
+                  githubCommentId: githubCommentId ?? null,
+                  basePath: basePath ?? null,
+                })),
+            )
+            .onConflictDoUpdate({
+              target: [findings.pullRequestId, findings.fingerprint],
+              set: {
+                runId,
+                // Never lowered: the enum runs from blocking to nit, so the least is the most
+                // severe.
+                severity: sql`least(${findings.severity}, excluded.severity)`,
+                // Reopened (from outdated): the new comment's ID, or none if it wasn't posted
+                // inline, since the old comment is on code that's gone. Still open: kept unless
+                // there's a new one.
+                githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
+                path: sql`excluded.path`,
+                basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
+                line: sql`excluded.line`,
+                startLine: sql`excluded.start_line`,
+                side: sql`excluded.side`,
+                title: sql`excluded.title`,
+                body: sql`excluded.body`,
+                raisedAtSha: headSha,
+                status: "open",
+                updatedAt: now(),
+              },
+              // A finding someone declined, disputed or resolved stays that way.
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
+            })
+            .returning({ id: findings.id });
+          // Every row may have hit a declined, disputed or resolved finding, left as it was.
+          if (rows.length === 0) continue;
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: "raised" as const,
+              actor: "self",
+              sha: headSha,
+            })),
+          );
+        }
+      });
+    },
+    markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
+    reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
+    async syncThreads(pullRequestId, threads, sha) {
+      const ids = (resolved: boolean) =>
+        threads.flatMap((thread) =>
+          thread.resolved === resolved && thread.firstCommentId !== undefined
+            ? [thread.firstCommentId]
+            : [],
+        );
+      const move = async (
+        commentIds: number[],
+        from: ("open" | "outdated" | "resolved_by_human")[],
+        to: "open" | "resolved_by_human",
+        type: "resolved" | "unresolved",
+      ) => {
+        if (commentIds.length === 0) return 0;
+        return db.transaction(async (tx) => {
+          const rows = await tx
+            .update(findings)
+            .set({ status: to, updatedAt: now() })
+            .where(
+              and(
+                eq(findings.pullRequestId, pullRequestId),
+                eq(findings.source, "self"),
+                inArray(findings.status, from),
+                inArray(findings.githubCommentId, commentIds),
+              ),
+            )
+            .returning({ id: findings.id, commentId: findings.githubCommentId });
+          if (rows.length > 0) {
+            await tx.insert(findingEvents).values(
+              rows.map((row) => ({
+                findingId: row.id,
+                type,
+                actor: "human",
+                sha,
+                githubCommentId: row.commentId,
+              })),
+            );
+          }
+          return rows.length;
+        });
+      };
+      const resolved = await move(ids(true), ["open", "outdated"], "resolved_by_human", "resolved");
+      // Unresolved again: open again (the next follow decides whether its line still stands).
+      const unresolved = await move(ids(false), ["resolved_by_human"], "open", "unresolved");
+      return { resolved, unresolved };
+    },
+    async escalate(changes, sha) {
+      if (changes.length === 0) return;
+      await db.transaction(async (tx) => {
+        for (const { id, severity } of changes) {
+          // Upwards only: from a less severe level than the new one.
+          const lower = SEVERITIES.slice(severityRank(severity) + 1);
+          if (lower.length === 0) continue;
+          const rows = await tx
+            .update(findings)
+            .set({ severity, updatedAt: now() })
+            .where(
+              and(
+                eq(findings.id, id),
+                eq(findings.status, "open"),
+                inArray(findings.severity, lower),
+              ),
+            )
+            .returning({ id: findings.id });
+          if (rows.length === 0) continue;
+          await tx
+            .insert(findingEvents)
+            .values({ findingId: id, type: "escalated", actor: "self", sha });
+        }
+      });
+    },
+  };
+
+  /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
+  async function moveStatus(
+    ids: readonly string[],
+    from: "open" | "outdated",
+    to: "open" | "outdated",
+    event: "outdated" | "raised",
+    sha: string,
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < ids.length; i += INSERT_CHUNK) {
+        const rows = await tx
+          .update(findings)
+          .set({ status: to, updatedAt: now() })
+          .where(
+            and(inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)), eq(findings.status, from)),
+          )
+          .returning({ id: findings.id });
+        if (rows.length === 0) continue;
+        await tx
+          .insert(findingEvents)
+          .values(rows.map((row) => ({ findingId: row.id, type: event, actor: "self", sha })));
+      }
+    });
+  }
+}
+
 /** Writes a gzip tarball of `dir`, hidden files included. */
 export function tarArchive(dir: string, archive: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -445,6 +769,7 @@ export async function awsControlDeps(
     max: 2,
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
+  const db = drizzle({ client: pool });
   // The App's slug, read once with the App's own JWT.
   let slugOnce: Promise<string> | undefined;
   const slug = () => {
@@ -465,7 +790,8 @@ export async function awsControlDeps(
 
   return {
     store,
-    runs: drizzleRunStore(drizzle({ client: pool })),
+    runs: drizzleRunStore(db),
+    findings: drizzleFindingStore(db),
     tokens: sfnTaskTokens(new SFNClient({})),
     async github(installationId) {
       const token = installationTokenProvider({
@@ -478,6 +804,11 @@ export async function awsControlDeps(
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
+        // GitHub Apps can call GraphQL with the installation token.
+        threads: graphQlThreadReader(
+          (query, variables) => client.graphql(query, variables),
+          (errors) => log("review threads partly unread", { errors }),
+        ),
         token,
         poster: (runId, pull) =>
           options.shadow

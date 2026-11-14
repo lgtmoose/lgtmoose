@@ -1,12 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { statusLabels } from "@lgtmoose/config";
-import type { ReviewEvent } from "@lgtmoose/core";
+import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import {
-  batchOutputSchema,
+  changedPaths,
+  diffCommits,
+  pathsOf,
+  pool,
+  rawDiff,
+  trackLines,
+  type ChangedPath,
+  type LineRef,
+  type RawDiff,
+  type Repo,
+} from "@lgtmoose/git";
+import {
   finishReview,
   headKeys,
   runKeys,
   type BatchOutcome,
+  type EarlierFinding,
+  type PullReader,
+  type PullTarget,
   type ReviewReport,
 } from "@lgtmoose/pipeline";
 import {
@@ -18,9 +32,10 @@ import {
 } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
-import type { ControlDeps } from "./ports.js";
 import { TASK_MISSING } from "./ecs.js";
-import type { RunManifest } from "./prepare.js";
+import { readOutcome } from "./outcomes.js";
+import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
+import { readManifest } from "./prepare.js";
 
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
@@ -37,7 +52,14 @@ export interface PostOutput {
   coveredBy?: string;
   event: ReviewEvent;
   complete: boolean;
+  /** New findings this run posted. */
   findings: number;
+  /**
+   * False when no review was posted for the run's decision: an incremental run found nothing
+   * new and the review on the PR already has this run's event and label (for an approval, one
+   * that still stands), or another run's review covers the head.
+   */
+  reviewed: boolean;
 }
 
 const CHECK_TITLE: Record<ReviewEvent, string> = {
@@ -45,37 +67,6 @@ const CHECK_TITLE: Record<ReviewEvent, string> = {
   COMMENT: "Reviewed, not approved",
   REQUEST_CHANGES: "Changes requested",
 };
-
-/**
- * One batch's outcome from its output object. A missing object (the sandbox task failed or
- * never ran) or one that doesn't validate counts as a failed batch, never as a clean one.
- */
-async function readOutcome(
-  deps: ControlDeps,
-  runId: string,
-  index: number,
-): Promise<BatchOutcome | undefined> {
-  const text = await deps.store.getText(runKeys(runId).batchOutput(index));
-  if (text === undefined) return undefined;
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return { index, error: "the batch output isn't JSON", transcriptKeys: [] };
-  }
-  const parsed = batchOutputSchema.safeParse(json);
-  if (!parsed.success || parsed.data.index !== index) {
-    return { index, error: "the batch output doesn't match its schema", transcriptKeys: [] };
-  }
-  const { findings, error, transcriptKeys, usage } = parsed.data;
-  return {
-    index,
-    ...(findings === undefined ? {} : { findings }),
-    ...(error === undefined ? {} : { error }),
-    transcriptKeys,
-    ...(usage === undefined ? {} : { usage: withoutUndefined(usage) }),
-  };
-}
 
 function withoutUndefined<T extends object>(
   value: T,
@@ -104,6 +95,12 @@ interface PostProgress {
   decisionLabel?: string;
   /** How many annotations its check run is to have, saved before creating it. */
   checkRunAnnotations?: number;
+  /** The review it posted, by GitHub ID (none in shadow mode). */
+  reviewId?: number;
+  /** It posted no review: GitHub's already says what its decision does (see `post`). */
+  quiet?: boolean;
+  /** Its findings are recorded: outdated, reopened, escalated and new ones. */
+  findings?: boolean;
 }
 
 const postProgressSchema = z.object({
@@ -120,6 +117,9 @@ const postProgressSchema = z.object({
   /** The label its decision calls for, saved before its first write to GitHub. */
   decisionLabel: z.string().optional(),
   checkRunAnnotations: z.number().int().nonnegative().optional(),
+  reviewId: z.number().int().positive().optional(),
+  quiet: z.boolean().optional(),
+  findings: z.boolean().optional(),
 });
 
 /**
@@ -174,14 +174,10 @@ export function reviewMarker(runId: string, complete: boolean): string {
 
 /**
  * Our reviews on the head that could make another from this run moot, the complete ones
- * first. One does once its run has finished the head (see `post`):
- * - a complete review;
- * - an incomplete one that requested changes: until earlier runs' open findings count in a
- *   later run's decision, a complete run could approve with its blocking findings unanswered
- *   (prepare dedupes them as already raised);
- * - an incomplete one, when this run is incomplete too.
- * A complete run posts over an incomplete COMMENT review. A COMMENT review sets no approval
- * state on GitHub, so nothing of it lingers for the new review to clear.
+ * first. One does once its run has finished the head (see `post`): a complete review, or an
+ * incomplete one when this run is incomplete too. A complete run posts over an incomplete
+ * review, whatever it decided: the incomplete run's posted findings are recorded, and count in
+ * this run's decision as earlier findings, so it can't approve past their blocking ones.
  */
 export function coveringReviews(
   reviews: readonly MarkedReview[],
@@ -189,12 +185,7 @@ export function coveringReviews(
 ): MarkedReview[] {
   const done = reviews.filter((review) => review.marker.endsWith(":complete"));
   const incomplete = reviews.filter((review) => review.marker.endsWith(":incomplete"));
-  return [
-    ...done,
-    ...(complete
-      ? incomplete.filter((review) => review.state === "CHANGES_REQUESTED")
-      : incomplete),
-  ];
+  return [...done, ...(complete ? [] : incomplete)];
 }
 
 /** `read`, called the first time only: its promise is shared by every later call. */
@@ -350,6 +341,409 @@ function costOf(report: ReviewReport): number | undefined {
 }
 
 /**
+ * A finding to follow: one of our records, with its status when it's one `standing` may move
+ * (open or outdated). Closed ones (resolved or declined by a person) have none.
+ */
+type TrackedRecord = Omit<FindingRecord, "status"> & { status?: FindingRecord["status"] };
+
+/** A file's names now: at head, for new-side findings; at today's merge base, for old-side ones. */
+interface Names {
+  nameAtHead: (path: string) => string;
+  /**
+   * An old-side finding's file at today's merge base: its recorded base-side name, followed
+   * through the base's renames since the base its commit had, when that's known. Rows recorded
+   * without a base-side name go through their head name.
+   */
+  baseNow: (record: TrackedRecord) => string;
+}
+
+/**
+ * The findings to follow to the new head: those `followAll` picks, and the rest only while the
+ * PR still changes their file: a new-side one's file at head (`names.nameAtHead`), an old-side
+ * one's base file (`names.baseNow`). Findings on files the PR left alone stay as they are,
+ * which keeps the work from growing with the PR's age.
+ */
+function toTrack<T extends TrackedRecord>(
+  records: readonly T[],
+  { atHead, changedBase }: PrPaths,
+  followAll: (record: T) => boolean,
+  names: Names,
+): T[] {
+  return records.filter(
+    (record) =>
+      followAll(record) ||
+      (record.side === "RIGHT"
+        ? atHead.has(names.nameAtHead(record.path))
+        : changedBase.has(names.baseNow(record))),
+  );
+}
+
+/**
+ * What following findings needs to know about their commits and files' names, read once: which
+ * commits are here, the base each old-side finding's commit had, the names files have now (two
+ * maps, never mixed: head names for new-side findings, merge-base names for old-side ones, so an
+ * old-side finding's base file never takes a name only head has), each such base's names, and
+ * each commit's file list to head (for `trackLines` to reuse).
+ */
+interface History extends Names {
+  present: ReadonlySet<string>;
+  /** Each old-side finding's commit's merge base with today's; "" without shared history. */
+  raisedBase: ReadonlyMap<string, string>;
+  /** For each such base, a merge-base name's name at that base. */
+  nameAtBase: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  /** Each present commit's file list to head. */
+  since: ReadonlyMap<string, RawDiff>;
+}
+
+/**
+ * Names from the PR's diff alone (merge base to head): each file's head name under its own and
+ * its base-side name. Enough to tell which findings need their commits' history to be placed.
+ * A path the PR deletes isn't placed: against the merge base, a file rewritten and then renamed
+ * shows as deleted plus added, though it's a rename since the finding's commit. Its history says
+ * where it went, or that it's gone.
+ */
+function prNames(changes: readonly ChangedPath[]): Map<string, string> {
+  // New-side names only: what each file is called at head.
+  const names = new Map<string, string>();
+  for (const file of changes) if (file.status !== "deleted") names.set(file.path, file.path);
+  for (const file of changes) {
+    if (file.oldPath !== undefined && file.status !== "deleted" && !names.has(file.oldPath)) {
+      names.set(file.oldPath, file.path);
+    }
+  }
+  return names;
+}
+
+/**
+ * Old-side names from the PR's diff alone: a base-side file's name at today's merge base, under
+ * its name at head (a rename the PR makes) and its own. Paths the PR adds aren't base files.
+ */
+function prBaseNames(changes: readonly ChangedPath[]): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const file of changes) {
+    if (file.status !== "added") names.set(file.path, file.oldPath ?? file.path);
+  }
+  for (const file of changes) {
+    if (file.oldPath !== undefined && !names.has(file.oldPath)) {
+      names.set(file.oldPath, file.oldPath);
+    }
+  }
+  return names;
+}
+
+/** The PR's diff alone, as `Names`: before any history is read. */
+function prOnlyNames(changes: readonly ChangedPath[]): Names {
+  const head = prNames(changes);
+  const base = prBaseNames(changes);
+  return {
+    nameAtHead: (path) => head.get(path) ?? path,
+    baseNow: (record) => record.basePath ?? base.get(record.path) ?? record.path,
+  };
+}
+
+/**
+ * Reads `records`' history: whether their commits are here, the base each old-side one's commit
+ * had, and the names their files have now. Head names come from the PR's renames (merge base to
+ * head) and its renames since each finding's commit (that commit to head: one file list per
+ * commit, reused to follow its lines). Merge-base names come from the PR's diff and the base's
+ * renames since each such base (that base to today's merge base).
+ */
+async function readHistory(
+  repo: Repo,
+  records: readonly TrackedRecord[],
+  changes: readonly ChangedPath[],
+  mergeBase: string,
+  headSha: string,
+): Promise<History> {
+  const names = prNames(changes);
+  const nameAtHead = (path: string) => names.get(path) ?? path;
+  const learn = (from: string, to: string) => {
+    if (!names.has(from)) names.set(from, to);
+  };
+  // For rows recorded without a base-side name: the PR's base-side names, with the base's
+  // renames learned below.
+  const baseNames = prBaseNames(changes);
+  const nameAtMergeBase = (path: string) => baseNames.get(path) ?? path;
+  // For each finding's base, a name there's name at today's merge base.
+  const movedSince = new Map<string, Map<string, string>>();
+
+  // One check for every commit the findings were raised at.
+  const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
+  const followable = records.filter((record) => present.has(record.raisedAtSha));
+  const raisedShas = [...new Set(followable.map((record) => record.raisedAtSha))];
+  const sinceList = await pool(raisedShas, FOLLOW_AT_ONCE, (sha) => rawDiff(repo, sha, headSha));
+  const since = new Map(raisedShas.map((sha, i) => [sha, sinceList[i] as RawDiff]));
+  for (const raw of sinceList) {
+    for (const file of pathsOf(raw)) {
+      if (file.oldPath !== undefined && file.status !== "deleted") {
+        learn(file.oldPath, nameAtHead(file.path));
+      }
+    }
+  }
+  // The base each old-side finding's commit had: its merge base with today's.
+  const leftShas = [
+    ...new Set(followable.filter((r) => r.side === "LEFT").map((r) => r.raisedAtSha)),
+  ];
+  const leftBases = await pool(leftShas, FOLLOW_AT_ONCE, async (sha) =>
+    // No common history: exit 1, no output.
+    (await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })).trim(),
+  );
+  const raisedBase = new Map(leftShas.map((sha, i) => [sha, leftBases[i] ?? ""]));
+  const bases = [...new Set([...raisedBase.values()].filter((base) => base !== ""))];
+  const baseMoves = await pool(bases, FOLLOW_AT_ONCE, (base) =>
+    changedPaths(repo, base, mergeBase),
+  );
+  const nameAtBase = new Map<string, Map<string, string>>();
+  for (const [i, base] of bases.entries()) {
+    const earlier = new Map<string, string>();
+    const later = new Map<string, string>();
+    for (const file of baseMoves[i] ?? []) {
+      if (file.oldPath === undefined || file.status === "deleted") continue;
+      earlier.set(file.path, file.oldPath);
+      later.set(file.oldPath, file.path);
+      if (!baseNames.has(file.oldPath)) baseNames.set(file.oldPath, file.path);
+    }
+    nameAtBase.set(base, earlier);
+    movedSince.set(base, later);
+  }
+  // Its recorded base-side name, followed through the base's renames since the base it was
+  // raised on. Without that base (its commit is gone, or shares no history), it can't be
+  // followed anyway: as recorded.
+  const baseNow = (record: TrackedRecord) => {
+    if (record.basePath === undefined) return nameAtMergeBase(record.path);
+    const base = raisedBase.get(record.raisedAtSha) ?? "";
+    return movedSince.get(base)?.get(record.basePath) ?? record.basePath;
+  };
+  return { present, raisedBase, nameAtHead, baseNow, nameAtBase, since };
+}
+
+/** Which of `paths` are files at `headSha` (one tree read). */
+async function pathsAtHead(
+  repo: Repo,
+  headSha: string,
+  paths: readonly string[],
+): Promise<Set<string>> {
+  const wanted = [...new Set(paths)];
+  if (wanted.length === 0) return new Set();
+  const out = await repo.git([
+    "ls-tree",
+    "-z",
+    "--name-only",
+    headSha,
+    "--",
+    ...wanted.map((path) => `:(literal)${path}`),
+  ]);
+  return new Set(out.split("\0").filter((path) => path !== ""));
+}
+
+/**
+ * The files the PR changes: those at head (not deleted), by head name, and those on the base side
+ * (not added), by merge-base name.
+ */
+interface PrPaths {
+  atHead: ReadonlySet<string>;
+  changedBase: ReadonlySet<string>;
+}
+
+function prPaths(changes: readonly ChangedPath[]): PrPaths {
+  return {
+    atHead: new Set(changes.flatMap((file) => (file.status === "deleted" ? [] : [file.path]))),
+    changedBase: new Set(
+      changes.flatMap((file) => (file.status === "added" ? [] : [file.oldPath ?? file.path])),
+    ),
+  };
+}
+
+/**
+ * One of our recorded findings as an earlier finding at `place` (its recorded one by default),
+ * `followed` there from the commit it was raised at, or not.
+ */
+function recordToEarlier(
+  record: TrackedRecord,
+  place: LineRef = { path: record.path, line: record.line },
+  followed = true,
+): EarlierFinding {
+  const shift = place.line - record.line;
+  const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
+  return {
+    finding: {
+      rule_category: record.ruleCategory,
+      severity: record.severity,
+      path: place.path,
+      line: place.line,
+      side: record.side,
+      ...(startLine === undefined || startLine < 1 ? {} : { start_line: startLine }),
+      title: record.title,
+      body: record.body,
+      // Not kept: earlier findings are only counted, listed and matched, never posted again.
+      evidence: record.title,
+    },
+    fingerprint: record.fingerprint,
+    ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
+    ...(followed ? {} : { followed: false }),
+  };
+}
+
+/** How many commits' lines are followed at once. */
+const FOLLOW_AT_ONCE = 4;
+
+/**
+ * Splits the PR's tracked findings into those standing at `headSha`, moved to where their lines
+ * are now, and those whose lines don't exist there (changed, deleted, or the PR no longer
+ * changes the file). Open findings that no longer stand are `outdated`; outdated ones that stand
+ * again, such as after a fix is reverted, are `reopened`.
+ *
+ * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
+ * when it was raised (its merge base with today's) to today's merge base, and stands while the
+ * PR still deletes that line. When the commit a finding was raised at is gone (force-pushed
+ * away) or shares no history with the base, its lines can't be followed exactly, so it doesn't
+ * stand: an open one goes outdated. Only open ones go `outdated` and only outdated ones are
+ * `reopened`; a record with no status (a closed one) just stands or not.
+ */
+async function standing(
+  repo: Repo,
+  records: readonly TrackedRecord[],
+  mergeBase: string,
+  headSha: string,
+  history: History,
+  { atHead }: PrPaths,
+  prDiff: RawDiff,
+): Promise<{ open: (EarlierFinding & { id: string })[]; outdated: string[]; reopened: string[] }> {
+  if (records.length === 0) return { open: [], outdated: [], reopened: [] };
+  // A base-side file's name at head (a deleted one keeps its own).
+  const fromBase = new Map(
+    pathsOf(prDiff).flatMap((file) =>
+      file.status === "added" ? [] : [[file.oldPath ?? file.path, file.path]],
+    ),
+  );
+  const refs = (list: readonly TrackedRecord[], path: (record: TrackedRecord) => string) =>
+    list.map((record) => ({ path: path(record), line: record.line }));
+
+  const { present, raisedBase, baseNow, nameAtBase, since } = history;
+  const followable = records.filter((record) => present.has(record.raisedAtSha));
+
+  // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
+  // followed (the commit it was raised at is gone, or shares no history with the base).
+  const at = new Map<TrackedRecord, LineRef | undefined>();
+  // New-side lines: from the head they were raised at to this head (renames followed).
+  const right = followable.filter((record) => record.side === "RIGHT");
+  await pool(
+    [...Map.groupBy(right, (record) => record.raisedAtSha)],
+    FOLLOW_AT_ONCE,
+    async ([sha, group]) => {
+      const moved = await trackLines(
+        repo,
+        sha,
+        headSha,
+        refs(group, (record) => record.path),
+        since.get(sha),
+      );
+      for (const [i, record] of group.entries()) at.set(record, moved[i]);
+    },
+  );
+  // Old-side lines: from the base the PR had when they were raised to today's merge base, by
+  // their name at that base; one diff per such base. They stand while the PR still deletes
+  // that line, so only the patches of the files they end up in are read.
+  const left = followable.filter(
+    (record) => record.side === "LEFT" && raisedBase.get(record.raisedAtSha) !== "",
+  );
+  const leftPlaces = new Map<TrackedRecord, LineRef | undefined>();
+  await pool(
+    [...Map.groupBy(left, (record) => raisedBase.get(record.raisedAtSha) ?? "")],
+    FOLLOW_AT_ONCE,
+    async ([base, group]) => {
+      // Old-side names only: never a name only head has. Its recorded base-side name is its
+      // name at that base; rows without one go back from today's.
+      const atBase = (record: TrackedRecord) => {
+        if (record.basePath !== undefined) return record.basePath;
+        const merged = baseNow(record);
+        return nameAtBase.get(base)?.get(merged) ?? merged;
+      };
+      const moved = await trackLines(repo, base, mergeBase, refs(group, atBase));
+      for (const [i, record] of group.entries()) leftPlaces.set(record, moved[i]);
+    },
+  );
+  const leftPaths = [...leftPlaces.values()].flatMap((place) =>
+    place === undefined ? [] : [place.path, fromBase.get(place.path) ?? place.path],
+  );
+  const patches =
+    leftPaths.length === 0
+      ? []
+      : await diffCommits(repo, mergeBase, headSha, {
+          paths: [...new Set(leftPaths)],
+          raw: prDiff,
+        });
+  // The lines the PR deletes, by base file.
+  const deletedLines = new Map(
+    patches.map((file) => [
+      file.oldPath ?? file.path,
+      new Set(
+        file.hunks.flatMap((hunk) =>
+          hunk.lines.flatMap((line) =>
+            line.kind === "del" && line.oldLine !== undefined ? [line.oldLine] : [],
+          ),
+        ),
+      ),
+    ]),
+  );
+  for (const [record, place] of leftPlaces) {
+    // Stands only while the PR still deletes that line, under the file's name at head.
+    const deleted = place !== undefined && deletedLines.get(place.path)?.has(place.line);
+    at.set(
+      record,
+      deleted === true
+        ? { path: fromBase.get(place.path) ?? place.path, line: place.line }
+        : undefined,
+    );
+  }
+  const open: (EarlierFinding & { id: string })[] = [];
+  const outdated: string[] = [];
+  const reopened: string[] = [];
+  for (const record of records) {
+    const isLeft = record.side === "LEFT";
+    // Not in `at`: it can't be followed exactly, so it doesn't stand.
+    let place = at.get(record);
+    if (place !== undefined && !isLeft && !atHead.has(place.path)) place = undefined;
+    if (place === undefined) {
+      if (record.status === "open") outdated.push(record.id);
+      continue;
+    }
+    if (record.status === "outdated") reopened.push(record.id);
+    // Followed to its place now.
+    open.push({ ...recordToEarlier(record, place), id: record.id });
+  }
+  return { open, outdated, reopened };
+}
+
+function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
+  return entry;
+}
+
+/**
+ * Whether the approval we posted last still stands for this head: GitHub still has it as
+ * APPROVED (it can be dismissed without a push) and it was submitted on this very commit, so a
+ * repo that wants the latest push approved has it. Without a review ID (shadow mode) or a way
+ * to read it, only a run at the same head counts; a failed read counts as not standing.
+ */
+async function approvalStands(
+  reader: PullReader,
+  target: PullTarget,
+  run: RunRecord,
+  headSha: string,
+): Promise<boolean> {
+  if (run.lastReviewEvent !== "APPROVE") return false;
+  if (run.lastReviewId === undefined || reader.review === undefined) {
+    return run.lastReviewedSha === headSha;
+  }
+  try {
+    const review = await reader.review(target, run.lastReviewId);
+    return review.state === "APPROVED" && review.commitId === headSha;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The post step: reads the prepared review and every batch's output, finishes the review
  * (placement, duplicates, decision, summary) and posts it: one review, the check run, the
  * summary comment and the status label. In shadow mode the poster records instead.
@@ -359,6 +753,12 @@ function costOf(report: ReviewReport): number | undefined {
  * `running()` (its execution isn't stopped), and the PR still open at the run's head. If not,
  * it posts nothing and marks the run superseded. Once it has written anything it records what
  * it posted; `succeedRun` leaves the PR's record to a newer run that has already posted.
+ *
+ * Our findings from earlier runs that are still open count towards the decision; those whose
+ * lines are gone are marked outdated, and outdated ones whose lines are back are reopened. An
+ * incremental run that found nothing new, and whose decision is the review event and label
+ * already on the PR (for an approval, one that still stands), posts no review, but still
+ * updates the check run, the summary and the label, and records the head as reviewed.
  */
 export async function post(
   deps: ControlDeps,
@@ -374,14 +774,14 @@ export async function post(
   const keys = runKeys(runId);
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
-  // Written by this run's own prepare step with the control task's role: trusted, not model output.
-  const manifest = JSON.parse(preparedText) as RunManifest;
+  // Written by this run's own prepare step with the control task's role; still shape-checked.
+  const manifest = readManifest(preparedText);
   const prepared = manifest.review;
   const outcomes = (
     await Promise.all(
       prepared.jobs
         .filter((job) => job.prompt !== undefined)
-        .map((job) => readOutcome(deps, runId, job.index)),
+        .map((job) => readOutcome(deps.store, runId, job.index)),
     )
   ).filter((outcome): outcome is BatchOutcome => outcome !== undefined);
 
@@ -389,9 +789,25 @@ export async function post(
   const pull: PullRef = { owner: target.owner, repo: target.repo, pull: target.number };
   const github = await deps.github(manifest.installationId);
   const poster = github.poster(runId, pull);
+  // What people did to our comments' threads first: a resolved one takes its finding out of the
+  // decision, and one unresolved again puts it back. If the threads can't be read, findings
+  // stay as they are.
+  try {
+    const threads = await github.threads.reviewThreads(target);
+    const synced = await deps.findings.syncThreads(run.pullRequestId, threads, pr.headSha);
+    if (synced.resolved + synced.unresolved > 0) deps.log("review threads", { runId, ...synced });
+  } catch (error) {
+    deps.log("review threads unread", {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
   let latest: Awaited<ReturnType<typeof github.reader.pull>>;
+  let outdated: string[];
+  let reopened: string[];
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -402,8 +818,80 @@ export async function post(
       token: await github.token(),
       checkout: "none",
     });
+    let earlier: Awaited<ReturnType<typeof standing>> = { open: [], outdated: [], reopened: [] };
+    // Findings a person resolved or declined: followed to this head like the others (renames
+    // included), so a re-raise is matched at their place now. Those whose line is gone or can't
+    // be followed are matched by fingerprint and comment ID only.
+    const closedRecords = await deps.findings.closedFindings(run.pullRequestId);
+    const closedIds = new Set(closedRecords.map((record) => record.id));
+    let closed: EarlierFinding[] = closedRecords.map((record) =>
+      recordToEarlier(record, undefined, false),
+    );
+    if (records.length + closedRecords.length > 0) {
+      // Which files the PR changes: names only, no patches or contents.
+      const prDiff = await rawDiff(repo, prepared.mergeBase, pr.headSha);
+      const changes = pathsOf(prDiff);
+      // Open ones are always followed; outdated and closed ones only while the PR still changes
+      // their file (a new-side one's at head, an old-side one's base file). One whose commit is
+      // gone can't be followed exactly and doesn't stand; closed ones are never marked outdated
+      // or reopened.
+      const followAll = (record: TrackedRecord) => record.status === "open";
+      const candidates: TrackedRecord[] = [...records, ...closedRecords];
+      // The PR's own renames tell most findings' files apart. One whose recorded file is neither
+      // in the PR under some name nor at head under that name was renamed (by the PR since, or
+      // by the base) or is gone: its commit's history says which.
+      const paths = prPaths(changes);
+      const { changedBase } = paths;
+      const known = prNames(changes);
+      const prOnly = prOnlyNames(changes);
+      // The file a finding is on: at head for a new-side one, on the base side for an old-side.
+      const fileOf = (record: TrackedRecord) =>
+        record.side === "RIGHT" ? record.path : (record.basePath ?? record.path);
+      const unplaced = candidates.filter((record) =>
+        record.side === "RIGHT"
+          ? !known.has(record.path)
+          : !changedBase.has(prOnly.baseNow(record)),
+      );
+      const atHead = await pathsAtHead(repo, pr.headSha, unplaced.map(fileOf));
+      const needHistory = unplaced.filter((record) => !atHead.has(fileOf(record)));
+      const byName = toTrack(candidates, paths, followAll, prOnly);
+      const read = [...new Set([...byName, ...needHistory])];
+      // The commits those findings were raised at: one request.
+      await repo.fetchCommits(read.map((record) => record.raisedAtSha));
+      const history = await readHistory(repo, read, changes, prepared.mergeBase, pr.headSha);
+      const tracked = toTrack(read, paths, followAll, history);
+      const all = await standing(
+        repo,
+        tracked,
+        prepared.mergeBase,
+        pr.headSha,
+        history,
+        paths,
+        prDiff,
+      );
+      const followed = new Map(
+        all.open.filter((entry) => closedIds.has(entry.id)).map((entry) => [entry.id, entry]),
+      );
+      closed = closedRecords.map((record, i) => {
+        const entry = followed.get(record.id);
+        return entry === undefined ? (closed[i] as EarlierFinding) : withoutId(entry);
+      });
+      earlier = {
+        open: all.open.filter((entry) => !closedIds.has(entry.id)),
+        outdated: all.outdated,
+        reopened: all.reopened,
+      };
+    }
+    ({ outdated, reopened } = earlier);
     latest = await github.reader.pull(target);
-    report = await finishReview(repo, prepared, outcomes, latest.headSha);
+    report = await finishReview(repo, prepared, outcomes, latest.headSha, {
+      earlier: earlier.open.map(withoutId),
+      closed,
+      stored: records.map((record) => ({
+        fingerprint: record.fingerprint,
+        severity: record.severity,
+      })),
+    });
   } finally {
     await work.remove();
   }
@@ -473,10 +961,32 @@ export async function post(
     await releaseLogged(headClaim, head.etag);
     deps.log("not posted", { runId, reason: stale });
     const findings = report.inline.length + report.body.length;
-    return { runId, posted: false, event: report.decision.event, complete: false, findings };
+    return {
+      runId,
+      posted: false,
+      event: report.decision.event,
+      complete: false,
+      findings,
+      reviewed: false,
+    };
   }
 
   const { decision } = report;
+  const fresh = report.inline.length + report.body.length;
+  // Nothing to say when the review on GitHub already says it: same event, same label, and for
+  // an approval, one that still stands (a push can dismiss it as stale). Decided once: a retry
+  // after the review was posted (or skipped) goes by what was done.
+  const quiet = progress.review
+    ? progress.quiet === true
+    : report.kind === "incremental" &&
+      fresh === 0 &&
+      decision.label !== undefined &&
+      decision.label === run.statusLabel &&
+      decision.event === run.lastReviewEvent &&
+      (decision.event !== "APPROVE" ||
+        (await approvalStands(github.reader, target, run, pr.headSha)));
+  // Each inline finding's comment on GitHub, to follow its review thread (this attempt's only).
+  const commentIds = new Map<Finding, number>();
   const payload = buildReview({
     event: decision.event,
     inline: report.inline,
@@ -494,7 +1004,48 @@ export async function post(
       // (the decision was skipped) leaves the recorded one as it is, like the label itself.
       statusLabel: decision.label,
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
+      // The review it posted; a quiet run leaves the PR's last review as it is.
+      review: quiet ? undefined : { event: decision.event, id: progress.reviewId },
     });
+  /**
+   * Records the run's findings once its review is out (or skipped as quiet): outdated first (a
+   * finding raised again at its new place, same fingerprint, is reopened), then reopened,
+   * escalated and new ones, and the files it reviewed. Once per run: a retry skips it.
+   */
+  const recordFindings = async () => {
+    if (progress.findings) return;
+    await deps.findings.markOutdated(outdated, pr.headSha);
+    await deps.findings.reopen(reopened, pr.headSha);
+    // Raised again more severely: stored at the higher severity, as the decision counted it.
+    const escalated = new Map(report.escalated.map((entry) => [entry.fingerprint, entry.severity]));
+    await deps.findings.escalate(
+      records.flatMap((record) => {
+        const severity = escalated.get(record.fingerprint);
+        return severity === undefined ? [] : [{ id: record.id, severity }];
+      }),
+      pr.headSha,
+    );
+    await deps.findings.saveFindings(
+      run.pullRequestId,
+      runId,
+      pr.headSha,
+      report.posted.map((entry) => {
+        const id = commentIds.get(entry.finding);
+        const file = prepared.files.find((candidate) => candidate.path === entry.finding.path);
+        const basePath = file === undefined ? undefined : (file.oldPath ?? file.path);
+        return {
+          ...entry,
+          ...(id === undefined ? {} : { githubCommentId: id }),
+          ...(basePath === undefined ? {} : { basePath }),
+        };
+      }),
+    );
+    // A failed batch's files have no record at this head, so the next run reviews them however
+    // far the incremental range has moved on.
+    await deps.runs.recordFiles(runId, report.reviewedFiles);
+    progress.findings = true;
+    await save();
+  };
   /** The summary comment, written (or found by its marker and edited) with `body`. */
   const writeSummary = async (body: string) => {
     const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
@@ -650,10 +1201,18 @@ export async function post(
           break;
         }
       }
-      if (coveredBy === undefined) {
+      if (coveredBy === undefined && quiet) {
+        deps.log("the PR's review already says this; not posting another", { runId });
+        progress.quiet = true;
+      } else if (coveredBy === undefined) {
         await saveIntent();
         try {
-          await poster.submitReview(pull, pr.headSha, payload);
+          const review = await poster.submitReview(pull, pr.headSha, payload);
+          if (review.id !== undefined) progress.reviewId = review.id;
+          for (const [i, finding] of review.payload.commented.entries()) {
+            const id = review.commentIds[i];
+            if (id !== undefined) commentIds.set(finding, id);
+          }
         } catch (error) {
           // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
           // timeout, a 5xx) it may be, and the claims stay until this task has stopped, when
@@ -682,8 +1241,10 @@ export async function post(
         event: decision.event,
         complete: report.complete,
         findings: report.inline.length + report.body.length,
+        reviewed: false,
       };
     }
+    await recordFindings();
     await writeCheckRun();
     // The summary comment and the label are the PR's: once a run for a later event has
     // posted they're its, and this one leaves them alone. Checked right before each write.
@@ -715,12 +1276,21 @@ export async function post(
 
   await record();
   await releaseLogged(headClaim, head.etag);
-  deps.log("posted", { runId, event: decision.event, complete: report.complete });
+  deps.log("posted", {
+    runId,
+    event: decision.event,
+    complete: report.complete,
+    reviewed: !quiet,
+    outdated: outdated.length,
+    reopened: reopened.length,
+    escalated: report.escalated.length,
+  });
   return {
     runId,
     posted: true,
     event: decision.event,
     complete: report.complete,
-    findings: report.inline.length + report.body.length,
+    findings: fresh,
+    reviewed: !quiet,
   };
 }

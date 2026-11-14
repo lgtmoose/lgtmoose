@@ -4,7 +4,18 @@
  */
 export { cloneAtSha, githubCloneUrl, type CloneOptions, type Repo } from "./clone.js";
 export {
+  changedPaths,
+  pathsOf,
+  rawDiff,
+  diffCommits,
+  noLongerAdded,
+  readingDepth,
+  REMOVED_LINES_SHOWN,
+  type EarlierChange,
   reviewDiff,
+  type ReadingDepth,
+  type ChangedPath,
+  type RawDiff,
   type DiffOptions,
   type FileDiff,
   type FileStatus,
@@ -20,6 +31,8 @@ export {
   type Hunk,
   type LineKind,
 } from "./patch.js";
+export { trackLine, trackLines, type LineRef } from "./track.js";
+export { pool } from "./pool.js";
 export {
   commentTarget,
   hunkFor,

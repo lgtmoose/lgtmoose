@@ -19,9 +19,12 @@ const pullSchema = z.object({
 });
 
 const issueCommentSchema = z.object({
+  id: z.number().int().optional(),
   body: z.string().nullable().optional(),
   user: z.object({ login: z.string() }).nullable(),
 });
+
+const reviewSchema = z.object({ state: z.string(), commit_id: z.string() });
 
 const reviewCommentSchema = issueCommentSchema.extend({
   path: z.string(),
@@ -75,6 +78,7 @@ export function githubPullReader(get: GitHubGet): PullReader {
       const comments: PullComment[] = [
         ...general.map((c) => ({ author: c.user?.login ?? "ghost", body: c.body ?? "" })),
         ...inline.map((c) => ({
+          ...(c.id === undefined ? {} : { id: c.id }),
           author: c.user?.login ?? "ghost",
           body: c.body ?? "",
           path: c.path,
@@ -84,6 +88,13 @@ export function githubPullReader(get: GitHubGet): PullReader {
         })),
       ];
       return comments.filter((c) => c.body.trim() !== "");
+    },
+    async review(target, reviewId) {
+      if (!Number.isSafeInteger(reviewId) || reviewId <= 0) throw new Error("Not a review ID.");
+      const review = reviewSchema.parse(
+        await get(`${base(target)}/pulls/${target.number}/reviews/${reviewId}`),
+      );
+      return { state: review.state, commitId: review.commit_id };
     },
   };
 }

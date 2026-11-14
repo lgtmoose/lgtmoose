@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { GitError, runGit, runGitBytes, type RunOptions } from "./exec.js";
+import { listTree } from "./tree.js";
 
 /** A local checkout. Every command it runs carries the auth header, so lazily fetched blobs work. */
 export interface Repo {
@@ -8,6 +9,13 @@ export interface Repo {
   git(args: readonly string[], options?: Pick<RunOptions, "okExitCodes">): Promise<string>;
   /** Whether the commit is in this checkout (it may have been force-pushed away). */
   hasCommit(sha: string): Promise<boolean>;
+  /** Which of these commits are in this checkout, checked together. */
+  hasCommits(shas: Iterable<string>): Promise<Set<string>>;
+  /**
+   * Fetches more commits (with history, without file contents in a partial clone), in one
+   * request when it can. Commits the remote no longer has are skipped: `hasCommit` says false.
+   */
+  fetchCommits(shas: Iterable<string>): Promise<void>;
   /** True when head's whole tree is on disk (`checkout: "full"`), so its blobs are local. */
   readonly fullCheckout: boolean;
   /**
@@ -67,9 +75,8 @@ export function isMissingObjectError(error: unknown): boolean {
     )
   );
 }
-/** Blob IDs per prefetch request, and paths per ls-tree, to stay well under ARG_MAX. */
+/** Blob IDs per prefetch request, to stay well under ARG_MAX. */
 const PREFETCH_BATCH = 500;
-const PATHS_PER_LIST = 1000;
 
 export function githubCloneUrl(owner: string, repo: string, host = "github.com"): string {
   return `https://${host}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git`;
@@ -140,16 +147,66 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
 
   const fetched = new Set([options.headSha]);
   await fetch([options.headSha]);
-  // One at a time, so a commit that's gone doesn't stop the others.
-  for (const sha of new Set(options.otherShas ?? [])) {
-    if (fetched.has(sha)) continue;
+  /**
+   * Which of these commits are in this clone, with one `git cat-file --batch-check` and without
+   * asking the remote.
+   */
+  const localCommits = async (shas: readonly string[]): Promise<Set<string>> => {
+    if (shas.length === 0) return new Set();
+    const { stdout } = await run(["cat-file", "--batch-check=%(objectname) %(objecttype)"], {
+      input: shas.map((sha) => `${sha}^{commit}`).join("\n") + "\n",
+      env: { GIT_NO_LAZY_FETCH: "1" },
+    });
+    // One line per input, in order: "<sha> commit", or "<input> missing".
+    const present = new Set<string>();
+    for (const [i, line] of stdout.split("\n").entries()) {
+      const sha = shas[i];
+      if (sha !== undefined && line.endsWith(" commit")) present.add(sha);
+    }
+    return present;
+  };
+  /**
+   * Present only if fetched or in head's history; a failed fetch already showed the remote
+   * lacks it, so the remote isn't asked again.
+   */
+  const hasCommits = async (shas: Iterable<string>): Promise<Set<string>> => {
+    const list = [...new Set(shas)].filter((sha) => SHA.test(sha));
+    const known = list.filter((sha) => fetched.has(sha));
+    const local = await localCommits(list.filter((sha) => !fetched.has(sha)));
+    return new Set([...known, ...local]);
+  };
+  /**
+   * Fetches commits in one request; if one of them is gone, the request fails as a whole, so
+   * they're fetched one at a time instead, skipping the ones that are gone.
+   */
+  const fetchCommits = async (shas: Iterable<string>): Promise<void> => {
+    const unknown = [...new Set(shas)].filter((sha) => !fetched.has(sha));
+    for (const sha of unknown) {
+      if (!SHA.test(sha)) throw new Error(`Not a full commit SHA: ${JSON.stringify(sha)}`);
+    }
+    // Commits in head's history (or fetched before) are here already: don't ask for them.
+    const here = await localCommits(unknown);
+    for (const sha of here) fetched.add(sha);
+    const wanted = unknown.filter((sha) => !here.has(sha));
+    if (wanted.length === 0) return;
     try {
-      await fetch([sha]);
-      fetched.add(sha);
+      await fetch(wanted);
+      for (const sha of wanted) fetched.add(sha);
+      return;
     } catch (error) {
       if (!isMissingObjectError(error)) throw error;
     }
-  }
+    if (wanted.length === 1) return;
+    for (const sha of wanted) {
+      try {
+        await fetch([sha]);
+        fetched.add(sha);
+      } catch (error) {
+        if (!isMissingObjectError(error)) throw error;
+      }
+    }
+  };
+  await fetchCommits(options.otherShas ?? []);
   if (options.checkout === "none") {
     // HEAD and the index point at head without writing (or downloading) any file.
     await run(["update-ref", "--no-deref", "HEAD", options.headSha]);
@@ -200,35 +257,21 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     headSha: options.headSha,
     fullCheckout: options.checkout !== "none",
     git: async (args, extra) => (await run(args, extra)).stdout,
-    hasCommit: async (sha) => {
-      if (fetched.has(sha)) return true;
-      if (!SHA.test(sha)) return false;
-      // Present only if it's in head's history; a failed fetch already showed the remote lacks
-      // it, so don't ask the remote again.
-      const { exitCode } = await run(["cat-file", "-e", `${sha}^{commit}`], {
-        okExitCodes: [1, 128],
-        env: { GIT_NO_LAZY_FETCH: "1" },
-      });
-      return exitCode === 0;
-    },
+    hasCommit: async (sha) => (await hasCommits([sha])).has(sha),
+    hasCommits,
     readBlobs,
+    fetchCommits,
     checkoutPaths: async (paths) => {
       if (paths.length === 0) return;
       const literal = { env: { GIT_LITERAL_PATHSPECS: "1" } };
-      // The files' blobs (directories expanded, -r), listed in chunks so a long list of paths
-      // never hits the OS argument limit, then fetched in one request before checking out.
-      const blobs: string[] = [];
-      for (let i = 0; i < paths.length; i += PATHS_PER_LIST) {
-        const tree = await run(
-          ["ls-tree", "-r", "-z", options.headSha, "--", ...paths.slice(i, i + PATHS_PER_LIST)],
-          literal,
-        );
-        for (const entry of tree.stdout.split("\0")) {
-          const [, type, sha] = entry.split(/\s/);
-          if (type === "blob" && sha !== undefined) blobs.push(sha);
-        }
-      }
-      await prefetch(blobs);
+      // The files' blobs (directories expanded), fetched in one request before checking out.
+      const tree = await listTree(
+        async (args) => (await run(args)).stdout,
+        options.headSha,
+        paths,
+        { recursive: true },
+      );
+      await prefetch(tree.flatMap((entry) => (entry.type === "blob" ? [entry.sha] : [])));
       // NUL-separated and literal, so no path is read as pathspec magic or split on a newline.
       await run(["checkout", options.headSha, "--pathspec-from-file=-", "--pathspec-file-nul"], {
         input: paths.join("\0") + "\0",
