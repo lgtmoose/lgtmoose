@@ -355,7 +355,7 @@ describe("CursorHarness", () => {
 
   it("redacts the key from transcripts and errors", async () => {
     const harness = await harnessFor([
-      { stderr: `Error: invalid api key ${API_KEY}`, exitCode: 1 },
+      { stderr: `Error: [unauthenticated] invalid api key ${API_KEY}`, exitCode: 1 },
     ]);
     const error = await failure(run(harness));
     expect(error.kind).toBe("auth");
@@ -363,15 +363,58 @@ describe("CursorHarness", () => {
     expect(store.objects.get("transcripts/run-1/1.jsonl")).not.toContain(API_KEY);
   });
 
+  /** The JSON a failed run prints, with `text` as its error result. */
+  const errorResult = (text: string) =>
+    `${JSON.stringify({ type: "result", subtype: "error", is_error: true, result: text })}\n`;
+
   it.each([
     ["You've hit your usage limit. Upgrade to Pro for more.", "plan_limit"],
     ["Error: rate limit exceeded, try again in 30 seconds", "rate_limit"],
     ["Authentication required. Run agent login or set CURSOR_API_KEY.", "auth"],
-  ] as const)("classifies %j as %s for the fallback chain", async (stderr, kind) => {
-    const harness = await harnessFor([{ stderr, exitCode: 1 }]);
+  ] as const)("classifies the error result %j as %s for the fallback chain", async (text, kind) => {
+    const harness = await harnessFor([{ stdout: errorResult(text), exitCode: 1 }]);
     const error = await failure(run(harness));
     expect(error.kind).toBe(kind);
     if (kind === "rate_limit") expect(error.retryAfterSeconds).toBe(30);
+  });
+
+  it.each([
+    "You've hit your usage limit. Upgrade to Pro for more.",
+    "Error: rate limit exceeded, try again in 30 seconds",
+    "Authentication required. Run agent login or set CURSOR_API_KEY.",
+  ])(
+    "reads only machine signals in stderr without an error result: %j is a process error",
+    async (stderr) => {
+      const harness = await harnessFor([{ stderr, exitCode: 1 }]);
+      expect((await failure(run(harness))).kind).toBe("process");
+    },
+  );
+
+  it.each([
+    ["Error: [unauthenticated] token revoked", "auth"],
+    ['{"error":{"status":429}}', "rate_limit"],
+    ["HTTP/1.1 401", "auth"],
+  ] as const)(
+    "reads machine signals in stderr without an error result: %j is %s",
+    async (stderr, kind) => {
+      const harness = await harnessFor([{ stderr, exitCode: 1 }]);
+      expect((await failure(run(harness))).kind).toBe(kind);
+    },
+  );
+
+  it("keeps a key that straddles stderr's cut out of the result", async () => {
+    // The kept tail is the last 48 KB; with no line break nearby, its cut lands 6 characters
+    // into the key, so an unredacted stream would keep the key's last 26.
+    const ending = "\nHTTP 401\n";
+    const after = "z".repeat(48 * 1024 - API_KEY.length + 6 - ending.length);
+    const stderr = `${"n".repeat(16 * 1024)}${"m".repeat(1000)}${API_KEY}${after}${ending}`;
+    const harness = await harnessFor([{ stderr, exitCode: 1 }]);
+    const error = await failure(run(harness));
+    expect(error.kind).toBe("auth");
+    const transcript = store.objects.get("transcripts/run-1/1.jsonl") ?? "";
+    for (const part of [API_KEY, API_KEY.slice(5), API_KEY.slice(-12)]) {
+      expect(transcript).not.toContain(part);
+    }
   });
 
   it("classifies an error result's text even with a warning on stderr", async () => {

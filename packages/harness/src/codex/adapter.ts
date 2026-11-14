@@ -20,7 +20,7 @@ import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { authJsonSecrets, codexAuth } from "./auth.js";
 import { dropOptionalNulls, strictSchema } from "./schema.js";
-import { classifyFailure } from "../limits.js";
+import { classifyFailure, classifyMachineSignals } from "../limits.js";
 import { parseCodexEvents, type CodexRun } from "./stream.js";
 
 export interface CodexHarnessOptions {
@@ -237,6 +237,7 @@ export class CodexHarness implements Harness {
           timeoutMs,
           killGraceMs: this.options.killGraceMs ?? 5000,
           maxOutputBytes: MAX_OUTPUT_BYTES,
+          secrets,
           onLine: (line) => {
             if (isAuthError(line)) authErrors++;
             if (BLOCKED_CONNECT.test(line)) blockedConnects++;
@@ -376,7 +377,9 @@ function failIfUnusable(
     throw fail("process", "codex wrote more output than allowed.");
   if (run.completed && run.failure === undefined) return;
   const detail = run.failure ?? (proc.stderr.trim() || "no output");
-  const limit = classifyFailure(detail);
+  // Wording only in Codex's own failure event; raw stderr only for machine signals.
+  const limit =
+    run.failure === undefined ? classifyMachineSignals(proc.stderr) : classifyFailure(run.failure);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;
     throw fail(kind, `codex stopped: ${detail}`, extra);

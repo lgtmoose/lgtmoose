@@ -55,7 +55,14 @@ export {
   type CodexHarnessOptions,
 } from "./codex/adapter.js";
 export { authJsonSecrets, codexAuth, type CodexAuth, type CodexAuthMethod } from "./codex/auth.js";
-export { classifyFailure, type LimitFailure } from "./limits.js";
+export {
+  classifyFailure,
+  classifyMachineSignals,
+  limitTimes,
+  type LimitFailure,
+} from "./limits.js";
+export { HeadTail } from "./headtail.js";
+export { StreamRedactor } from "./redact.js";
 export {
   CursorHarness,
   cursorArgs,
@@ -66,11 +73,7 @@ export {
 } from "./cursor/adapter.js";
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
 export { CURSOR_DENIED_TOOLS, cursorPermissions, DENIED_ROOTS } from "./cursor/policy.js";
-export {
-  classifyCursorFailure,
-  classifyStrictCursorFailure,
-  isGenericError,
-} from "./cursor/result.js";
+export { classifyCursorFailure, isGenericError } from "./cursor/result.js";
 export { statusesIn } from "./status.js";
 export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
 export { isInside } from "./paths.js";

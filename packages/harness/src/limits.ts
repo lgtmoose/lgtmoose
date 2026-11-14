@@ -1,6 +1,6 @@
 import type { HarnessErrorKind } from "./harness.js";
-import { HeadTail } from "./process.js";
-import { statusesInBounded } from "./status.js";
+import { HeadTail } from "./headtail.js";
+import { statusesIn } from "./status.js";
 
 /**
  * Failure wording the CLIs share: plan and spend limits, throttling and refused credentials, with
@@ -60,19 +60,29 @@ function resetsAt(message: string): string | undefined {
  * fallback chain can react. Undefined for any other failure. A long message is read the way
  * stderr is kept (`HeadTail`): its start and its end.
  */
-export function classifyFailure(message: string): LimitFailure | undefined {
-  return classifyBoundedFailure(HeadTail.of(message));
-}
-
-/** `classifyFailure` for a message already cut down, for classifiers that build on it. */
-export function classifyBoundedFailure(message: string): LimitFailure | undefined {
+export function classifyFailure(whole: string): LimitFailure | undefined {
+  const message = HeadTail.of(whole);
   let kind: LimitFailure["kind"];
-  const statuses = statusesInBounded(message);
+  const statuses = statusesIn(message);
   if (PLAN_LIMIT.test(message)) kind = "plan_limit";
   else if (statuses.has(429) || RATE_LIMIT.test(message)) kind = "rate_limit";
   else if (statuses.has(401) || AUTH_FAILURE.test(message)) return { kind: "auth" };
   else return undefined;
   return { kind, ...limitTimes(message) };
+}
+
+/**
+ * Whether raw output (stderr) reports a rate limit or a refused credential, from machine signals
+ * only (`statusesIn`): bracketed connect-rpc codes, HTTP statuses in their HTTP forms and JSON
+ * status fields. Never wording: stderr carries banners, warnings and log lines that mention
+ * limits without hitting one. A long text is read at its start and end (`HeadTail`).
+ */
+export function classifyMachineSignals(whole: string): LimitFailure | undefined {
+  const message = HeadTail.of(whole);
+  const statuses = statusesIn(message);
+  if (statuses.has(429)) return { kind: "rate_limit", ...limitTimes(message) };
+  if (statuses.has(401)) return { kind: "auth" };
+  return undefined;
 }
 
 /** When a limit the message reports resets: the wait it gives, the time it names, or both. */

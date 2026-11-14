@@ -4,12 +4,8 @@
  * negative row for each false positive found.
  */
 import { describe, expect, it } from "vitest";
-import {
-  classifyCursorFailure,
-  classifyStrictCursorFailure,
-  isGenericError,
-} from "./cursor/result.js";
-import { classifyFailure } from "./limits.js";
+import { classifyCursorFailure, isGenericError } from "./cursor/result.js";
+import { classifyFailure, classifyMachineSignals } from "./limits.js";
 import { statusesIn } from "./status.js";
 
 type Kind = "plan_limit" | "rate_limit" | "auth" | undefined;
@@ -95,8 +91,6 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   ["status: 429", R, R],
   ["status code: 429", R, R],
   ["errorCode: 429", R, R],
-  ["status 429 from server", R, R],
-  ["status 429 rows", R, R],
   ["unexpected status 401", A, A],
   ["request failed with status 429", R, R],
   ["Request failed with status code 429", R, R],
@@ -134,6 +128,17 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   ['{"count": 429}', N, N],
   ['{"status": "ok", "items": 401}', N, N],
   ["{ not json at all 401 }", N, N],
+  // The count rule holds after "status" and every other prefix: a word after the code that
+  // isn't a status text makes it a count (round 7).
+  ["status 429 rows", N, N],
+  ["status 429 from server", N, N],
+  ["HTTP 429 requests queued", N, N],
+  ["statusCode: 429 rows", N, N],
+  ["ServerError: 429 items", N, N],
+  // A bare "error" or "code" prefix only at the end of the line or before a status text.
+  ["found error 401.", N, N],
+  ["Error: 429, Passed: 12", N, N],
+  ["code 401; retrying", N, N],
   ["resource exhausted, trying a smaller batch", N, R],
   ["unauthenticated users see a login page", N, A],
 ];
@@ -147,7 +152,7 @@ describe.each(KINDS)("%j", (message, shared, cursor) => {
   });
 });
 
-/** [stderr, classifyStrictCursorFailure]: machine signals only, never wording. */
+/** [stderr, classifyMachineSignals]: machine signals only, never wording. */
 const STRICT: readonly (readonly [string, Kind])[] = [
   ["[unauthenticated] bad key", A],
   ["Error: [resource_exhausted]", R],
@@ -159,19 +164,31 @@ const STRICT: readonly (readonly [string, Kind])[] = [
   ["resource_exhausted", N],
   ["You've hit your usage limit", N],
   ["warning: rate limit headers missing", N],
+  ["Authentication required", N],
+  ["Spending limit reached for this team", N],
+  ["Rate limit reached for requests", N],
+  ["unexpected status 401 Unauthorized", A],
+  ['{"error":{"code":"resource_exhausted"}}', R],
 ];
 
 describe.each(STRICT)("stderr %j", (stderr, kind) => {
   it(`is ${kind ?? "nothing"} to the strict classifier`, () => {
-    expect(classifyStrictCursorFailure(stderr)?.kind).toBe(kind);
+    expect(classifyMachineSignals(stderr)?.kind).toBe(kind);
   });
 });
 
 /** [text, statuses]: JSON shapes the text forms above don't show. */
-const JSON_LINES = `${'{"level":"info","msg":"working"}\n'.repeat(60)}{"error":{"status":429}}`;
+const LOG_LINE = '{"level":"info","msg":"working"}\n';
+const JSON_LINES = `${LOG_LINE.repeat(60)}{"error":{"status":429}}`;
+/** The error, then more log lines than the parse budget. */
+const ERROR_THEN_LOGS = `{"error":{"status":401}}\n${LOG_LINE.repeat(100)}`;
+/** Log lines that do carry a key the pass reads, but no status. */
+const KEYED_LOGS = `{"status":429}\n${'{"code":"ok","msg":"x"}\n'.repeat(100)}`;
 const STATUSES: readonly (readonly [string, readonly number[]])[] = [
   ['log {"status": 401} then {"error": {"status": 429}}', [401, 429]],
   [JSON_LINES, [429]],
+  [ERROR_THEN_LOGS, [401]],
+  [KEYED_LOGS, [429]],
   ['AxiosError { message: oops, response: {"status":401,"data":{}} }', [401]],
   ['{ inspect: dump, nested: {"code": 429} }', [429]],
   [`${"{".repeat(100)}\n{"status":429}`, [429]],
@@ -204,6 +221,12 @@ const GENERIC: readonly (readonly [string, boolean])[] = [
   ["Request failed: model overloaded", false],
   ["The model returned malformed tool calls.", false],
   ["Error: the workspace isn't trusted", false],
+  ["error: request failed", true],
+  ["ERROR: Unknown error", true],
+  ["Error: Request failed. See https://cursor.com/docs for details.", true],
+  ["Request failed. Try again later.", true],
+  ["Request failed. The model is overloaded.", false],
+  ["An unexpected error occurred. Your API key was revoked.", false],
 ];
 
 describe.each(GENERIC)("error result %j", (text, generic) => {
@@ -239,7 +262,7 @@ describe("classification cost", () => {
     "1 MB of 'try again at'": "try again at ".repeat(80 * 1024),
     "1 MB of 'status '": "status ".repeat(150 * 1024),
   };
-  const classifiers = { classifyFailure, classifyCursorFailure, classifyStrictCursorFailure };
+  const classifiers = { classifyFailure, classifyCursorFailure, classifyMachineSignals };
 
   // A linear pass over 1 MB takes milliseconds; a quadratic pattern takes seconds. The best of
   // five runs, and a retry, keep a machine busy with other test files from failing it.

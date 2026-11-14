@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { classifyBoundedFailure, limitTimes, type LimitFailure } from "../limits.js";
-import { HeadTail } from "../process.js";
-import { statusesInBounded } from "../status.js";
+import { HeadTail } from "../headtail.js";
+import { classifyFailure, limitTimes, type LimitFailure } from "../limits.js";
 import type { HarnessUsage } from "../harness.js";
 
 /**
@@ -93,43 +92,39 @@ const RESOURCE_EXHAUSTED = /\bresource[_ ]exhausted\b/i;
  * then `resource_exhausted` and Cursor's auth wording. Undefined for any other failure.
  */
 export function classifyCursorFailure(whole: string): LimitFailure | undefined {
-  // Cut down once, here, the way stderr is kept; the shared classifier below doesn't again.
+  // Cut down the way stderr is kept; cutting is idempotent, so the shared classifier's own cut
+  // below does nothing more.
   const message = HeadTail.of(whole);
   if (PLAN_LIMIT.test(message)) return { kind: "plan_limit", ...limitTimes(message) };
-  const shared = classifyBoundedFailure(message);
+  const shared = classifyFailure(message);
   if (shared !== undefined) return shared;
   if (RESOURCE_EXHAUSTED.test(message)) return { kind: "rate_limit", ...limitTimes(message) };
   return AUTH_FAILURE.test(message) ? { kind: "auth" } : undefined;
 }
 
-/**
- * Like `classifyCursorFailure`, but from machine signals only (`statusesIn`): bracketed
- * connect-rpc codes, HTTP statuses in their HTTP forms and JSON status fields. Never wording a
- * banner or warning could contain. For stderr behind a generic error result.
- */
-export function classifyStrictCursorFailure(whole: string): LimitFailure | undefined {
-  const message = HeadTail.of(whole);
-  const statuses = statusesInBounded(message);
-  if (statuses.has(429)) return { kind: "rate_limit", ...limitTimes(message) };
-  if (statuses.has(401)) return { kind: "auth" };
-  return undefined;
-}
-
-/** Bare error-class prefixes ("Error: ", "ConnectError: ") a generic message may carry. */
-const ERROR_PREFIX = /^(?:[A-Za-z]*Error\s*:\s*)+/;
-/** The first sentence: hints like "Please try again." after it say nothing about the cause. */
-const FIRST_SENTENCE = /^[^.!?]*/;
-/** Error results too generic to say what went wrong, once normalised. */
+/** Error-class prefixes ("Error: ", "ConnectError: ") a generic message may carry. */
+const ERROR_PREFIX = /^(?:[a-z]*error\s*:\s*)+/i;
+/** Error results too generic to say what went wrong. */
 const GENERIC_ERROR =
   /^(?:request failed|unknown error|internal error|error|failed|an? (?:unexpected |unknown |internal )?error(?: occurred| has occurred)?|something went wrong)$/i;
+/** Sentences that only say what to do next, not what went wrong. */
+const HINT =
+  /^(?:please )?(?:try again(?: later| in a (?:moment|few minutes))?|retry(?: later)?|see .{0,200} for (?:more )?details|check the logs(?: for (?:more )?details)?|contact support)$/i;
 
 /**
- * Whether an error result's text says nothing about the cause, after its error-class prefixes
- * and any sentences after the first ("Please try again.") are dropped: "Error: Request failed",
- * "An unexpected error occurred. Please try again.".
+ * Whether an error result's text says nothing about the cause: once its error-class prefixes
+ * and its hint sentences ("Please try again.", "See the logs for details.") are dropped, what's
+ * left is empty or a generic phrase ("Request failed", "An unexpected error occurred"). Any
+ * other sentence names a cause, which makes the result specific.
  */
 export function isGenericError(text: string): boolean {
-  const bare = text.trim().replace(ERROR_PREFIX, "");
-  const first = (FIRST_SENTENCE.exec(bare)?.[0] ?? "").trim();
-  return first === "" || GENERIC_ERROR.test(first);
+  const sentences = text
+    .trim()
+    .replace(ERROR_PREFIX, "")
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim().replace(/[.!?]+$/, ""))
+    .filter((sentence) => sentence !== "" && !HINT.test(sentence));
+  return (
+    sentences.length === 0 || (sentences.length === 1 && GENERIC_ERROR.test(sentences[0] ?? ""))
+  );
 }

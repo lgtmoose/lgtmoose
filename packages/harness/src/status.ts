@@ -1,4 +1,4 @@
-import { HeadTail } from "./process.js";
+import { HeadTail } from "./headtail.js";
 
 /**
  * HTTP statuses (and connect-rpc codes, as the status they stand for) a CLI's error text reports.
@@ -16,38 +16,51 @@ const CONNECT_CODES: Readonly<Record<string, number>> = {
 
 /** Status texts that may follow a code: "401 Unauthorized", "429 (Too Many Requests)". */
 const STATUS_TEXT = String.raw`\(?(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b`;
-/** What may follow a code a weak prefix introduces: the end of a clause, or a status text. */
+/**
+ * The count rule, for every form: a code followed by a word ("429 rows", "401 tests failed") is
+ * a count, not a status, unless the word is a status text or "status" ("401 status code").
+ */
+const NOT_A_COUNT = String.raw`(?![ \t]+(?!status\b|${STATUS_TEXT})[A-Za-z])`;
+/** Where a verb's code may end: the end of a clause, or a status text. */
 const CLAUSE_END = String.raw`(?=[ \t]*(?:$|[.,;:!)\]]|${STATUS_TEXT}))`;
+/** Where a bare "error" or "code" prefix's code may end: the end of the line, or a status text. */
+const LINE_END = String.raw`(?=[ \t]*(?:$|${STATUS_TEXT}))`;
 
 /**
- * The text forms, each capturing the code. Strong prefixes are HTTP wording that a count can't
- * follow; the code after a weak one must end its clause or carry a status text, so "code 429
- * lines changed" and "Error: 429 files changed" don't count.
- *
- * Strong:
+ * The text forms, each capturing the code. All of them follow the count rule (`NOT_A_COUNT`).
  * - "[unauthenticated]", "[resource_exhausted]" (the name is the capture);
  * - "HTTP 429", "HTTP/1.1 401", "HTTP error 429";
  * - "401 Unauthorized", "429 (Too Many Requests)";
  * - an error class name and a colon: "AuthenticationError: 401", "HTTPError: 401";
  * - a status field: "status: 429", "statusCode=401", "status_code: 401", "errorCode: 429",
  *   `"statusCode": 401`;
- * - "status 429", "status code 429", whatever follows ("status 429 from server").
- *
- * Weak: "returned 401", "responded with 429", "failed with 429", "code 429", "code: 429",
- * "Error: 401", "HTTPError 401", "Response code 401 (Unauthorized)".
+ * - after a verb or "status", at the end of a clause or before a status text: "returned 401",
+ *   "responded with 429, retrying", "failed with 429.", "status 429", "status code 429";
+ * - after a bare "error" or "code", or an error class without a colon, only at the end of the
+ *   line or before a status text: "Error: 401", "code: 429", "HTTPError 401", "Response code
+ *   401 (Unauthorized)"; not "found error 401." or "Error: 429, Passed: 12".
  */
 const FORMS: readonly RegExp[] = [
   /\[(unauthenticated|resource_exhausted|permission_denied)\]/gi,
-  /\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b/gi,
+  new RegExp(String.raw`\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b${NOT_A_COUNT}`, "gi"),
   new RegExp(String.raw`\b(\d{3}) ${STATUS_TEXT}`, "gi"),
-  /\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b/g,
-  /\b(?:status|statusCode|status_code|status code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b/gi,
-  /\bstatus(?: code)? (\d{3})\b/gi,
+  new RegExp(String.raw`\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b${NOT_A_COUNT}`, "g"),
   new RegExp(
-    String.raw`\b(?:returned|responded with|failed with|code:?|Error:?|[A-Za-z]\w*(?:Error|Exception)) (\d{3})${CLAUSE_END}`,
+    String.raw`\b(?:status|statusCode|status_code|status code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b${NOT_A_COUNT}`,
+    "gi",
+  ),
+  new RegExp(
+    String.raw`\b(?:returned|responded with|failed with|status code|status) (\d{3})${CLAUSE_END}`,
+    "gim",
+  ),
+  new RegExp(
+    String.raw`\b(?:code:?|error:?|[A-Za-z]\w*(?:Error|Exception)) (\d{3})${LINE_END}`,
     "gim",
   ),
 ];
+
+/** A key `fromObject` reads, quoted as JSON writes it. */
+const STATUS_KEY = /"(?:status|statusCode|status_code|code|errorCode|error_code|error)"\s*:/;
 
 /** Longest object the JSON pass parses, how many it parses, and how many spans it records. */
 const MAX_OBJECT = 64 * 1024;
@@ -144,10 +157,14 @@ function fromJson(text: string, found: Set<number>): void {
     for (let i = spans.length - 1; i >= 0 && parses < MAX_PARSES; i--) {
       const span = spans[i];
       if (span === undefined) continue;
+      const body = text.slice(span.start, span.end);
+      // An object with none of the keys read can't hold a status, nor can anything inside it:
+      // skip it before parsing, so JSON log lines don't use up the budget.
+      if (!STATUS_KEY.test(body)) continue;
       if (span.end - span.start <= MAX_OBJECT) {
         parses++;
         try {
-          fromObject(JSON.parse(text.slice(span.start, span.end)), found);
+          fromObject(JSON.parse(body), found);
           continue;
         } catch {
           // Not JSON: look inside.
@@ -163,12 +180,8 @@ function fromJson(text: string, found: Set<number>): void {
  * Every status the text reports: JSON fields, then the text forms. A long text is read the way
  * stderr is kept (`HeadTail`): its start and its end.
  */
-export function statusesIn(text: string): Set<number> {
-  return statusesInBounded(HeadTail.of(text));
-}
-
-/** `statusesIn` for a text already cut down, for classifiers that build on it. */
-export function statusesInBounded(text: string): Set<number> {
+export function statusesIn(whole: string): Set<number> {
+  const text = HeadTail.of(whole);
   const found = new Set<number>();
   fromJson(text, found);
   for (const form of FORMS) {

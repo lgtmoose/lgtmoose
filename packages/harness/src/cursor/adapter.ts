@@ -18,12 +18,11 @@ import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { addUsage } from "../usage.js";
-import type { LimitFailure } from "../limits.js";
+import { classifyMachineSignals, type LimitFailure } from "../limits.js";
 import { cursorAuth } from "./auth.js";
 import { cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
-  classifyStrictCursorFailure,
   isGenericError,
   cursorUsage,
   findCursorResult,
@@ -169,6 +168,7 @@ export class CursorHarness implements Harness {
           timeoutMs,
           killGraceMs: this.options.killGraceMs ?? 5000,
           maxOutputBytes: MAX_OUTPUT_BYTES,
+          secrets,
         });
         const key = transcriptKey(runId, n);
         await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
@@ -297,13 +297,17 @@ function classifyRun(
   errorText: string | undefined,
   stderr: string | undefined,
 ): LimitFailure | undefined {
-  if (errorText === undefined)
-    return stderr === undefined ? undefined : classifyCursorFailure(stderr);
+  // Wording (limit phrases, bare connect code names) is read only in the JSON error result,
+  // which the CLI writes on purpose. Raw stderr carries banners, warnings and log lines, so it's
+  // only ever read for machine signals: with no error result, or behind a generic one.
+  if (errorText === undefined) {
+    return stderr === undefined ? undefined : classifyMachineSignals(stderr);
+  }
   const fromResult = classifyCursorFailure(errorText);
   if (fromResult !== undefined || stderr === undefined || !isGenericError(errorText)) {
     return fromResult;
   }
-  return classifyStrictCursorFailure(stderr);
+  return classifyMachineSignals(stderr);
 }
 
 /** Throws the right HarnessError when a run didn't print a successful result. */

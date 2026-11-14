@@ -109,6 +109,7 @@ export class ClaudeCodeHarness implements Harness {
           timeoutMs,
           killGraceMs: this.options.killGraceMs ?? 5000,
           maxOutputBytes: MAX_OUTPUT_BYTES,
+          secrets,
           onLine: (line) => {
             if (isAuthRetry(line)) authRetries++;
             return authRetries >= MAX_AUTH_RETRIES ? "kill" : undefined;

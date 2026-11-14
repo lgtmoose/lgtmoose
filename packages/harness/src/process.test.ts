@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { classifyCursorFailure } from "./cursor/result.js";
 import { classifyFailure } from "./limits.js";
-import { HeadTail, runProcess } from "./process.js";
+import { HeadTail } from "./headtail.js";
+import { runProcess } from "./process.js";
 import { statusesIn } from "./status.js";
 
 describe("HeadTail", () => {
@@ -16,6 +17,37 @@ describe("HeadTail", () => {
     const kept = new HeadTail(4, 6);
     for (const chunk of ["head", "-middle-middle-", "tail!!"]) kept.add(chunk);
     expect(kept.text()).toBe("head\n… 15 characters left out …\n" + "tail!!");
+  });
+
+  it("cuts at a line break when one is near", () => {
+    const kept = new HeadTail(10, 10);
+    kept.add("line one\nline two is long\n…middle…\nthe end\n");
+    // The head stops after "line one\n"; the tail starts after the break nearest its cut.
+    expect(kept.text()).toMatch(/^line one\n\n… \d+ characters left out …\nthe end\n$/);
+  });
+
+  it("never splits a character outside the basic plane", () => {
+    const emoji = "😀"; // two UTF-16 code units
+    const head = new HeadTail(3, 4);
+    head.add(`ab${emoji}${"x".repeat(20)}`);
+    const text = head.text();
+    expect(text.startsWith(`ab${emoji}`)).toBe(true);
+    expect(text).not.toMatch(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+    );
+
+    const tail = new HeadTail(2, 3);
+    tail.add(`${"x".repeat(20)}${emoji}yy`);
+    expect(tail.text().endsWith(`${emoji}yy`) || tail.text().endsWith("yy")).toBe(true);
+    expect(tail.text()).not.toMatch(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+    );
+  });
+
+  it("is idempotent: a kept text isn't cut again", () => {
+    const long = `${"a".repeat(100 * 1024)}\n${"b".repeat(100 * 1024)}`;
+    const once = HeadTail.of(long);
+    expect(HeadTail.of(once)).toBe(once);
   });
 
   it("stays linear over many small chunks", () => {

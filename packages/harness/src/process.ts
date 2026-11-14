@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { HeadTail } from "./headtail.js";
+import { StreamRedactor } from "./redact.js";
 
 export interface RunProcessOptions {
   command: string;
@@ -16,10 +18,16 @@ export interface RunProcessOptions {
   maxOutputBytes: number;
   /** Called for each complete stdout line. Returning "kill" stops the run early. */
   onLine?: (line: string) => "kill" | undefined;
+  /**
+   * Values redacted from stderr as it streams in, before any of it is kept, so a cut through the
+   * middle of a secret can't leave part of it in the result.
+   */
+  secrets?: readonly string[];
 }
 
 export interface ProcessResult {
   stdout: string;
+  /** Redacted (`RunProcessOptions.secrets`), and only its start and end when long (`HeadTail`). */
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -27,57 +35,6 @@ export interface ProcessResult {
   stopped?: "timeout" | "output_limit" | "requested";
   /** Set when the process couldn't be started. */
   spawnError?: Error;
-}
-
-/**
- * stderr kept: its start (what the CLI said first) and its end (where its final error is), so
- * chatty output in between can't push the cause out.
- */
-const STDERR_HEAD = 16 * 1024;
-const STDERR_TAIL = 48 * 1024;
-
-/** Collects a stream's text, keeping its first and last characters (`STDERR_HEAD`, `_TAIL`). */
-export class HeadTail {
-  private head = "";
-  private tail = "";
-  private dropped = 0;
-
-  constructor(
-    private readonly headSize = STDERR_HEAD,
-    private readonly tailSize = STDERR_TAIL,
-  ) {}
-
-  add(text: string): void {
-    let rest = text;
-    if (this.head.length < this.headSize) {
-      const room = this.headSize - this.head.length;
-      this.head += rest.slice(0, room);
-      rest = rest.slice(room);
-    }
-    if (rest === "") return;
-    this.tail += rest;
-    // Trimmed in batches, so collecting stays linear.
-    if (this.tail.length > 2 * this.tailSize) this.trim();
-  }
-
-  text(): string {
-    this.trim();
-    if (this.dropped === 0) return this.head + this.tail;
-    return `${this.head}\n… ${this.dropped} characters left out …\n${this.tail}`;
-  }
-
-  /** A text cut down the same way: its start and end, with what's left out noted between. */
-  static of(text: string): string {
-    const kept = new HeadTail();
-    kept.add(text);
-    return kept.text();
-  }
-
-  private trim(): void {
-    if (this.tail.length <= this.tailSize) return;
-    this.dropped += this.tail.length - this.tailSize;
-    this.tail = this.tail.slice(-this.tailSize);
-  }
 }
 
 /**
@@ -111,6 +68,11 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     let stdoutBytes = 0;
     let pending = "";
     const stderr = new HeadTail();
+    const redactor = new StreamRedactor(options.secrets ?? []);
+    const stderrText = (): string => {
+      stderr.add(redactor.end());
+      return stderr.text();
+    };
     let stopped: ProcessResult["stopped"];
     let spawnError: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -149,7 +111,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     });
     // Decoded as a stream, so a character split across chunks stays whole.
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => stderr.add(chunk));
+    child.stderr.on("data", (chunk: string) => stderr.add(redactor.push(chunk)));
     // The child may exit before reading its input.
     child.stdin.on("error", () => {});
     child.on("error", (error) => {
@@ -158,7 +120,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
       if (child.pid === undefined) {
         finish({
           stdout: "",
-          stderr: stderr.text(),
+          stderr: stderrText(),
           exitCode: null,
           signal: null,
           spawnError: error,
@@ -172,7 +134,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     child.on("close", (exitCode, signal) => {
       const result: ProcessResult = {
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: stderr.text(),
+        stderr: stderrText(),
         exitCode,
         signal,
       };
