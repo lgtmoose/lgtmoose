@@ -67,6 +67,11 @@ describe("statusesIn", () => {
     expect(statuses('log {"status": 401} then {"error": {"status": 429}}')).toEqual([401, 429]);
   });
 
+  it("finds a JSON body after a brace or quote that never closes", () => {
+    expect(statuses('warning: config {draft\n{"status":429}')).toEqual([429]);
+    expect(statuses('warning: {can\'t "parse\n{"status":401}')).toEqual([401]);
+  });
+
   it("isn't fooled by braces inside JSON strings", () => {
     expect(statuses('{"message": "a } brace", "status": 429}')).toEqual([429]);
   });

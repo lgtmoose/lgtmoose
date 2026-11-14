@@ -64,33 +64,43 @@ function fromObject(value: unknown, found: Set<number>): void {
   if (error !== null && typeof error === "object") fromObject(error, found);
 }
 
+/** How many closed `{...}` spans the scan records before it stops. */
+const MAX_CLOSED = 1000;
+
 /**
- * The top-level `{...}` spans in a text, found in one pass that tracks nesting and skips braces
- * inside JSON strings.
+ * The outermost closed `{...}` spans in a text, found in one pass that tracks nesting and skips
+ * braces inside JSON strings. A brace that never closes doesn't hide the objects after it: every
+ * closed span is recorded, and the ones not inside another closed span are kept. A JSON string
+ * can't hold a raw line break, so a stray quote stops counting as one at the end of its line.
  */
 function objectSpans(text: string): string[] {
-  const spans: string[] = [];
-  let depth = 0;
-  let start = -1;
+  const closed: { start: number; end: number }[] = [];
+  const open: number[] = [];
   let inString = false;
-  for (let i = 0; i < text.length && spans.length < MAX_OBJECTS; i++) {
+  for (let i = 0; i < text.length && closed.length < MAX_CLOSED; i++) {
     const c = text[i];
+    if (c === "\n") inString = false;
     if (inString) {
       if (c === "\\") i++;
       else if (c === '"') inString = false;
       continue;
     }
-    if (c === '"' && depth > 0) inString = true;
-    else if (c === "{") {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (c === "}" && depth > 0) {
-      depth--;
-      if (depth === 0 && i + 1 - start <= MAX_OBJECT) spans.push(text.slice(start, i + 1));
-    } else if (c === "\n" && depth > 0 && i - start > MAX_OBJECT) {
-      // An unclosed brace: give up on it rather than scan to the end.
-      depth = 0;
+    if (c === '"' && open.length > 0) inString = true;
+    else if (c === "{") open.push(i);
+    else if (c === "}") {
+      const start = open.pop();
+      if (start !== undefined) closed.push({ start, end: i + 1 });
     }
+  }
+  // Closed in order of their ends: an outer span comes after the ones inside it.
+  closed.sort((a, b) => a.start - b.start || b.end - a.end);
+  const spans: string[] = [];
+  let reach = -1;
+  for (const { start, end } of closed) {
+    if (start < reach) continue;
+    reach = end;
+    if (end - start <= MAX_OBJECT) spans.push(text.slice(start, end));
+    if (spans.length >= MAX_OBJECTS) break;
   }
   return spans;
 }
