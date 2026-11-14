@@ -136,6 +136,12 @@ export interface FinishOptions {
    * listed in the summary; a new finding with the same fingerprint isn't posted again.
    */
   earlier?: readonly EarlierFinding[];
+  /**
+   * Findings a person resolved or declined, at their recorded place. The person's decision
+   * wins: a re-raise matching one (its fingerprint, stored or at that place, or a duplicate of
+   * its comment) is dropped, and doesn't count.
+   */
+  closed?: readonly EarlierFinding[];
 }
 
 /**
@@ -680,11 +686,24 @@ export async function finishReview(
       }),
     )
   ).flat();
-  const comments = await knownFindings(prepared.comments, byPath, readLines, ours);
+  const closed = options.closed ?? [];
+  const closedKnown = (
+    await Promise.all(
+      closed.map(async (entry) => {
+        const parts = await partsOf(entry.finding);
+        const here = fingerprint(parts);
+        return [
+          { fingerprint: entry.fingerprint, parts },
+          ...(here === entry.fingerprint ? [] : [{ fingerprint: here, parts }]),
+        ];
+      }),
+    )
+  ).flat();
+  const comments = await knownFindings(prepared.comments, byPath, readLines, [...ours, ...closed]);
   const candidates = await Promise.all(
     [...inline, ...body].map(async (finding) => ({ finding, parts: await partsOf(finding) })),
   );
-  const deduped = dedupeFindings(candidates, [...oursKnown, ...comments]);
+  const deduped = dedupeFindings(candidates, [...oursKnown, ...closedKnown, ...comments]);
   // Earlier findings stay open until their lines go (outdated) or a person resolves or declines
   // them: the reviewer is told not to repeat our comments, so its silence doesn't clear one.
   // One raised again more severely (dedupe matched it to the finding itself, never by line

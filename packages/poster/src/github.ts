@@ -49,9 +49,28 @@ export class GitHubClient {
     this.userAgent = options.userAgent ?? "lgtmoose";
   }
 
-  async request<T = unknown>(method: string, path: string, body?: object): Promise<T> {
+  /**
+   * The GraphQL endpoint for this API base: GitHub Enterprise serves REST at `/api/v3` and
+   * GraphQL at `/api/graphql` on the same host; github.com serves it at `<base>/graphql`.
+   */
+  get graphqlUrl(): string {
+    return this.apiUrl.endsWith("/api/v3")
+      ? `${this.apiUrl.slice(0, -"/api/v3".length)}/api/graphql`
+      : `${this.apiUrl}/graphql`;
+  }
+
+  /** One GraphQL request: the reply's JSON (`data` and `errors`). */
+  graphql(query: string, variables: Record<string, unknown>): Promise<unknown> {
+    return this.send("POST", this.graphqlUrl, "/graphql", { query, variables });
+  }
+
+  request<T = unknown>(method: string, path: string, body?: object): Promise<T> {
+    return this.send(method, `${this.apiUrl}${path}`, path, body);
+  }
+
+  private async send<T>(method: string, url: string, path: string, body?: object): Promise<T> {
     const token = await this.token();
-    const response = await this.fetchFn(`${this.apiUrl}${path}`, {
+    const response = await this.fetchFn(url, {
       method,
       headers: {
         accept: "application/vnd.github+json",

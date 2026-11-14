@@ -1,5 +1,5 @@
 {
-  "id": "6fbbee26-8200-4d2c-8b4e-e4c89a053e58",
+  "id": "4f7b425c-6d79-4ca5-979d-b9d0cd800ce3",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1079,7 +1079,8 @@
         "dispute_answered",
         "resolved",
         "outdated",
-        "escalated"
+        "escalated",
+        "unresolved"
       ]
     },
     "public.finding_source": {

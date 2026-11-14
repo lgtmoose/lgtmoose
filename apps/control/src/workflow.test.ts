@@ -234,9 +234,9 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-/** A stored finding: tracked while open or outdated, kept once a person resolves its thread. */
+/** A stored finding: tracked while open or outdated, kept once a person resolves or declines it. */
 type StoredFinding = Omit<FindingRecord, "status"> & {
-  status: FindingRecord["status"] | "resolved_by_human";
+  status: FindingRecord["status"] | "resolved_by_human" | "declined";
 };
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
@@ -246,7 +246,14 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     rows,
     async trackedFindings() {
       return rows.flatMap((row) =>
-        row.status === "resolved_by_human" ? [] : [{ ...row, status: row.status }],
+        row.status === "resolved_by_human" || row.status === "declined"
+          ? []
+          : [{ ...row, status: row.status }],
+      );
+    },
+    async closedFindings() {
+      return rows.flatMap(({ status, ...row }) =>
+        status === "resolved_by_human" || status === "declined" ? [row] : [],
       );
     },
     async saveFindings(_pr, _run, headSha, posted) {
@@ -269,7 +276,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
         const known = rows[at];
         if (known === undefined) rows.push(row);
-        else if (known.status !== "resolved_by_human") {
+        else if (known.status !== "resolved_by_human" && known.status !== "declined") {
           rows[at] = {
             ...row,
             id: known.id,
@@ -670,10 +677,16 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
     expect(resolved.posted).toMatchObject({ event: "APPROVE" });
 
+    // The reviewer raises it again: the person's decision wins. Not posted, not counted.
+    headSha = await commit({ "src/other.ts": "export const rate = 8;\n" }, "unrelated, again");
+    const reraised = await review(h, 3, [finding()]);
+    expect(reraised.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+
     // Unresolved again: back in the decision.
     threads = [{ resolved: false, firstCommentId: 1000 }];
     headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated again");
-    const reopened = await review(h, 3);
+    const reopened = await review(h, 4);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
     expect(reopened.posted).toMatchObject({ event: "REQUEST_CHANGES" });
   });

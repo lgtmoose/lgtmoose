@@ -892,6 +892,33 @@ describe("prepareReview and finishReview with earlier runs", () => {
     ]);
   });
 
+  it("drops a re-raise of a finding a person resolved or declined, and doesn't count it", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const once = (findings: Finding[], options: Parameters<typeof finishReview>[4]) =>
+      finishReview(repo, prepared, [{ index: 0, findings, transcriptKeys: [] }], headSha, options);
+    const [resolved] = (await once([finding()], {})).posted;
+    if (resolved === undefined) throw new Error("expected a posted finding");
+
+    // By its stored fingerprint.
+    const exact = await once([finding()], { closed: [resolved] });
+    expect(exact.posted).toEqual([]);
+    expect(exact.dropped).toEqual([{ finding: finding(), reason: "duplicate" }]);
+    expect(exact.decision.event).toBe("APPROVE");
+
+    // A protected category, stored under a fingerprint from its old place: by the one here.
+    const money = finding({ rule_category: "money" });
+    const moved = await once([money], {
+      closed: [{ finding: money, fingerprint: "fingerprint-at-the-old-name" }],
+    });
+    expect(moved.posted).toEqual([]);
+    expect(moved.decision.event).toBe("APPROVE");
+
+    // Not ours to decide on: a different problem still posts.
+    const other = finding({ line: 2, title: "Sum starts at the wrong value", evidence: "x" });
+    expect((await once([other], { closed: [resolved] })).posted).toHaveLength(1);
+  });
+
   it("records a done file in a skipped batch at the closer depth it was read at", async () => {
     const { repo, prepare } = await setUp();
     const planned = await prepare({});

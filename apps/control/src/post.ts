@@ -301,8 +301,24 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     }
     ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);
+    const closed = (await deps.findings.closedFindings(run.pullRequestId)).map((record) => ({
+      finding: {
+        rule_category: record.ruleCategory,
+        severity: record.severity,
+        path: record.path,
+        line: record.line,
+        side: record.side,
+        ...(record.startLine === undefined ? {} : { start_line: record.startLine }),
+        title: record.title,
+        body: record.body,
+        evidence: record.title,
+      },
+      fingerprint: record.fingerprint,
+      ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
+    }));
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
       earlier: earlier.open,
+      closed,
     });
   } finally {
     await work.remove();

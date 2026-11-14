@@ -325,6 +325,9 @@ describe("drizzleFindingStore", () => {
       ),
     ).toEqual({ resolved: 1, unresolved: 0 });
     expect(await tracked()).toEqual(["fp1:body", "fp1:other"]);
+    expect(await findingStore.closedFindings(run.pullRequestId)).toMatchObject([
+      { fingerprint: "fp1:inline", githubCommentId: 601 },
+    ]);
     // Again: nothing more to do.
     expect(
       await findingStore.syncThreads(
@@ -349,7 +352,7 @@ describe("drizzleFindingStore", () => {
       .where(eq(findingEvents.findingId, inline?.id ?? ""));
     expect(events.filter((event) => event.actor === "human")).toEqual([
       { type: "resolved", actor: "human", sha: sha("2") },
-      { type: "raised", actor: "human", sha: sha("4") },
+      { type: "unresolved", actor: "human", sha: sha("4") },
     ]);
   });
 

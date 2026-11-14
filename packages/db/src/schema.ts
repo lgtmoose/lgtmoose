@@ -52,6 +52,8 @@ export const findingEventType = pgEnum("finding_event_type", [
   "outdated",
   // Raised again more severely: the finding now has the higher severity.
   "escalated",
+  // A person unresolved the finding's review thread after resolving it: open again.
+  "unresolved",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [

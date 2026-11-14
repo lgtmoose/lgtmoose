@@ -30,6 +30,29 @@ describe("GitHubClient", () => {
     await expect(github.request("GET", "/user")).rejects.toThrow("Bad credentials");
   });
 
+  it("sends GraphQL to the API base's GraphQL endpoint, for github.com and Enterprise", async () => {
+    for (const [apiUrl, url] of [
+      [undefined, "https://api.github.com/graphql"],
+      ["https://ghe.example.com/api/v3", "https://ghe.example.com/api/graphql"],
+      ["https://ghe.example.com/api/v3/", "https://ghe.example.com/api/graphql"],
+    ] as const) {
+      const fake = fakeFetch([{ status: 200, body: { data: { ok: true } } }]);
+      const github = new GitHubClient({
+        token: async () => TOKEN,
+        fetch: fake.fetch,
+        ...(apiUrl === undefined ? {} : { apiUrl }),
+      });
+      expect(github.graphqlUrl).toBe(url);
+      expect(await github.graphql("query { ok }", { n: 1 })).toEqual({ data: { ok: true } });
+      expect(fake.calls[0]).toMatchObject({
+        method: "POST",
+        url,
+        body: { query: "query { ok }", variables: { n: 1 } },
+        auth: `Bearer ${TOKEN}`,
+      });
+    }
+  });
+
   it("follows pages until a short one", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
     const { github, calls } = poster([

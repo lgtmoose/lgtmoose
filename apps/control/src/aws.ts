@@ -316,6 +316,39 @@ const INSERT_CHUNK = 500;
 /** Our own findings in `findings`, with a `finding_events` row for each change. */
 export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()): FindingStore {
   return {
+    async closedFindings(pullRequestId) {
+      const rows = await db
+        .select()
+        .from(findings)
+        .where(
+          and(
+            eq(findings.pullRequestId, pullRequestId),
+            inArray(findings.status, ["resolved_by_human", "declined"]),
+            eq(findings.source, "self"),
+          ),
+        )
+        .orderBy(asc(findings.createdAt));
+      return rows.flatMap((row) =>
+        row.path === null || row.line === null || row.side === null
+          ? []
+          : [
+              {
+                id: row.id,
+                fingerprint: row.fingerprint,
+                ruleCategory: row.ruleCategory,
+                severity: row.severity,
+                path: row.path,
+                line: row.line,
+                startLine: row.startLine ?? undefined,
+                side: row.side,
+                title: row.title,
+                body: row.body,
+                raisedAtSha: row.raisedAtSha,
+                githubCommentId: row.githubCommentId ?? undefined,
+              },
+            ],
+      );
+    },
     async trackedFindings(pullRequestId) {
       const rows = await db
         .select()
@@ -426,7 +459,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         commentIds: number[],
         from: ("open" | "outdated" | "resolved_by_human")[],
         to: "open" | "resolved_by_human",
-        type: "resolved" | "raised",
+        type: "resolved" | "unresolved",
       ) => {
         if (commentIds.length === 0) return 0;
         return db.transaction(async (tx) => {
@@ -458,7 +491,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
       };
       const resolved = await move(ids(true), ["open", "outdated"], "resolved_by_human", "resolved");
       // Unresolved again: open again (the next follow decides whether its line still stands).
-      const unresolved = await move(ids(false), ["resolved_by_human"], "open", "raised");
+      const unresolved = await move(ids(false), ["resolved_by_human"], "open", "unresolved");
       return { resolved, unresolved };
     },
     async escalate(changes, sha) {
@@ -584,9 +617,7 @@ export async function awsControlDeps(
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         // GitHub Apps can call GraphQL with the installation token.
-        threads: graphQlThreadReader((query, variables) =>
-          client.request("POST", "/graphql", { query, variables }),
-        ),
+        threads: graphQlThreadReader((query, variables) => client.graphql(query, variables)),
         token,
         poster: (runId, pull) =>
           options.shadow

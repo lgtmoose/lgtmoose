@@ -70,6 +70,11 @@ export interface FindingStore {
   /** Our findings on the PR that are open or outdated, oldest first. */
   trackedFindings(pullRequestId: string): Promise<FindingRecord[]>;
   /**
+   * Our findings on the PR a person resolved or declined, at their recorded place: the person's
+   * decision wins, so the reviewer raising one again is dropped.
+   */
+  closedFindings(pullRequestId: string): Promise<Omit<FindingRecord, "status">[]>;
+  /**
    * Records a run's new findings as open, raised at `headSha`. A fingerprint already on the PR
    * (say, outdated, then raised again) is reopened at the new place; its severity is never
    * lowered, and it keeps its comment ID unless a new one is given.
