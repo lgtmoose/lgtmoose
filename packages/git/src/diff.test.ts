@@ -612,6 +612,41 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.files[0]?.removedSinceLastReview ?? []).toEqual([]);
   });
 
+  it("compares a reverted rename's dropped lines with the planned file at its name", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.move("a.ts", "b.ts");
+    await fixture.write({
+      "b.ts": lines(10).replace("line 3\n", "line 3\nrequireAdmin(user);\nkeepThis(user);\n"),
+    });
+    const reviewed = await fixture.commit("rename, add two lines");
+    // b.ts goes; a.ts comes back rewritten, still adding one of the two lines.
+    await fixture.remove("b.ts");
+    await fixture.write({ "a.ts": `${lines(10, "other")}keepThis(user);\n` });
+    const head = await fixture.commit("rewrite a.ts");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["b.ts", reviewed]]),
+    });
+    const [file] = diff.files;
+    expect(file?.path).toBe("a.ts");
+    // Still added by a.ts, so not something the PR stopped adding.
+    expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
+  });
+
+  it("gives no fallback reason for a file a gone commit leaves at move depth", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.move("a.ts", "b.ts");
+    const head = await fixture.commit("move only");
+
+    const diff = await reviewDiff(await clone(head, [base]), {
+      baseSha: base,
+      reviewedAt: new Map([["b.ts", "e".repeat(40)]]),
+    });
+    expect(diff.files).toMatchObject([{ path: "b.ts", moved: true }]);
+    expect(diff.fallbackReason).toBeUndefined();
+  });
+
   it("has nothing to review when a pure rename is undone", async () => {
     const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
     await fixture.move("a.ts", "b.ts");

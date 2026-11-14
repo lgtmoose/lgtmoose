@@ -432,8 +432,7 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
   const newLines = changed
     ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
     : [];
-  const renamedSince = changed?.status === "renamed" && file.status === "renamed";
-  if (newLines.length === 0 && removed.length === 0 && !renamedSince) return undefined;
+  if (newLines.length === 0 && removed.length === 0) return undefined;
   return withRemoved({ ...file, changedSinceLastReview: newLines }, removed);
 }
 
@@ -458,6 +457,7 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   const mergeBase = (await repo.git(["merge-base", options.baseSha, repo.headSha])).trim();
   const files = await diffRange(repo, mergeBase, repo.headSha);
   const result = { mergeBase, headSha: repo.headSha, prFiles: files };
+  const prFileAt = new Map(files.map((file) => [file.path, file]));
   const { reviewedAt } = options;
   if (reviewedAt === undefined || reviewedAt.size === 0) {
     return { ...result, kind: "full", files, unchanged: [] };
@@ -597,8 +597,11 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     }
     const earlier = planned.get(path);
     if (earlier !== undefined) {
-      // Already planned under that name: record this name with it, and what it no longer adds.
-      plan(withRemoved(earlier, [...(earlier.removedSinceLastReview ?? []), ...removed]), [
+      // Already planned under that name: record this name with it, and what it no longer adds
+      // compared with that file (its own PR diff, rewordings left out), not with nothing.
+      const since = baseOf(before.path)?.since.get(path);
+      const dropped = removedTexts(before, prFileAt.get(path), since);
+      plan(withRemoved(earlier, [...(earlier.removedSinceLastReview ?? []), ...dropped]), [
         ...(earlier.alsoReviewedAs ?? []),
         before.path,
       ]);
@@ -639,17 +642,23 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   for (const path of unchanged) {
     if (planned.has(path)) throw new Error(`${path} is both planned and covered.`);
   }
+  // Named in the fallback reason: files a gone commit sends to a full read. A move or an
+  // import-only edit is still read lightly, so it isn't one.
+  const readInFull = [...gone].filter((path) => {
+    const file = planned.get(path);
+    return file !== undefined && !file.moved && !file.mechanical;
+  });
   return {
     ...result,
     kind: compared ? "incremental" : "full",
     files: [...planned.values()],
     unchanged: [...unchanged],
-    ...(gone.size > 0
+    ...(readInFull.length > 0
       ? {
           fallbackReason:
-            gone.size === 1
-              ? `${[...gone][0] ?? ""} is reviewed in full: the commit it was last reviewed at is no longer in the repository (force-pushed away).`
-              : `${gone.size} files are reviewed in full: the commits they were last reviewed at are no longer in the repository (force-pushed away).`,
+            readInFull.length === 1
+              ? `${readInFull[0] ?? ""} is reviewed in full: the commit it was last reviewed at is no longer in the repository (force-pushed away).`
+              : `${readInFull.length} files are reviewed in full: the commits they were last reviewed at are no longer in the repository (force-pushed away).`,
         }
       : {}),
   };

@@ -114,10 +114,11 @@ async function standing(
   // Where each finding is now. Undefined: its line is gone. Not in the map: it can't be
   // followed (the commit it was raised at is gone, or shares no history with the base).
   const at = new Map<FindingRecord, LineRef | undefined>();
-  const followable = new Map<string, boolean>();
-  for (const sha of new Set(records.map((record) => record.raisedAtSha))) {
-    followable.set(sha, await repo.hasCommit(sha));
-  }
+  // One check for every commit the findings were raised at.
+  const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
+  const followable = new Map(
+    records.map((record) => [record.raisedAtSha, present.has(record.raisedAtSha)]),
+  );
   // New-side lines: from the head they were raised at to this head.
   const right = records.filter((r) => r.side === "RIGHT" && followable.get(r.raisedAtSha));
   for (const [sha, group] of groupBy(right, (record) => record.raisedAtSha)) {
