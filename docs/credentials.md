@@ -113,7 +113,9 @@ The broker controls how review runs use the stored credentials. It runs as two L
 - **Refreshed tokens.** Codex refreshes a ChatGPT sign-in's tokens during a run, and the refresh retires the old refresh token. That is why a sign-in has one slot. The sandbox hands the new `auth.json` to a presigned URL for its batch. When the batch gives its lease back, the broker stores the new `auth.json` as a new version of the secret, but only if all of these hold:
   - the batch still holds its lease;
   - the secret hasn't changed since the task started, so a newer `lgtmoose auth codex` isn't overwritten;
-  - the new file is an `auth.json` for the same ChatGPT account.
+  - the new file is an `auth.json`, and it and the stored one have the same non-empty `tokens.account_id`.
+
+  A sign-in stored without an account ID gets no refresh write-back. Codex's own `auth.json` type makes `account_id` optional, so this can happen. Its refreshed tokens are refused, the credential alarm fires, and runs keep using the stored tokens until their refresh token stops working. Run `lgtmoose auth codex` again to store a sign-in that has one.
 
   The handed-back object is deleted either way. The broker can read and write the value of a ChatGPT sign-in's secret only. For every other credential it can only describe the secret.
 

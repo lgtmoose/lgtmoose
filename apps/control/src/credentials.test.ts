@@ -19,14 +19,15 @@ const EXEC = "arn:aws:states:us-east-1:1:execution:review:a";
 const OTHER_EXEC = "arn:aws:states:us-east-1:1:execution:review:b";
 const SECRET = "arn:aws:secretsmanager:us-east-1:1:secret:lgtmoose/provider/codex";
 
-function authJson(account: string, refresh: string): string {
+/** A sign-in's auth.json; `account` undefined leaves `account_id` out. */
+function authJson(account: string | undefined, refresh: string): string {
   return JSON.stringify({
     OPENAI_API_KEY: null,
     tokens: {
       id_token: "id",
       access_token: `access-${refresh}`,
       refresh_token: refresh,
-      account_id: account,
+      ...(account === undefined ? {} : { account_id: account }),
     },
     last_refresh: "2026-11-14T00:00:00Z",
   });
@@ -203,6 +204,23 @@ describe("acquireLease", () => {
     expect(state.writes.map((w) => w.value)).toEqual([authJson("acct-1", "r2")]);
     expect(store.objects.has(left)).toBe(false);
   });
+
+  it("records the version it stored on takeover, so its own task's refresh is stored too", async () => {
+    const { deps, store, state, running } = setup();
+    await acquire(deps, OTHER_RUN, 2, OTHER_EXEC);
+    store.put(runKeys(OTHER_RUN).batchCredential(2), authJson("acct-1", "r2"));
+    running.delete(OTHER_EXEC);
+    const lease = await acquire(deps);
+    // The new task started with r2 (version v2), refreshed it to r3, and hands that back.
+    expect(JSON.parse(store.objects.get(leaseKey("codex", 0))!.text).versionId).toBe("v2");
+    store.put(runKeys(RUN).batchCredential(0), authJson("acct-1", "r3"));
+    await release(deps, lease);
+    expect(state.writes.map((w) => w.value)).toEqual([
+      authJson("acct-1", "r2"),
+      authJson("acct-1", "r3"),
+    ]);
+    expect(store.objects.has(leaseKey("codex", 0))).toBe(false);
+  });
 });
 
 describe("releaseLease", () => {
@@ -250,6 +268,8 @@ describe("releaseLease", () => {
 
   it.each([
     ["another account's auth.json", authJson("acct-2", "r2")],
+    ["an auth.json without an account ID", authJson(undefined, "r2")],
+    ["an auth.json with an empty account ID", authJson("", "r2")],
     ["something that isn't an auth.json", '{"tokens":{}}'],
     ["text that isn't JSON", "sk-not-json"],
   ])("refuses %s and reports a problem", async (_name, text) => {
@@ -260,6 +280,20 @@ describe("releaseLease", () => {
     expect(state.writes).toEqual([]);
     expect(problems).toEqual([expect.objectContaining({ providerId: "codex", value: 1 })]);
     expect(store.objects.has(runKeys(RUN).batchCredential(0))).toBe(false);
+  });
+
+  it("stores no refresh while the stored sign-in has no account ID, even one without either", async () => {
+    for (const handedBack of [authJson(undefined, "r2"), authJson("acct-1", "r2")]) {
+      const { deps, store, state, problems } = setup();
+      state.value = authJson(undefined, "r1");
+      const lease = await acquire(deps);
+      store.put(runKeys(RUN).batchCredential(0), handedBack);
+      await release(deps, lease);
+      expect(state.writes).toEqual([]);
+      expect(problems).toEqual([
+        expect.objectContaining({ value: 1, reason: expect.stringContaining("no account ID") }),
+      ]);
+    }
   });
 
   it("reports a run refused for auth", async () => {

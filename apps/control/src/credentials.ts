@@ -207,7 +207,7 @@ export async function acquireLease(deps: BrokerDeps, event: AcquireEvent): Promi
     takenAt: now,
     expiresAt: now + deps.leaseTtlMs,
   };
-  const body = JSON.stringify(lease);
+  let body = JSON.stringify(lease);
   const first = Math.floor(deps.random() * credential.limit) % credential.limit;
   const slots = Array.from({ length: credential.limit }, (_, i) => (first + i) % credential.limit);
   const taken = (slot: number, previous?: Lease): HeldLease => {
@@ -248,9 +248,17 @@ export async function acquireLease(deps: BrokerDeps, event: AcquireEvent): Promi
       (held.runId === runId && held.index === index) ||
       !(await deps.executionRunning(held.executionArn));
     if (!done) continue;
-    if ((await deps.store.replaceText(key, body, current.etag)) === undefined) continue;
+    const etag = await deps.store.replaceText(key, body, current.etag);
+    if (etag === undefined) continue;
     if (held !== undefined && credential.auth === "chatgpt-login") {
-      await storeRefresh(deps, providerId, credential, held);
+      const stored = await storeRefresh(deps, providerId, credential, held);
+      if (stored !== undefined) {
+        // The task this lease is for starts after this, with the version just stored: the
+        // lease must record that one, or this task's own refresh would be refused at release.
+        lease.versionId = stored;
+        body = JSON.stringify(lease);
+        if ((await deps.store.replaceText(key, body, etag)) === undefined) continue;
+      }
     }
     return taken(slot, held);
   }
@@ -324,10 +332,17 @@ const authJsonSchema = z.looseObject({
   }),
 });
 
-function accountOf(text: string): string | undefined {
+/**
+ * A sign-in's `auth.json`, and its ChatGPT account: undefined when the text isn't an
+ * `auth.json` at all; `account` undefined when it has no `tokens.account_id` (Codex's own type
+ * makes it optional).
+ */
+function signInOf(text: string): { account: string | undefined } | undefined {
   try {
     const parsed = authJsonSchema.safeParse(JSON.parse(text));
-    return parsed.success ? (parsed.data.tokens.account_id ?? "") : undefined;
+    if (!parsed.success) return undefined;
+    const account = parsed.data.tokens.account_id?.trim();
+    return { account: account === undefined || account === "" ? undefined : account };
   } catch {
     return undefined;
   }
@@ -336,8 +351,8 @@ function accountOf(text: string): string | undefined {
 /**
  * Stores the refreshed `auth.json` a lease's batch left, and deletes it. It's stored only when
  * it's a sign-in's `auth.json`, the secret is still the version the batch started with (so a
- * newer refresh or a new `lgtmoose auth` isn't overwritten), and it's for the same ChatGPT
- * account. Returns the new version's ID, when stored.
+ * newer refresh or a new `lgtmoose auth` isn't overwritten), and both it and the stored one
+ * name the same, non-empty ChatGPT account ID. Returns the new version's ID, when stored.
  */
 async function storeRefresh(
   deps: BrokerDeps,
@@ -351,9 +366,9 @@ async function storeRefresh(
   const fields = { providerId, runId: lease.runId, index: lease.index };
   try {
     const refreshed = object.text;
-    const account =
-      Buffer.byteLength(refreshed) <= MAX_REFRESH_BYTES ? accountOf(refreshed) : undefined;
-    if (account === undefined) {
+    const signIn =
+      Buffer.byteLength(refreshed) <= MAX_REFRESH_BYTES ? signInOf(refreshed) : undefined;
+    if (signIn === undefined) {
       deps.audit("refreshed credential not stored: not a sign-in's auth.json", fields);
       deps.problem(providerId, 1, "a task handed back a credential that isn't an auth.json");
       return undefined;
@@ -367,10 +382,25 @@ async function storeRefresh(
       });
       return undefined;
     }
-    const before = accountOf(await deps.secrets.read(credential.secretId));
-    if (before !== account) {
-      deps.audit("refreshed credential not stored: it's for another account", fields);
-      deps.problem(providerId, 1, "a task handed back a credential for another account");
+    // Only a refresh provably for the same ChatGPT account is stored: without an account ID on
+    // both sides, a file written in the sandbox could swap in another account's tokens.
+    const stored = signInOf(await deps.secrets.read(credential.secretId))?.account;
+    if (stored === undefined) {
+      deps.audit("refreshed credential not stored: the stored sign-in has no account ID", fields);
+      deps.problem(
+        providerId,
+        1,
+        "the stored ChatGPT sign-in has no account ID, so refreshed tokens can't be stored; run lgtmoose auth codex again",
+      );
+      return undefined;
+    }
+    if (signIn.account !== stored) {
+      deps.audit("refreshed credential not stored: it's not for the same account", fields);
+      deps.problem(
+        providerId,
+        1,
+        "a task handed back a credential that isn't for the same account",
+      );
       return undefined;
     }
     const versionId = await deps.secrets.write(credential.secretId, refreshed, lease.holder);
