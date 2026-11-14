@@ -51,6 +51,7 @@ function harness(
     profiles?: InferenceProfile[];
     /** The identity may not list inference profiles. */
     noProfileList?: boolean;
+    profilesFail?: boolean;
     remove?: RemoveResult;
     put?: PutResult;
   } = {},
@@ -62,6 +63,7 @@ function harness(
   const validated: (true | string)[] = [];
   const confirms: string[] = [];
   const legacyAsked: string[][] = [];
+  const bedrockCalls: string[] = [];
   const reruns: (string | undefined)[] = [];
   const store: CredentialStore = {
     put: (label, value, putOptions) => {
@@ -101,11 +103,17 @@ function harness(
     credentials: () => store,
     bedrock: () => ({
       anthropicModels: (asked) => {
+        bedrockCalls.push("models");
         legacyAsked.push([...(asked?.legacyToCheck ?? [])]);
         return Promise.resolve(options.models ?? []);
       },
-      inferenceProfiles: () =>
-        Promise.resolve(options.noProfileList === true ? undefined : (options.profiles ?? [])),
+      inferenceProfiles: () => {
+        bedrockCalls.push("profiles");
+        if (options.profilesFail === true) return Promise.reject(new Error("throttled"));
+        return Promise.resolve(
+          options.noProfileList === true ? undefined : (options.profiles ?? []),
+        );
+      },
     }),
     run,
     trapSignals: () => () => {},
@@ -116,7 +124,7 @@ function harness(
     const result = await runAuth(argv, () => Promise.resolve(deps));
     return { ...result, all: [...out, result.stdout, result.stderr].join("") };
   };
-  return { go, puts, removed, out, run, validated, confirms, legacyAsked, reruns };
+  return { go, puts, removed, out, run, validated, confirms, legacyAsked, reruns, bedrockCalls };
 }
 
 const SECRETS = [OAUTH, ANTHROPIC_KEY, "SECRET-REFRESH", "SECRET-ACCESS", "SECRET-CURSOR"];
@@ -478,6 +486,44 @@ describe("auth", () => {
       `  unknown  ${OPUS}: callable only through an inference profile`,
     );
     expect(result.stderr).toContain("so profile ids weren't checked. On-demand ids were.");
+  });
+
+  it("bedrock: lists profiles first, and doesn't start the model checks if that fails", async () => {
+    const ok = harness({ models: [model(HAIKU), model(SONNET), model(OPUS)] });
+    await ok.go(["bedrock"]);
+    expect(ok.bedrockCalls).toEqual(["profiles", "models"]);
+    const failing = harness({ profilesFail: true });
+    const result = await failing.go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("throttled");
+    expect(failing.bedrockCalls).toEqual(["profiles"]);
+  });
+
+  it("bedrock: says to pick another region when access is granted but nothing is callable", async () => {
+    const config = { ...baseConfig, providers: [baseConfig.providers[0]] };
+    const result = await harness({
+      config,
+      models: [model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] })],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      "Access is granted, but this region has no on-demand or inference-profile way to call these models; pick another region.",
+    );
+    expect(result.stderr).not.toContain("Request model access");
+  });
+
+  it("bedrock: keeps the legacy marker on a profile id it couldn't check", async () => {
+    const LEGACY = "anthropic.claude-3-opus-20240229-v1:0";
+    const config = pinned({ fast: "arn:aws:x", standard: "arn:aws:y", deep: `eu.${LEGACY}` });
+    const result = await harness({
+      config,
+      models: [model(LEGACY, { legacy: true })],
+      noProfileList: true,
+    }).go(["bedrock"]);
+    expect(result.stdout + result.stderr).toContain(
+      `eu.${LEGACY} (legacy: Bedrock is retiring it): needs bedrock:ListInferenceProfiles`,
+    );
   });
 
   it("bedrock: a global. id is checked against the list too", async () => {

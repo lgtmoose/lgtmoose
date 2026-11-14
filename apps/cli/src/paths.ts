@@ -8,6 +8,13 @@ import { errorMessage } from "./errors.js";
 // apps/cli/{src,dist}/ → repo root, the same place infra/cdk/lib/load-config.ts looks.
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
+/**
+ * How messages tell the person to run the CLI. It only runs from a checkout of this repo
+ * (config and CDK paths resolve from REPO_ROOT), where the root package script is how it's
+ * started, so this matches the README and every other message.
+ */
+export const CLI = "pnpm lgtmoose";
+
 /** Honours LGTMOOSE_CONFIG the same way `cdk synth` does, so both agree on the file. */
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
   return resolve(REPO_ROOT, env.LGTMOOSE_CONFIG ?? "lgtmoose.config.ts");

@@ -12,7 +12,7 @@ import {
   type ProviderConfig,
   type Tier,
 } from "@lgtmoose/config";
-import { loadDeployConfig } from "../paths.js";
+import { CLI, loadDeployConfig } from "../paths.js";
 import { isPromptCancel } from "../setup/prompter.js";
 import type { SetupFiles } from "../setup/setup.js";
 import {
@@ -202,7 +202,7 @@ function parseFlags(argv: readonly string[]): Flags {
       yes: values.yes === true,
       help: values.help === true,
       positionals,
-      rerun: ["pnpm lgtmoose auth", ...argv].join(" "),
+      rerun: [CLI, "auth", ...argv].join(" "),
     };
   } catch (error) {
     throw new UsageError(errorMessage(error));
@@ -477,27 +477,25 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     tiers.flatMap(({ model }) => (model.kind === "id" ? [model.id] : [])),
   );
   const bedrock = deps.bedrock(region);
-  const [models, profiles] = await Promise.all([
-    bedrock.anthropicModels({ legacyToCheck }),
-    bedrock.inferenceProfiles(),
-  ]);
+  // One after the other: Bedrock's control plane throttles bursts, and if the profile listing
+  // fails there's no point starting the availability checks.
+  const profiles = await bedrock.inferenceProfiles();
+  const models = await bedrock.anthropicModels({ legacyToCheck });
+  const facts: BedrockFacts = { models, profiles, region, reach: reachOf(models, profiles) };
   const current = models.filter((model) => !model.legacy);
   // Usable means callable here too: access granted, and an id this region can call it by.
-  const callable = current.filter(
-    (model) => model.usable && (pinnableIds(model, profiles)?.length ?? 0) > 0,
-  );
-  const maybe = current.filter(
-    (model) => model.usable && pinnableIds(model, profiles) === undefined,
-  );
+  const usable = current.filter((model) => model.usable);
+  const callable = usable.filter((model) => (facts.reach.get(model.modelId)?.length ?? 0) > 0);
+  const maybe = usable.filter((model) => facts.reach.get(model.modelId) === undefined);
   const lines = current
     .toSorted((a, b) => a.modelId.localeCompare(b.modelId))
-    .map((model) => modelLine(model, profiles));
+    .map((model) => modelLine(model, facts));
 
   const tierLines: string[] = [];
   let blocked = false;
   let anyChecked = false;
   for (const { provider, tier, model } of tiers) {
-    const verdict = tierVerdict(model, tier, { models, profiles, region });
+    const verdict = tierVerdict(model, tier, facts);
     if (verdict.state !== "not checked") anyChecked = true;
     if (verdict.state === "blocked") blocked = true;
     tierLines.push(
@@ -527,12 +525,7 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     );
   }
   if (!anyChecked && callable.length === 0 && maybe.length === 0) {
-    notes.unshift(
-      current.length === 0
-        ? `Bedrock offers no Anthropic models in ${region}. Pick another region.`
-        : "This account can't call any Anthropic model here. Request model access in the " +
-            `Bedrock console (${region}), then run this again.`,
-    );
+    notes.unshift(noModelNote(current.length, usable.length, region));
   }
   if (models.some((model) => model.usable && model.callerAuthorized === false)) {
     notes.push(
@@ -619,10 +612,33 @@ function pinnableIds(
   return profiles.filter((profile) => profile.modelId === model.modelId).map((p) => p.id);
 }
 
+/** Each model's pinnable ids, worked out once. */
+function reachOf(
+  models: readonly ModelAccess[],
+  profiles: readonly InferenceProfile[] | undefined,
+): ReadonlyMap<string, string[] | undefined> {
+  return new Map(models.map((model) => [model.modelId, pinnableIds(model, profiles)]));
+}
+
+/** Why no model can be used here, when none can. */
+function noModelNote(offered: number, usable: number, region: string): string {
+  if (offered === 0) return `Bedrock offers no Anthropic models in ${region}. Pick another region.`;
+  if (usable > 0) {
+    return (
+      "Access is granted, but this region has no on-demand or inference-profile way to call " +
+      "these models; pick another region."
+    );
+  }
+  return (
+    "This account can't call any Anthropic model here. Request model access in the " +
+    `Bedrock console (${region}), then run this again.`
+  );
+}
+
 /** One line of the model list: whether it's usable here, and the ids to pin if so. */
-function modelLine(model: ModelAccess, profiles: readonly InferenceProfile[] | undefined): string {
+function modelLine(model: ModelAccess, facts: BedrockFacts): string {
   if (!model.usable) return `  blocked  ${model.modelId}: ${model.problems.join(", ")}`;
-  const ids = pinnableIds(model, profiles);
+  const ids = facts.reach.get(model.modelId);
   if (ids === undefined) {
     return `  unknown  ${model.modelId}: callable only through an inference profile (${NEEDS_PROFILE_LIST})`;
   }
@@ -643,6 +659,8 @@ interface BedrockFacts {
   /** Undefined when they couldn't be listed. */
   profiles: readonly InferenceProfile[] | undefined;
   region: string;
+  /** Each model's pinnable ids (`pinnableIds`). */
+  reach: ReadonlyMap<string, string[] | undefined>;
 }
 
 /** Whether a tier's model can run on Bedrock here. "not checked" is reported, never failed. */
@@ -672,7 +690,7 @@ function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFa
     let unknown = 0;
     for (const model of facts.models) {
       if (model.legacy || !model.usable || !pattern.test(model.modelId)) continue;
-      const pins = pinnableIds(model, facts.profiles);
+      const pins = facts.reach.get(model.modelId);
       if (pins === undefined) unknown += 1;
       else ids.push(...pins);
     }
@@ -701,7 +719,7 @@ function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts):
   }
   const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
   const instead = () => {
-    const ids = pinnableIds(access, facts.profiles);
+    const ids = facts.reach.get(access.modelId);
     if (ids === undefined) return `use one of its inference profiles (${NEEDS_PROFILE_LIST})`;
     return ids.length > 0
       ? `use ${ids.join(" or ")}`
@@ -718,7 +736,7 @@ function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts):
   }
   const profileId = `${prefix}.${id}`;
   if (facts.profiles === undefined) {
-    return { state: "not checked", detail: `${profileId}: ${NEEDS_PROFILE_LIST}` };
+    return { state: "not checked", detail: `${profileId}${legacy}: ${NEEDS_PROFILE_LIST}` };
   }
   if (!facts.profiles.some((profile) => profile.id === profileId && profile.modelId === id)) {
     return {

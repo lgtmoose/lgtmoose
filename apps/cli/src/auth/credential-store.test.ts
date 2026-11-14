@@ -12,7 +12,6 @@ import {
   awsCredentialStore,
   credentialDescription,
   credentialTags,
-  rescheduleDays,
   type CredentialSender,
 } from "./credential-store.js";
 
@@ -124,13 +123,11 @@ describe("awsCredentialStore", () => {
     });
   });
 
-  it("puts the deletion back on or before its old date when AWS refused the new value", async () => {
-    // The earlier remove ran 2 days ago with lgtmoose's 7-day window: 5 days were left.
-    const removedAt = new Date("2026-11-12T00:00:00Z");
+  it("reschedules a refused restore with lgtmoose's window and reports AWS's date", async () => {
     const newDate = new Date("2026-11-21T00:00:00Z");
     const { client, sent } = fake([
       scheduled,
-      () => ({ DeletedDate: removedAt }),
+      () => ({ DeletedDate: new Date("2026-11-12T00:00:00Z") }),
       () => ({}),
       denied,
       absent,
@@ -140,9 +137,11 @@ describe("awsCredentialStore", () => {
       .put(LABEL, "VALUE-SECRET")
       .catch((e: unknown) => e);
     expect(String(error)).toContain("not allowed to update");
-    // DeleteSecret's own date, and why it's later than before.
-    expect(String(error)).toContain("scheduled for deletion again, on 2026-11-21T00:00:00.000Z");
-    expect(String(error)).toContain("it had 5 days left");
+    expect(String(error)).toContain(
+      "scheduled for deletion again, on 2026-11-21T00:00:00.000Z; the earlier removal's date isn't kept.",
+    );
+    // Removed 2 days ago: it could have been lgtmoose's own window, so nothing about shortening.
+    expect(String(error)).not.toContain("shortens");
     expect(String(error)).not.toContain("VALUE-SECRET");
     expect((sent[5] as DeleteSecretCommand).input).toEqual({
       SecretId: "lgtmoose/provider/codex",
@@ -150,21 +149,22 @@ describe("awsCredentialStore", () => {
     });
   });
 
-  it("works out the window from when the earlier remove ran, rounding down", () => {
-    const hour = 60 * 60 * 1000;
-    // Removed an hour ago: 6 whole days left (rounded down), so the 7-day minimum moves it later.
-    expect(rescheduleDays(new Date(NOW.getTime() - hour), NOW)).toEqual({
-      days: 7,
-      note: "later than before: it had 6 days left, assuming the earlier removal used lgtmoose's 7-day window, but Secrets Manager needs at least 7",
-    });
-    expect(rescheduleDays(NOW, NOW)).toEqual({
-      days: 7,
-      note: "on or before the date it had, assuming the earlier removal used lgtmoose's 7-day window",
-    });
-    expect(rescheduleDays(undefined, NOW)).toEqual({
-      days: 7,
-      note: "the earlier removal's date couldn't be read, so the date may have moved",
-    });
+  it("says when the earlier removal had a longer window, which this shortens", async () => {
+    // Scheduled 20 days ago and still there: not lgtmoose's 7-day window.
+    const longAgo = new Date("2026-10-25T00:00:00Z");
+    const { client } = fake([
+      scheduled,
+      () => ({ DeletedDate: longAgo }),
+      () => ({}),
+      denied,
+      absent,
+    ]);
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
+      .put(LABEL, "VALUE")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain(
+      "It had been scheduled since 2026-10-25T00:00:00.000Z, so it was removed with a window longer than 7 days, which this shortens.",
+    );
   });
 
   it("says the removal is cancelled and the OLD credential is live when rescheduling fails", async () => {
@@ -183,14 +183,23 @@ describe("awsCredentialStore", () => {
     expect(String(error)).toContain("pnpm lgtmoose auth remove codex");
   });
 
-  it("never undoes after an error AWS may have applied, even if the version looks absent", async () => {
-    const { client, sent } = fake([scheduled, () => ({}), () => ({}), timeout, absent]);
+  it("never undoes after an error AWS may have applied, even if every check looks absent", async () => {
+    const { client, sent } = fake([
+      scheduled,
+      () => ({}),
+      () => ({}),
+      timeout,
+      absent,
+      absent,
+      absent,
+    ]);
     const error = await awsCredentialStore(client, "eu-west-2", quick)
       .put(LABEL, "VALUE")
       .catch((e: unknown) => e);
     expect(String(error)).toContain("Couldn't tell whether the new value was stored");
     expect(String(error)).toContain("The earlier removal is cancelled");
     expect(String(error)).toContain("may hold the OLD credential");
+    expect(sent.filter((c) => c instanceof DescribeSecretCommand)).toHaveLength(4);
     expect(sent.some((c) => c instanceof DeleteSecretCommand)).toBe(false);
   });
 
@@ -211,7 +220,7 @@ describe("awsCredentialStore", () => {
     expect(sent.some((c) => c instanceof DeleteSecretCommand)).toBe(false);
   });
 
-  it("asks again only while it gets no answer, and treats a late landing as stored", async () => {
+  it("waits out a lagging answer: absent at first, then current, is stored", async () => {
     let token = "";
     const timesOut = (command: unknown) => {
       token = (command as UpdateSecretCommand).input.ClientRequestToken ?? "";
@@ -219,7 +228,15 @@ describe("awsCredentialStore", () => {
     };
     const waits: number[] = [];
     const landed = () => ({ VersionIdsToStages: { [token]: ["AWSCURRENT"] } });
-    const { client, sent } = fake([scheduled, () => ({}), () => ({}), timesOut, timeout, landed]);
+    const { client, sent } = fake([
+      scheduled,
+      () => ({}),
+      () => ({}),
+      timesOut,
+      absent,
+      absent,
+      landed,
+    ]);
     const store = awsCredentialStore(client, "eu-west-2", {
       now: () => NOW,
       sleep: (ms) => {
@@ -228,16 +245,11 @@ describe("awsCredentialStore", () => {
       },
     });
     expect(await store.put(LABEL, "VALUE")).toEqual({ outcome: "restored" });
-    expect(waits).toEqual([300]);
-    expect(sent.map((c) => (c as object).constructor).slice(3)).toEqual([
-      UpdateSecretCommand,
-      DescribeSecretCommand,
-      DescribeSecretCommand,
-      TagResourceCommand,
-    ]);
+    expect(waits).toEqual([300, 1000]);
+    expect(sent.at(-1)).toBeInstanceOf(TagResourceCommand);
   });
 
-  it("stops at the first answer that lists the versions", async () => {
+  it("trusts one negative answer when AWS refused the update outright", async () => {
     const { client, sent } = fake([
       () => {
         throw awsErr("ResourceExistsException");
@@ -252,7 +264,7 @@ describe("awsCredentialStore", () => {
     expect(sent.filter((c) => c instanceof DescribeSecretCommand)).toHaveLength(1);
   });
 
-  it("says it can't tell when neither the update nor the checks answer", async () => {
+  it("says it can't tell when neither the update nor the checks answer, naming the command", async () => {
     const { client, sent } = fake([
       () => {
         throw awsErr("ResourceExistsException");
@@ -263,9 +275,11 @@ describe("awsCredentialStore", () => {
       timeout,
     ]);
     const error = await awsCredentialStore(client, "eu-west-2", quick)
-      .put(LABEL, "VALUE")
+      .put(LABEL, "VALUE", { rerun: "pnpm lgtmoose auth codex" })
       .catch((e: unknown) => e);
-    expect(String(error)).toContain("It holds either the new value or the previous one");
+    expect(String(error)).toContain(
+      "It holds either the new value or the previous one. Run pnpm lgtmoose auth codex again",
+    );
     expect(sent).toHaveLength(5);
   });
 
