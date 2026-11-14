@@ -102,7 +102,7 @@ LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres 
 5. **M5:** conversation and learning: reply judge, commands, learnings, dashboard
 6. **M6:** public release v0.1.0
 
-See [docs/architecture.md](docs/architecture.md).
+See [docs/architecture.md](docs/architecture.md). Review criteria come from rule packs: see [docs/rule-packs.md](docs/rule-packs.md).
 
 ## License
 

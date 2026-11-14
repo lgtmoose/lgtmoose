@@ -19,7 +19,7 @@ import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness
 import { planReview, readHeaders, type Plan } from "@lgtmoose/planner";
 import {
   buildReviewerPrompt,
-  loadRulePacks,
+  selectRulePacks,
   placeFindings,
   readConventionFilesAt,
   type PullRequestComment,
@@ -247,7 +247,9 @@ export async function prepareReview(
   const conventions = await readConventionFilesAt(repo, pr.baseSha, {
     globs: config.conventions,
   });
-  const rulePacks = await loadRulePacks(config.rulepacks);
+  const selected = await selectRulePacks(config.rulepacks, { repo, baseSha: pr.baseSha });
+  for (const problem of selected.problems) deps.progress(`Rule packs: ${problem}`);
+  const rulePacks = selected.packs;
   deps.progress(
     `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped.`,
   );

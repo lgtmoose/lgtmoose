@@ -50,12 +50,22 @@ export {
   type SkippedPath,
 } from "./cross-file.js";
 export {
+  MANDATORY_RULE_PACKS,
+  PRIVATE_RULE_PACK_DIR,
+  REPO_RULE_PACK_LIMITS,
   RULE_PACK_DIR,
   RulePackError,
   availableRulePacks,
   loadRulePack,
   loadRulePacks,
+  parseRulePack,
+  selectRulePacks,
+  type PackRule,
   type RulePack,
+  type RulePackDirs,
+  type RulePackSource,
+  type SelectRulePacksOptions,
+  type SelectedRulePacks,
 } from "./rule-packs.js";
 export {
   UNTRUSTED_TAG,

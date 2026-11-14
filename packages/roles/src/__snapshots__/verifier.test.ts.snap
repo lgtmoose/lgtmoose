@@ -85,72 +85,189 @@ Return only a JSON object that matches this JSON Schema, with no other text:
 
 # Rule packs
 
+Review criteria. Each rule names its category, which is the rule_category to report, and its default severity. Use a different severity only when the severity definitions above clearly call for it.
+
 ## Rule pack: generic
 
-### Generic rule pack (v0)
+### Generic
 
-Rules for any language and any repo. Each section below is named by its \`rule_category\` id. Report a finding only when the diff breaks one of these rules, or a rule in the repo's convention files.
+Rules for any language and any repo. Always on.
+
+Report a finding only when the diff breaks one of these rules, or a rule in another rule pack or in the repo's convention files.
 
 #### correctness
 
-The change does not do what it is meant to do, or breaks something that worked.
+- wrong-logic (default severity: blocking): Wrong logic, such as an inverted or incomplete condition, an off-by-one error, the wrong operator or the wrong variable.
+  Example:
 
-- Wrong logic: inverted or incomplete conditions, off-by-one errors, wrong operator, wrong variable.
-- Unhandled cases the code clearly receives: empty lists, missing keys, \`null\` or \`undefined\`, zero, negative numbers.
-- Async mistakes: a promise that is not awaited, work that runs in the wrong order, shared state changed by concurrent calls.
-- A changed function signature, return type or behaviour that existing callers still rely on. Read the callers to check.
-- Resource leaks: files, connections, timers or listeners that are opened and never closed.
-- Data loss: writes that overwrite, truncate or delete more than intended.
+      if (items.length > 0) return "empty";
+
+- unhandled-case (default severity: blocking): A case the code clearly receives is not handled, such as an empty list, a missing key, null or undefined, zero or a negative number.
+  Example:
+
+      const first = users[0].name; // users can be empty
+
+- async-mistake (default severity: blocking): A promise that is not awaited, work that runs in the wrong order, or shared state changed by concurrent calls.
+  Example:
+
+      save(record); // returns a promise; the next line reads the saved record
+
+- broken-callers (default severity: blocking): A changed signature, return type or behaviour that existing callers still rely on. Read the callers to check.
+  Example:
+
+      // parse() now returns undefined on bad input, but callers still call .value on it
+
+- resource-leak (default severity: should_fix): A file, connection, timer or listener that is opened and never closed.
+  Example:
+
+      const handle = await open(path); // no close on any path
+
+- data-loss (default severity: blocking): A write that overwrites, truncates or deletes more than intended.
+  Example:
+
+      await db.delete(orders); // no where clause
 
 #### error_handling
 
-Failures must be handled or passed on, never hidden.
+- swallowed-error (default severity: should_fix): An error that is caught and ignored, or logged and then treated as success.
+  Example:
 
-- Errors that are caught and ignored, or logged and then treated as success.
-- Calls that can fail (network, file system, parsing, external processes) with no handling where a failure is likely.
-- Error messages that drop the cause, or that leak secrets or internal details to users.
-- Cleanup that does not run on the error path.
-- Retries with no limit, or retries of operations that are not safe to repeat.
+      try { await charge(); } catch {} return { ok: true };
+
+- unhandled-failure (default severity: should_fix): A call that can fail (network, file system, parsing, external processes) with no handling where a failure is likely.
+  Example:
+
+      const config = JSON.parse(await readFile(path, "utf8")); // user-edited file
+
+- lossy-error-message (default severity: should_fix): An error message that drops the cause, or that leaks secrets or internal details to users.
+  Example:
+
+      res.status(500).send(error.stack);
+
+- cleanup-on-error (default severity: should_fix): Cleanup that does not run on the error path.
+  Example:
+
+      const dir = await mkdtemp(prefix); await work(dir); await rm(dir); // no finally
+
+- unsafe-retry (default severity: should_fix): Retries with no limit, or retries of an operation that is not safe to repeat.
+  Example:
+
+      while (!(await send(payment))) {}
 
 #### security
 
-Basic security problems. Use \`authz\` or \`secrets\` instead when they fit better.
+- injection (default severity: blocking): User input built into SQL, shell commands, file paths, HTML, regular expressions or templates without escaping or parameters.
+  Example:
 
-- Injection: user input built into SQL, shell commands, file paths, HTML, regular expressions or templates without escaping or parameters.
-- Untrusted input that is not validated before use: request bodies, headers, webhook payloads, file contents.
-- Unsafe deserialization, or \`eval\` and similar on input.
-- Path traversal: user input that can reach files outside the intended folder.
-- Weak or misused crypto: home-made schemes, hard-coded keys or IVs, non-constant-time comparison of secrets.
-- TLS or certificate checks turned off.
+      db.query(\`SELECT * FROM users WHERE id = \${req.params.id}\`);
+
+- unvalidated-input (default severity: should_fix): Untrusted input (request bodies, headers, webhook payloads, file contents) that is not validated before use.
+  Example:
+
+      const amount = req.body.amount; // used as a number, never checked
+
+- unsafe-eval (default severity: blocking): Unsafe deserialization, or eval and similar functions on input.
+  Example:
+
+      const fn = new Function(req.query.code);
+
+- path-traversal (default severity: blocking): User input that can reach files outside the intended folder.
+  Example:
+
+      res.sendFile(join(uploads, req.params.name)); // name can be ../../etc/passwd
+
+- weak-crypto (default severity: blocking): Home-made crypto, hard-coded keys or IVs, or a non-constant-time comparison of secrets.
+  Example:
+
+      if (req.headers["x-signature"] === expected) { … }
+
+- tls-disabled (default severity: blocking): TLS or certificate checks turned off.
+  Example:
+
+      new https.Agent({ rejectUnauthorized: false });
 
 #### authz
 
-- A new route, handler or action with no authentication or permission check, where similar code has one.
-- Checks against the wrong user, role or tenant, or checks that a caller can skip.
-- Data from one user or tenant that another can read or change.
+- missing-check (default severity: blocking): A new route, handler or action with no authentication or permission check, where similar code has one.
+  Example:
+
+      router.delete("/users/:id", deleteUser); // other routes use requireAdmin
+
+- wrong-subject (default severity: blocking): A check against the wrong user, role or tenant, or a check the caller can skip.
+  Example:
+
+      if (req.query.admin === "true") return next();
+
+- cross-user-access (default severity: blocking): Data from one user or tenant that another can read or change.
+  Example:
+
+      return db.invoices.find({ id: req.params.id }); // no owner filter
 
 #### secrets
 
-- Credentials, tokens, keys or passwords committed in code, config or test fixtures.
-- Secrets written to logs, error messages, URLs or responses.
+- committed-secret (default severity: blocking): Credentials, tokens, keys or passwords committed in code, config or test fixtures.
+  Example:
+
+      const STRIPE_KEY = "sk_live_…";
+
+- leaked-secret (default severity: blocking): A secret written to logs, error messages, URLs or responses.
+  Example:
+
+      log.info("connecting", { url, password });
 
 #### tests
 
-- New behaviour or a bug fix with no test, in a repo that has tests for similar code.
-- Tests that cannot fail: no assertions, assertions on the mock itself, or a test that is skipped.
-- Tests changed to match a bug instead of the intended behaviour.
-- Tests that depend on the clock, the network, random values or run order without control.
+- missing-test (default severity: should_fix): New behaviour or a bug fix with no test, in a repo that has tests for similar code.
+  Example:
+
+      // adds a refund path to payments.ts; payments.test.ts covers only charges
+
+- test-cannot-fail (default severity: should_fix): A test that cannot fail, such as one with no assertions, one that asserts on the mock itself, or one that is skipped.
+  Example:
+
+      it("refunds", async () => { await refund(order); });
+
+- test-matches-bug (default severity: should_fix): A test changed to match a bug instead of the intended behaviour.
+  Example:
+
+      expect(total([1, 2])).toBe(4); // was 3
+
+- flaky-test (default severity: should_fix): A test that depends on the clock, the network, random values or run order without controlling them.
+  Example:
+
+      expect(token.expiresAt).toBe(Date.now() + 3600_000);
 
 #### wiring
 
-New code must be connected to the rest of the system. Read the files around the change to check.
+- unused-new-code (default severity: should_fix): A new module, function or component that nothing imports or calls, when the PR means to use it.
+  Example:
 
-- A new module, function or component that nothing imports or calls, when the PR means to use it.
-- A new export left out of the package's index or public entry point.
-- A new route, command, job or handler that is never registered.
-- A new environment variable or setting that is read but not added to config schemas, examples, deployment files or docs that list the others.
-- A renamed or removed export, setting or environment variable still used somewhere else.
-- A new dependency used but not added to the package manifest, or added to the wrong package.
+      // adds validateOrder() but the handler still calls the old check
+
+- missing-export (default severity: should_fix): A new export left out of the package's index or public entry point.
+  Example:
+
+      // packages/core/src/money.ts exports formatCents; index.ts doesn't re-export it
+
+- unregistered-handler (default severity: should_fix): A new route, command, job or handler that is never registered.
+  Example:
+
+      // adds jobs/cleanup.ts; the scheduler's job list is unchanged
+
+- undeclared-setting (default severity: should_fix): A new environment variable or setting that is read but not added to the config schemas, examples, deployment files or docs that list the others.
+  Example:
+
+      const limit = Number(process.env.EXPORT_LIMIT); // not in .env.example or the schema
+
+- stale-reference (default severity: blocking): A renamed or removed export, setting or environment variable that is still used somewhere else.
+  Example:
+
+      // renames getUser to fetchUser; admin/page.tsx still imports getUser
+
+- missing-dependency (default severity: should_fix): A new dependency that is used but not added to the package manifest, or added to the wrong package.
+  Example:
+
+      import { z } from "zod"; // zod is only in the root package.json
 
 # Repo conventions
 
