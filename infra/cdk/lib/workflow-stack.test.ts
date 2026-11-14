@@ -342,9 +342,16 @@ describe("review state machine", () => {
     for (const state of [States.Prepare, States.Post, review, States.MarkFailed]) {
       expect(state?.TimeoutSeconds).toBeGreaterThan(0);
     }
-    for (const state of [States.Prepare, States.Post, attempt, States.MarkFailed]) {
+    for (const state of [States.Prepare, States.Post, States.MarkFailed]) {
       expect(state?.Retry?.[0]?.BackoffRate).toBe(2);
     }
+    // An attempt isn't retried for a busy or unusable credential (the lease waits on its own),
+    // and is retried with backoff for anything else.
+    expect(attempt?.Retry?.[0]).toMatchObject({
+      ErrorEquals: ["Lgtmoose.CredentialBusy", "Lgtmoose.CredentialUnavailable"],
+      MaxAttempts: 0,
+    });
+    expect(attempt?.Retry?.[1]).toMatchObject({ ErrorEquals: ["States.ALL"], BackoffRate: 2 });
     expect(review?.TimeoutSeconds).toBe(30 * 60);
     // The attempt retries as a whole, so the sandbox task itself doesn't.
     expect(review?.Retry).toBeUndefined();

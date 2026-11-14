@@ -1,11 +1,13 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Duration, RemovalPolicy } from "aws-cdk-lib";
+import { ArnFormat, Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import type { ISecurityGroup, SubnetSelection } from "aws-cdk-lib/aws-ec2";
 import type { ContainerDefinition, ICluster, TaskDefinition } from "aws-cdk-lib/aws-ecs";
-import { Effect, PolicyStatement, Role } from "aws-cdk-lib/aws-iam";
+import { Effect, Policy, PolicyStatement, Role } from "aws-cdk-lib/aws-iam";
 import { LogGroup, type RetentionDays } from "aws-cdk-lib/aws-logs";
+import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
+import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import {
   Choice,
   Condition,
@@ -21,6 +23,7 @@ import {
   Pass,
   StateMachine,
   Succeed,
+  TaskInput,
   Timeout,
   Wait,
   WaitTime,
@@ -37,6 +40,23 @@ import { lgtmooseFunction } from "./lambda.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const PRESIGN_HANDLER = join(REPO_ROOT, "apps/control/src/lambda.ts");
+const BROKER_HANDLER = join(REPO_ROOT, "apps/control/src/credentials-lambda.ts");
+
+/** Where the broker keeps credential leases (`LEASE_PREFIX` in @lgtmoose/control). */
+const LEASE_PREFIX = "credentials/leases/";
+
+/** Errors the broker throws on purpose (credentials.ts in @lgtmoose/control). */
+export const CREDENTIAL_BUSY = "Lgtmoose.CredentialBusy";
+const CREDENTIAL_UNAVAILABLE = "Lgtmoose.CredentialUnavailable";
+/** A sandbox attempt that failed after taking its lease, once the lease is given back. */
+const SANDBOX_FAILED = "Lgtmoose.SandboxFailed";
+
+/**
+ * How long a batch waits for a free credential slot, at most: asked again every 20 s at first,
+ * then every 2 minutes, for about three hours. A batch that never gets one fails, and the
+ * review is incomplete.
+ */
+export const LEASE_WAIT = { first: Duration.seconds(20), max: Duration.minutes(2), attempts: 99 };
 
 /** The S3 prefix of a run's objects (`RUN_PREFIX` in @lgtmoose/pipeline). */
 const RUN_PREFIX = "runs/";
@@ -60,6 +80,12 @@ const SANDBOX_ATTEMPTS = 3;
 
 /** How long a batch's presigned URLs last: one attempt, with room to start the task. */
 const URL_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(15));
+
+/**
+ * How long a credential lease lasts if it's never given back (its execution died): longer than
+ * one sandbox attempt may run, with room to start it.
+ */
+export const LEASE_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(10));
 
 /**
  * The presigner role's session: long enough for every URL signed with it. Role chaining (the
@@ -90,6 +116,19 @@ export interface ReviewWorkflowProps {
   sandboxSecurityGroup: ISecurityGroup;
   /** Sandbox tasks run at once per review, from the deploy config. */
   maxConcurrency: number;
+  /**
+   * The reviewer provider's stored credential, which each batch leases around its sandbox task.
+   * None for a Bedrock provider: it signs with the task role and has nothing to lease.
+   */
+  credential?: {
+    providerId: string;
+    auth: string;
+    /** Tasks that may hold it at once, across reviews (`credentialConcurrency`). */
+    limit: number;
+    secret: ISecret;
+  };
+  /** How long the broker's audit log is kept. */
+  auditRetention: RetentionDays;
 }
 
 /**
@@ -212,8 +251,15 @@ export class ReviewWorkflow extends Construct {
       String(PRESIGNER_SESSION.toSeconds()),
     );
 
+    const refresh = props.credential?.auth === "chatgpt-login";
     const presign = new LambdaInvoke(this, "Presign", {
       lambdaFunction: presignFunction,
+      payload: TaskInput.fromObject({
+        runId: JsonPath.stringAt("$.runId"),
+        index: JsonPath.numberAt("$.index"),
+        // A ChatGPT sign-in's task also gets a URL to hand its refreshed auth.json back.
+        ...(refresh ? { credentialRefresh: true } : {}),
+      }),
       payloadResponseOnly: true,
       resultPath: "$.presigned",
       taskTimeout: Timeout.duration(Duration.minutes(1)),
@@ -251,9 +297,18 @@ export class ReviewWorkflow extends Construct {
     });
     // One attempt: fresh URLs, then the sandbox task. A model failure is written as the batch's
     // output and the task succeeds; a failed task is infrastructure (the image, capacity),
-    // worth another go, and the retry presigns again so its URLs are new too.
+    // worth another go, and the retry presigns again so its URLs are new too. With a stored
+    // credential, the attempt first leases it, and gives it back after the task, whatever the
+    // task did (`credentialBroker`).
     const batch = new Parallel(this, "Attempt", { resultPath: JsonPath.DISCARD });
-    batch.branch(presign.next(sandbox));
+    batch.branch(
+      props.credential === undefined
+        ? presign.next(sandbox)
+        : this.leased(props, props.credential, presign, sandbox),
+    );
+    // Waiting for a credential slot has its own retries; a credential that can't be used won't
+    // be fixed by another attempt.
+    batch.addRetry({ errors: [CREDENTIAL_BUSY, CREDENTIAL_UNAVAILABLE], maxAttempts: 0 });
     batch.addRetry({
       errors: [Errors.ALL],
       maxAttempts: SANDBOX_ATTEMPTS - 1,
@@ -378,5 +433,185 @@ export class ReviewWorkflow extends Construct {
       props.control.taskDefinition.taskRole,
       "states:DescribeExecution",
     );
+    if (this.brokerFunction !== undefined) {
+      // A lease's holder is done when its execution no longer runs. A policy of its own, not
+      // the function's default one: the state machine refers to the function, so the function
+      // mustn't depend on a policy that refers to the state machine.
+      new Policy(this, "BrokerExecutionPolicy", {
+        roles: [this.brokerFunction.role!],
+        statements: [
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["states:DescribeExecution"],
+            resources: [
+              Stack.of(this).formatArn({
+                service: "states",
+                resource: "execution",
+                resourceName: `${this.stateMachine.stateMachineName}:*`,
+                arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+              }),
+            ],
+          }),
+        ],
+      });
+    }
   }
+
+  /** The credential broker Lambda, when the reviewer has a stored credential. */
+  brokerFunction: NodejsFunction | undefined;
+
+  /**
+   * One batch attempt that leases the reviewer's credential: take a lease (waiting while every
+   * slot is in use), presign, run the sandbox task, and give the lease back. A failure after the
+   * lease gives it back too, then fails the attempt for the attempt's own retries.
+   */
+  private leased(
+    props: ReviewWorkflowProps,
+    credential: NonNullable<ReviewWorkflowProps["credential"]>,
+    presign: LambdaInvoke,
+    sandbox: EcsRunTask,
+  ): IChainable {
+    const fn = lgtmooseFunction(this, "BrokerFunction", {
+      entry: BROKER_HANDLER,
+      description: "Leases the reviewer's model credential around each sandbox task.",
+      memorySize: 256,
+      timeout: Duration.seconds(30),
+      environment: {
+        ARTIFACT_BUCKET: props.artifactBucket.bucketName,
+        LGTMOOSE_LEASE_TTL_SECONDS: String(LEASE_TTL.toSeconds()),
+        LGTMOOSE_CREDENTIALS: JSON.stringify({
+          [credential.providerId]: {
+            secretId: credential.secret.secretArn,
+            auth: credential.auth,
+            limit: credential.limit,
+          },
+        }),
+      },
+      // The audit log: which run and batch used which credential version.
+      logGroup: new LogGroup(this, "BrokerLogs", {
+        retention: props.auditRetention,
+        removalPolicy: RemovalPolicy.RETAIN,
+      }),
+    });
+    this.brokerFunction = fn;
+    const bucket = props.artifactBucket;
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        resources: [bucket.arnForObjects(`${LEASE_PREFIX}*`)],
+      }),
+    );
+    // A batch's output, to tell an auth failure; and a sign-in's refreshed auth.json.
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:GetObject"],
+        resources: [
+          bucket.arnForObjects(`${RUN_PREFIX}*/batches/*/output.json`),
+          bucket.arnForObjects(`${RUN_PREFIX}*/batches/*/credential.json`),
+        ],
+      }),
+    );
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:DeleteObject"],
+        resources: [bucket.arnForObjects(`${RUN_PREFIX}*/batches/*/credential.json`)],
+      }),
+    );
+    // Its state and version, never its value...
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"],
+        resources: [secretArnPattern(credential.secret)],
+      }),
+    );
+    // ...except for a ChatGPT sign-in, whose refreshed auth.json it stores after checking it's
+    // for the same account.
+    if (credential.auth === "chatgpt-login") {
+      fn.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
+          resources: [secretArnPattern(credential.secret)],
+        }),
+      );
+    }
+
+    const batchRef = {
+      providerId: credential.providerId,
+      runId: JsonPath.stringAt("$.runId"),
+      index: JsonPath.numberAt("$.index"),
+    };
+    const acquire = new LambdaInvoke(this, "Lease", {
+      lambdaFunction: fn,
+      payload: TaskInput.fromObject({
+        action: "acquire",
+        ...batchRef,
+        executionArn: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.lease",
+      taskTimeout: Timeout.duration(Duration.minutes(1)),
+    });
+    acquire.addRetry({
+      errors: [CREDENTIAL_BUSY],
+      interval: LEASE_WAIT.first,
+      maxDelay: LEASE_WAIT.max,
+      backoffRate: 1.5,
+      maxAttempts: LEASE_WAIT.attempts,
+      jitterStrategy: JitterType.FULL,
+    });
+    // Lambda's own transient errors are retried by LambdaInvoke's default retry.
+    const release = (id: string) => {
+      const step = new LambdaInvoke(this, id, {
+        lambdaFunction: fn,
+        payload: TaskInput.fromObject({
+          action: "release",
+          ...batchRef,
+          lease: JsonPath.objectAt("$.lease"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: JsonPath.DISCARD,
+        taskTimeout: Timeout.duration(Duration.minutes(1)),
+      });
+      step.addRetry({
+        errors: [Errors.ALL],
+        interval: Duration.seconds(5),
+        maxAttempts: 4,
+        backoffRate: 2,
+        jitterStrategy: JitterType.FULL,
+      });
+      return step;
+    };
+    // A release that keeps failing doesn't fail the batch: its review is done, and the lease
+    // expires (`LEASE_TTL`). A refreshed auth.json is then stored by whoever takes the slot.
+    const done = new Pass(this, "Released");
+    const releaseAfterTask = release("Release");
+    releaseAfterTask.addCatch(done, { errors: [Errors.ALL], resultPath: JsonPath.DISCARD });
+    const attemptFailed = new Fail(this, "AttemptFailed", {
+      error: SANDBOX_FAILED,
+      cause: "The sandbox attempt failed; its credential lease was given back.",
+    });
+    const releaseAfterFailure = release("ReleaseAfterFailure");
+    releaseAfterFailure.addCatch(attemptFailed, {
+      errors: [Errors.ALL],
+      resultPath: JsonPath.DISCARD,
+    });
+    const failedAfterLease = releaseAfterFailure.next(attemptFailed);
+    for (const step of [presign, sandbox]) {
+      step.addCatch(failedAfterLease, { errors: [Errors.ALL], resultPath: "$.attemptError" });
+    }
+    return acquire.next(presign).next(sandbox).next(releaseAfterTask).next(done);
+  }
+}
+
+/**
+ * A secret's ARN for IAM. A secret referenced by name has no full ARN; this matches it with the
+ * six random characters Secrets Manager adds.
+ */
+export function secretArnPattern(secret: ISecret): string {
+  return secret.secretFullArn ?? `${secret.secretArn}-??????`;
 }

@@ -21,8 +21,15 @@ export interface SandboxDeps {
    * their paths. Runs before the harness sees the checkout.
    */
   dropSymlinks(dir: string): Promise<string[]>;
-  /** The harness for this task's provider, saving transcripts to `transcripts`. */
-  harness(transcripts: TranscriptStore): Harness;
+  /**
+   * The harness for this task's provider, saving transcripts to `transcripts`. A harness whose
+   * CLI refreshes its credential (Codex with a ChatGPT sign-in) hands the new one to
+   * `onAuthRefreshed`.
+   */
+  harness(
+    transcripts: TranscriptStore,
+    onAuthRefreshed: (credential: string) => Promise<void>,
+  ): Harness;
   /** A writable directory for the checkout. */
   workDir: string;
   log(message: string, fields?: Record<string, unknown>): void;
@@ -92,8 +99,18 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     });
   }
 
+  // A refreshed credential goes to its own presigned PUT, for the credential broker to store.
+  // Without one, it's dropped: the provider's secret keeps the credential the task started with.
+  const onAuthRefreshed = async (credential: string) => {
+    if (urls.credential === undefined) {
+      deps.log("the credential was refreshed, but there's nowhere to hand it back");
+      return;
+    }
+    await put(deps, urls.credential, credential);
+    deps.log("handed the refreshed credential back");
+  };
   const outcome = await runBatch(
-    deps.harness(presignedTranscripts(deps, urls)),
+    deps.harness(presignedTranscripts(deps, urls), onAuthRefreshed),
     { index: input.index, files: [], prompt: input.prompt },
     {
       cwd: checkout,

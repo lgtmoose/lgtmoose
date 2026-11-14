@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ConfigError } from "./errors.js";
 import {
+  credentialConcurrency,
   defineConfig,
   isPlanCredential,
   modelFor,
@@ -136,6 +137,37 @@ describe("isPlanCredential", () => {
     expect(isPlanCredential({ harness: "cursor-agent", auth: "service-account" })).toBe(false);
     expect(isPlanCredential({ harness: "codex", auth: "api-key" })).toBe(false);
     expect(isPlanCredential({ harness: "claude-code", auth: "bedrock" })).toBe(false);
+  });
+});
+
+describe("credentialConcurrency", () => {
+  it("defaults to 1 for a ChatGPT sign-in, 2 for other plans and 16 for keys", () => {
+    expect(credentialConcurrency({ harness: "codex", auth: "chatgpt-login" })).toBe(1);
+    expect(credentialConcurrency({ harness: "claude-code", auth: "oauth-token" })).toBe(2);
+    expect(credentialConcurrency({ harness: "cursor-agent", auth: "api-key" })).toBe(2);
+    expect(credentialConcurrency({ harness: "codex", auth: "api-key" })).toBe(16);
+    expect(credentialConcurrency({ harness: "cursor-agent", auth: "service-account" })).toBe(16);
+  });
+
+  it("takes the provider's concurrency", () => {
+    const config = parseDeployConfig({
+      ...minimal,
+      providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token", concurrency: 1 }],
+    });
+    expect(credentialConcurrency(config.providers[0]!)).toBe(1);
+  });
+
+  it("refuses more than one task at once for a ChatGPT sign-in, or a limit out of range", () => {
+    const codex = { id: "codex", harness: "codex", auth: "chatgpt-login" } as const;
+    expect(issuesOf({ ...minimal, providers: [{ ...codex, concurrency: 2 }] })).toEqual([
+      expect.objectContaining({ path: "providers[0].concurrency" }),
+    ]);
+    expect(
+      parseDeployConfig({ ...minimal, providers: [{ ...codex, concurrency: 1 }] }),
+    ).toBeTruthy();
+    const key = { id: "k", harness: "codex", auth: "api-key" } as const;
+    expect(issuesOf({ ...minimal, providers: [{ ...key, concurrency: 0 }] })).toHaveLength(1);
+    expect(issuesOf({ ...minimal, providers: [{ ...key, concurrency: 65 }] })).toHaveLength(1);
   });
 });
 

@@ -45,6 +45,16 @@ describe("presignBatch", () => {
     );
   });
 
+  it("adds a PUT for the refreshed credential only when asked", async () => {
+    const d = deps();
+    const keys = runKeys(RUN_ID);
+    await presignBatch(d.deps, { runId: RUN_ID, index: 1 }, 900);
+    expect(JSON.parse(d.objects.get(keys.batchUrls(1)) ?? "").credential).toBeUndefined();
+    await presignBatch(d.deps, { runId: RUN_ID, index: 1, credentialRefresh: true }, 900);
+    const urls = batchUrlsSchema.parse(JSON.parse(d.objects.get(keys.batchUrls(1)) ?? ""));
+    expect(urls.credential).toContain(`${keys.batchCredential(1)}?method=PUT`);
+  });
+
   it("refuses anything but a run ID and a batch index", async () => {
     const d = deps();
     for (const event of [

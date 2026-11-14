@@ -2,10 +2,12 @@ export { ConfigError, type ConfigIssue } from "./errors.js";
 export {
   DEFAULT_TIER_MODELS,
   HARNESS_AUTH,
+  MAX_CREDENTIAL_CONCURRENCY,
   PLAN_AUTH_METHODS,
   PROVIDER_ID_PATTERN,
   ROLES,
   TIERS,
+  credentialConcurrency,
   defineConfig,
   isPlanCredential,
   deployConfigSchema,
