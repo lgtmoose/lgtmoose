@@ -299,7 +299,9 @@ describe("post", () => {
     const result = await post(h.deps, RUN_ID, async () => running);
     expect(result).toMatchObject({ posted: false });
     expect(shadowed(h)).toEqual([]);
-    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    // Superseded, with nothing recorded for the PR.
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+    expect(h.runs.runs.get(RUN_ID)).not.toHaveProperty("result");
     expect(h.logs).toContain("not posted");
     expect(reason).toBeTruthy();
   });
@@ -315,7 +317,8 @@ describe("post", () => {
     });
     expect(result).toMatchObject({ posted: false });
     expect(shadowed(h).length).toBeGreaterThan(0);
-    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+    expect(h.runs.runs.get(RUN_ID)).not.toHaveProperty("result");
   });
 
   it("posts the batches' findings as one review and records the run", async () => {
@@ -462,12 +465,16 @@ describe("runCommand", () => {
     expect(h.tokens.succeeded.at(-1)).toEqual({});
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
 
-    // Stopped mid-post: the post still finishes and its run stays posted.
-    h.execution.status = "ABORTED";
+    // A failing post on a stopped execution leaves a finished run as it is.
     h.deps.tokens.succeed = async () => {
       throw dead();
     };
-    await runCommand(h.deps, { ...postCommand, taskToken: "p" }, { ...SETTINGS, shadow: true });
+    h.execution.status = "ABORTED";
+    await runCommand(
+      h.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000001", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    ).catch(() => undefined);
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
 
     // A failed post fails its token instead of throwing; stopped, it fails the run itself.

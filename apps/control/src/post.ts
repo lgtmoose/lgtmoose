@@ -114,6 +114,7 @@ export async function post(
   const poster = github.poster(runId, pull);
   const work = await deps.workDir();
   let report: ReviewReport;
+  let latest: Awaited<ReturnType<typeof github.reader.pull>>;
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -124,25 +125,29 @@ export async function post(
       token: await github.token(),
       checkout: "none",
     });
-    const latest = await github.reader.pull(target);
+    latest = await github.reader.pull(target);
     report = await finishReview(repo, prepared, outcomes, latest.headSha);
   } finally {
     await work.remove();
   }
 
-  const stale = async (): Promise<string | undefined> => {
+  /** Why the run no longer counts, if it doesn't, given the PR as GitHub has it now. */
+  const stale = async (now: typeof latest): Promise<string | undefined> => {
     if (!(await running())) return "its execution was stopped";
-    const latest = await github.reader.pull(target);
-    if (latest.state !== "open") return "the PR is closed";
-    if (latest.headSha !== pr.headSha) return "the PR's head moved on";
+    if (now.state !== "open") return "the PR is closed";
+    if (now.headSha !== pr.headSha) return "the PR's head moved on";
     return undefined;
   };
-  const skip = (reason: string): PostOutput => {
+  // The run won't post: it's superseded, by the run for the new head, or by nothing if the PR
+  // closed. Marked here, since the dispatcher may not stop this execution (it may never see
+  // the event that made it stale).
+  const skip = async (reason: string): Promise<PostOutput> => {
+    await deps.runs.supersedeRun(runId);
     deps.log("not posted", { runId, reason });
     const findings = report.inline.length + report.body.length;
     return { runId, posted: false, event: report.decision.event, complete: false, findings };
   };
-  const before = await stale();
+  const before = await stale(latest);
   if (before !== undefined) return skip(before);
 
   const { decision } = report;
@@ -173,7 +178,7 @@ export async function post(
   }
 
   // Posting takes a while: a stop or a push in the meantime means a newer run records the PR.
-  const after = await stale();
+  const after = await stale(await github.reader.pull(target));
   if (after !== undefined) return skip(after);
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,
