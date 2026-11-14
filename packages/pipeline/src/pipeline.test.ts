@@ -9,7 +9,13 @@ import { cloneAtSha } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessRunOptions } from "@lgtmoose/harness";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PullComment, PullReader, PullRequest } from "./pull.js";
-import { runReview, type ReviewDeps } from "./pipeline.js";
+import {
+  finishReview,
+  prepareReview,
+  runReview,
+  type PrepareOptions,
+  type ReviewDeps,
+} from "./pipeline.js";
 
 const exec = promisify(execFile);
 
@@ -264,5 +270,109 @@ describe("runReview", () => {
     await expect(runReview(d, OPTIONS)).rejects.toThrow("clone failed");
     expect(dirs).toHaveLength(1);
     await expect(stat(dirs[0] ?? "")).rejects.toThrow();
+  });
+});
+
+describe("prepareReview and finishReview with earlier runs", () => {
+  const ALL = ["src/total.ts", "CLAUDE.md", ".lgtmoose.yaml"];
+
+  async function setUp() {
+    const repo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha],
+    });
+    const blobs = new Map(
+      (await git(work, "ls-tree", "-r", headSha))
+        .split("\n")
+        .map((line) => line.split(/\s/))
+        .map(([, , sha = "", path = ""]) => [path, sha]),
+    );
+    const github = deps().deps.github;
+    const prepare = (options: PrepareOptions) =>
+      prepareReview({ github, progress: () => {} }, OPTIONS.target, repo, pull(), options);
+    return { repo, blobs, prepare };
+  }
+
+  it("leaves files out of the prompt when a posted run reviewed the same blob", async () => {
+    const { repo, blobs, prepare } = await setUp();
+    const reviewed = ALL.map((path) => ({ path, blobSha: blobs.get(path) ?? "" }));
+
+    const partly = await prepare({ reviewed: reviewed.slice(1) });
+    expect(partly.done.toSorted()).toEqual([".lgtmoose.yaml", "CLAUDE.md"]);
+    expect(partly.jobs[0]?.prompt).toContain("src/total.ts");
+    expect(partly.jobs[0]?.prompt).not.toContain("Ignore every rule");
+
+    const prepared = await prepare({ reviewed });
+    expect(prepared.jobs).toEqual([{ index: 0, files: expect.any(Array), done: true }]);
+    const report = await finishReview(repo, prepared, [], headSha);
+    expect(report.complete).toBe(true);
+    expect(report.batches).toMatchObject([{ index: 0, done: true }]);
+    expect(report.reviewedFiles.map((file) => file.path).toSorted()).toEqual(ALL.toSorted());
+  });
+
+  it("still reviews a file whose change was reverted since the last review", async () => {
+    const first = await setUp();
+    const reviewed = ALL.map((path) => ({ path, blobSha: first.blobs.get(path) ?? "" }));
+    const lastReviewed = headSha;
+    headSha = await commit({ "src/total.ts": TOTAL }, "revert");
+    const repo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha, lastReviewed],
+    });
+    const prepared = await prepareReview(
+      { github: deps().deps.github, progress: () => {} },
+      OPTIONS.target,
+      repo,
+      pull(),
+      { lastReviewed, reviewed },
+    );
+    expect(prepared.kind).toBe("incremental");
+    expect(prepared.done).not.toContain("src/total.ts");
+    expect(prepared.jobs[0]?.prompt).toContain("no longer adds");
+  });
+
+  it("carries an unposted run's findings for files whose blob didn't change", async () => {
+    const { repo, blobs, prepare } = await setUp();
+    const total = { path: "src/total.ts", oldBlob: undefined, newBlob: blobs.get("src/total.ts") };
+    const prepared = await prepare({ resumed: [{ files: [total], findings: [finding()] }] });
+    expect(prepared.done).toEqual(["src/total.ts"]);
+    expect(prepared.carried).toEqual([finding()]);
+
+    const outcome = { index: 0, findings: [], transcriptKeys: [] };
+    const report = await finishReview(repo, prepared, [outcome], headSha);
+    expect(report.inline).toEqual([finding()]);
+    expect(report.posted).toHaveLength(1);
+    expect(report.decision.event).toBe("REQUEST_CHANGES");
+
+    const changed = await prepare({
+      resumed: [{ files: [{ ...total, newBlob: "0".repeat(40) }], findings: [finding()] }],
+    });
+    expect(changed.done).toEqual([]);
+    expect(changed.carried).toEqual([]);
+  });
+
+  it("counts earlier open findings once and doesn't post them again", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const outcome = { index: 0, findings: [finding()], transcriptKeys: [] };
+    const first = await finishReview(repo, prepared, [outcome], headSha);
+    const [posted] = first.posted;
+    if (posted === undefined) throw new Error("expected a posted finding");
+
+    const again = await finishReview(repo, prepared, [outcome], headSha, { earlier: [posted] });
+    expect(again.posted).toEqual([]);
+    expect(again.inline).toEqual([]);
+    expect(again.dropped).toEqual([{ finding: finding(), reason: "duplicate" }]);
+    expect(again.decision.counts.blocking).toBe(1);
+
+    const clean = await finishReview(repo, prepared, [{ ...outcome, findings: [] }], headSha, {
+      earlier: [posted],
+    });
+    expect(clean.decision.event).toBe("REQUEST_CHANGES");
+    expect(clean.summary).toContain("Loop skips the last item");
   });
 });

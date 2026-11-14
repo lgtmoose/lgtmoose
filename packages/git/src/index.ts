@@ -4,6 +4,7 @@
  */
 export { cloneAtSha, githubCloneUrl, type CloneOptions, type Repo } from "./clone.js";
 export {
+  diffCommits,
   reviewDiff,
   type DiffOptions,
   type FileDiff,
@@ -20,6 +21,7 @@ export {
   type Hunk,
   type LineKind,
 } from "./patch.js";
+export { trackLine, trackLines, type LineRef } from "./track.js";
 export {
   commentTarget,
   hunkFor,

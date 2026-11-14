@@ -218,6 +218,14 @@ async function diffRange(
   });
 }
 
+/**
+ * Every file `from..to` changes, with hunks and blob SHAs, as a plain commit-to-commit diff (no
+ * merge base, no mechanical detection). For following lines from one commit to another.
+ */
+export function diffCommits(repo: Repo, from: string, to: string): Promise<FileDiff[]> {
+  return diffRange(repo, from, to, { detectMechanical: false });
+}
+
 /** Head-side line numbers each file's diff adds. */
 function addedLines(file: FileDiff): Set<number> {
   return new Set(

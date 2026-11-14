@@ -6,8 +6,10 @@ import {
   runKeys,
   type BatchInput,
   type PreparedReview,
+  type ResumedWork,
 } from "@lgtmoose/pipeline";
 import { jobTarget, type WorkflowJob } from "./job.js";
+import { readOutcome } from "./outcomes.js";
 import type { ControlDeps } from "./ports.js";
 
 /** How the batches are run, from the control task's environment. */
@@ -48,6 +50,63 @@ async function sealCheckout(repo: Repo, prepared: PreparedReview): Promise<void>
   }
 }
 
+/** How many of a PR's unposted runs are looked at for finished batches. */
+export const RESUME_RUNS = 3;
+
+function runKind(
+  prepared: PreparedReview,
+  lastReviewed: string | undefined,
+): "first" | "incremental" | "full" {
+  if (lastReviewed === undefined) return "first";
+  return prepared.kind;
+}
+
+/**
+ * The finished batches of the PR's recent runs that never posted (stopped by a newer push,
+ * superseded or failed): each batch's files at the blobs it saw, and its findings. They're
+ * recorded as reviewed under their own run, so the record outlives the run's objects, and this
+ * run skips the files whose blobs haven't changed and posts their findings.
+ */
+async function resumableWork(
+  deps: ControlDeps,
+  pullRequestId: string,
+  runId: string,
+): Promise<ResumedWork[]> {
+  const work: ResumedWork[] = [];
+  for (const earlierId of await deps.runs.unpostedRuns(pullRequestId, runId, RESUME_RUNS)) {
+    const text = await deps.store.getText(runKeys(earlierId).prepared);
+    // A run stopped before its prepare step finished has nothing to pick up.
+    if (text === undefined) continue;
+    // Written by that run's prepare step with the control task's role, like our own.
+    const review = (JSON.parse(text) as RunManifest).review;
+    const byPath = new Map(review.files.map((file) => [file.path, file]));
+    const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
+    const jobs = review.jobs.filter((job) => job.prompt !== undefined);
+    const outcomes = await Promise.all(
+      jobs.map((job) => readOutcome(deps.store, earlierId, job.index)),
+    );
+    for (const [i, job] of jobs.entries()) {
+      const outcome = outcomes[i];
+      if (outcome?.findings === undefined) continue;
+      const paths = new Set(job.files);
+      const files = job.files.flatMap((path) => {
+        const file = byPath.get(path);
+        return file === undefined ? [] : [{ path, oldBlob: file.oldBlob, newBlob: file.newBlob }];
+      });
+      await deps.runs.recordFiles(
+        earlierId,
+        files.flatMap(({ path, newBlob }) =>
+          newBlob === undefined
+            ? []
+            : [{ path, blobSha: newBlob, depth: depthOf.get(path) ?? "full" }],
+        ),
+      );
+      work.push({ files, findings: outcome.findings.filter((finding) => paths.has(finding.path)) });
+    }
+  }
+  return work;
+}
+
 /**
  * The prepare step: records the run, clones the PR, plans it and writes each batch's input, the
  * checkout archive and the prepared review to the artifact bucket. It runs once per execution.
@@ -78,6 +137,9 @@ export async function prepare(
   }
 
   const keys = runKeys(run.runId);
+  const lastReviewed = run.lastReviewedSha;
+  const resumed = await resumableWork(deps, run.pullRequestId, run.runId);
+  const reviewed = await deps.runs.reviewedFiles(run.pullRequestId);
   const work = await deps.workDir();
   try {
     const checkout = join(work.dir, "checkout");
@@ -85,7 +147,7 @@ export async function prepare(
       url: deps.cloneUrl(target.owner, target.repo),
       dir: checkout,
       headSha: pr.headSha,
-      otherShas: [pr.baseSha],
+      otherShas: lastReviewed === undefined ? [pr.baseSha] : [pr.baseSha, lastReviewed],
       token: await github.token(),
     });
     const prepared = await prepareReview(
@@ -93,6 +155,11 @@ export async function prepare(
       target,
       repo,
       pr,
+      {
+        ...(lastReviewed === undefined ? {} : { lastReviewed }),
+        reviewed,
+        resumed,
+      },
     );
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
@@ -119,8 +186,19 @@ export async function prepare(
       review: prepared,
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
-    await deps.runs.setFilesTotal(run.runId, prepared.plan.files.length);
-    deps.log("prepared", { runId: run.runId, batches: batches.length });
+    await deps.runs.setPlan(run.runId, {
+      filesTotal: prepared.plan.files.length,
+      kind: runKind(prepared, lastReviewed),
+      fromSha: prepared.lastReviewed,
+    });
+    deps.log("prepared", {
+      runId: run.runId,
+      kind: prepared.kind,
+      batches: batches.length,
+      done: prepared.done.length,
+      carried: prepared.carried.length,
+      ...(prepared.fallbackReason === undefined ? {} : { fallback: prepared.fallbackReason }),
+    });
     return { runId: run.runId, superseded: false, batches };
   } finally {
     await work.remove();

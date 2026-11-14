@@ -16,7 +16,13 @@ import {
 import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
 import { reviewDiff } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness";
-import { planReview, readHeaders, type Plan } from "@lgtmoose/planner";
+import {
+  planReview,
+  readHeaders,
+  type Batch,
+  type Plan,
+  type ReadingDepth,
+} from "@lgtmoose/planner";
 import {
   buildReviewerPrompt,
   loadRulePacks,
@@ -57,6 +63,8 @@ export interface BatchReport {
   files: string[];
   /** Skipped without a model call: every file in it was only moved. */
   skipped?: true;
+  /** Skipped without a model call: an earlier run reviewed every file in it already. */
+  done?: true;
   /** Why the batch failed. Undefined when it was reviewed. */
   error?: string;
   transcriptKeys: string[];
@@ -89,6 +97,33 @@ export interface ReviewReport {
   plan: { reviewed: number; skipped: number };
   /** The summary comment that would be posted. */
   summary: string;
+  /** Whether the run reviewed only what changed since the last review. */
+  kind: "full" | "incremental";
+  /** This run's new findings (`inline` and `body`), each with its fingerprint, to record. */
+  posted: { finding: Finding; fingerprint: string }[];
+  /** File versions this run reviewed, to record so a later run can skip them. */
+  reviewedFiles: ReviewedFile[];
+}
+
+/** A file version a run reviewed, and how closely. */
+export interface ReviewedFile {
+  path: string;
+  blobSha: string;
+  depth: ReadingDepth;
+}
+
+/** A finding an earlier run posted that's still open, with its recorded fingerprint. */
+export interface EarlierFinding {
+  finding: Finding;
+  fingerprint: string;
+}
+
+export interface FinishOptions {
+  /**
+   * Findings earlier runs posted that are still open. They count towards the decision and are
+   * listed in the summary; a new finding with the same fingerprint isn't posted again.
+   */
+  earlier?: readonly EarlierFinding[];
 }
 
 /**
@@ -108,15 +143,59 @@ export interface PreparedReview {
   conventionFilesOmitted: string[];
   /** One entry per planned batch, in order. */
   jobs: BatchJob[];
+  /**
+   * `incremental`: only the files the PR's own changes moved in since `lastReviewed` (see
+   * `reviewDiff`). `full`: the whole PR, also when an incremental review fell back to it.
+   */
+  kind: "full" | "incremental";
+  /** The commit the incremental review starts from. */
+  lastReviewed?: string;
+  /** Why an incremental review became a full one: the last reviewed commit is gone. */
+  fallbackReason?: string;
+  /**
+   * Planned files that need no model run: an earlier run reviewed the same blob (see
+   * `PrepareOptions.reviewed` and `resumed`). Their batches leave them out of the prompt.
+   */
+  done: string[];
+  /** Findings an earlier, unposted run found on `done` files, posted with this run's. */
+  carried: Finding[];
 }
 
-/** One batch to review: its prompt, or `skipped` when every file in it was only moved. */
+/**
+ * One batch to review: its prompt, `skipped` when every file in it was only moved, or `done`
+ * when an earlier run already reviewed every file in it at the same blob.
+ */
 export interface BatchJob {
   index: number;
   files: string[];
-  /** The reviewer prompt. Undefined for a skipped batch. */
+  /** The reviewer prompt, for the batch's files that aren't done. Undefined otherwise. */
   prompt?: string;
   skipped?: true;
+  done?: true;
+}
+
+/** A file version an earlier run reviewed. */
+export interface ReviewedBlob {
+  path: string;
+  blobSha: string;
+}
+
+/**
+ * Batches a run finished but never posted (it was stopped, superseded or failed later on): the
+ * files they covered, at the blobs they saw, and what they found on them.
+ */
+export interface ResumedWork {
+  files: { path: string; oldBlob: string | undefined; newBlob: string | undefined }[];
+  findings: Finding[];
+}
+
+export interface PrepareOptions {
+  /** The commit the last posted review was for, for an incremental review. */
+  lastReviewed?: string;
+  /** File versions posted runs reviewed: a planned file at one of these blobs is done. */
+  reviewed?: readonly ReviewedBlob[];
+  /** Unposted runs' finished batches: their files are done and their findings carried over. */
+  resumed?: readonly ResumedWork[];
 }
 
 /** What one batch's reviewer run returned. Findings are placed and checked in `finishReview`. */
@@ -235,10 +314,15 @@ export async function prepareReview(
   target: PullTarget,
   repo: Repo,
   pr: PullRequest,
+  options: PrepareOptions = {},
 ): Promise<PreparedReview> {
   const comments = await deps.github.comments(target, COMMENT_LIMIT);
   const config = await baseConfig(repo, pr.baseSha);
-  const diff = await reviewDiff(repo, { baseSha: pr.baseSha });
+  const diff = await reviewDiff(repo, {
+    baseSha: pr.baseSha,
+    ...(options.lastReviewed === undefined ? {} : { lastReviewed: options.lastReviewed }),
+  });
+  if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
   const headers = await readHeaders(repo, diff.files, {
     skip: config.skip,
     include: config.include,
@@ -248,8 +332,9 @@ export async function prepareReview(
     globs: config.conventions,
   });
   const rulePacks = await loadRulePacks(config.rulepacks);
+  const { done, carried } = doneFiles(plan, options);
   deps.progress(
-    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped.`,
+    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}.`,
   );
 
   const context = {
@@ -269,7 +354,12 @@ export async function prepareReview(
     if (batch.files.every((planned) => planned.depth === "move")) {
       return { index: batch.index, files, skipped: true };
     }
-    return { index: batch.index, files, prompt: buildReviewerPrompt({ ...context, batch }) };
+    const todo = batch.files.filter((planned) => !done.has(planned.file.path));
+    if (todo.every((planned) => planned.depth === "move")) {
+      return { index: batch.index, files, done: true };
+    }
+    const prompt = buildReviewerPrompt({ ...context, batch: { ...batch, files: todo } });
+    return { index: batch.index, files, prompt };
   });
   return {
     target,
@@ -281,7 +371,51 @@ export async function prepareReview(
     plan,
     conventionFilesOmitted: conventions.omitted,
     jobs,
+    kind: diff.kind,
+    ...(diff.lastReviewed === undefined ? {} : { lastReviewed: diff.lastReviewed }),
+    ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
+    done: [...done],
+    carried,
   };
+}
+
+/**
+ * Planned files an earlier run reviewed at the same blob, and the findings unposted runs made on
+ * them. A file is matched by path and head blob, since that's what the reviewer read; a finding
+ * on the old side is carried only when the old blob matches too. Deleted files have no head
+ * blob, so they're always reviewed; so are files with lines removed since the last review,
+ * since the removal is what's left to look at (a fully reverted file keeps its old blob).
+ */
+function doneFiles(plan: Plan, options: PrepareOptions): { done: Set<string>; carried: Finding[] } {
+  const key = (path: string, blob: string) => `${path}\0${blob}`;
+  const reviewed = new Set((options.reviewed ?? []).map((entry) => key(entry.path, entry.blobSha)));
+  const candidates = plan.files.flatMap(({ file }) =>
+    file.newBlob === undefined || (file.removedSinceLastReview?.length ?? 0) > 0
+      ? []
+      : [{ path: file.path, oldBlob: file.oldBlob, newBlob: file.newBlob }],
+  );
+  const done = new Set<string>();
+  const carried: Finding[] = [];
+  for (const file of candidates) {
+    if (reviewed.has(key(file.path, file.newBlob))) done.add(file.path);
+  }
+  for (const work of options.resumed ?? []) {
+    const seen = new Map(work.files.map((entry) => [entry.path, entry]));
+    const same = new Map<string, { oldSide: boolean }>();
+    for (const file of candidates) {
+      const entry = seen.get(file.path);
+      if (entry?.newBlob !== file.newBlob) continue;
+      done.add(file.path);
+      same.set(file.path, { oldSide: entry.oldBlob === file.oldBlob });
+    }
+    for (const finding of work.findings) {
+      const match = same.get(finding.path);
+      if (match !== undefined && (finding.side === "RIGHT" || match.oldSide)) {
+        carried.push(finding);
+      }
+    }
+  }
+  return { done, carried };
 }
 
 export interface RunBatchOptions {
@@ -332,6 +466,7 @@ export async function finishReview(
   prepared: PreparedReview,
   outcomes: readonly BatchOutcome[],
   latestHeadSha: string,
+  options: FinishOptions = {},
 ): Promise<ReviewReport> {
   const { pr, plan, config } = prepared;
   const byIndex = new Map(outcomes.map((outcome) => [outcome.index, outcome]));
@@ -340,9 +475,26 @@ export async function finishReview(
   const body: Finding[] = [];
   const misplaced: Finding[] = [];
   let overLimit = 0;
+  const place = (findings: readonly Finding[], batch: Batch) => {
+    const placed = placeFindings(findings, batch);
+    inline.push(...placed.inline);
+    body.push(...placed.outsideDiff);
+    misplaced.push(...placed.dropped);
+    overLimit += placed.overLimit;
+  };
+  // Carried findings are placed on the PR's diff now, which may differ from the earlier run's.
+  const done = new Set(prepared.done);
+  if (prepared.carried.length > 0) {
+    const files = plan.files.filter((planned) => done.has(planned.file.path));
+    place(prepared.carried, { index: -1, files, changedLines: 0 });
+  }
   for (const job of prepared.jobs) {
     if (job.skipped === true) {
       batches.push({ index: job.index, files: job.files, skipped: true, transcriptKeys: [] });
+      continue;
+    }
+    if (job.done === true) {
+      batches.push({ index: job.index, files: job.files, done: true, transcriptKeys: [] });
       continue;
     }
     const outcome = byIndex.get(job.index);
@@ -357,11 +509,7 @@ export async function finishReview(
       batches.push({ ...report, error: outcome?.error ?? "the batch produced no result" });
       continue;
     }
-    const placed = placeFindings(outcome.findings, batch);
-    inline.push(...placed.inline);
-    body.push(...placed.outsideDiff);
-    misplaced.push(...placed.dropped);
-    overLimit += placed.overLimit;
+    place(outcome.findings, batch);
     batches.push(report);
   }
 
@@ -387,8 +535,16 @@ export async function finishReview(
     }),
   );
   const deduped = dedupeFindings(candidates, known);
-  const kept = new Set(deduped.kept.map((entry) => entry.finding));
-  const open = [...inline, ...body].filter((finding) => kept.has(finding));
+  // Findings an earlier run recorded and that are still open count once, as the earlier ones.
+  const earlier = options.earlier ?? [];
+  const earlierPrints = new Set(earlier.map((entry) => entry.fingerprint));
+  const repeated = deduped.kept.filter((entry) => earlierPrints.has(entry.fingerprint));
+  const posted = deduped.kept.filter((entry) => !earlierPrints.has(entry.fingerprint));
+  const kept = new Set(posted.map((entry) => entry.finding));
+  const open = [
+    ...[...inline, ...body].filter((finding) => kept.has(finding)),
+    ...earlier.map((entry) => entry.finding),
+  ];
 
   // What the planner flagged for a person: new code it skipped, and lockfile changes it
   // couldn't review. No findings there doesn't mean nothing is wrong, so they hold approval.
@@ -448,7 +604,10 @@ export async function finishReview(
     body: body.filter((finding) => kept.has(finding)),
     dropped: [
       ...misplaced.map((finding) => ({ finding, reason: "misplaced" as const })),
-      ...deduped.dropped.map(({ finding }) => ({ finding, reason: "duplicate" as const })),
+      ...[...deduped.dropped, ...repeated].map(({ finding }) => ({
+        finding,
+        reason: "duplicate" as const,
+      })),
     ],
     overLimit,
     decision,
@@ -456,7 +615,27 @@ export async function finishReview(
     batches,
     plan: { reviewed: plan.files.length, skipped: plan.skipped.length },
     summary,
+    kind: prepared.kind,
+    posted,
+    reviewedFiles: reviewedFiles(prepared, batches),
   };
+}
+
+/**
+ * The file versions this run reviewed, to record: the files of batches that produced a result,
+ * were done already, or only moved files. Deleted files have no blob at head and aren't listed.
+ */
+function reviewedFiles(prepared: PreparedReview, batches: readonly BatchReport[]): ReviewedFile[] {
+  const finished = new Set(
+    batches.filter((batch) => batch.error === undefined).map((batch) => batch.index),
+  );
+  return prepared.plan.batches.flatMap((batch) =>
+    finished.has(batch.index)
+      ? batch.files.flatMap(({ file, depth }) =>
+          file.newBlob === undefined ? [] : [{ path: file.path, blobSha: file.newBlob, depth }],
+        )
+      : [],
+  );
 }
 
 /**
@@ -481,7 +660,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     const prepared = await prepareReview(deps, target, repo, pr);
     const outcomes: BatchOutcome[] = [];
     for (const job of prepared.jobs) {
-      if (job.skipped === true) continue;
+      if (job.prompt === undefined) continue;
       deps.progress(`Reviewing batch ${job.index + 1} of ${prepared.jobs.length}…`);
       outcomes.push(
         await runBatch(deps.harness, job, {

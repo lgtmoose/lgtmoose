@@ -10,7 +10,15 @@ import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@l
 import { ShadowPoster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
-import type { ArtifactStore, ControlDeps, RunRecord, RunStore } from "./ports.js";
+import type {
+  ArtifactStore,
+  ControlDeps,
+  FileRecord,
+  FindingRecord,
+  FindingStore,
+  RunRecord,
+  RunStore,
+} from "./ports.js";
 import { post } from "./post.js";
 import { prepare, type RunManifest } from "./prepare.js";
 import { PREPARE_FAILED, runCommand } from "./run.js";
@@ -53,6 +61,7 @@ const TOTAL = [
   "",
 ].join("\n");
 const LOOP = "for (let i = 0; i < items.length - 1; i++) {";
+const HEAD_TOTAL = TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++");
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "lgtmoose-control-"));
@@ -113,35 +122,86 @@ interface Run extends RunRecord {
   status: string;
   executionArn: string;
   filesTotal?: number;
+  kind?: string;
+  fromSha?: string;
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
+  files: FileRecord[];
 }
 
-function memoryRuns(): RunStore & { runs: Map<string, Run> } {
+/** Run IDs in the order runs start: RUN_ID first. */
+const runId = (n: number) =>
+  n === 0 ? RUN_ID : `0b6f6d8e-3c1a-4c3e-9a51-${String(n).padStart(12, "0")}`;
+
+/** One PR's runs, like `drizzleRunStore` keeps them. */
+function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecord> } {
   const runs = new Map<string, Run>();
+  const pr: Partial<RunRecord> = { summaryCommentId: 41 };
+  const current = (run: Run): Run =>
+    Object.assign(run, {
+      summaryCommentId: pr.summaryCommentId,
+      lastReviewedSha: pr.lastReviewedSha,
+      statusLabel: pr.statusLabel,
+    });
   return {
     runs,
+    pr,
     async startRun(input) {
-      const run: Run = {
-        runId: RUN_ID,
+      for (const run of runs.values())
+        if (run.executionArn === input.executionArn) return current(run);
+      const run: Run = current({
+        runId: runId(runs.size),
         pullRequestId: "pr-1",
-        summaryCommentId: 41,
+        summaryCommentId: undefined,
+        lastReviewedSha: undefined,
+        statusLabel: undefined,
         status: "running",
         executionArn: input.executionArn,
-      };
-      runs.set(RUN_ID, run);
+        files: [],
+      });
+      runs.set(run.runId, run);
       return run;
     },
-    async getRun(runId) {
-      return runs.get(runId);
+    async getRun(id) {
+      const run = runs.get(id);
+      return run === undefined ? undefined : current(run);
     },
-    async setFilesTotal(runId, filesTotal) {
-      const run = runs.get(runId);
-      if (run) run.filesTotal = filesTotal;
+    async setPlan(id, plan) {
+      const run = runs.get(id);
+      if (run)
+        Object.assign(run, { filesTotal: plan.filesTotal, kind: plan.kind, fromSha: plan.fromSha });
     },
-    async succeedRun(runId, result) {
-      const run = runs.get(runId);
-      if (run) Object.assign(run, { status: "succeeded", result });
+    async reviewedFiles() {
+      return [...runs.values()].flatMap((run) =>
+        run.files.map(({ path, blobSha }) => ({ path, blobSha })),
+      );
+    },
+    async recordFiles(id, files) {
+      const run = runs.get(id);
+      if (!run) return;
+      for (const file of files) {
+        if (!run.files.some((known) => known.path === file.path)) run.files.push(file);
+      }
+    },
+    async unpostedRuns(_pr, exceptRunId, limit) {
+      const all = [...runs.values()];
+      const last = all.findLastIndex((run) => run.status === "succeeded");
+      return all
+        .slice(last + 1)
+        .filter((run) => run.runId !== exceptRunId)
+        .reverse()
+        .slice(0, limit)
+        .map((run) => run.runId);
+    },
+    async succeedRun(id, result) {
+      const run = runs.get(id);
+      if (!run) return;
+      Object.assign(run, { status: "succeeded", result });
+      Object.assign(pr, {
+        lastReviewedSha: result.headSha,
+        statusLabel: result.statusLabel,
+        summaryCommentId: result.summaryCommentId,
+      });
     },
     async failRun(executionArn, error) {
       for (const run of runs.values()) {
@@ -150,9 +210,48 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
         }
       }
     },
-    async supersedeRun(runId) {
-      const run = runs.get(runId);
+    async supersedeRun(id) {
+      const run = runs.get(id);
       if (run) run.status = "superseded";
+    },
+  };
+}
+
+interface StoredFinding extends FindingRecord {
+  status: "open" | "outdated";
+}
+
+/** `findings` for one PR, like `drizzleFindingStore`. */
+function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
+  const rows: StoredFinding[] = [];
+  return {
+    rows,
+    async openFindings() {
+      return rows.filter((row) => row.status === "open").map(({ status: _, ...row }) => row);
+    },
+    async saveFindings(_pr, _run, headSha, posted) {
+      for (const { finding, fingerprint } of posted) {
+        const row: StoredFinding = {
+          id: `f${rows.length}`,
+          fingerprint,
+          ruleCategory: finding.rule_category,
+          severity: finding.severity,
+          path: finding.path,
+          line: finding.line,
+          startLine: finding.start_line,
+          side: finding.side,
+          title: finding.title,
+          body: finding.body,
+          raisedAtSha: headSha,
+          status: "open",
+        };
+        const at = rows.findIndex((known) => known.fingerprint === fingerprint);
+        if (at === -1) rows.push(row);
+        else rows[at] = { ...row, id: rows[at]?.id ?? row.id };
+      }
+    },
+    async markOutdated(ids) {
+      for (const row of rows) if (ids.includes(row.id)) row.status = "outdated";
     },
   };
 }
@@ -183,6 +282,7 @@ function harness(setup: Setup = {}) {
     },
   };
   const runs = memoryRuns();
+  const findings = memoryFindings();
   const reader: PullReader = {
     pull: async () => pull(setup.head ?? headSha),
     comments: async () => [],
@@ -190,6 +290,7 @@ function harness(setup: Setup = {}) {
   const deps: ControlDeps = {
     store,
     runs,
+    findings,
     tokens: {
       async succeed(_token, output) {
         tokens.succeeded.push(output);
@@ -216,7 +317,7 @@ function harness(setup: Setup = {}) {
     archive: tarArchive,
     log: (message) => logs.push(message),
   };
-  return { deps, objects, files, runs, tokens, installations, logs };
+  return { deps, objects, files, runs, findings, tokens, installations, logs, setup };
 }
 
 const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
@@ -287,6 +388,7 @@ describe("post", () => {
       event: "REQUEST_CHANGES",
       complete: true,
       findings: 1,
+      reviewed: true,
     });
     expect(h.installations).toEqual([99, 99]);
     const [review] = shadowRecords(h.objects, "review");
@@ -332,6 +434,158 @@ describe("post", () => {
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output({ findings: [] })));
 
     expect(await post(h.deps, RUN_ID)).toMatchObject({ event: "APPROVE", complete: true });
+  });
+});
+
+describe("later runs", () => {
+  const OTHER = "export const rate = 2;\n";
+  const exec = (n: number) => `${EXECUTION}-${n}`;
+
+  /** The PR also changes src/other.ts; returns the new head. */
+  async function addOther(text = "export const rate = 3;\n"): Promise<string> {
+    headSha = await commit({ "src/other.ts": text }, "other");
+    return headSha;
+  }
+
+  /** Prepares and posts run `n` with these findings for each batch. */
+  async function review(h: ReturnType<typeof harness>, n: number, found: Finding[] = []) {
+    const prepared = await prepare(h.deps, JOB, exec(n), SETTINGS);
+    for (const batch of prepared.batches) {
+      h.objects.set(
+        runKeys(prepared.runId).batchOutput(batch.index),
+        JSON.stringify(output({ index: batch.index, findings: found })),
+      );
+    }
+    return { prepared, posted: await post(h.deps, prepared.runId) };
+  }
+
+  const promptOf = (h: ReturnType<typeof harness>, id: string, index = 0) =>
+    (JSON.parse(h.objects.get(runKeys(id).batchInput(index)) ?? "{}") as { prompt?: string })
+      .prompt ?? "";
+  const reviews = (h: ReturnType<typeof harness>) => shadowRecords(h.objects, "review").length;
+
+  beforeEach(async () => {
+    // The base has src/other.ts too, so the PR modifies it.
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit({ "src/other.ts": OTHER }, "base other");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "rebase", "--quiet", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    headSha = await git(work, "rev-parse", "HEAD");
+  });
+
+  it("reviews only the files changed since the last review", async () => {
+    const h = harness();
+    await addOther();
+    await review(h, 1);
+    const first = headSha;
+    headSha = await commit({ "src/other.ts": "export const rate = 4;\n" }, "again");
+
+    const { prepared } = await review(h, 2);
+
+    expect(h.runs.runs.get(prepared.runId)).toMatchObject({ kind: "incremental", fromSha: first });
+    expect(promptOf(h, prepared.runId)).toContain("src/other.ts");
+    expect(promptOf(h, prepared.runId)).not.toContain("src/total.ts");
+  });
+
+  it("posts no review when nothing new is found, but records the head and keeps the decision", async () => {
+    const h = harness();
+    await addOther();
+    const { posted: first } = await review(h, 1, [finding()]);
+    expect(first).toMatchObject({ event: "REQUEST_CHANGES", reviewed: true });
+    headSha = await commit({ "src/other.ts": "export const rate = 5;\n" }, "unrelated");
+
+    const { posted } = await review(h, 2);
+
+    // The loop finding's line is untouched, so it stays open and still requests changes.
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0, reviewed: false });
+    expect(reviews(h)).toBe(1);
+    expect(h.runs.pr).toMatchObject({ lastReviewedSha: headSha, statusLabel: expect.any(String) });
+    expect(shadowRecords(h.objects, "summary-comment")).toHaveLength(2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("marks a finding outdated once its line changes, and approves", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 0;"),
+      },
+      "touch other line",
+    );
+    // Line 3 (the loop) is untouched: still open.
+    expect((await review(h, 2)).posted).toMatchObject({
+      event: "REQUEST_CHANGES",
+      reviewed: false,
+    });
+
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("i < items.length; i++", "i <= items.length - 1; i++") },
+      "fix",
+    );
+    const { posted } = await review(h, 3);
+
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
+    expect(reviews(h)).toBe(2);
+  });
+
+  it("falls back to a full review after a force-push, skipping files whose blob didn't change", async () => {
+    const h = harness();
+    await addOther();
+    const { prepared: first } = await review(h, 1);
+    // Rewrite the branch: same src/total.ts, a new src/other.ts, and the old head collected.
+    const old = headSha;
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++"),
+        "src/other.ts": "export const rate = 9;\n",
+      },
+      "rewritten",
+    );
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    const { prepared } = await review(h, 2);
+
+    expect(h.runs.runs.get(prepared.runId)).toMatchObject({ kind: "full", fromSha: undefined });
+    expect(h.logs).toContain("prepared");
+    expect(promptOf(h, prepared.runId)).toContain("src/other.ts");
+    expect(promptOf(h, prepared.runId)).not.toContain("src/total.ts");
+    expect(
+      h.runs.runs
+        .get(first.runId)
+        ?.files.map((file) => file.path)
+        .toSorted(),
+    ).toEqual(["src/other.ts", "src/total.ts"]);
+    expect(old).not.toBe(headSha);
+  });
+
+  it("picks up a stopped run's finished batch: skips its unchanged files and posts its findings", async () => {
+    const h = harness();
+    await addOther();
+    const stopped = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    h.objects.set(runKeys(stopped.runId).batchOutput(0), JSON.stringify(output()));
+    await h.deps.runs.supersedeRun(stopped.runId);
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "newer push");
+
+    const { prepared, posted } = await review(h, 2);
+
+    expect(promptOf(h, prepared.runId)).not.toContain("src/total.ts");
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 1, reviewed: true });
+    expect(h.runs.runs.get(stopped.runId)?.files.map((file) => file.path)).toContain(
+      "src/total.ts",
+    );
+  });
+
+  it("reviews no batch when the head is the one reviewed last", async () => {
+    const h = harness();
+    await review(h, 1);
+    const { prepared, posted } = await review(h, 2);
+    expect(prepared.batches).toEqual([]);
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: false });
   });
 });
 

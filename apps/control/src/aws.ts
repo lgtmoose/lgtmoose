@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { pullRequests, reviewRuns } from "@lgtmoose/db";
+import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
 import {
@@ -16,13 +16,20 @@ import {
   ShadowPoster,
   installationTokenProvider,
 } from "@lgtmoose/poster";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
 import type { ControlEnv } from "./env.js";
-import type { ArtifactStore, ControlDeps, RunRecord, RunStore, TaskTokens } from "./ports.js";
+import type {
+  ArtifactStore,
+  ControlDeps,
+  FindingStore,
+  RunRecord,
+  RunStore,
+  TaskTokens,
+} from "./ports.js";
 
 /** The artifact bucket over S3. */
 export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore {
@@ -118,13 +125,21 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         runId: reviewRuns.id,
         pullRequestId: reviewRuns.pullRequestId,
         summaryCommentId: pullRequests.summaryCommentId,
+        lastReviewedSha: pullRequests.lastReviewedSha,
+        statusLabel: pullRequests.statusLabel,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
       .where(eq(reviewRuns.id, runId));
     return row === undefined
       ? undefined
-      : { ...row, summaryCommentId: row.summaryCommentId ?? undefined };
+      : {
+          runId: row.runId,
+          pullRequestId: row.pullRequestId,
+          summaryCommentId: row.summaryCommentId ?? undefined,
+          lastReviewedSha: row.lastReviewedSha ?? undefined,
+          statusLabel: row.statusLabel ?? undefined,
+        };
   }
 
   return {
@@ -161,6 +176,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .returning({
           id: pullRequests.id,
           lastReviewedSha: pullRequests.lastReviewedSha,
+          statusLabel: pullRequests.statusLabel,
           summaryCommentId: pullRequests.summaryCommentId,
         });
       if (pull === undefined) throw new Error("The pull request wasn't recorded.");
@@ -169,8 +185,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .values({
           pullRequestId: pull.id,
           headSha: input.headSha,
-          // Every run reviews the whole PR until incremental reviews land.
-          kind: pull.lastReviewedSha === null ? "first" : "full",
+          // Until the prepare step has diffed the PR (see `setPlan`).
+          kind: pull.lastReviewedSha === null ? "first" : "incremental",
           status: "running",
           executionArn: input.executionArn,
           startedAt: now(),
@@ -181,11 +197,54 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         runId: run.id,
         pullRequestId: pull.id,
         summaryCommentId: pull.summaryCommentId ?? undefined,
+        lastReviewedSha: pull.lastReviewedSha ?? undefined,
+        statusLabel: pull.statusLabel ?? undefined,
       };
     },
     getRun: record,
-    async setFilesTotal(runId, filesTotal) {
-      await db.update(reviewRuns).set({ filesTotal }).where(eq(reviewRuns.id, runId));
+    async setPlan(runId, plan) {
+      await db
+        .update(reviewRuns)
+        .set({ filesTotal: plan.filesTotal, kind: plan.kind, fromSha: plan.fromSha ?? null })
+        .where(eq(reviewRuns.id, runId));
+    },
+    async reviewedFiles(pullRequestId) {
+      return db
+        .selectDistinct({ path: filesReviewed.path, blobSha: filesReviewed.blobSha })
+        .from(filesReviewed)
+        .innerJoin(reviewRuns, eq(filesReviewed.runId, reviewRuns.id))
+        .where(eq(reviewRuns.pullRequestId, pullRequestId));
+    },
+    async recordFiles(runId, files) {
+      for (let i = 0; i < files.length; i += INSERT_CHUNK) {
+        await db
+          .insert(filesReviewed)
+          .values(files.slice(i, i + INSERT_CHUNK).map((file) => ({ runId, ...file })))
+          .onConflictDoNothing();
+      }
+    },
+    async unpostedRuns(pullRequestId, exceptRunId, limit) {
+      const [posted] = await db
+        .select({ at: max(reviewRuns.createdAt) })
+        .from(reviewRuns)
+        .where(
+          and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")),
+        );
+      const since = posted?.at ?? undefined;
+      const rows = await db
+        .select({ id: reviewRuns.id })
+        .from(reviewRuns)
+        .where(
+          and(
+            eq(reviewRuns.pullRequestId, pullRequestId),
+            ne(reviewRuns.id, exceptRunId),
+            ne(reviewRuns.status, "succeeded"),
+            ...(since === undefined ? [] : [gt(reviewRuns.createdAt, since)]),
+          ),
+        )
+        .orderBy(desc(reviewRuns.createdAt))
+        .limit(limit);
+      return rows.map((row) => row.id);
     },
     async succeedRun(runId, result) {
       const run = await record(runId);
@@ -228,6 +287,125 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .update(reviewRuns)
         .set({ status: "superseded", finishedAt: now() })
         .where(eq(reviewRuns.id, runId));
+    },
+  };
+}
+
+/** Rows per insert, to stay well under Postgres's limit on bound parameters. */
+const INSERT_CHUNK = 500;
+
+/** Our own findings in `findings`, with a `finding_events` row for each change. */
+export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()): FindingStore {
+  return {
+    async openFindings(pullRequestId) {
+      const rows = await db
+        .select()
+        .from(findings)
+        .where(
+          and(
+            eq(findings.pullRequestId, pullRequestId),
+            eq(findings.status, "open"),
+            eq(findings.source, "self"),
+          ),
+        )
+        .orderBy(asc(findings.createdAt));
+      return rows.flatMap((row) =>
+        row.path === null || row.line === null || row.side === null
+          ? []
+          : [
+              {
+                id: row.id,
+                fingerprint: row.fingerprint,
+                ruleCategory: row.ruleCategory,
+                severity: row.severity,
+                path: row.path,
+                line: row.line,
+                startLine: row.startLine ?? undefined,
+                side: row.side,
+                title: row.title,
+                body: row.body,
+                raisedAtSha: row.raisedAtSha,
+              },
+            ],
+      );
+    },
+    async saveFindings(pullRequestId, runId, headSha, posted) {
+      if (posted.length === 0) return;
+      await db.transaction(async (tx) => {
+        for (let i = 0; i < posted.length; i += INSERT_CHUNK) {
+          const rows = await tx
+            .insert(findings)
+            .values(
+              posted.slice(i, i + INSERT_CHUNK).map(({ finding, fingerprint }) => ({
+                pullRequestId,
+                runId,
+                fingerprint,
+                ruleCategory: finding.rule_category,
+                severity: finding.severity,
+                path: finding.path,
+                line: finding.line,
+                startLine: finding.start_line ?? null,
+                side: finding.side,
+                title: finding.title,
+                body: finding.body,
+                raisedAtSha: headSha,
+              })),
+            )
+            .onConflictDoUpdate({
+              target: [findings.pullRequestId, findings.fingerprint],
+              set: {
+                runId,
+                severity: sql`excluded.severity`,
+                path: sql`excluded.path`,
+                line: sql`excluded.line`,
+                startLine: sql`excluded.start_line`,
+                side: sql`excluded.side`,
+                title: sql`excluded.title`,
+                body: sql`excluded.body`,
+                raisedAtSha: headSha,
+                status: "open",
+                updatedAt: now(),
+              },
+              // A finding someone declined, disputed or resolved stays that way.
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
+            })
+            .returning({ id: findings.id });
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: "raised" as const,
+              actor: "self",
+              sha: headSha,
+            })),
+          );
+        }
+      });
+    },
+    async markOutdated(ids, sha) {
+      if (ids.length === 0) return;
+      await db.transaction(async (tx) => {
+        for (let i = 0; i < ids.length; i += INSERT_CHUNK) {
+          const rows = await tx
+            .update(findings)
+            .set({ status: "outdated", updatedAt: now() })
+            .where(
+              and(
+                inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)),
+                eq(findings.status, "open"),
+              ),
+            )
+            .returning({ id: findings.id });
+          if (rows.length === 0) continue;
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: "outdated" as const,
+              actor: "self",
+              sha,
+            })),
+          );
+        }
+      });
     },
   };
 }
@@ -284,10 +462,12 @@ export async function awsControlDeps(
     max: 2,
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
+  const db = drizzle({ client: pool });
 
   return {
     store,
-    runs: drizzleRunStore(drizzle({ client: pool })),
+    runs: drizzleRunStore(db),
+    findings: drizzleFindingStore(db),
     tokens: sfnTaskTokens(new SFNClient({})),
     async github(installationId) {
       const token = installationTokenProvider({
