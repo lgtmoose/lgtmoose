@@ -11,7 +11,8 @@
     "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
     "test": "vitest run",
     "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "smoke:webhook": "tsx src/smoke-cli.ts"
   },
   "exports": {
     ".": {
