@@ -12,7 +12,7 @@ import { annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord } from "./ports.js";
-import type { RunManifest } from "./prepare.js";
+import { readManifest } from "./prepare.js";
 
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
@@ -21,7 +21,10 @@ export interface PostOutput {
   complete: boolean;
   /** New findings this run posted. */
   findings: number;
-  /** False when an incremental run found nothing new and the decision stood: no review posted. */
+  /**
+   * False when an incremental run found nothing new and the review on the PR already has this
+   * run's event and label (never for an approval): no review posted.
+   */
   reviewed: boolean;
 }
 
@@ -111,9 +114,10 @@ async function standing(
  * summary comment and the status label. In shadow mode the poster records instead.
  *
  * Our findings from earlier runs that are still open count towards the decision; those whose
- * lines are gone are marked outdated. An incremental run that found nothing new and leaves the
- * label as it was posts no review, but still updates the check run, the summary and the label,
- * and records the head as reviewed.
+ * lines are gone are marked outdated. An incremental run that found nothing new, and whose
+ * decision is the review event and label already on the PR (other than an approval), posts no
+ * review, but still updates the check run, the summary and the label, and records the head as
+ * reviewed.
  */
 export async function post(deps: ControlDeps, runId: string): Promise<PostOutput> {
   const run = await deps.runs.getRun(runId);
@@ -121,8 +125,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   const keys = runKeys(runId);
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
-  // Written by this run's own prepare step with the control task's role: trusted, not model output.
-  const manifest = JSON.parse(preparedText) as RunManifest;
+  const manifest = readManifest(preparedText);
   const prepared = manifest.review;
   const outcomes = (
     await Promise.all(
@@ -163,11 +166,15 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
 
   const { decision } = report;
   const fresh = report.inline.length + report.body.length;
+  // Nothing to say when the review on GitHub already says it: same event, same label. An
+  // approval is always posted again, since a push can dismiss the earlier one as stale.
   const quiet =
     report.kind === "incremental" &&
     fresh === 0 &&
     decision.label !== undefined &&
-    decision.label === run.statusLabel;
+    decision.label === run.statusLabel &&
+    decision.event === run.lastReviewEvent &&
+    decision.event !== "APPROVE";
   if (!quiet) {
     const payload = buildReview({
       event: decision.event,
@@ -200,12 +207,16 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   await deps.findings.markOutdated(outdated, pr.headSha);
   await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
   await deps.runs.recordFiles(runId, report.reviewedFiles);
+  // A failed batch's files weren't reviewed: the next incremental run starts from the last
+  // complete one, so they're in its range again (the rest are done by blob).
+  const batchFailed = report.batches.some((batch) => batch.error !== undefined);
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,
     costUsd: costOf(report),
-    headSha: pr.headSha,
+    reviewedSha: batchFailed ? undefined : pr.headSha,
     statusLabel: decision.label ?? run.statusLabel,
     summaryCommentId: comment.id ?? run.summaryCommentId,
+    reviewEvent: quiet ? undefined : decision.event,
   });
   deps.log("posted", {
     runId,

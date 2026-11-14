@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
+import type { ReviewEvent } from "@lgtmoose/core";
 import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
@@ -117,6 +118,8 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 /** Any drizzle Postgres database: node-postgres in the task, PGlite in tests. */
 type Db = PgDatabase<PgQueryResultHKT>;
 
+const REVIEW_EVENTS: readonly ReviewEvent[] = ["APPROVE", "COMMENT", "REQUEST_CHANGES"];
+
 /** `review_runs` and `pull_requests` with drizzle. */
 export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): RunStore {
   async function record(runId: string): Promise<RunRecord | undefined> {
@@ -127,6 +130,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         summaryCommentId: pullRequests.summaryCommentId,
         lastReviewedSha: pullRequests.lastReviewedSha,
         statusLabel: pullRequests.statusLabel,
+        lastReviewEvent: pullRequests.lastReviewEvent,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
@@ -139,6 +143,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           summaryCommentId: row.summaryCommentId ?? undefined,
           lastReviewedSha: row.lastReviewedSha ?? undefined,
           statusLabel: row.statusLabel ?? undefined,
+          lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
         };
   }
 
@@ -173,12 +178,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             updatedAt: now(),
           },
         })
-        .returning({
-          id: pullRequests.id,
-          lastReviewedSha: pullRequests.lastReviewedSha,
-          statusLabel: pullRequests.statusLabel,
-          summaryCommentId: pullRequests.summaryCommentId,
-        });
+        .returning({ id: pullRequests.id, lastReviewedSha: pullRequests.lastReviewedSha });
       if (pull === undefined) throw new Error("The pull request wasn't recorded.");
       const [run] = await db
         .insert(reviewRuns)
@@ -192,14 +192,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           startedAt: now(),
         })
         .returning({ id: reviewRuns.id });
-      if (run === undefined) throw new Error("The review run wasn't recorded.");
-      return {
-        runId: run.id,
-        pullRequestId: pull.id,
-        summaryCommentId: pull.summaryCommentId ?? undefined,
-        lastReviewedSha: pull.lastReviewedSha ?? undefined,
-        statusLabel: pull.statusLabel ?? undefined,
-      };
+      const recorded = run === undefined ? undefined : await record(run.id);
+      if (recorded === undefined) throw new Error("The review run wasn't recorded.");
+      return recorded;
     },
     getRun: record,
     async setPlan(runId, plan) {
@@ -209,13 +204,19 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .where(eq(reviewRuns.id, runId));
     },
     async reviewedFiles(pullRequestId) {
-      return db
-        .selectDistinct({ path: filesReviewed.path, blobSha: filesReviewed.blobSha })
+      // The latest posted run's record of each path.
+      const rows = await db
+        .selectDistinctOn([filesReviewed.path], {
+          path: filesReviewed.path,
+          blobSha: filesReviewed.blobSha,
+          depth: filesReviewed.depth,
+        })
         .from(filesReviewed)
         .innerJoin(reviewRuns, eq(filesReviewed.runId, reviewRuns.id))
-        .where(
-          and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")),
-        );
+        .where(and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")))
+        .orderBy(filesReviewed.path, desc(reviewRuns.createdAt), desc(filesReviewed.createdAt));
+      // Runs never record "skipped"; the enum has it for files the planner left out.
+      return rows.flatMap((row) => (row.depth === "skipped" ? [] : [{ ...row, depth: row.depth }]));
     },
     async recordFiles(runId, files) {
       for (let i = 0; i < files.length; i += INSERT_CHUNK) {
@@ -264,7 +265,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         await tx
           .update(pullRequests)
           .set({
-            lastReviewedSha: result.headSha,
+            ...(result.reviewedSha === undefined ? {} : { lastReviewedSha: result.reviewedSha }),
+            ...(result.reviewEvent === undefined ? {} : { lastReviewEvent: result.reviewEvent }),
             statusLabel: result.statusLabel ?? null,
             summaryCommentId: result.summaryCommentId ?? null,
             updatedAt: now(),
@@ -372,6 +374,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
               setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
             })
             .returning({ id: findings.id });
+          // Every row may have hit a declined, disputed or resolved finding, left as it was.
+          if (rows.length === 0) continue;
           await tx.insert(findingEvents).values(
             rows.map((row) => ({
               findingId: row.id,

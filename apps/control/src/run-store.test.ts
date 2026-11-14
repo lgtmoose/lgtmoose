@@ -59,9 +59,10 @@ describe("drizzleRunStore", () => {
     await store.succeedRun(run.runId, {
       filesDone: 3,
       costUsd: 0.12345,
-      headSha: "a".repeat(40),
+      reviewedSha: "a".repeat(40),
       statusLabel: "lgtmoose: changes requested",
       summaryCommentId: 77,
+      reviewEvent: "REQUEST_CHANGES",
     });
     expect(await runRow(run.runId)).toMatchObject({
       status: "succeeded",
@@ -78,10 +79,25 @@ describe("drizzleRunStore", () => {
       summaryCommentId: 77,
       lastReviewedSha: "a".repeat(40),
       statusLabel: "lgtmoose: changes requested",
+      lastReviewEvent: "REQUEST_CHANGES",
     });
     expect(await runRow(next.runId)).toMatchObject({ kind: "incremental" });
     await store.setPlan(next.runId, { filesTotal: 1, kind: "full", fromSha: undefined });
     expect(await runRow(next.runId)).toMatchObject({ kind: "full", fromSha: null, filesTotal: 1 });
+
+    // A run with a failed batch and no review posted keeps the last reviewed head and event.
+    await store.succeedRun(next.runId, {
+      filesDone: 0,
+      costUsd: undefined,
+      reviewedSha: undefined,
+      statusLabel: "lgtmoose: changes requested",
+      summaryCommentId: 77,
+      reviewEvent: undefined,
+    });
+    expect(await store.getRun(next.runId)).toMatchObject({
+      lastReviewedSha: "a".repeat(40),
+      lastReviewEvent: "REQUEST_CHANGES",
+    });
   });
 
   it("records reviewed files once and lists those of the PR's posted runs", async () => {
@@ -89,9 +105,10 @@ describe("drizzleRunStore", () => {
       store.succeedRun(runId, {
         filesDone: 1,
         costUsd: undefined,
-        headSha: "a".repeat(40),
+        reviewedSha: "a".repeat(40),
         statusLabel: undefined,
         summaryCommentId: undefined,
+        reviewEvent: undefined,
       });
     const first = await start("arn:exec:files:1", 20);
     const second = await start("arn:exec:files:2", 20);
@@ -107,9 +124,22 @@ describe("drizzleRunStore", () => {
 
     const files = await store.reviewedFiles(first.pullRequestId);
     expect(files.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([
-      { path: "src/a.ts", blobSha: "c".repeat(40) },
-      { path: "src/b.ts", blobSha: "c".repeat(40) },
+      { path: "src/a.ts", blobSha: "c".repeat(40), depth: "full" },
+      { path: "src/b.ts", blobSha: "c".repeat(40), depth: "full" },
     ]);
+
+    // Only each path's latest posted record counts: after a fix (blob d) and a revert, the old
+    // blob c isn't done any more. Its depth comes along.
+    const fix = await start("arn:exec:files:5", 20);
+    await store.recordFiles(fix.runId, [{ ...file, blobSha: "d".repeat(40), depth: "mechanical" }]);
+    await succeed(fix.runId);
+    await db
+      .update(reviewRuns)
+      .set({ createdAt: new Date(Date.UTC(2030, 0, 1)) })
+      .where(eq(reviewRuns.id, fix.runId));
+    expect(
+      (await store.reviewedFiles(first.pullRequestId)).find((row) => row.path === "src/a.ts"),
+    ).toEqual({ path: "src/a.ts", blobSha: "d".repeat(40), depth: "mechanical" });
   });
 
   it("lists the runs since the last posted one that didn't post, newest first", async () => {
@@ -119,9 +149,10 @@ describe("drizzleRunStore", () => {
     await store.succeedRun(posted.runId, {
       filesDone: 1,
       costUsd: undefined,
-      headSha: "a".repeat(40),
+      reviewedSha: "a".repeat(40),
       statusLabel: undefined,
       summaryCommentId: undefined,
+      reviewEvent: undefined,
     });
     const stopped = await start("arn:exec:unposted:3", 30);
     const failed = await start("arn:exec:unposted:4", 30);
@@ -191,6 +222,12 @@ describe("drizzleFindingStore", () => {
       .update(findings)
       .set({ status: "declined" })
       .where(eq(findings.id, second?.id ?? ""));
+    expect(await findingStore.openFindings(run.pullRequestId)).toEqual([]);
+
+    // Only the declined one: no row changes, and nothing to record an event for.
+    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("3"), [
+      { finding: finding("Second"), fingerprint: "fp1:b" },
+    ]);
     expect(await findingStore.openFindings(run.pullRequestId)).toEqual([]);
 
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("3"), [

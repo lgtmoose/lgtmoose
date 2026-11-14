@@ -275,6 +275,7 @@ describe("runReview", () => {
 
 describe("prepareReview and finishReview with earlier runs", () => {
   const ALL = ["src/total.ts", "CLAUDE.md", ".lgtmoose.yaml"];
+  const FULL = "full" as const;
 
   async function setUp() {
     const repo = await cloneAtSha({
@@ -297,7 +298,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
   it("leaves files out of the prompt when a posted run reviewed the same blob", async () => {
     const { repo, blobs, prepare } = await setUp();
-    const reviewed = ALL.map((path) => ({ path, blobSha: blobs.get(path) ?? "" }));
+    const reviewed = ALL.map((path) => ({ path, blobSha: blobs.get(path) ?? "", depth: FULL }));
 
     const partly = await prepare({ reviewed: reviewed.slice(1) });
     expect(partly.done.toSorted()).toEqual([".lgtmoose.yaml", "CLAUDE.md"]);
@@ -314,7 +315,11 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
   it("still reviews a file whose change was reverted since the last review", async () => {
     const first = await setUp();
-    const reviewed = ALL.map((path) => ({ path, blobSha: first.blobs.get(path) ?? "" }));
+    const reviewed = ALL.map((path) => ({
+      path,
+      blobSha: first.blobs.get(path) ?? "",
+      depth: FULL,
+    }));
     const lastReviewed = headSha;
     headSha = await commit({ "src/total.ts": TOTAL }, "revert");
     const repo = await cloneAtSha({
@@ -337,10 +342,15 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
   it("carries an unposted run's findings for files whose blob didn't change", async () => {
     const { repo, blobs, prepare } = await setUp();
-    const total = { path: "src/total.ts", oldBlob: undefined, newBlob: blobs.get("src/total.ts") };
+    const total = {
+      path: "src/total.ts",
+      oldBlob: undefined,
+      newBlob: blobs.get("src/total.ts"),
+      depth: FULL,
+    };
     const prepared = await prepare({ resumed: [{ files: [total], findings: [finding()] }] });
     expect(prepared.done).toEqual(["src/total.ts"]);
-    expect(prepared.carried).toEqual([finding()]);
+    expect(prepared.carried).toEqual([[finding()]]);
 
     const outcome = { index: 0, findings: [], transcriptKeys: [] };
     const report = await finishReview(repo, prepared, [outcome], headSha);
@@ -353,6 +363,71 @@ describe("prepareReview and finishReview with earlier runs", () => {
     });
     expect(changed.done).toEqual([]);
     expect(changed.carried).toEqual([]);
+  });
+
+  it("doesn't count a file as done when it was only read less closely before", async () => {
+    const { blobs, prepare } = await setUp();
+    for (const depth of ["move", "mechanical"] as const) {
+      const prepared = await prepare({
+        reviewed: [{ path: "src/total.ts", blobSha: blobs.get("src/total.ts") ?? "", depth }],
+      });
+      expect(prepared.done).toEqual([]);
+      expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
+    }
+  });
+
+  it("places each resumed batch's findings under its own per-batch limit", async () => {
+    const { repo, blobs, prepare } = await setUp();
+    const total = {
+      path: "src/total.ts",
+      oldBlob: undefined,
+      newBlob: blobs.get("src/total.ts"),
+      depth: FULL,
+    };
+    const many = (batch: number) =>
+      Array.from({ length: 30 }, (_, i) => finding({ title: `Problem ${batch} ${i}` }));
+    const prepared = await prepare({
+      resumed: [
+        { files: [total], findings: many(1) },
+        { files: [total], findings: many(2) },
+      ],
+    });
+    const report = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: [], transcriptKeys: [] }],
+      headSha,
+    );
+    // 60 findings in one batch would pass the 50-finding limit; two batches of 30 don't.
+    expect(report.overLimit).toBe(0);
+  });
+
+  it("holds approval for a lockfile the PR changed before the last review", async () => {
+    await commit({ "bun.lockb": "\0binary lockfile\0" }, "lockfile");
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("let sum = 0;", "let sum = 0; // ok") },
+      "later",
+    );
+    const lastReviewed = await git(work, "rev-parse", "HEAD~1");
+    const repo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha, lastReviewed],
+    });
+    const prepared = await prepareReview(
+      { github: deps().deps.github, progress: () => {} },
+      OPTIONS.target,
+      repo,
+      pull(),
+      { lastReviewed },
+    );
+    expect(prepared.kind).toBe("incremental");
+    expect(prepared.files.map((file) => file.path)).not.toContain("bun.lockb");
+    const report = await finishReview(repo, prepared, [], headSha);
+    expect(report.complete).toBe(false);
+    expect(report.decision.event).not.toBe("APPROVE");
+    expect(report.summary).toContain("lockfiles");
   });
 
   it("counts earlier open findings once and doesn't post them again", async () => {

@@ -84,6 +84,11 @@ export const pullRequests = pgTable(
     commentsThrough: timestamp("comments_through", { withTimezone: true }),
     statusLabel: text("status_label"),
     summaryCommentId: bigint("summary_comment_id", { mode: "number" }),
+    /**
+     * The event of the last review we posted (APPROVE, COMMENT or REQUEST_CHANGES), so a run
+     * with nothing new can tell whether the review on GitHub still says the right thing.
+     */
+    lastReviewEvent: text("last_review_event"),
     paused: boolean("paused").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

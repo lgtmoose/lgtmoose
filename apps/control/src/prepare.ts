@@ -7,6 +7,7 @@ import {
   type BatchInput,
   type PreparedReview,
   type ResumedWork,
+  unreviewedReasons,
 } from "@lgtmoose/pipeline";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { readOutcome } from "./outcomes.js";
@@ -19,11 +20,20 @@ export interface PrepareSettings {
   batchTimeoutMs: number;
 }
 
+export const MANIFEST_VERSION = 2;
+
 /** What `runs/<id>/prepared.json` holds: the prepared review and the installation it's for. */
 export interface RunManifest {
-  version: 1;
+  version: typeof MANIFEST_VERSION;
   installationId: number;
   review: PreparedReview;
+}
+
+/** A manifest written before incremental reviews: the review lacks the fields they added. */
+interface LegacyManifest {
+  version: 1;
+  installationId: number;
+  review: Omit<PreparedReview, "kind" | "done" | "carried" | "unreviewed">;
 }
 
 /** What the prepare step hands the state machine: the run and the batches to map over. */
@@ -62,11 +72,33 @@ function runKind(
 }
 
 /**
+ * Parses a run's manifest. Written by the run's own prepare step with the control task's role:
+ * trusted, not model output. A version 1 manifest (from before incremental reviews) gets the
+ * fields it lacks, so a run prepared before a deploy still posts after it.
+ */
+export function readManifest(text: string): RunManifest {
+  const manifest = JSON.parse(text) as RunManifest | LegacyManifest;
+  if (manifest.version === MANIFEST_VERSION) return manifest;
+  const { review } = manifest;
+  return {
+    ...manifest,
+    version: MANIFEST_VERSION,
+    review: {
+      ...review,
+      kind: "full",
+      done: [],
+      carried: [],
+      unreviewed: unreviewedReasons(review.plan.skipped),
+    },
+  };
+}
+
+/**
  * The finished batches of the PR's recent runs that never posted (stopped by a newer push,
- * superseded or failed): the files each batch's prompt covered, at the blobs it saw, and its
- * findings. This run skips the files whose blobs haven't changed and posts their findings.
- * They're also recorded under their own run, for the record; only a posted run's files count
- * as reviewed later (see `RunStore.reviewedFiles`).
+ * superseded or failed): the files each batch's prompt covered, at the blobs and depth it saw
+ * them, and its findings. This run skips the files whose blobs haven't changed and posts their
+ * findings. Nothing about them is recorded: only a posted run's files count as reviewed (see
+ * `RunStore.reviewedFiles`), and the outputs stay in the artifact bucket for the next run.
  *
  * Files a batch had as done already are left out: their findings, if any, came from an older
  * run, and are picked up from that run while it's among the recent ones. Past that, the file
@@ -77,41 +109,37 @@ async function resumableWork(
   pullRequestId: string,
   runId: string,
 ): Promise<ResumedWork[]> {
-  const work: ResumedWork[] = [];
-  for (const earlierId of await deps.runs.unpostedRuns(pullRequestId, runId, RESUME_RUNS)) {
-    const text = await deps.store.getText(runKeys(earlierId).prepared);
-    // A run stopped before its prepare step finished has nothing to pick up.
-    if (text === undefined) continue;
-    // Written by that run's prepare step with the control task's role, like our own.
-    const review = (JSON.parse(text) as RunManifest).review;
-    const byPath = new Map(review.files.map((file) => [file.path, file]));
-    const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
-    const alreadyDone = new Set(review.done);
-    const jobs = review.jobs.filter((job) => job.prompt !== undefined);
-    const outcomes = await Promise.all(
-      jobs.map((job) => readOutcome(deps.store, earlierId, job.index)),
-    );
-    for (const [i, job] of jobs.entries()) {
-      const outcome = outcomes[i];
-      if (outcome?.findings === undefined) continue;
-      const covered = job.files.filter((path) => !alreadyDone.has(path));
-      const paths = new Set(covered);
-      const files = covered.flatMap((path) => {
-        const file = byPath.get(path);
-        return file === undefined ? [] : [{ path, oldBlob: file.oldBlob, newBlob: file.newBlob }];
-      });
-      await deps.runs.recordFiles(
-        earlierId,
-        files.flatMap(({ path, newBlob }) =>
-          newBlob === undefined
-            ? []
-            : [{ path, blobSha: newBlob, depth: depthOf.get(path) ?? "full" }],
-        ),
-      );
-      work.push({ files, findings: outcome.findings.filter((finding) => paths.has(finding.path)) });
-    }
-  }
-  return work;
+  const earlierIds = await deps.runs.unpostedRuns(pullRequestId, runId, RESUME_RUNS);
+  const perRun = await Promise.all(earlierIds.map((id) => resumableBatches(deps, id)));
+  return perRun.flat();
+}
+
+async function resumableBatches(deps: ControlDeps, earlierId: string): Promise<ResumedWork[]> {
+  const text = await deps.store.getText(runKeys(earlierId).prepared);
+  // A run stopped before its prepare step finished has nothing to pick up.
+  if (text === undefined) return [];
+  const { review } = readManifest(text);
+  const byPath = new Map(review.files.map((file) => [file.path, file]));
+  const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
+  const alreadyDone = new Set(review.done);
+  const jobs = review.jobs.filter((job) => job.prompt !== undefined);
+  const outcomes = await Promise.all(
+    jobs.map((job) => readOutcome(deps.store, earlierId, job.index)),
+  );
+  return jobs.flatMap((job, i) => {
+    const findings = outcomes[i]?.findings;
+    if (findings === undefined) return [];
+    const covered = job.files.filter((path) => !alreadyDone.has(path));
+    const paths = new Set(covered);
+    const files = covered.flatMap((path) => {
+      const file = byPath.get(path);
+      const depth = depthOf.get(path);
+      return file === undefined || depth === undefined
+        ? []
+        : [{ path, oldBlob: file.oldBlob, newBlob: file.newBlob, depth }];
+    });
+    return [{ files, findings: findings.filter((finding) => paths.has(finding.path)) }];
+  });
 }
 
 /**
@@ -145,8 +173,10 @@ export async function prepare(
 
   const keys = runKeys(run.runId);
   const lastReviewed = run.lastReviewedSha;
-  const resumed = await resumableWork(deps, run.pullRequestId, run.runId);
-  const reviewed = await deps.runs.reviewedFiles(run.pullRequestId);
+  const [resumed, reviewed] = await Promise.all([
+    resumableWork(deps, run.pullRequestId, run.runId),
+    deps.runs.reviewedFiles(run.pullRequestId),
+  ]);
   const work = await deps.workDir();
   try {
     const checkout = join(work.dir, "checkout");
@@ -188,7 +218,7 @@ export async function prepare(
       batches.push({ index: batch.index });
     }
     const manifest: RunManifest = {
-      version: 1,
+      version: MANIFEST_VERSION,
       installationId: job.installationId,
       review: prepared,
     };

@@ -46,6 +46,11 @@ export interface ReviewDiff {
   /** Why an incremental review fell back to a full one. */
   fallbackReason?: string;
   files: FileDiff[];
+  /**
+   * Every file the PR changes against the merge base, whatever the kind: `files` itself for a
+   * full review. For what holds approval for the whole PR, such as a lockfile change.
+   */
+  prFiles: FileDiff[];
 }
 
 export interface DiffOptions {
@@ -313,11 +318,24 @@ function removedTexts(
 export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<ReviewDiff> {
   const mergeBase = (await repo.git(["merge-base", options.baseSha, repo.headSha])).trim();
   const lastReviewed = options.lastReviewed;
-  if (lastReviewed === repo.headSha) {
-    return { kind: "incremental", mergeBase, headSha: repo.headSha, lastReviewed, files: [] };
-  }
   const files = await diffRange(repo, mergeBase, repo.headSha);
-  const full: ReviewDiff = { kind: "full", mergeBase, headSha: repo.headSha, files };
+  if (lastReviewed === repo.headSha) {
+    return {
+      kind: "incremental",
+      mergeBase,
+      headSha: repo.headSha,
+      lastReviewed,
+      files: [],
+      prFiles: files,
+    };
+  }
+  const full: ReviewDiff = {
+    kind: "full",
+    mergeBase,
+    headSha: repo.headSha,
+    files,
+    prFiles: files,
+  };
   if (lastReviewed === undefined) return full;
   if (!(await repo.hasCommit(lastReviewed))) {
     return {
@@ -385,5 +403,6 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     headSha: repo.headSha,
     lastReviewed,
     files: incremental,
+    prFiles: files,
   };
 }

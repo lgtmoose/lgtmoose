@@ -1,4 +1,4 @@
-import type { Finding } from "@lgtmoose/core";
+import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { PullReader } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
@@ -22,6 +22,8 @@ export interface RunRecord {
   lastReviewedSha: string | undefined;
   /** The status label the last posted review set. */
   statusLabel: string | undefined;
+  /** The event of the last review posted on the PR. */
+  lastReviewEvent: ReviewEvent | undefined;
 }
 
 /** A file version a run reviewed. */
@@ -88,12 +90,13 @@ export interface RunStore {
     },
   ): Promise<void>;
   /**
-   * Every file version a posted (succeeded) run of the PR recorded as reviewed. Unposted runs'
-   * files are left out: their findings were never posted, so the files only count as done
-   * while those findings can still be picked up (see `unpostedRuns`).
+   * For each path, the version the PR's latest posted (succeeded) run to review it recorded,
+   * and how closely. Only the latest counts: after a fix and a revert, the reverted file's old
+   * blob was reviewed once, but its findings were marked outdated since, so it isn't done.
+   * Unposted runs' files are left out: their findings were never posted (see `unpostedRuns`).
    */
-  reviewedFiles(pullRequestId: string): Promise<{ path: string; blobSha: string }[]>;
-  /** Records file versions a run reviewed. Recording one twice is a no-op. */
+  reviewedFiles(pullRequestId: string): Promise<FileRecord[]>;
+  /** Records file versions a posted run reviewed. Recording one twice is a no-op. */
   recordFiles(runId: string, files: readonly FileRecord[]): Promise<void>;
   /**
    * The PR's runs since its last posted one that didn't post (stopped, superseded or failed),
@@ -107,9 +110,16 @@ export interface RunStore {
     result: {
       filesDone: number;
       costUsd: number | undefined;
-      headSha: string;
+      /**
+       * The head to record as the PR's last reviewed commit, the start of the next incremental
+       * review. Undefined when a batch failed: the record stays at the last complete run, so the
+       * failed batch's files are reviewed next time.
+       */
+      reviewedSha: string | undefined;
       statusLabel: string | undefined;
       summaryCommentId: number | undefined;
+      /** The event of the review this run posted. Undefined when it posted none. */
+      reviewEvent: ReviewEvent | undefined;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */

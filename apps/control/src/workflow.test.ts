@@ -92,7 +92,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function finding(): Finding {
+function finding(overrides: Partial<Finding> = {}): Finding {
   return {
     rule_category: "correctness",
     severity: "blocking",
@@ -102,6 +102,7 @@ function finding(): Finding {
     title: "Loop skips the last item",
     body: "The bound drops the last item from the total.",
     evidence: LOOP,
+    ...overrides,
   };
 }
 
@@ -142,6 +143,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       summaryCommentId: pr.summaryCommentId,
       lastReviewedSha: pr.lastReviewedSha,
       statusLabel: pr.statusLabel,
+      lastReviewEvent: pr.lastReviewEvent,
     });
   return {
     runs,
@@ -155,6 +157,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         summaryCommentId: undefined,
         lastReviewedSha: undefined,
         statusLabel: undefined,
+        lastReviewEvent: undefined,
         status: "running",
         executionArn: input.executionArn,
         files: [],
@@ -172,9 +175,13 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         Object.assign(run, { filesTotal: plan.filesTotal, kind: plan.kind, fromSha: plan.fromSha });
     },
     async reviewedFiles() {
-      return [...runs.values()].flatMap((run) =>
-        run.status === "succeeded" ? run.files.map(({ path, blobSha }) => ({ path, blobSha })) : [],
-      );
+      // The latest posted run's record of each path.
+      const latest = new Map<string, FileRecord>();
+      for (const run of runs.values()) {
+        if (run.status !== "succeeded") continue;
+        for (const file of run.files) latest.set(file.path, file);
+      }
+      return [...latest.values()];
     },
     async recordFiles(id, files) {
       const run = runs.get(id);
@@ -198,7 +205,8 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       if (!run) return;
       Object.assign(run, { status: "succeeded", result });
       Object.assign(pr, {
-        lastReviewedSha: result.headSha,
+        ...(result.reviewedSha === undefined ? {} : { lastReviewedSha: result.reviewedSha }),
+        ...(result.reviewEvent === undefined ? {} : { lastReviewEvent: result.reviewEvent }),
         statusLabel: result.statusLabel,
         summaryCommentId: result.summaryCommentId,
       });
@@ -398,7 +406,7 @@ describe("post", () => {
     expect(comment).toMatchObject({ comment_id: 41 });
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({
       status: "succeeded",
-      result: { filesDone: 1, headSha },
+      result: { filesDone: 1, reviewedSha: headSha, reviewEvent: "REQUEST_CHANGES" },
     });
   });
 
@@ -593,9 +601,8 @@ describe("later runs", () => {
 
     expect(promptOf(h, prepared.runId)).not.toContain("src/total.ts");
     expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 1, reviewed: true });
-    expect(h.runs.runs.get(stopped.runId)?.files.map((file) => file.path)).toContain(
-      "src/total.ts",
-    );
+    // Nothing is recorded for the stopped run: only posted runs' files count as reviewed.
+    expect(h.runs.runs.get(stopped.runId)?.files).toEqual([]);
   });
 
   it("reviews a file again rather than lose findings from a run too far back to pick up", async () => {
@@ -622,12 +629,90 @@ describe("later runs", () => {
     expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
   });
 
-  it("reviews no batch when the head is the one reviewed last", async () => {
+  it("reviews no batch when the head is the one reviewed last, and approves again", async () => {
     const h = harness();
     await review(h, 1);
     const { prepared, posted } = await review(h, 2);
     expect(prepared.batches).toEqual([]);
-    expect(posted).toMatchObject({ event: "APPROVE", reviewed: false });
+    // An approval is posted again: a push may have dismissed the earlier one as stale.
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
+    expect(reviews(h)).toBe(2);
+  });
+
+  it("starts the next incremental review from the last complete run when a batch failed", async () => {
+    const h = harness();
+    const first = headSha;
+    // No batch output: the batch failed.
+    const failed = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    expect((await post(h.deps, failed.runId)).complete).toBe(false);
+    expect(h.runs.pr.lastReviewedSha).toBeUndefined();
+    headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated");
+
+    const { prepared } = await review(h, 2);
+
+    expect(first).not.toBe(headSha);
+    expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
+    expect(h.runs.pr.lastReviewedSha).toBe(headSha);
+  });
+
+  it("reviews a file again when it returns to a blob whose finding was marked outdated", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("i < items.length; i++", "i <= items.length - 1; i++") },
+      "fix",
+    );
+    expect((await review(h, 2)).posted).toMatchObject({ event: "APPROVE" });
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    // Revert the fix: src/total.ts is back at the blob run 1 reviewed.
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "revert the fix");
+
+    const { prepared, posted } = await review(h, 3, [finding()]);
+
+    expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 1 });
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("posts a review when the event changes though the label doesn't", async () => {
+    const h = harness();
+    const shouldFix = finding({
+      severity: "should_fix",
+      line: 6,
+      title: "Sum isn't rounded",
+      evidence: "return sum;",
+    });
+    await review(h, 1, [finding(), shouldFix]);
+    // Fix the blocking loop; the should-fix line stays.
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("i < items.length; i++", "i <= items.length - 1; i++") },
+      "fix",
+    );
+
+    const { posted } = await review(h, 2);
+
+    // Same "changes" label, but REQUEST_CHANGES became COMMENT: the old review must not stand.
+    expect(posted).toMatchObject({ event: "COMMENT", findings: 0, reviewed: true });
+    expect(reviews(h)).toBe(2);
+    expect(h.runs.pr.lastReviewEvent).toBe("COMMENT");
+  });
+
+  it("posts a run prepared before incremental reviews (manifest version 1)", async () => {
+    const h = harness();
+    const prepared = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    const key = runKeys(prepared.runId).prepared;
+    const manifest = JSON.parse(h.objects.get(key) ?? "{}") as {
+      version: number;
+      review: Record<string, unknown>;
+    };
+    for (const field of ["kind", "done", "carried", "unreviewed"]) delete manifest.review[field];
+    h.objects.set(key, JSON.stringify({ ...manifest, version: 1 }));
+    h.objects.set(runKeys(prepared.runId).batchOutput(0), JSON.stringify(output()));
+
+    expect(await post(h.deps, prepared.runId)).toMatchObject({
+      event: "REQUEST_CHANGES",
+      findings: 1,
+    });
   });
 });
 
