@@ -331,6 +331,7 @@ function failIfUnusable(
     result.subtype === "success" &&
     result.is_error !== true;
   if (ok) return;
+  // The classifiers read a long result text's start and end (`HeadTail`), as stderr is kept.
   const errorText = (result?.is_error === true ? result.result : undefined)?.trim() || undefined;
   const stderr = proc.stderr.trim() || undefined;
   const detail = [errorText, stderr].filter(Boolean).join("\n") || "no output";

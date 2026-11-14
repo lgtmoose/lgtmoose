@@ -29,7 +29,56 @@ export interface ProcessResult {
   spawnError?: Error;
 }
 
-const MAX_STDERR = 64 * 1024;
+/**
+ * stderr kept: its start (what the CLI said first) and its end (where its final error is), so
+ * chatty output in between can't push the cause out.
+ */
+const STDERR_HEAD = 16 * 1024;
+const STDERR_TAIL = 48 * 1024;
+
+/** Collects a stream's text, keeping its first and last characters (`STDERR_HEAD`, `_TAIL`). */
+export class HeadTail {
+  private head = "";
+  private tail = "";
+  private dropped = 0;
+
+  constructor(
+    private readonly headSize = STDERR_HEAD,
+    private readonly tailSize = STDERR_TAIL,
+  ) {}
+
+  add(text: string): void {
+    let rest = text;
+    if (this.head.length < this.headSize) {
+      const room = this.headSize - this.head.length;
+      this.head += rest.slice(0, room);
+      rest = rest.slice(room);
+    }
+    if (rest === "") return;
+    this.tail += rest;
+    // Trimmed in batches, so collecting stays linear.
+    if (this.tail.length > 2 * this.tailSize) this.trim();
+  }
+
+  text(): string {
+    this.trim();
+    if (this.dropped === 0) return this.head + this.tail;
+    return `${this.head}\n… ${this.dropped} characters left out …\n${this.tail}`;
+  }
+
+  /** A text cut down the same way: its start and end, with what's left out noted between. */
+  static of(text: string): string {
+    const kept = new HeadTail();
+    kept.add(text);
+    return kept.text();
+  }
+
+  private trim(): void {
+    if (this.tail.length <= this.tailSize) return;
+    this.dropped += this.tail.length - this.tailSize;
+    this.tail = this.tail.slice(-this.tailSize);
+  }
+}
 
 /**
  * Sends a signal to the child's whole process group. The child is started detached, so it leads
@@ -61,7 +110,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let pending = "";
-    let stderr = "";
+    const stderr = new HeadTail();
     let stopped: ProcessResult["stopped"];
     let spawnError: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -98,16 +147,22 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
         if (options.onLine(line) === "kill") stop("requested");
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderr.length < MAX_STDERR) stderr += chunk.toString("utf8").slice(0, MAX_STDERR);
-    });
+    // Decoded as a stream, so a character split across chunks stays whole.
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => stderr.add(chunk));
     // The child may exit before reading its input.
     child.stdin.on("error", () => {});
     child.on("error", (error) => {
       spawnError = error;
       // Without a pid it never started, and "close" may not follow.
       if (child.pid === undefined) {
-        finish({ stdout: "", stderr, exitCode: null, signal: null, spawnError: error });
+        finish({
+          stdout: "",
+          stderr: stderr.text(),
+          exitCode: null,
+          signal: null,
+          spawnError: error,
+        });
       }
     });
     child.on("exit", () => {
@@ -117,7 +172,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     child.on("close", (exitCode, signal) => {
       const result: ProcessResult = {
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr,
+        stderr: stderr.text(),
         exitCode,
         signal,
       };

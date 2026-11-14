@@ -1,3 +1,5 @@
+import { HeadTail } from "./process.js";
+
 /**
  * HTTP statuses (and connect-rpc codes, as the status they stand for) a CLI's error text reports.
  * Only machine-shaped signals count, so a line number (`index.js:429:17`) or a count ("search
@@ -12,33 +14,47 @@ const CONNECT_CODES: Readonly<Record<string, number>> = {
   permission_denied: 403,
 };
 
-/** Status texts that may follow a code: "401 Unauthorized", "429 Too Many Requests". */
-const STATUS_TEXT = String.raw`(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)`;
+/** Status texts that may follow a code: "401 Unauthorized", "429 (Too Many Requests)". */
+const STATUS_TEXT = String.raw`\(?(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b`;
+/** What may follow a code a weak prefix introduces: the end of a clause, or a status text. */
+const CLAUSE_END = String.raw`(?=[ \t]*(?:$|[.,;:!)\]]|${STATUS_TEXT}))`;
 
 /**
- * The text forms, each capturing the code:
- * - "[unauthenticated]", "[resource_exhausted]" (group 1 is the name);
- * - "HTTP 429", "HTTP/1.1 401";
- * - "401 Unauthorized", "429 Too Many Requests";
- * - an error class name: "AuthenticationError: 401", "HTTPError: 401", "FooException: 429";
- * - a status field: "status: 429", "statusCode=401", "status_code: 401", "status code: 429",
- *   "errorCode: 429", `"statusCode": 401`;
- * - "returned 401", "responded with 429", "failed with 429", "status code 429", "status 429", at
- *   the end of a clause (end of line, or punctuation); before a status text, the form above
- *   covers it.
+ * The text forms, each capturing the code. Strong prefixes are HTTP wording that a count can't
+ * follow; the code after a weak one must end its clause or carry a status text, so "code 429
+ * lines changed" and "Error: 429 files changed" don't count.
+ *
+ * Strong:
+ * - "[unauthenticated]", "[resource_exhausted]" (the name is the capture);
+ * - "HTTP 429", "HTTP/1.1 401", "HTTP error 429";
+ * - "401 Unauthorized", "429 (Too Many Requests)";
+ * - an error class name and a colon: "AuthenticationError: 401", "HTTPError: 401";
+ * - a status field: "status: 429", "statusCode=401", "status_code: 401", "errorCode: 429",
+ *   `"statusCode": 401`;
+ * - "status 429", "status code 429", whatever follows ("status 429 from server").
+ *
+ * Weak: "returned 401", "responded with 429", "failed with 429", "code 429", "code: 429",
+ * "Error: 401", "HTTPError 401", "Response code 401 (Unauthorized)".
  */
 const FORMS: readonly RegExp[] = [
   /\[(unauthenticated|resource_exhausted|permission_denied)\]/gi,
-  /\bHTTP(?:\/\d(?:\.\d)?)? (\d{3})\b/gi,
-  new RegExp(String.raw`\b(\d{3}) ${STATUS_TEXT}\b`, "gi"),
+  /\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b/gi,
+  new RegExp(String.raw`\b(\d{3}) ${STATUS_TEXT}`, "gi"),
   /\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b/g,
   /\b(?:status|statusCode|status_code|status code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b/gi,
-  /\b(?:returned|responded with|failed with|status code|status) (\d{3})(?=[ \t]*(?:$|[.,;:!)\]]))/gim,
+  /\bstatus(?: code)? (\d{3})\b/gi,
+  new RegExp(
+    String.raw`\b(?:returned|responded with|failed with|code:?|Error:?|[A-Za-z]\w*(?:Error|Exception)) (\d{3})${CLAUSE_END}`,
+    "gim",
+  ),
 ];
 
-/** Longest object the JSON pass parses, and how many it looks at. */
+/** Longest object the JSON pass parses, how many it parses, and how many spans it records. */
 const MAX_OBJECT = 64 * 1024;
-const MAX_OBJECTS = 20;
+const MAX_PARSES = 40;
+const MAX_CLOSED = 2000;
+/** Unclosed openers the scan remembers; past this the oldest are dropped. */
+const MAX_OPEN = 64;
 
 /** The status a JSON field holds: a number, a numeric string, or a connect code name. */
 function statusOf(value: unknown): number | undefined {
@@ -64,37 +80,23 @@ function fromObject(value: unknown, found: Set<number>): void {
   if (error !== null && typeof error === "object") fromObject(error, found);
 }
 
-/** How many closed `{...}` spans the scan records before it stops. */
-const MAX_CLOSED = 1000;
-/** Deeper nesting than this isn't an error body: braces past it are ignored. */
-const MAX_DEPTH = 64;
-
-/** How much of each end of a message the classifiers read. */
-const CLASSIFIED_END = 32 * 1024;
-
-/**
- * The part of a message the classifiers read: all of it up to 64 KB, else its first and last
- * 32 KB. A CLI's error, its status and its JSON body sit at one end or the other (stderr is
- * capped at 64 KB anyway), and a bound keeps classifying any message cheap.
- */
-export function classifiedPart(message: string): string {
-  if (message.length <= 2 * CLASSIFIED_END) return message;
-  return `${message.slice(0, CLASSIFIED_END)}\n${message.slice(-CLASSIFIED_END)}`;
+interface Span {
+  start: number;
+  end: number;
+  children: Span[];
 }
 
 /**
- * The outermost closed `{...}` spans in a text, found in one pass that tracks nesting and skips
- * braces inside JSON strings. A brace that never closes doesn't hide the objects after it: every
- * closed span is recorded, and the ones not inside another closed span are kept. A JSON string
- * can't hold a raw line break, so a stray quote stops counting as one at the end of its line.
+ * The closed `{...}` spans in a text as a forest, outermost first, found in one pass that skips
+ * braces inside JSON strings. An opener that never closes doesn't hide later objects: past
+ * `MAX_OPEN` unclosed openers the oldest are forgotten. A JSON string can't hold a raw line
+ * break, so a stray quote stops counting as one at the end of its line.
  */
-function objectSpans(text: string): string[] {
-  const closed: { start: number; end: number }[] = [];
+function spanForest(text: string): Span[] {
+  const closed: Span[] = [];
   const open: number[] = [];
-  /** Braces opened past `MAX_DEPTH` and not closed yet. */
-  let tooDeep = 0;
   let inString = false;
-  for (let i = 0; i < text.length && closed.length < MAX_CLOSED; i++) {
+  for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === "\n") inString = false;
     if (inString) {
@@ -104,39 +106,71 @@ function objectSpans(text: string): string[] {
     }
     if (c === '"' && open.length > 0) inString = true;
     else if (c === "{") {
-      if (open.length < MAX_DEPTH) open.push(i);
-      else tooDeep++;
-    } else if (c === "}" && tooDeep > 0) {
-      tooDeep--;
+      // Dropped in batches, so it stays linear.
+      if (open.length >= 2 * MAX_OPEN) open.splice(0, MAX_OPEN);
+      open.push(i);
     } else if (c === "}") {
       const start = open.pop();
-      if (start !== undefined) closed.push({ start, end: i + 1 });
+      if (start === undefined) continue;
+      closed.push({ start, end: i + 1, children: [] });
+      // Keep the latest spans, the error usually being the last thing a CLI prints; trimmed in
+      // batches so it stays linear.
+      if (closed.length >= 2 * MAX_CLOSED) closed.splice(0, closed.length - MAX_CLOSED);
     }
   }
-  // Closed in order of their ends: an outer span comes after the ones inside it.
+  if (closed.length > MAX_CLOSED) closed.splice(0, closed.length - MAX_CLOSED);
+  // Nest them: sorted by start, an outer span before the ones inside it.
   closed.sort((a, b) => a.start - b.start || b.end - a.end);
-  const spans: string[] = [];
-  let reach = -1;
-  for (const { start, end } of closed) {
-    if (start < reach) continue;
-    reach = end;
-    if (end - start <= MAX_OBJECT) spans.push(text.slice(start, end));
-    if (spans.length >= MAX_OBJECTS) break;
+  const roots: Span[] = [];
+  const stack: Span[] = [];
+  for (const span of closed) {
+    while (stack.length > 0 && (stack.at(-1)?.end ?? 0) <= span.start) stack.pop();
+    const parent = stack.at(-1);
+    if (parent === undefined) roots.push(span);
+    else parent.children.push(span);
+    stack.push(span);
   }
-  return spans;
+  return roots;
 }
 
-/** Every status the text reports, JSON fields first, then the text forms. */
-export function statusesIn(message: string): Set<number> {
-  const text = classifiedPart(message);
-  const found = new Set<number>();
-  for (const span of objectSpans(text)) {
-    try {
-      fromObject(JSON.parse(span), found);
-    } catch {
-      // Not JSON.
+/**
+ * Statuses in the text's JSON objects. The outermost objects are parsed from the last one
+ * back, since the error is usually printed last; one that isn't valid JSON (an inspect dump,
+ * say) has its inner objects parsed instead.
+ */
+function fromJson(text: string, found: Set<number>): void {
+  let parses = 0;
+  const visit = (spans: readonly Span[]): void => {
+    for (let i = spans.length - 1; i >= 0 && parses < MAX_PARSES; i--) {
+      const span = spans[i];
+      if (span === undefined) continue;
+      if (span.end - span.start <= MAX_OBJECT) {
+        parses++;
+        try {
+          fromObject(JSON.parse(text.slice(span.start, span.end)), found);
+          continue;
+        } catch {
+          // Not JSON: look inside.
+        }
+      }
+      visit(span.children);
     }
-  }
+  };
+  visit(spanForest(text));
+}
+
+/**
+ * Every status the text reports: JSON fields, then the text forms. A long text is read the way
+ * stderr is kept (`HeadTail`): its start and its end.
+ */
+export function statusesIn(text: string): Set<number> {
+  return statusesInBounded(HeadTail.of(text));
+}
+
+/** `statusesIn` for a text already cut down, for classifiers that build on it. */
+export function statusesInBounded(text: string): Set<number> {
+  const found = new Set<number>();
+  fromJson(text, found);
   for (const form of FORMS) {
     for (const match of text.matchAll(form)) {
       const value = match[1];

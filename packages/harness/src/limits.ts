@@ -1,5 +1,6 @@
 import type { HarnessErrorKind } from "./harness.js";
-import { classifiedPart, statusesIn } from "./status.js";
+import { HeadTail } from "./process.js";
+import { statusesInBounded } from "./status.js";
 
 /**
  * Failure wording the CLIs share: plan and spend limits, throttling and refused credentials, with
@@ -56,12 +57,17 @@ function resetsAt(message: string): string | undefined {
 
 /**
  * Whether a failure message is a plan limit, a rate limit or a refused credential, so the
- * fallback chain can react. Undefined for any other failure.
+ * fallback chain can react. Undefined for any other failure. A long message is read the way
+ * stderr is kept (`HeadTail`): its start and its end.
  */
-export function classifyFailure(whole: string): LimitFailure | undefined {
-  const message = classifiedPart(whole);
+export function classifyFailure(message: string): LimitFailure | undefined {
+  return classifyBoundedFailure(HeadTail.of(message));
+}
+
+/** `classifyFailure` for a message already cut down, for classifiers that build on it. */
+export function classifyBoundedFailure(message: string): LimitFailure | undefined {
   let kind: LimitFailure["kind"];
-  const statuses = statusesIn(message);
+  const statuses = statusesInBounded(message);
   if (PLAN_LIMIT.test(message)) kind = "plan_limit";
   else if (statuses.has(429) || RATE_LIMIT.test(message)) kind = "rate_limit";
   else if (statuses.has(401) || AUTH_FAILURE.test(message)) return { kind: "auth" };
