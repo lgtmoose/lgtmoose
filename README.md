@@ -8,7 +8,7 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 
 - **Review every PR** as a GitHub App: inline comments, a summary, a status label and a required check run.
 - **Learn from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database and synced back to the repo for review.
-- **Run on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor plan credentials where the vendor's terms allow it. Different providers can do different jobs, and it falls back to the next one when a plan runs out.
+- **Run on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor plan credentials where the vendor's terms allow it ([what each vendor's terms say](docs/providers.md)). Different providers can do different jobs, and it falls back to the next one when a plan runs out.
 - **Stay in your account.** The model runs in a sandbox with no GitHub token and network access only to its model API. Plain code, not the model, posts reviews, decides and writes memory.
 
 ## Quickstart (planned)
