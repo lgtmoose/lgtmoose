@@ -80,8 +80,12 @@ async function main(): Promise<void> {
         if (env.harness === "cursor-agent") return new CursorHarness(options);
         if (env.harness === "agent-sdk") {
           // The image's pinned claude (CLAUDE_CODE_VERSION), which the SDK version tracks.
+          // Never the SDK's bundled binary, whose version the policy wasn't checked against.
           const claude = onPath("claude", process.env.PATH);
-          return new AgentSdkHarness({ ...options, ...(claude ? { binaryPath: claude } : {}) });
+          if (claude === undefined) {
+            throw new Error("The agent-sdk harness needs the image's claude on PATH.");
+          }
+          return new AgentSdkHarness({ ...options, binaryPath: claude });
         }
         return new ClaudeCodeHarness(options);
       },

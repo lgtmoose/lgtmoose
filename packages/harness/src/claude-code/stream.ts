@@ -185,8 +185,12 @@ export function nextClockTime(text: string, now: Date): Date | undefined {
   // Today's date as the zone sees it, at that time, then back to UTC.
   const local = new Date(now.getTime() + offsetMs);
   const day = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
-  let at = day + (hour * 60 + minute) * 60_000 - offsetMs;
+  const wall = day + (hour * 60 + minute) * 60_000;
+  let at = wall - offsetMs;
   if (at <= now.getTime()) at += 86_400_000;
+  // The offset at the reset itself, in case a daylight-saving change falls in between.
+  const offsetThen = zoneOffsetMs(zone, new Date(at));
+  if (offsetThen !== offsetMs) at += offsetMs - offsetThen;
   return new Date(at);
 }
 

@@ -76,6 +76,10 @@ describe("claudeLimitFailure", () => {
     expect(nextClockTime("9am (America/New_York)", now)?.toISOString()).toBe(
       "2026-11-15T14:00:00.000Z",
     );
+    // Across the spring change: 03:10 BST the next morning is 02:10 UTC.
+    expect(
+      nextClockTime("3:10am (Europe/London)", new Date("2027-03-27T23:30:00Z"))?.toISOString(),
+    ).toBe("2027-03-28T02:10:00.000Z");
     expect(nextClockTime("Nov 20", now)).toBeUndefined();
     expect(nextClockTime("3pm (Not/AZone)", now)).toBeUndefined();
   });

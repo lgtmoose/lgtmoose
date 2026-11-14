@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  query as sdkQuery,
   type HookCallbackMatcher,
   type Options,
   type SDKMessage,
@@ -94,10 +93,12 @@ export class AgentSdkHarness implements Harness {
     const auth = sdkAuth(source);
     const runId = options.runId ?? randomUUID();
     const deadline = Date.now() + options.timeoutMs;
+    // Loaded on first use, so importing the harness package doesn't load the SDK.
+    const query =
+      this.options.query ?? ((await import("@anthropic-ai/claude-agent-sdk")).query as AgentQuery);
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-agent-sdk-"));
     const keys: string[] = [];
     const secrets = auth.secrets;
-    const query = this.options.query ?? (sdkQuery as AgentQuery);
     try {
       const session = await prepareClaudeSession(
         home,
@@ -170,7 +171,8 @@ export class AgentSdkHarness implements Harness {
       // `system` goes in the system prompt, not the user turn.
       return await withRepair(attempt, options.prompt + promptSuffix, secrets, keys);
     } finally {
-      await rm(home, { recursive: true, force: true });
+      // An aborted CLI may still be writing its session as it exits: retry a busy directory.
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   }
 }
