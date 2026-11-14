@@ -19,6 +19,7 @@ const pullSchema = z.object({
 });
 
 const issueCommentSchema = z.object({
+  id: z.number().int().optional(),
   body: z.string().nullable().optional(),
   user: z.object({ login: z.string() }).nullable(),
 });
@@ -77,6 +78,7 @@ export function githubPullReader(get: GitHubGet): PullReader {
       const comments: PullComment[] = [
         ...general.map((c) => ({ author: c.user?.login ?? "ghost", body: c.body ?? "" })),
         ...inline.map((c) => ({
+          ...(c.id === undefined ? {} : { id: c.id }),
           author: c.user?.login ?? "ghost",
           body: c.body ?? "",
           path: c.path,

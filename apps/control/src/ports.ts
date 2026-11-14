@@ -2,6 +2,7 @@ import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { PullReader } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
+import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
@@ -53,6 +54,15 @@ export interface FindingRecord {
   raisedAtSha: string;
   /** Outdated findings are followed too: one whose line comes back (a reverted fix) reopens. */
   status: "open" | "outdated";
+  /** Its inline review comment on GitHub, when it was posted inline and the ID was read back. */
+  githubCommentId: number | undefined;
+}
+
+/** A finding to record, with its inline comment's ID when it was posted inline. */
+export interface FindingToSave {
+  finding: Finding;
+  fingerprint: string;
+  githubCommentId?: number;
 }
 
 /** `findings` and `finding_events`, for our own findings. */
@@ -61,14 +71,26 @@ export interface FindingStore {
   trackedFindings(pullRequestId: string): Promise<FindingRecord[]>;
   /**
    * Records a run's new findings as open, raised at `headSha`. A fingerprint already on the PR
-   * (say, outdated, then raised again) is reopened at the new place.
+   * (say, outdated, then raised again) is reopened at the new place; its severity is never
+   * lowered, and it keeps its comment ID unless a new one is given.
    */
   saveFindings(
     pullRequestId: string,
     runId: string,
     headSha: string,
-    findings: readonly { finding: Finding; fingerprint: string }[],
+    findings: readonly FindingToSave[],
   ): Promise<void>;
+  /**
+   * Follows what people did to our comments' review threads: an open or outdated finding whose
+   * thread is resolved becomes `resolved_by_human`, and one resolved that way whose thread was
+   * unresolved again is open again. Each with an event by a person. Findings whose comment
+   * isn't in `threads` (deleted, or never posted inline) are left as they are.
+   */
+  syncThreads(
+    pullRequestId: string,
+    threads: readonly ReviewThread[],
+    sha: string,
+  ): Promise<{ resolved: number; unresolved: number }>;
   /** Marks open findings outdated at `sha`: the lines they're on no longer exist. */
   markOutdated(ids: readonly string[], sha: string): Promise<void>;
   /** Reopens outdated findings at `sha`: the lines they're on exist again. */
@@ -163,6 +185,8 @@ export interface ControlDeps {
    */
   github(installationId: number): Promise<{
     reader: PullReader;
+    /** The PR's review threads, through GraphQL, to follow resolved ones. */
+    threads: ReviewThreadReader;
     token: () => Promise<string>;
     poster: (runId: string, pull: PullRef) => Poster;
   }>;

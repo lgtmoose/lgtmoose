@@ -29,6 +29,8 @@ export interface PullRequest {
 }
 
 export interface PullComment {
+  /** GitHub's ID for the comment (a review comment's for comments on the diff). */
+  id?: number;
   author: string;
   body: string;
   /** Set for comments on the diff. */

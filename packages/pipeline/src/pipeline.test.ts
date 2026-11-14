@@ -825,12 +825,13 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(report.decision.counts).toMatchObject({ blocking: 0, nit: 1 });
   });
 
-  it("matches a re-raise to an earlier finding through our own comment on it", async () => {
+  it("matches a re-raise to an earlier finding through our own comment on it, by its ID", async () => {
     const { repo, prepare } = await setUp();
-    // Over lines 1-3; our comment on it sits at line 3 alone, with its title.
+    // Over lines 1-3; our comment on it (ID 4242) sits at line 3 alone.
     const earlier = finding({ severity: "nit", start_line: 1, line: 3 });
     const comments: PullComment[] = [
       {
+        id: 4242,
         author: "lgtmoose[bot]",
         body: "**Nit:** Loop skips the last item\n\nThe bound drops the last item from the total.",
         path: "src/total.ts",
@@ -851,15 +852,44 @@ describe("prepareReview and finishReview with earlier runs", () => {
 
     // On line 3 alone: a duplicate of our comment (the same code), standing for the finding.
     const reraised = finding({ title: "Loop skips the final item" });
+    const finish = (commentId: number) =>
+      finishReview(
+        repo,
+        prepared,
+        [{ index: 0, findings: [reraised], transcriptKeys: [] }],
+        headSha,
+        { earlier: [{ ...posted, commentId }] },
+      );
+    const report = await finish(4242);
+    expect(report.dropped).toContainEqual({ finding: reraised, reason: "duplicate" });
+    expect(report.escalated).toEqual([{ fingerprint: posted.fingerprint, severity: "blocking" }]);
+
+    // The same place and title, but another comment: it doesn't stand for the finding.
+    const other = await finish(7);
+    expect(other.dropped).toContainEqual({ finding: reraised, reason: "duplicate" });
+    expect(other.escalated).toEqual([]);
+  });
+
+  it("matches a protected re-raise to an earlier finding whose stored fingerprint is from another place", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    // Recorded under its old name (renamed since): its stored fingerprint is from there, and
+    // following it put it here. Protected categories only ever match exactly.
+    const money = finding({ rule_category: "money", severity: "should_fix" });
+    const earlier = { finding: money, fingerprint: "fingerprint-at-the-old-name" };
     const report = await finishReview(
       repo,
       prepared,
-      [{ index: 0, findings: [reraised], transcriptKeys: [] }],
+      [{ index: 0, findings: [{ ...money, severity: "blocking" }], transcriptKeys: [] }],
       headSha,
-      { earlier: [posted] },
+      { earlier: [earlier] },
     );
-    expect(report.dropped).toContainEqual({ finding: reraised, reason: "duplicate" });
-    expect(report.escalated).toEqual([{ fingerprint: posted.fingerprint, severity: "blocking" }]);
+    expect(report.posted).toEqual([]);
+    expect(report.decision.counts).toMatchObject({ blocking: 1, should_fix: 0 });
+    // Escalated under the fingerprint it's stored with.
+    expect(report.escalated).toEqual([
+      { fingerprint: "fingerprint-at-the-old-name", severity: "blocking" },
+    ]);
   });
 
   it("records a done file in a skipped batch at the closer depth it was read at", async () => {

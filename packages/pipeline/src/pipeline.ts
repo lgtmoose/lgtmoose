@@ -126,6 +126,8 @@ export interface ReviewedFile {
 export interface EarlierFinding {
   finding: Finding;
   fingerprint: string;
+  /** Its inline review comment's GitHub ID, when it has one: that comment stands for it. */
+  commentId?: number;
 }
 
 export interface FinishOptions {
@@ -329,12 +331,9 @@ async function knownFindings(
       code: citedCode(lines, comment.line, start),
       occurrence: codeOccurrence(lines, comment.line, start),
     });
-    // Our comment on an earlier finding (at its place, with its title) stands for it.
-    const at = lineKey({ path: comment.path, side: comment.side ?? "RIGHT", line: comment.line });
-    const text = letters(comment.body);
-    const own = ours.find(
-      (entry) => lineKey(entry.finding) === at && text.includes(letters(entry.finding.title)),
-    );
+    // Our comment on an earlier finding (by its GitHub ID) stands for it.
+    const own =
+      comment.id === undefined ? undefined : ours.find((entry) => entry.commentId === comment.id);
     known.push({ fingerprint: own?.fingerprint ?? fingerprint(parts), parts });
   }
   return known;
@@ -665,12 +664,22 @@ export async function finishReview(
   // Our earlier open findings join the duplicate check ahead of the PR's comments, and our own
   // comment on one stands for it, so a re-raise is matched to the finding itself.
   const ours = options.earlier ?? [];
-  const oursKnown = await Promise.all(
-    ours.map(async (entry) => ({
-      fingerprint: entry.fingerprint,
-      parts: await partsOf(entry.finding),
-    })),
-  );
+  // Each under its stored fingerprint and under the one at its place now (after a rename or a
+  // shift), so an exact re-raise matches either way; protected categories only match exactly.
+  const storedOf = new Map<string, string>();
+  const oursKnown = (
+    await Promise.all(
+      ours.map(async (entry) => {
+        const parts = await partsOf(entry.finding);
+        const here = fingerprint(parts);
+        if (here !== entry.fingerprint) storedOf.set(here, entry.fingerprint);
+        return [
+          { fingerprint: entry.fingerprint, parts },
+          ...(here === entry.fingerprint ? [] : [{ fingerprint: here, parts }]),
+        ];
+      }),
+    )
+  ).flat();
   const comments = await knownFindings(prepared.comments, byPath, readLines, ours);
   const candidates = await Promise.all(
     [...inline, ...body].map(async (finding) => ({ finding, parts: await partsOf(finding) })),
@@ -682,7 +691,9 @@ export async function finishReview(
   // alone) counts at the higher severity.
   const ourPrints = new Set(ours.map((entry) => entry.fingerprint));
   const raisedTo = new Map<string, Severity>();
-  for (const { finding, matched } of deduped.dropped) {
+  for (const dropped of deduped.dropped) {
+    const { finding } = dropped;
+    const matched = storedOf.get(dropped.matched) ?? dropped.matched;
     if (!ourPrints.has(matched)) continue;
     const known =
       raisedTo.get(matched) ?? ours.find((e) => e.fingerprint === matched)?.finding.severity;
@@ -772,16 +783,6 @@ export async function finishReview(
     escalated,
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
   };
-}
-
-/** Where a finding is: its path, side and line. */
-function lineKey(finding: Pick<Finding, "path" | "side" | "line">): string {
-  return `${finding.path}\0${finding.side}\0${finding.line}`;
-}
-
-/** Letters and digits only, lower case: to find a title in a comment's Markdown. */
-function letters(text: string): string {
-  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 /** A planned file, with how its batch went: `failed` when it produced no result. */

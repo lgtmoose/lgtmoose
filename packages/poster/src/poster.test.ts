@@ -65,6 +65,31 @@ describe("GitHubPoster", () => {
     });
   });
 
+  it("reads back each inline comment's ID, matched by place", async () => {
+    const [comment] = review.comments;
+    if (comment === undefined) throw new Error("expected a comment");
+    const { poster: p, calls } = poster([
+      { status: 200, body: { id: 11 } },
+      {
+        status: 200,
+        body: [
+          { id: 900, path: "other.ts", side: "RIGHT", line: comment.line },
+          { id: 901, path: comment.path, side: comment.side, line: comment.line },
+        ],
+      },
+    ]);
+    const posted = await p.submitReview(PULL, "abc", review);
+    expect(posted.commentIds).toEqual([901]);
+    expect(calls[1]).toMatchObject({
+      method: "GET",
+      url: "https://api.github.com/repos/acme/app/pulls/7/reviews/11/comments?per_page=100&page=1",
+    });
+
+    // The review is posted either way: an ID that can't be read is left out.
+    const { poster: q } = poster([{ status: 200, body: { id: 12 } }, { status: 500 }]);
+    expect((await q.submitReview(PULL, "abc", review)).commentIds).toEqual([undefined]);
+  });
+
   it("moves comments into the body and retries once when GitHub refuses a position", async () => {
     const { poster: p, calls } = poster([
       { status: 422, body: { message: "Unprocessable Entity" } },

@@ -274,6 +274,85 @@ describe("drizzleFindingStore", () => {
     ]);
   });
 
+  it("keeps the comment ID and never lowers severity when a finding is saved again", async () => {
+    const run = await start("arn:exec:findings:3", 42);
+    const save = (severity: Finding["severity"], githubCommentId?: number) =>
+      findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
+        {
+          finding: { ...finding("Kept"), severity },
+          fingerprint: "fp1:kept",
+          ...(githubCommentId === undefined ? {} : { githubCommentId }),
+        },
+      ]);
+    const stored = async () =>
+      (await findingStore.trackedFindings(run.pullRequestId)).map((record) => [
+        record.severity,
+        record.githubCommentId,
+      ]);
+    await save("should_fix", 501);
+    expect(await stored()).toEqual([["should_fix", 501]]);
+    await save("nit");
+    expect(await stored()).toEqual([["should_fix", 501]]);
+    await save("blocking", 502);
+    expect(await stored()).toEqual([["blocking", 502]]);
+  });
+
+  it("follows review threads: resolved by a person, and open again when unresolved", async () => {
+    const run = await start("arn:exec:findings:4", 43);
+    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
+      { finding: finding("Inline"), fingerprint: "fp1:inline", githubCommentId: 601 },
+      { finding: finding("Other"), fingerprint: "fp1:other", githubCommentId: 602 },
+      { finding: finding("In the body"), fingerprint: "fp1:body" },
+    ]);
+    const tracked = async () =>
+      (await findingStore.trackedFindings(run.pullRequestId))
+        .map((record) => record.fingerprint)
+        .toSorted();
+    const inline = (await findingStore.trackedFindings(run.pullRequestId)).find(
+      (record) => record.fingerprint === "fp1:inline",
+    );
+
+    // 602's comment was deleted: not in the threads, left alone. 999 isn't ours.
+    expect(
+      await findingStore.syncThreads(
+        run.pullRequestId,
+        [
+          { resolved: true, firstCommentId: 601 },
+          { resolved: true, firstCommentId: 999 },
+          { resolved: true, firstCommentId: undefined },
+        ],
+        sha("2"),
+      ),
+    ).toEqual({ resolved: 1, unresolved: 0 });
+    expect(await tracked()).toEqual(["fp1:body", "fp1:other"]);
+    // Again: nothing more to do.
+    expect(
+      await findingStore.syncThreads(
+        run.pullRequestId,
+        [{ resolved: true, firstCommentId: 601 }],
+        sha("3"),
+      ),
+    ).toEqual({ resolved: 0, unresolved: 0 });
+
+    expect(
+      await findingStore.syncThreads(
+        run.pullRequestId,
+        [{ resolved: false, firstCommentId: 601 }],
+        sha("4"),
+      ),
+    ).toEqual({ resolved: 0, unresolved: 1 });
+    expect(await tracked()).toEqual(["fp1:body", "fp1:inline", "fp1:other"]);
+
+    const events = await db
+      .select({ type: findingEvents.type, actor: findingEvents.actor, sha: findingEvents.sha })
+      .from(findingEvents)
+      .where(eq(findingEvents.findingId, inline?.id ?? ""));
+    expect(events.filter((event) => event.actor === "human")).toEqual([
+      { type: "resolved", actor: "human", sha: sha("2") },
+      { type: "raised", actor: "human", sha: sha("4") },
+    ]);
+  });
+
   it("escalates an open finding's severity upwards only, with an event", async () => {
     const run = await start("arn:exec:findings:2", 41);
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [

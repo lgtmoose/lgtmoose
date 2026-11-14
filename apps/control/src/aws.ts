@@ -10,6 +10,7 @@ import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
 import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
+import { graphQlThreadReader } from "./threads.js";
 import {
   GitHubClient,
   GitHubLabelClient,
@@ -347,6 +348,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 body: row.body,
                 raisedAtSha: row.raisedAtSha,
                 status: row.status,
+                githubCommentId: row.githubCommentId ?? undefined,
               },
             ],
       );
@@ -358,26 +360,32 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           const rows = await tx
             .insert(findings)
             .values(
-              posted.slice(i, i + INSERT_CHUNK).map(({ finding, fingerprint }) => ({
-                pullRequestId,
-                runId,
-                fingerprint,
-                ruleCategory: finding.rule_category,
-                severity: finding.severity,
-                path: finding.path,
-                line: finding.line,
-                startLine: finding.start_line ?? null,
-                side: finding.side,
-                title: finding.title,
-                body: finding.body,
-                raisedAtSha: headSha,
-              })),
+              posted
+                .slice(i, i + INSERT_CHUNK)
+                .map(({ finding, fingerprint, githubCommentId }) => ({
+                  pullRequestId,
+                  runId,
+                  fingerprint,
+                  ruleCategory: finding.rule_category,
+                  severity: finding.severity,
+                  path: finding.path,
+                  line: finding.line,
+                  startLine: finding.start_line ?? null,
+                  side: finding.side,
+                  title: finding.title,
+                  body: finding.body,
+                  raisedAtSha: headSha,
+                  githubCommentId: githubCommentId ?? null,
+                })),
             )
             .onConflictDoUpdate({
               target: [findings.pullRequestId, findings.fingerprint],
               set: {
                 runId,
-                severity: sql`excluded.severity`,
+                // Never lowered: the enum runs from blocking to nit, so the least is the most
+                // severe.
+                severity: sql`least(${findings.severity}, excluded.severity)`,
+                githubCommentId: sql`coalesce(excluded.github_comment_id, ${findings.githubCommentId})`,
                 path: sql`excluded.path`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
@@ -407,6 +415,52 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
+    async syncThreads(pullRequestId, threads, sha) {
+      const ids = (resolved: boolean) =>
+        threads.flatMap((thread) =>
+          thread.resolved === resolved && thread.firstCommentId !== undefined
+            ? [thread.firstCommentId]
+            : [],
+        );
+      const move = async (
+        commentIds: number[],
+        from: ("open" | "outdated" | "resolved_by_human")[],
+        to: "open" | "resolved_by_human",
+        type: "resolved" | "raised",
+      ) => {
+        if (commentIds.length === 0) return 0;
+        return db.transaction(async (tx) => {
+          const rows = await tx
+            .update(findings)
+            .set({ status: to, updatedAt: now() })
+            .where(
+              and(
+                eq(findings.pullRequestId, pullRequestId),
+                eq(findings.source, "self"),
+                inArray(findings.status, from),
+                inArray(findings.githubCommentId, commentIds),
+              ),
+            )
+            .returning({ id: findings.id, commentId: findings.githubCommentId });
+          if (rows.length > 0) {
+            await tx.insert(findingEvents).values(
+              rows.map((row) => ({
+                findingId: row.id,
+                type,
+                actor: "human",
+                sha,
+                githubCommentId: row.commentId,
+              })),
+            );
+          }
+          return rows.length;
+        });
+      };
+      const resolved = await move(ids(true), ["open", "outdated"], "resolved_by_human", "resolved");
+      // Unresolved again: open again (the next follow decides whether its line still stands).
+      const unresolved = await move(ids(false), ["resolved_by_human"], "open", "raised");
+      return { resolved, unresolved };
+    },
     async escalate(changes, sha) {
       if (changes.length === 0) return;
       await db.transaction(async (tx) => {
@@ -529,6 +583,10 @@ export async function awsControlDeps(
       const client = new GitHubClient({ token });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
+        // GitHub Apps can call GraphQL with the installation token.
+        threads: graphQlThreadReader((query, variables) =>
+          client.request("POST", "/graphql", { query, variables }),
+        ),
         token,
         poster: (runId, pull) =>
           options.shadow

@@ -53,7 +53,12 @@ export class ShadowPoster implements Poster {
       comments: payload.comments,
       nits_left_out: payload.nitsLeftOut,
     });
-    return { id: undefined, movedToBody: false, payload };
+    return {
+      id: undefined,
+      movedToBody: false,
+      payload,
+      commentIds: payload.comments.map(() => undefined),
+    };
   }
 
   async startCheckRun(pull: PullRef, headSha: string): Promise<undefined> {

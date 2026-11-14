@@ -10,6 +10,7 @@ import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@l
 import { ShadowPoster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
+import type { ReviewThread } from "./threads.js";
 import type {
   ArtifactStore,
   ControlDeps,
@@ -233,8 +234,10 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-/** A stored finding: tracked while open or outdated. */
-type StoredFinding = FindingRecord;
+/** A stored finding: tracked while open or outdated, kept once a person resolves its thread. */
+type StoredFinding = Omit<FindingRecord, "status"> & {
+  status: FindingRecord["status"] | "resolved_by_human";
+};
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
 function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
@@ -242,10 +245,12 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
   return {
     rows,
     async trackedFindings() {
-      return rows.map((row) => ({ ...row }));
+      return rows.flatMap((row) =>
+        row.status === "resolved_by_human" ? [] : [{ ...row, status: row.status }],
+      );
     },
     async saveFindings(_pr, _run, headSha, posted) {
-      for (const { finding, fingerprint } of posted) {
+      for (const { finding, fingerprint, githubCommentId } of posted) {
         const row: StoredFinding = {
           id: `f${rows.length}`,
           fingerprint,
@@ -259,10 +264,23 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
           body: finding.body,
           raisedAtSha: headSha,
           status: "open",
+          githubCommentId,
         };
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
-        if (at === -1) rows.push(row);
-        else rows[at] = { ...row, id: rows[at]?.id ?? row.id };
+        const known = rows[at];
+        if (known === undefined) rows.push(row);
+        else if (known.status !== "resolved_by_human") {
+          rows[at] = {
+            ...row,
+            id: known.id,
+            // Never lowered; the comment ID kept unless there's a new one.
+            severity:
+              severityRank(known.severity) < severityRank(row.severity)
+                ? known.severity
+                : row.severity,
+            githubCommentId: githubCommentId ?? known.githubCommentId,
+          };
+        }
       }
     },
     async markOutdated(ids) {
@@ -272,6 +290,24 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     async reopen(ids) {
       for (const row of rows)
         if (ids.includes(row.id) && row.status === "outdated") row.status = "open";
+    },
+    async syncThreads(_pr, threads) {
+      let resolved = 0;
+      let unresolved = 0;
+      for (const thread of threads) {
+        for (const row of rows) {
+          if (thread.firstCommentId === undefined || row.githubCommentId !== thread.firstCommentId)
+            continue;
+          if (thread.resolved && row.status !== "resolved_by_human") {
+            row.status = "resolved_by_human";
+            resolved++;
+          } else if (!thread.resolved && row.status === "resolved_by_human") {
+            row.status = "open";
+            unresolved++;
+          }
+        }
+      }
+      return { resolved, unresolved };
     },
     async escalate(changes) {
       for (const { id, severity } of changes) {
@@ -287,6 +323,10 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
 interface Setup {
   /** The head the PR is at when it's read. */
   head?: string;
+  /** The PR's review threads, as GitHub GraphQL would return them; none by default. */
+  threads?: () => ReviewThread[];
+  /** Give each inline comment posted an ID (as GitHub does), from 1000 up. */
+  commentIds?: boolean;
   /** What GitHub says about any review; unset for a reader that can't tell. */
   review?: () => { state: string; commitId: string };
 }
@@ -319,6 +359,7 @@ function harness(setup: Setup = {}) {
   /** What each `fetchCommits` on a clone asked for. */
   const fetched: string[][] = [];
   const { review: reviewOf } = setup;
+  let nextComment = 1000;
   const reader: PullReader = {
     pull: async () => pull(setup.head ?? headSha),
     comments: async () => [],
@@ -347,9 +388,21 @@ function harness(setup: Setup = {}) {
       installations.push(installationId);
       return {
         reader,
+        threads: { reviewThreads: async () => setup.threads?.() ?? [] },
         token: async () => "",
-        poster: (runId) =>
-          new ShadowPoster({ store: { put: (key, body) => store.putText(key, body) }, runId }),
+        poster: (runId) => {
+          const shadow = new ShadowPoster({
+            store: { put: (key, body) => store.putText(key, body) },
+            runId,
+          });
+          if (setup.commentIds !== true) return shadow;
+          return Object.assign(Object.create(shadow) as ShadowPoster, {
+            async submitReview(...args: Parameters<ShadowPoster["submitReview"]>) {
+              const review = await shadow.submitReview(...args);
+              return { ...review, commentIds: review.payload.comments.map(() => nextComment++) };
+            },
+          });
+        },
       };
     },
     async clone(options) {
@@ -601,6 +654,43 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
     expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
     expect(reviews(h)).toBe(2);
+  });
+
+  it("follows our comment's thread: resolved takes the finding out, unresolved puts it back", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    const first = await review(h, 1, [finding()]);
+    expect(first.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    expect(h.findings.rows).toMatchObject([{ status: "open", githubCommentId: 1000 }]);
+
+    // A person resolves the thread; the next run approves, with the finding left alone.
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
+    const resolved = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+    expect(resolved.posted).toMatchObject({ event: "APPROVE" });
+
+    // Unresolved again: back in the decision.
+    threads = [{ resolved: false, firstCommentId: 1000 }];
+    headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated again");
+    const reopened = await review(h, 3);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(reopened.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("leaves findings as they are when the review threads can't be read", async () => {
+    const h = harness({
+      commentIds: true,
+      threads: () => {
+        throw new Error("GraphQL is down");
+      },
+    });
+    await review(h, 1, [finding()]);
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
+    const second = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(second.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    expect(h.logs).toContain("review threads unread");
   });
 
   it("keeps a finding open when the reviewer is quiet about it after a nearby edit", async () => {

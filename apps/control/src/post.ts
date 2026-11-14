@@ -198,7 +198,11 @@ async function standing(
       // Not kept: earlier findings are only counted and listed, never posted again.
       evidence: record.title,
     };
-    open.push({ finding, fingerprint: record.fingerprint });
+    open.push({
+      finding,
+      fingerprint: record.fingerprint,
+      ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
+    });
   }
   return { open, outdated, reopened };
 }
@@ -258,6 +262,19 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   const pull: PullRef = { owner: target.owner, repo: target.repo, pull: target.number };
   const github = await deps.github(manifest.installationId);
   const poster = github.poster(runId, pull);
+  // What people did to our comments' threads first: a resolved one takes its finding out of the
+  // decision, and one unresolved again puts it back. If the threads can't be read, findings
+  // stay as they are.
+  try {
+    const threads = await github.threads.reviewThreads(target);
+    const synced = await deps.findings.syncThreads(run.pullRequestId, threads, pr.headSha);
+    if (synced.resolved + synced.unresolved > 0) deps.log("review threads", { runId, ...synced });
+  } catch (error) {
+    deps.log("review threads unread", {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -304,6 +321,8 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     (decision.event !== "APPROVE" ||
       (await approvalStands(github.reader, target, run, pr.headSha)));
   let posted: { event: ReviewEvent; id: number | undefined } | undefined;
+  // Each inline finding's comment on GitHub, to follow its review thread.
+  const commentIds = new Map<Finding, number>();
   if (!quiet) {
     const payload = buildReview({
       event: decision.event,
@@ -314,6 +333,10 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     });
     const review = await poster.submitReview(pull, pr.headSha, payload);
     posted = { event: decision.event, id: review.id };
+    for (const [i, finding] of review.payload.commented.entries()) {
+      const id = review.commentIds[i];
+      if (id !== undefined) commentIds.set(finding, id);
+    }
   }
   if (decision.conclusion !== undefined) {
     await poster.completeCheckRun(pull, {
@@ -345,7 +368,15 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     }),
     pr.headSha,
   );
-  await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
+  await deps.findings.saveFindings(
+    run.pullRequestId,
+    runId,
+    pr.headSha,
+    report.posted.map((entry) => {
+      const id = commentIds.get(entry.finding);
+      return id === undefined ? entry : { ...entry, githubCommentId: id };
+    }),
+  );
   await deps.runs.recordFiles(runId, report.reviewedFiles);
   // A failed batch's files have no record at this head, so the next run reviews them however
   // far the incremental range has moved on.
