@@ -1192,6 +1192,57 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open", path: "src/total.ts" }]);
   });
 
+  it("keeps a finding under the file's new name when its commit is gone and the PR renamed it", async () => {
+    const h = harness();
+    await review(h, 1, [finding({ severity: "should_fix" })]);
+    // Rewrite the branch: the commit the finding was raised at is gone, and the PR now renames
+    // the file (same change otherwise).
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit({ "src/sum.ts": HEAD_TOTAL }, "rewritten with a rename");
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    // Kept at its line under the new name: a reworded re-raise there is matched to it.
+    const again = await review(h, 2, [
+      finding({ path: "src/sum.ts", title: "Loop skips the final item" }),
+    ]);
+    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
+    expect(again.posted).toMatchObject({ findings: 0 });
+  });
+
+  it("follows an old-side finding when the base renames the file and the PR is rebased", async () => {
+    const h = harness();
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("  return sum;\n", "") },
+      "drop return",
+    );
+    const left = finding({
+      side: "LEFT",
+      line: 6,
+      title: "Return was removed",
+      evidence: "return sum;",
+    });
+    await review(h, 1, [left]);
+    // Main renames the file; the PR is rebased onto it, so it now deletes the return in
+    // src/sum.ts.
+    await git(work, "checkout", "--quiet", "main");
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    baseSha = await commit({}, "main: rename");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "rebase", "--quiet", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    headSha = await git(work, "rev-parse", "HEAD");
+
+    await review(h, 2);
+    // Still deleted, under the base's new name: it stands.
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    // Raised again there: the same finding.
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
+    const again = await review(h, 3, [{ ...left, path: "src/sum.ts" }]);
+    expect(again.posted).toMatchObject({ findings: 0 });
+  });
+
   it("skips following findings when there are none", async () => {
     const h = harness();
     await review(h, 1);
