@@ -28,7 +28,7 @@ interface Setup {
   run?: "ok" | "timeout";
   status?: number;
   input?: object;
-  /** What removing escaping symlinks finds. */
+  /** What removing symlinks finds. */
   links?: string[];
 }
 
@@ -89,7 +89,7 @@ function setup(options: Setup = {}) {
     extract: async (_archive, dir) => {
       extracted.push(dir);
     },
-    dropEscapingSymlinks: async (dir) => {
+    dropSymlinks: async (dir) => {
       // Only after the checkout is there, and before the harness runs.
       if (!extracted.includes(dir) || runs.length > 0) throw new Error("out of order");
       dropped.push(dir);
@@ -122,7 +122,7 @@ describe("runSandboxBatch", () => {
     expect(s.puts.size).toBe(2);
   });
 
-  it("removes escaping symlinks after extracting and before the harness runs", async () => {
+  it("removes symlinks after extracting and before the harness runs", async () => {
     const s = setup({ links: ["docs/env"] });
     await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
     expect(s.dropped).toEqual(["/work/checkout"]);

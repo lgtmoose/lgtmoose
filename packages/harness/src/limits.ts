@@ -18,15 +18,25 @@ export interface LimitFailure {
  */
 const PLAN_LIMIT =
   /hit your usage limit|usage[_ ]limit[_ ]reached|spend cap|quota[_ ]exceeded|usage[_ ]not[_ ]included|insufficient[_ ]quota|purchase more credits/i;
-/** Throttling: the same credential works again shortly. */
-const RATE_LIMIT =
-  /rate[_ -]?limit|too many requests|(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*429\b|server[_ ]overloaded/i;
 /**
- * The credential itself was refused. Status codes count only next to HTTP wording, here and in
- * `RATE_LIMIT`, so a line number in a stack trace (`index.js:429:17`) doesn't match.
+ * An HTTP status in a message: the code right after HTTP wording ("HTTP 429", "status 401",
+ * "status code: 429", "returned 401", "responded with 429", "error 401"), so a line number in a
+ * stack trace (`index.js:429:17`) doesn't count.
  */
-const AUTH_FAILURE =
-  /(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*401\b|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials/i;
+export function httpStatus(code: number): string {
+  return String.raw`(?:\bHTTP(?:\/[\d.]+)?|\bstatus(?: code)?|\berror|\bcode|\breturned|\bresponded(?: with)?|\bfailed with)[\s:=]*${code}\b`;
+}
+
+/** Throttling: the same credential works again shortly. */
+const RATE_LIMIT = new RegExp(
+  String.raw`rate[_ -]?limit|too many requests|${httpStatus(429)}|server[_ ]overloaded`,
+  "i",
+);
+/** The credential itself was refused. A 401 only as a status (`httpStatus`). */
+const AUTH_FAILURE = new RegExp(
+  String.raw`${httpStatus(401)}|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials`,
+  "i",
+);
 
 const SECONDS: Record<string, number> = {
   s: 1,

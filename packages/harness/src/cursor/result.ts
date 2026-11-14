@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { classifyFailure, limitTimes, type LimitFailure } from "../limits.js";
+import { classifyFailure, httpStatus, limitTimes, type LimitFailure } from "../limits.js";
 import type { HarnessUsage } from "../harness.js";
 
 /**
@@ -54,30 +54,48 @@ export function cursorUsage(result: CursorResult | undefined): HarnessUsage {
   return out;
 }
 
+/** Words for a limit, and for it having been hit. */
+const LIMIT = String.raw`(?:usage|spend(?:ing)?|monthly|team|plan)\s+limit`;
+const HIT = String.raw`(?:reached|exceeded|hit|met)`;
 /**
  * A Cursor plan's included usage or spend limit is used up: a limit that was hit, not a mention
- * of one. "Upgrade to Pro for higher usage limits" and "included usage" banners don't match.
+ * of one. Matches "You've hit your usage limit", "Your spend limit has been reached", "Spending
+ * limit exceeded", "You've used up your included usage for this month", "You're out of fast
+ * requests"; not "Upgrade to Pro for higher usage limits", "Check your spend limit in settings"
+ * or "Your plan includes 500 requests of included usage".
  */
-const PLAN_LIMIT =
-  /(?:hit|reached|exceeded|used up)\s+(?:your|the|its|this)?\s*(?:\w+\s+)?(?:usage|spend(?:ing)?)\s+limit|(?:usage|spend(?:ing)?)\s+limit\s+(?:reached|exceeded|hit)|out of (?:fast )?requests/i;
+const PLAN_LIMIT = new RegExp(
+  [
+    String.raw`\b${HIT}\s+(?:your|the|its|this|a)?\s*(?:\w+\s+)?${LIMIT}`,
+    String.raw`\b${LIMIT}\s+(?:has\s+been\s+|was\s+|is\s+)?${HIT}`,
+    String.raw`\b(?:used\s+up|run\s+out\s+of|ran\s+out\s+of|exhausted)\s+(?:all\s+of\s+)?(?:your|the)?\s*(?:included\s+|monthly\s+|fast\s+)*(?:usage|requests|quota|credits)`,
+    String.raw`\bout\s+of\s+(?:fast\s+|included\s+)?(?:requests|usage|credits)`,
+  ].join("|"),
+  "i",
+);
+/** connect-rpc's code for a quota or rate the server enforces (Cursor's API speaks connect). */
+const RESOURCE_EXHAUSTED = /\bresource[_ ]exhausted\b/i;
 /**
- * The key was refused, or the CLI has none. A 401 only next to HTTP wording, so a line number
- * in a stack trace (`index.js:401:7`) doesn't match. Not a 403 or "forbidden": the egress proxy
- * refuses a host it doesn't allow with 403 too, and that isn't the key's fault.
+ * The key was refused, or the CLI has none: connect-rpc's `unauthenticated`, a 401 as a status
+ * (`httpStatus`), or Cursor's wording. Not a 403 or "forbidden": the egress proxy refuses a host
+ * it doesn't allow with 403 too, and that isn't the key's fault.
  */
-const AUTH_FAILURE =
-  /(?:HTTP\/?[\d.]*|status(?: code)?|error|code)[\s:=]*401\b|unauthori[sz]ed|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login/i;
+const AUTH_FAILURE = new RegExp(
+  String.raw`\bunauthenticated\b|${httpStatus(401)}|unauthori[sz]ed|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login`,
+  "i",
+);
 
 /**
  * Whether a Cursor failure is a plan limit, a rate limit or a refused key, so the fallback chain
- * can move on. Cursor's plan-limit wording wins, since such messages may mention a 429 too; then
- * the checks shared with Codex ("rate limit", "429", "try again in 20 seconds"); then Cursor's
- * auth wording. Undefined for any other failure.
+ * can move on. Cursor's plan-limit wording wins, since such messages may mention a 429 or
+ * `resource_exhausted` too; then those, and the checks shared with Codex ("rate limit", "status
+ * 429", "try again in 20 seconds"); then the auth checks. Undefined for any other failure.
  */
 export function classifyCursorFailure(message: string): LimitFailure | undefined {
   if (PLAN_LIMIT.test(message)) return { kind: "plan_limit", ...limitTimes(message) };
   const shared = classifyFailure(message);
-  if (shared !== undefined) return shared;
-  if (AUTH_FAILURE.test(message)) return { kind: "auth" };
+  if (shared !== undefined && shared.kind !== "auth") return shared;
+  if (RESOURCE_EXHAUSTED.test(message)) return { kind: "rate_limit", ...limitTimes(message) };
+  if (shared !== undefined || AUTH_FAILURE.test(message)) return { kind: "auth" };
   return undefined;
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -26,7 +27,7 @@ import {
   findCursorResult,
   type CursorResult,
 } from "./result.js";
-import { copyWorkspace } from "./workspace.js";
+import { copyWorkspace, type WorkspaceCopy } from "./workspace.js";
 
 export interface CursorHarnessOptions {
   /** Where each attempt's output is saved. */
@@ -101,16 +102,79 @@ type Attempt<T> =
   | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
   | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
 
+/** A copy of one checkout that runs on it share (`copyWorkspace`). */
+interface Workspace {
+  /** The temporary directory holding the copy, removed by `dispose` or at exit. */
+  root: string;
+  /** The copy's real path: the CLI's working directory and its read allowlist. */
+  dir: string;
+  copy: WorkspaceCopy;
+}
+
+/** Copies not yet disposed of, removed when the process exits, whoever forgot them. */
+const LIVE_COPIES = new Set<string>();
+process.once("exit", () => {
+  for (const root of LIVE_COPIES) rmSync(root, { recursive: true, force: true });
+});
+
 /**
- * Runs the Cursor CLI headless (`agent -p`) in read-only ask mode, on a copy of the checkout in
- * the run's temporary directory. The caller's tree is never changed.
+ * Runs the Cursor CLI headless (`agent -p`) in read-only ask mode, on a copy of the checkout in a
+ * temporary directory. The caller's tree is never changed. The copy is made once per checkout and
+ * harness, and reused by the repair attempt and later runs on the same checkout: the model can't
+ * write to it. Call `dispose` to remove the copies early; they're removed at exit regardless.
  */
 export class CursorHarness implements Harness {
   readonly id = "cursor-agent";
   private readonly options: CursorHarnessOptions;
+  private readonly workspaces = new Map<string, Promise<Workspace>>();
 
   constructor(options: CursorHarnessOptions) {
     this.options = options;
+  }
+
+  /** Removes every checkout copy this harness made. Later runs make new ones. */
+  async dispose(): Promise<void> {
+    const all = [...this.workspaces.values()];
+    this.workspaces.clear();
+    for (const result of await Promise.allSettled(all)) {
+      if (result.status !== "fulfilled") continue;
+      await rm(result.value.root, { recursive: true, force: true });
+      LIVE_COPIES.delete(result.value.root);
+    }
+  }
+
+  /** The copy of the checkout at `cwd`, made on first use. A failed copy is tried again next run. */
+  private workspaceFor(cwd: string, keys: readonly string[]): Promise<Workspace> {
+    const fail = (error: unknown): never => {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new HarnessError("process", `Could not copy the checkout for the CLI: ${message}`, {
+        transcriptKeys: keys,
+        cause: error,
+      });
+    };
+    return realpath(cwd)
+      .then((source) => {
+        const cached = this.workspaces.get(source);
+        if (cached !== undefined) return cached;
+        const made = this.copyCheckout(source);
+        this.workspaces.set(source, made);
+        made.catch(() => this.workspaces.delete(source));
+        return made;
+      }, fail)
+      .catch(fail);
+  }
+
+  private async copyCheckout(source: string): Promise<Workspace> {
+    const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-ws-"));
+    LIVE_COPIES.add(root);
+    try {
+      const copy = await copyWorkspace(source, join(root, "checkout"));
+      return { root, dir: await realpath(join(root, "checkout")), copy };
+    } catch (error) {
+      LIVE_COPIES.delete(root);
+      await rm(root, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   async run<T>(options: HarnessRunOptions<T>): Promise<HarnessResult<T>> {
@@ -122,17 +186,18 @@ export class CursorHarness implements Harness {
     const model = options.model.trim() || this.options.models?.[tier];
     const secrets = auth.secrets;
     const keys: string[] = [];
+    checkPromptSize(options.prompt, keys);
+    const { dir: workspace, copy } = await this.workspaceFor(options.cwd, keys);
     // No structured-output flag: the schema is described in the prompt, and checked with zod.
-    const firstPrompt = options.prompt + schemaPromptSuffix(schemaJson(options.schema));
+    const firstPrompt =
+      options.prompt + copyNote(copy) + schemaPromptSuffix(schemaJson(options.schema));
     checkPromptSize(firstPrompt, keys);
     const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
+    const taskDir = await freeTaskDir(workspace);
     try {
       const home = join(root, "home");
       await mkdir(join(home, ".cursor"), { recursive: true });
       await mkdir(join(home, "tmp"));
-      await copyWorkspace(options.cwd, join(root, "checkout"));
-      const workspace = await realpath(join(root, "checkout"));
-      const taskDir = `.lgtmoose-task-${randomUUID()}`;
       await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig(workspace));
       const env: Record<string, string> = {
         PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -203,8 +268,36 @@ export class CursorHarness implements Harness {
         { transcriptKeys: keys },
       );
     } finally {
+      await rm(join(workspace, taskDir), { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });
     }
+  }
+}
+
+/** Tells the model what the copy it can read leaves out, when it leaves anything out. */
+function copyNote(copy: WorkspaceCopy): string {
+  const parts = [
+    copy.links > 0 ? `${copy.links} symlink${copy.links === 1 ? "" : "s"}` : undefined,
+    copy.unreadable > 0
+      ? `${copy.unreadable} unreadable entr${copy.unreadable === 1 ? "y" : "ies"}`
+      : undefined,
+  ].filter(Boolean);
+  if (parts.length === 0) return "";
+  return `\n\nThe checkout you can read leaves out ${parts.join(" and ")}. Their changes, if any, are in the diff above.`;
+}
+
+/**
+ * A directory name for the run's task files in the workspace: not a dot name (globs and ignore
+ * rules may skip those), random, and not already in the copy.
+ */
+async function freeTaskDir(workspace: string): Promise<string> {
+  for (;;) {
+    const name = `lgtmoose-task-${randomUUID()}`;
+    const taken = await lstat(join(workspace, name)).then(
+      () => true,
+      () => false,
+    );
+    if (!taken) return name;
   }
 }
 
@@ -222,8 +315,8 @@ function checkPromptSize(prompt: string, keys: readonly string[]): void {
 /**
  * What goes on the command line for attempt `n`: the prompt itself when it fits in one argument
  * (`MAX_CURSOR_ARG_PROMPT_BYTES`), otherwise a pointer to a task file holding it, which the
- * model reads with its Read tool. The file sits in the workspace, where reads are allowed, under
- * a random name no checkout can already use.
+ * model reads with its Read tool. The file sits in the workspace, where reads are allowed, in
+ * the run's own task directory (`freeTaskDir`).
  */
 async function deliver(workspace: string, taskDir: string, n: number, prompt: string) {
   if (Buffer.byteLength(prompt) <= MAX_CURSOR_ARG_PROMPT_BYTES) return prompt;
@@ -265,11 +358,10 @@ function failIfUnusable(
   const errorText = (result?.is_error === true ? result.result : undefined)?.trim() || undefined;
   const stderr = proc.stderr.trim() || undefined;
   const detail = [errorText, stderr].filter(Boolean).join("\n") || "no output";
-  // The JSON error result says what went wrong; stderr only when it says nothing classifiable,
-  // so a banner or warning there can't decide the kind.
-  const limit =
-    (errorText === undefined ? undefined : classifyCursorFailure(errorText)) ??
-    (stderr === undefined ? undefined : classifyCursorFailure(stderr));
+  // The JSON error result says what went wrong when there is one; stderr only without it, so a
+  // banner or warning there can't decide the kind.
+  const reason = errorText ?? stderr;
+  const limit = reason === undefined ? undefined : classifyCursorFailure(reason);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;
     throw fail(kind, `agent stopped: ${detail}`, extra);

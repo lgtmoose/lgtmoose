@@ -1,14 +1,4 @@
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  readlink,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -53,16 +43,31 @@ describe("copyWorkspace", () => {
     expect(await tree(source)).toContain("AGENTS.md");
   });
 
-  it("keeps links that resolve inside the checkout, as links, and drops the rest", async () => {
+  it("skips config dirs and ignore files whatever their case", async () => {
+    for (const dir of [".Cursor", ".CLAUDE", "pkg/Node_Modules"]) {
+      await mkdir(join(source, dir), { recursive: true });
+      await writeFile(join(source, dir, "x"), "");
+    }
+    await writeFile(join(source, ".cursorignore"), "lgtmoose-task-*\n");
+    await writeFile(join(source, ".CursorIndexingIgnore"), "*\n");
+    await writeFile(join(source, "a.ts"), "");
+    expect(await copyWorkspace(source, dest)).toEqual({ links: 0, unreadable: 0 });
+    expect(await tree(dest)).toEqual(["a.ts", "pkg"]);
+  });
+
+  it("copies no symlinks at all, and counts them", async () => {
     await mkdir(join(source, "docs"));
+    await mkdir(join(source, "config"));
     await writeFile(join(source, "README.md"), "hi");
     await symlink("../README.md", join(source, "docs", "readme"));
     await symlink("../../secret", join(source, "docs", "up"));
     await symlink("/proc/self/environ", join(source, "docs", "env"));
     await symlink("missing", join(source, "docs", "gone"));
-    await copyWorkspace(source, dest);
-    expect(await readdir(join(dest, "docs"))).toEqual(["readme"]);
-    expect(await readlink(join(dest, "docs", "readme"))).toBe("../README.md");
+    // Inside the checkout, but under a name the copy must not have.
+    await symlink("config", join(source, ".cursor"));
+    await symlink(join(source, "README.md"), join(source, "abs"));
+    expect(await copyWorkspace(source, dest)).toEqual({ links: 6, unreadable: 0 });
+    expect(await tree(dest)).toEqual(["README.md", "config", "docs"]);
   });
 
   it("doesn't follow a directory link while walking", async () => {
@@ -70,9 +75,27 @@ describe("copyWorkspace", () => {
     await writeFile(join(source, "real", "a.ts"), "");
     await symlink("real", join(source, "alias"));
     await copyWorkspace(source, dest);
-    expect((await readdir(dest)).sort()).toEqual(["alias", "real"]);
-    expect((await lstat(join(dest, "alias"))).isSymbolicLink()).toBe(true);
-    expect(await readlink(join(dest, "alias"))).toBe("real");
+    expect((await readdir(dest)).sort()).toEqual(["real"]);
     expect(await readdir(join(dest, "real"))).toEqual(["a.ts"]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("skips and counts what it can't read", async () => {
+    await mkdir(join(source, "locked"));
+    await writeFile(join(source, "locked", "a.ts"), "");
+    await writeFile(join(source, "secret.ts"), "");
+    await writeFile(join(source, "ok.ts"), "");
+    await chmod(join(source, "secret.ts"), 0o000);
+    await chmod(join(source, "locked"), 0o000);
+    try {
+      expect(await copyWorkspace(source, dest)).toEqual({ links: 0, unreadable: 2 });
+      expect(await tree(dest)).toEqual(["locked", "ok.ts"]);
+    } finally {
+      await chmod(join(source, "locked"), 0o755);
+    }
+  });
+
+  it("fails on anything else, such as a destination that already exists", async () => {
+    await mkdir(dest);
+    await expect(copyWorkspace(source, dest)).rejects.toThrow(/EEXIST/);
   });
 });

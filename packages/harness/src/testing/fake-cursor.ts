@@ -59,7 +59,7 @@ fs.appendFileSync(
     cliConfig: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : undefined,
     checkoutEntries: fs.readdirSync(".").sort(),
     taskFile: (() => {
-      const m = /(\\.lgtmoose-task-[\\w-]+\\/prompt-\\d+\\.md)/.exec(process.argv.at(-1) || "");
+      const m = /(lgtmoose-task-[\\w-]+\\/prompt-\\d+\\.md)/.exec(process.argv.at(-1) || "");
       return m ? fs.readFileSync(m[1], "utf8") : undefined;
     })(),
   }) + "\\n",

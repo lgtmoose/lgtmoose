@@ -39,6 +39,16 @@ describe("classifyCursorFailure", () => {
     ["Invalid API key", "auth"],
     ["Error: 401 Unauthorized", "auth"],
     ["Authentication required", "auth"],
+    ["Your spend limit has been reached.", "plan_limit"],
+    ["Spending limit exceeded", "plan_limit"],
+    ["You've used up your included usage for this month.", "plan_limit"],
+    ["You've run out of fast requests", "plan_limit"],
+    ["You have reached your monthly limit", "plan_limit"],
+    ["Request failed: server returned 401", "auth"],
+    ["ConnectError: [unauthenticated] invalid token", "auth"],
+    ["request failed with status 429", "rate_limit"],
+    ["ConnectError: [resource_exhausted] slow down, try again in 20 seconds", "rate_limit"],
+    ["[resource_exhausted] You've hit your usage limit", "plan_limit"],
   ] as const)("%j is %s", (message, kind) => {
     expect(classifyCursorFailure(message)?.kind).toBe(kind);
   });
@@ -59,6 +69,10 @@ describe("classifyCursorFailure", () => {
     "Your plan includes included usage of 500 requests.",
     "TypeError: x is undefined\n    at run (index.js:429:17)",
     "    at main (cli.js:401:3)",
+    "Check your spend limit in settings.",
+    "Usage limits apply to fast requests.",
+    "Your team's monthly limit resets on the 1st.",
+    "Fetched 429 files in 3s",
   ])("doesn't read %j as a limit", (message) => {
     expect(classifyCursorFailure(message)).toBeUndefined();
   });

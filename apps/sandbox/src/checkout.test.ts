@@ -1,8 +1,8 @@
-import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { dropEscapingSymlinks } from "./checkout.js";
+import { dropSymlinks } from "./checkout.js";
 
 let root: string;
 let checkout: string;
@@ -25,39 +25,37 @@ const exists = (path: string) =>
     () => false,
   );
 
-describe("dropEscapingSymlinks", () => {
-  it("drops links that lead outside the checkout, absolute or relative", async () => {
+describe("dropSymlinks", () => {
+  it("drops every link: outside, inside, into config, to a directory and dangling", async () => {
+    await mkdir(join(checkout, "config", "hooks"), { recursive: true });
     await symlink("/proc/self/environ", join(checkout, "docs", "env"));
     await symlink("../../secret", join(checkout, "docs", "up"));
-    await symlink(root, join(checkout, "docs", "dir"));
-    expect(await dropEscapingSymlinks(checkout)).toEqual(["docs/dir", "docs/env", "docs/up"]);
-    expect(await exists(join(checkout, "docs", "env"))).toBe(false);
+    await symlink("../README.md", join(checkout, "docs", "readme"));
+    await symlink("config", join(checkout, ".cursor"));
+    await symlink("missing", join(checkout, "gone"));
+    expect(await dropSymlinks(checkout)).toEqual([
+      ".cursor",
+      "docs/env",
+      "docs/readme",
+      "docs/up",
+      "gone",
+    ]);
+    expect(await exists(join(checkout, "docs", "readme"))).toBe(false);
+    // Files and the targets stay.
+    expect(await exists(join(checkout, "README.md"))).toBe(true);
+    expect(await exists(join(checkout, "config", "hooks"))).toBe(true);
     expect(await exists(join(root, "secret"))).toBe(true);
   });
 
-  it("keeps links that stay inside", async () => {
-    await symlink("../README.md", join(checkout, "docs", "readme"));
-    await symlink("deep", join(checkout, "docs", "alias"));
-    expect(await dropEscapingSymlinks(checkout)).toEqual([]);
-    expect(await readlink(join(checkout, "docs", "readme"))).toBe("../README.md");
+  it("doesn't walk through a directory link", async () => {
+    await mkdir(join(root, "outside"));
+    await symlink("../outside-target", join(root, "outside", "inner"));
+    await symlink(join(root, "outside"), join(checkout, "docs", "dir"));
+    expect(await dropSymlinks(checkout)).toEqual(["docs/dir"]);
+    expect(await exists(join(root, "outside", "inner"))).toBe(true);
   });
 
-  it("catches a chain whose `..` climbs out through another link", async () => {
-    // `top` points at the checkout root, so `top/../secret` is outside, though it reads inside.
-    await symlink("../..", join(checkout, "docs", "deep", "top"));
-    await symlink("deep/top/../secret", join(checkout, "docs", "sneaky"));
-    expect(await dropEscapingSymlinks(checkout)).toEqual(["docs/sneaky"]);
-  });
-
-  it("keeps links into a directory whose name only starts with dots", async () => {
-    await mkdir(join(checkout, "..data"));
-    await writeFile(join(checkout, "..data", "a"), "x");
-    await symlink("..data/a", join(checkout, "link"));
-    expect(await dropEscapingSymlinks(checkout)).toEqual([]);
-  });
-
-  it("drops dangling links", async () => {
-    await symlink("missing", join(checkout, "gone"));
-    expect(await dropEscapingSymlinks(checkout)).toEqual(["gone"]);
+  it("leaves a checkout without links alone", async () => {
+    expect(await dropSymlinks(checkout)).toEqual([]);
   });
 });

@@ -153,8 +153,47 @@ describe("CursorHarness", () => {
     expect(call?.env.HOME?.startsWith(tmpRoot)).toBe(true);
     expect(call?.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
     expect(call?.argv.join(" ")).not.toContain(API_KEY);
-    // The run's home and workspace copy are removed afterwards.
+    // The run's home goes when it ends; the checkout copy stays for reuse until dispose.
+    expect((await readdir(tmpRoot)).map((name) => name.replace(/-[^-]+$/, ""))).toEqual([
+      "lgtmoose-cursor-ws",
+    ]);
+    await harness.dispose();
     expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
+  it("copies the checkout once and reuses it for the repair and later runs", async () => {
+    await writeFile(join(cwd, "a.ts"), "export {};");
+    const harness = await harnessFor([
+      { stdout: cursorResult("not json") },
+      { stdout: cursorResult(ANSWER) },
+    ]);
+    await run(harness);
+    // Changing the checkout now doesn't reach the copy the harness keeps.
+    await writeFile(join(cwd, "b.ts"), "export {};");
+    await run(harness);
+    const calls = await fake!.calls();
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map((call) => call.cwd)).size).toBe(1);
+    expect(calls[2]?.checkoutEntries).toEqual(["a.ts"]);
+    // The task directory of each run is gone afterwards.
+    expect(await readdir(calls[0]?.cwd ?? "")).toEqual(["a.ts"]);
+  });
+
+  it("fails as a process error when the checkout can't be copied", async () => {
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
+    const error = await failure(
+      harness.run({
+        prompt: "p",
+        cwd: join(cwd, "missing"),
+        schema,
+        model: "",
+        timeoutMs: 10_000,
+        runId: "run-1",
+      }),
+    );
+    expect(error.kind).toBe("process");
+    expect(error.message).toContain("Could not copy the checkout");
+    expect(await fake!.calls()).toEqual([]);
   });
 
   it("allows reads of the workspace copy only, and denies the tools and roots", async () => {
@@ -213,15 +252,20 @@ describe("CursorHarness", () => {
     expect(await readFile(join(cwd, ".cursor", "hooks.json"), "utf8")).toBe('{"hooks":{}}');
   });
 
-  it("copies links that stay inside the checkout and drops the rest", async () => {
+  it("copies no symlinks, and tells the model how many it left out", async () => {
     await mkdir(join(cwd, "docs"));
+    await mkdir(join(cwd, "config"));
     await writeFile(join(cwd, "README.md"), "hi");
     await symlink("../README.md", join(cwd, "docs", "readme"));
     await symlink("/proc/self/environ", join(cwd, "docs", "env"));
+    // A link to a config dir under a skipped name, and an absolute one back into the checkout.
+    await symlink("config", join(cwd, ".cursor"));
+    await symlink(join(cwd, "README.md"), join(cwd, "abs"));
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
     await run(harness);
     const [call] = await fake!.calls();
-    expect(call?.checkoutEntries).toEqual(["README.md", "docs"]);
+    expect(call?.checkoutEntries).toEqual(["README.md", "config", "docs"]);
+    expect(call?.argv.at(-1)).toContain("leaves out 4 symlinks");
     // The originals are untouched.
     expect((await readdir(join(cwd, "docs"))).sort()).toEqual(["env", "readme"]);
   });
@@ -233,7 +277,7 @@ describe("CursorHarness", () => {
     const [call] = await fake!.calls();
     const arg = call?.argv.at(-1) ?? "";
     expect(Buffer.byteLength(arg)).toBeLessThan(1000);
-    expect(arg).toMatch(/\.lgtmoose-task-[\w-]+\/prompt-1\.md/);
+    expect(arg).toMatch(/lgtmoose-task-[\w-]+\/prompt-1\.md/);
     expect(call?.taskFile?.startsWith(prompt)).toBe(true);
   });
 
@@ -345,6 +389,27 @@ describe("CursorHarness", () => {
     expect((await failure(run(harness))).kind).toBe("auth");
   });
 
+  it("doesn't fall back to stderr when the error result says something else", async () => {
+    const stdout = `${JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "The model returned malformed tool calls.",
+    })}\n`;
+    const harness = await harnessFor([
+      { stdout, stderr: "warning: rate limit headers missing", exitCode: 1 },
+    ]);
+    const error = await failure(run(harness));
+    expect(error.kind).toBe("process");
+    // stderr still shows in the message.
+    expect(error.message).toContain("rate limit headers missing");
+  });
+
+  it("classifies stderr when there's no error result", async () => {
+    const harness = await harnessFor([{ stderr: "Error: [unauthenticated] bad key", exitCode: 1 }]);
+    expect((await failure(run(harness))).kind).toBe("auth");
+  });
+
   it("treats an error result as a failure", async () => {
     const stdout = `${JSON.stringify({
       type: "result",
@@ -405,6 +470,7 @@ describe("CursorHarness", () => {
     const harness = await harnessFor([{ hang: true }]);
     const error = await failure(run(harness, { timeoutMs: 300 }));
     expect(error.kind).toBe("timeout");
+    await harness.dispose();
     expect(existsSync(tmpRoot) && (await readdir(tmpRoot)).length === 0).toBe(true);
   });
 

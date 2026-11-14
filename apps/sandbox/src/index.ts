@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { ClaudeCodeHarness, CodexHarness, CursorHarness, type Harness } from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
-import { dropEscapingSymlinks } from "./checkout.js";
+import { dropSymlinks } from "./checkout.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
 
@@ -51,7 +51,7 @@ async function main(): Promise<void> {
       writeFile: (path, body) =>
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
-      dropEscapingSymlinks,
+      dropSymlinks,
       harness: (transcripts): Harness => {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
         if (env.harness === "codex") return new CodexHarness(options);
