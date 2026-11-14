@@ -1,7 +1,13 @@
 import { PutObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { AssumeRoleCommand, STSClient } from "@aws-sdk/client-sts";
-import { presignBatch, type PresignEvent, type PresignResult } from "./presign.js";
+import {
+  checkOutcome,
+  presignBatch,
+  type OutcomeEvent,
+  type PresignEvent,
+  type PresignResult,
+} from "./presign.js";
 
 /**
  * The presign Lambda: one invocation per batch attempt, from the review state machine's map.
@@ -82,7 +88,19 @@ function wholeSeconds(name: string): number {
   return value;
 }
 
-export async function handler(event: PresignEvent): Promise<PresignResult> {
+/** S3's "no such key", which a missing batch output is. */
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && (error.name === "NoSuchKey" || error.name === "NotFound");
+}
+
+/**
+ * Two calls per batch attempt from the map: presign its URLs (`presignBatch`), and after the
+ * attempt, check its output for whether to try the next provider (`checkOutcome`). Both use the
+ * presigner role, which may read `runs/*`.
+ */
+export async function handler(
+  event: PresignEvent | OutcomeEvent,
+): Promise<PresignResult | { fallback: boolean }> {
   const bucket = process.env.ARTIFACT_BUCKET;
   const roleArn = process.env.LGTMOOSE_PRESIGNER_ROLE_ARN;
   if (!bucket) throw new Error("ARTIFACT_BUCKET is not set.");
@@ -91,6 +109,25 @@ export async function handler(event: PresignEvent): Promise<PresignResult> {
   const session = wholeSeconds("LGTMOOSE_PRESIGNER_SESSION_SECONDS");
   const credentials = await presignerCredentials(roleArn, session, ttl);
   const client = new S3Client({ credentials });
+  if ("action" in event) {
+    return checkOutcome(
+      {
+        getText: async (key) => {
+          try {
+            const reply = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+            return await reply.Body?.transformToString("utf8");
+          } catch (error) {
+            if (isMissing(error)) return undefined;
+            throw error;
+          }
+        },
+        log: (message, fields) => {
+          process.stdout.write(`${JSON.stringify({ message, ...fields })}\n`);
+        },
+      },
+      event,
+    );
+  }
   return presignBatch(
     {
       presign: (method, key, expiresIn) =>

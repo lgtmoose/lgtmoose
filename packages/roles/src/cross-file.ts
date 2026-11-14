@@ -51,14 +51,23 @@ export function collectBatchNotes(batches: readonly ReviewedBatch[]): BatchNotes
   let room: number = CROSS_FILE_LIMITS.notes;
   const collected: BatchNotes[] = [];
   for (const batch of [...batches].sort((a, b) => a.index - b.index)) {
-    const notes = [...new Set((batch.output?.notes ?? []).map((note) => clipNote(note.trim())))]
-      .filter((note) => note !== "")
-      .slice(0, Math.min(room, FINDING_LIMITS.notesPerRun));
+    const notes = clipBatchNotes(batch.output?.notes ?? []).slice(0, room);
     if (notes.length === 0) continue;
     room -= notes.length;
     collected.push({ batch: batch.index, files: batch.files, notes });
   }
   return collected;
+}
+
+/**
+ * One batch's notes within the soft limits: trimmed, blank and repeated ones dropped, each cut
+ * to `FINDING_LIMITS.note` characters, at most `FINDING_LIMITS.notesPerRun`. What a sandbox task
+ * stores in its batch output.
+ */
+export function clipBatchNotes(notes: readonly string[]): string[] {
+  return [...new Set(notes.map((note) => clipNote(note.trim())))]
+    .filter((note) => note !== "")
+    .slice(0, FINDING_LIMITS.notesPerRun);
 }
 
 function clipNote(note: string): string {

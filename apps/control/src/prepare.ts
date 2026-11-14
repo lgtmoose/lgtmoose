@@ -265,6 +265,7 @@ export async function prepare(
         runId: run.runId,
         index: batch.index,
         prompt: batch.prompt,
+        ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
         model: settings.model,
         timeoutMs: settings.batchTimeoutMs,
       });

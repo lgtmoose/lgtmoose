@@ -20,6 +20,21 @@ describe("readSandboxEnv", () => {
     });
   });
 
+  it("reads the provider's model, with `default` for the harness's own", () => {
+    const env = {
+      LGTMOOSE_PROVIDER: "codex",
+      HTTPS_PROXY: "http://proxy:3128",
+      LGTMOOSE_HARNESS: "codex",
+      LGTMOOSE_AUTH: "chatgpt-login",
+      LGTMOOSE_BATCH_URLS: "https://bucket/urls.json",
+    };
+    expect(readSandboxEnv({ ...env, LGTMOOSE_MODEL: "gpt-5.1-codex" })).toMatchObject({
+      model: "gpt-5.1-codex",
+    });
+    expect(readSandboxEnv({ ...env, LGTMOOSE_MODEL: "default" })).toMatchObject({ model: "" });
+    expect(readSandboxEnv(env)).not.toHaveProperty("model");
+  });
+
   it("names the missing ones", () => {
     expect(readSandboxEnv({ LGTMOOSE_PROVIDER: "claude", LGTMOOSE_AUTH: " " })).toEqual({
       missing: ["HTTPS_PROXY", "LGTMOOSE_HARNESS", "LGTMOOSE_AUTH", "LGTMOOSE_BATCH_URLS"],

@@ -91,6 +91,7 @@ async function main(): Promise<void> {
         return new ClaudeCodeHarness(options);
       },
       workDir: WORK,
+      ...(env.model === undefined ? {} : { model: env.model }),
       log,
     },
     env.batchUrls,

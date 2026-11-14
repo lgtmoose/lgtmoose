@@ -28,7 +28,8 @@ import {
   type ReadingDepth,
 } from "@lgtmoose/planner";
 import {
-  buildReviewerPrompt,
+  buildReviewerParts,
+  clipBatchNotes,
   selectRulePacks,
   placeFindings,
   readConventionFilesAt,
@@ -71,6 +72,11 @@ export interface BatchReport {
   done?: true;
   /** Why the batch failed. Undefined when it was reviewed. */
   error?: string;
+  /**
+   * What the reviewer noted for the cross-file pass (`BatchOutcome.notes`), with `files` the
+   * input `collectBatchNotes` takes. Model output: leads, not facts.
+   */
+  notes?: string[];
   transcriptKeys: string[];
   usage?: HarnessUsage;
 }
@@ -185,6 +191,13 @@ export interface PreparedReview {
   /** One entry per planned batch, in order. */
   jobs: BatchJob[];
   /**
+   * The part of every batch's prompt that they all share (the role and the built-in and
+   * private rule packs, see `buildReviewerParts`), sent as the harness's `system` so it's
+   * prompt-cached. Each job's `prompt` is the rest. Undefined in runs prepared before it was
+   * split out, whose prompts are whole.
+   */
+  reviewerSystem?: string;
+  /**
    * `incremental`: only the files whose PR change moved since each was last reviewed (see
    * `reviewDiff`). `full`: the whole PR, also when no file has a usable earlier review.
    */
@@ -276,6 +289,11 @@ export interface BatchOutcome {
   index: number;
   /** The model's findings, validated with `reviewerOutputSchema`. Undefined when it failed. */
   findings?: Finding[];
+  /**
+   * The reviewer's notes for the cross-file pass, within the soft limits (`clipBatchNotes`).
+   * Model output: untrusted, like the findings.
+   */
+  notes?: string[];
   /** Why the batch failed. */
   error?: string;
   transcriptKeys: string[];
@@ -479,6 +497,8 @@ export async function prepareReview(
     conventions: conventions.files,
     rulePacks,
   };
+  // The same for every batch: it doesn't depend on the batch's files.
+  let reviewerSystem: string | undefined;
   const jobs: BatchJob[] = plan.batches.map((batch) => {
     const paths = batch.files.map((planned) => planned.file.path);
     if (batch.files.every((planned) => planned.depth === "move")) {
@@ -488,7 +508,11 @@ export async function prepareReview(
     if (todo.every((planned) => planned.depth === "move")) {
       return { index: batch.index, files: paths, done: true };
     }
-    const prompt = buildReviewerPrompt({ ...context, batch: { ...batch, files: todo } });
+    const { system, prompt } = buildReviewerParts({
+      ...context,
+      batch: { ...batch, files: todo },
+    });
+    reviewerSystem = system;
     return { index: batch.index, files: paths, prompt };
   });
   return {
@@ -502,6 +526,7 @@ export async function prepareReview(
     conventionFilesOmitted: conventions.omitted,
     rulePackProblems: selected.problems,
     jobs,
+    ...(reviewerSystem === undefined ? {} : { reviewerSystem }),
     kind: diff.kind,
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
     done: [...done].map(([path, depth]) => ({ path, depth })),
@@ -618,6 +643,8 @@ export interface RunBatchOptions {
   timeoutMs: number;
   /** Groups this batch's transcripts, such as `<run id>-batch-<index>`. */
   runId: string;
+  /** The prompt part every batch shares (`PreparedReview.reviewerSystem`). */
+  system?: string;
 }
 
 /** Runs the reviewer on one batch. A failed run is an outcome with `error`, never a throw. */
@@ -630,15 +657,18 @@ export async function runBatch(
   try {
     const result = await harness.run({
       prompt: job.prompt,
+      ...(options.system === undefined ? {} : { system: options.system }),
       cwd: options.cwd,
       schema: reviewerOutputSchema,
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
     });
+    const notes = clipBatchNotes(result.output.notes ?? []);
     return {
       index: job.index,
       findings: result.output.findings,
+      ...(notes.length === 0 ? {} : { notes }),
       transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };
@@ -711,7 +741,7 @@ export async function finishReview(
       continue;
     }
     place(outcome.findings, batch);
-    batches.push(report);
+    batches.push(outcome.notes === undefined ? report : { ...report, notes: outcome.notes });
   }
 
   const statuses = batchFileStatuses(prepared, batches);
@@ -955,6 +985,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
           model: options.model,
           timeoutMs: options.batchTimeoutMs,
           runId: `${options.runId}-batch-${job.index}`,
+          ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
         }),
       );
     }

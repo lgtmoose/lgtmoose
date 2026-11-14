@@ -5,6 +5,7 @@ import {
   batchTranscriptKeys,
   batchUrlsSchema,
   runKeys,
+  wantsFallback,
 } from "./workflow.js";
 
 const RUN = "0f0e8c2a-4b1d-4c3e-9a7f-1234567890ab";
@@ -70,5 +71,48 @@ describe("batchUrlsSchema", () => {
     expect(batchUrlsSchema.safeParse(ok).success).toBe(true);
     expect(batchUrlsSchema.safeParse({ ...ok, input: "http://b/i" }).success).toBe(false);
     expect(batchUrlsSchema.safeParse({ ...ok, input: "file:///etc/passwd" }).success).toBe(false);
+  });
+});
+
+describe("batch notes", () => {
+  const base = { version: 1, index: 0, findings: [], transcriptKeys: [] };
+
+  it("accepts notes within the soft limits, only with findings", () => {
+    expect(batchOutputSchema.safeParse({ ...base, notes: ["exports total()"] }).success).toBe(true);
+    expect(batchOutputSchema.safeParse({ ...base, notes: ["x".repeat(501)] }).success).toBe(false);
+    expect(
+      batchOutputSchema.safeParse({ ...base, notes: Array.from({ length: 31 }, (_, i) => `n${i}`) })
+        .success,
+    ).toBe(false);
+    const failed = { version: 1, index: 0, error: "timeout: x", transcriptKeys: [] };
+    expect(batchOutputSchema.safeParse({ ...failed, notes: ["n"] }).success).toBe(false);
+  });
+});
+
+describe("wantsFallback", () => {
+  const output = (fields: Record<string, unknown>) =>
+    JSON.stringify({ version: 1, index: 0, transcriptKeys: [], ...fields });
+
+  it("moves on after a limit, an auth failure or a prompt too large for the provider", () => {
+    for (const kind of ["rate_limit", "plan_limit", "auth", "input_too_large"]) {
+      expect(wantsFallback(output({ error: `${kind}: stopped` }))).toEqual({
+        fallback: true,
+        reason: kind,
+      });
+    }
+  });
+
+  it("stops when the batch was reviewed, or failed in a way another provider would too", () => {
+    expect(wantsFallback(output({ findings: [] })).fallback).toBe(false);
+    expect(wantsFallback(output({ error: "timeout: too slow" })).fallback).toBe(false);
+    expect(wantsFallback(output({ error: "invalid_output: bad JSON" })).fallback).toBe(false);
+    // Only the error's kind counts, not text further on.
+    expect(wantsFallback(output({ error: "timeout: hit rate_limit: maybe" })).fallback).toBe(false);
+  });
+
+  it("moves on when there's no usable output", () => {
+    expect(wantsFallback(undefined).fallback).toBe(true);
+    expect(wantsFallback("not json").fallback).toBe(true);
+    expect(wantsFallback(output({ findings: [], error: "both" })).fallback).toBe(true);
   });
 });

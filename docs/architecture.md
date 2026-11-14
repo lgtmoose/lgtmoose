@@ -39,6 +39,13 @@ Before using a plan credential, read [Providers](providers.md): what each vendor
 - **Tiers.** Each provider maps the tiers `fast`, `standard` and `deep` to models through `models`. Claude Code and the Agent SDK default to the aliases `haiku`, `sonnet` and `opus`, which follow each family's newest model. Codex and Cursor default to their CLI's own model; Codex turns the tier into a reasoning effort.
 - **Usage.** Every attempt is recorded in `provider_usage`: tokens, cost, limit hits and the provider it fell back to. The summary comment ends with usage per provider.
 
+### Batches in the review workflow
+
+- **In parallel.** The Step Functions map runs up to `maxConcurrency` batches of a review at once (4 by default). It runs fewer when the reviewer's stored credential allows fewer at once (its `concurrency`, see [Credentials](credentials.md)). The credential broker's leases also cap each credential across reviews. A batch waiting for a free slot waits in its lease step, so its sandbox task's timeout doesn't start until it has one.
+- **Falling back.** Each sandbox task runs one provider. After an attempt on the reviewer's provider, the workflow reads the batch's output. A rate limit, a used-up plan, a rejected credential, a prompt too large for that provider, or no usable output sends the batch to the next provider's sandbox task, in `providers` order. A failure there on the last provider, or any other failure, stands. A batch with no findings at the end is failed, so the review is incomplete and can't approve.
+- **Prompt caching.** The part of the reviewer prompt every batch shares (the role's instructions and the built-in and private rule packs) is sent as the harness's system prompt. The Agent SDK harness caches it. The CLI harnesses put it first, followed by the repository's rule packs, conventions, the PR, and the batch's diff last. Repository content is never in the system part.
+- **Notes for the cross-file pass.** Each batch's output keeps the reviewer's notes (exports, env vars, endpoints and props it adds, changes or relies on), cut to at most 30 notes of 500 characters. They're model output, so the cross-file pass treats them as leads to check.
+
 One AWS account and region holds one install. `lgtmoose setup` writes fixed Secrets Manager names (`lgtmoose/github-app`, `lgtmoose/github-webhook-secret`), so a second install there would overwrite the first one's App credentials. Use another account or region for staging until deployment names land.
 
 ## Security controls

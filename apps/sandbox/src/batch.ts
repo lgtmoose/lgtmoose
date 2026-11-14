@@ -32,6 +32,11 @@ export interface SandboxDeps {
   ): Harness;
   /** A writable directory for the checkout. */
   workDir: string;
+  /**
+   * The model this task's provider runs (`LGTMOOSE_MODEL`; empty for the harness's default).
+   * Undefined: the input's, the reviewer provider's.
+   */
+  model?: string;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -114,15 +119,19 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     { index: input.index, files: [], prompt: input.prompt },
     {
       cwd: checkout,
-      model: input.model,
+      // This task's provider's model: a batch that fell back to it runs its model, not the
+      // reviewer provider's in the input.
+      model: deps.model ?? input.model,
       timeoutMs: input.timeoutMs,
       runId: batchRunId(input.runId, input.index),
+      ...(input.system === undefined ? {} : { system: input.system }),
     },
   );
   const output: BatchOutput = batchOutputSchema.parse({
     version: 1,
     index: input.index,
     ...(outcome.findings === undefined ? {} : { findings: outcome.findings }),
+    ...(outcome.notes === undefined ? {} : { notes: outcome.notes }),
     ...(outcome.error === undefined ? {} : { error: outcome.error.slice(0, 4000) }),
     transcriptKeys: outcome.transcriptKeys.slice(0, 3),
     ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
