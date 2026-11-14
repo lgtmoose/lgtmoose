@@ -54,8 +54,15 @@
     {
       "idx": 7,
       "version": "7",
-      "when": 1794697981233,
-      "tag": "0008_thread-resolver",
+      "when": 1794696785171,
+      "tag": "0008_learning-embedding-model",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794698094124,
+      "tag": "0009_thread-resolver",
       "breakpoints": true
     }
   ]

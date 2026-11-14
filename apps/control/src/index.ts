@@ -3,7 +3,7 @@ import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
 import { currentTaskArn, taskStatus } from "./ecs.js";
 import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
-import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
+import { readCommand, readControlEnv, readEmbeddingsSettings, readReviewSettings } from "./env.js";
 import { runCommand } from "./run.js";
 
 /**
@@ -36,7 +36,10 @@ async function main(): Promise<void> {
       process.stderr.write(`early heartbeat failed: ${errorName(error) ?? "unknown"}\n`);
     }
   }
-  const deps = await awsControlDeps(env, { shadow: settings.shadow });
+  const deps = await awsControlDeps(env, {
+    shadow: settings.shadow,
+    embeddings: readEmbeddingsSettings(process.env),
+  });
   const ecs = new ECSClient({});
   try {
     await runCommand(

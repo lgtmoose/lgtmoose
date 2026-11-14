@@ -65,3 +65,14 @@ One AWS account and region holds one install. `lgtmoose setup` writes fixed Secr
 - Protected categories (`authz`, `tenant_scoping`, `money`, `secrets`) can't be suppressed by learnings or dedupe. A learning that could quiet findings (`accepted_pattern`, `scoping`, `correction`) can't name one, and retrieval checks `mayLearningSuppress` for every finding a learning would quiet, learnings with no category included.
 - Learning text is proposal text from comments or the model. Retrieval puts it in an untrusted block in the prompt, never with the instructions.
 - PR code is never executed.
+
+## Learnings retrieval
+
+The prepare step (the control task) picks each batch's learnings; the sandbox only sees their text in its prompt.
+
+1. **Scope.** Active learnings of the PR's org: org-wide ones, and the PR's repo's whose path glob (if any) matches one of the batch's files.
+2. **Rank.** With `learnings.embeddings` set to `bedrock` (Titan Text Embeddings v2 in the deployment's account) or `openai` (its embeddings API, with the key in `lgtmoose/embeddings/openai`), learnings and the batch's diff are embedded and ranked by pgvector cosine distance. A learning is embedded the first time it's ranked with a model, and the model is stored with the vector, so changing provider re-embeds rather than comparing unlike vectors. With `none` (the default), or when the provider fails, learnings are ranked by shared keywords, with no network call.
+3. **Prompt.** The top 15 go in the batch's prompt after the PR and before the diff, each in an untrusted block. The prompt says a learning can't relax the rules or their severities, and never quiets a protected-category finding. Learnings are context only: no code drops or downgrades a finding because of one.
+4. **Use.** Each learning put in a prompt has `hits` counted and `last_used_at` set. The reconciler retires active learnings unused for 90 days, with a `retired` event by `lgtmoose` (permission `system`), so their history stays.
+
+The embeddings provider receives learning text and batch diffs. Only the control task can reach it: its role gets `bedrock:InvokeModel` on the one Titan model, or read access to the OpenAI key's secret. Sandbox roles get neither. `learningsForPullRequest` lists the learnings that apply to a PR, for the `learnings` command (NIC-834).

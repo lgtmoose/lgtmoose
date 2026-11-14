@@ -16,6 +16,7 @@ export {
   type DroppedReport,
   type EarlierFinding,
   type FinishOptions,
+  type LearningsForBatch,
   type PrepareDeps,
   type PrepareOptions,
   type PreparedReview,

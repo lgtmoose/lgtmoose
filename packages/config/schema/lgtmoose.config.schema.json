@@ -150,6 +150,74 @@
         "pattern": "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
       }
     },
+    "learnings": {
+      "default": {
+        "embeddings": {
+          "provider": "none"
+        }
+      },
+      "type": "object",
+      "properties": {
+        "embeddings": {
+          "default": {
+            "provider": "none"
+          },
+          "description": "How learnings are ranked against a batch's diff: bedrock or openai embeddings, or none for keywords. The provider receives learning text and diffs.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "provider"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "const": "bedrock"
+                },
+                "model": {
+                  "default": "amazon.titan-embed-text-v2:0",
+                  "type": "string",
+                  "pattern": "^amazon\\.titan-embed-text-v2(?::\\d+)?$"
+                }
+              },
+              "required": [
+                "provider"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "const": "openai"
+                },
+                "model": {
+                  "default": "text-embedding-3-small",
+                  "type": "string",
+                  "pattern": "^text-embedding-3-(?:small|large)$"
+                }
+              },
+              "required": [
+                "provider"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "tickets": {
       "type": "object",
       "properties": {

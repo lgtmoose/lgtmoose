@@ -141,6 +141,7 @@ export function toPermission(value: string | undefined): Permission {
 
 /** A recorded permission (`Permission` or `org:<role>`); anything unknown counts as `none`. */
 export function toCheckedPermission(value: string | undefined): CheckedPermission {
+  if (value === "system") return "system";
   if (value?.startsWith("org:") === true) {
     const role = value.slice(4);
     return (ORG_ROLES as readonly string[]).includes(role)

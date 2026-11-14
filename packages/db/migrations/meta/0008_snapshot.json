@@ -1,5 +1,5 @@
 {
-  "id": "35c6293d-2917-4296-bb43-f56e2da787f7",
+  "id": "3f9c27ef-d878-405a-9182-0f73d0c1ad73",
   "prevId": "2d528b0f-81d9-4294-9d9a-f64e062c233a",
   "version": "7",
   "dialect": "postgresql",
@@ -286,18 +286,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "actor_login": {
-          "name": "actor_login",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "counted": {
-          "name": "counted",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
         },
         "sha": {
           "name": "sha",
@@ -722,6 +710,12 @@
         "embedding": {
           "name": "embedding",
           "type": "vector(1024)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "embedding_model": {
+          "name": "embedding_model",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

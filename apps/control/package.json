@@ -16,6 +16,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1167.0",
     "@aws-sdk/client-ecs": "^3.1169.0",
     "@aws-sdk/client-s3": "^3.1167.0",
     "@aws-sdk/client-secrets-manager": "^3.1167.0",
@@ -27,6 +28,7 @@
     "@lgtmoose/core": "workspace:*",
     "@lgtmoose/db": "workspace:*",
     "@lgtmoose/git": "workspace:*",
+    "@lgtmoose/learnings": "workspace:*",
     "@lgtmoose/pipeline": "workspace:*",
     "@lgtmoose/poster": "workspace:*",
     "@lgtmoose/summary": "workspace:*",
