@@ -1,0 +1,34 @@
+{
+  "name": "@lgtmoose/learnings",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The learnings store and its write policy: what a learning may say, who may apply it, and what is redacted first.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lgtmoose/core": "workspace:*",
+    "@lgtmoose/db": "workspace:*",
+    "drizzle-orm": "^0.45.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "@electric-sql/pglite-pgvector": "^0.0.17",
+    "typescript": "catalog:"
+  }
+}

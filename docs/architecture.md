@@ -51,6 +51,10 @@ One AWS account and region holds one install. `lgtmoose setup` writes fixed Secr
 ## Security controls
 
 - The model can't approve. The decision is a pure function of verified findings.
-- Learnings are written only through a policy check (author permission and provenance). The model can only propose them.
-- Protected categories (`authz`, `tenant_scoping`, `money`, `secrets`) can't be suppressed by learnings or dedupe.
+- Learnings are written only through a policy check (author permission and provenance). The model can only propose them. `@lgtmoose/learnings` enforces it:
+  - The author, the PR, the comment and the author's permission come from GitHub, never from the proposal.
+  - A repo or path learning is active at once for an author with write access or higher, an org-wide one only for an admin. Anything else waits as `pending` until someone with that access approves it.
+  - The text is scanned and redacted before it's stored, pending ones included: tokens, keys, credentials in URLs, emails, phone and card numbers.
+  - `forget` retires a learning; its row and `learning_events` history stay.
+- Protected categories (`authz`, `tenant_scoping`, `money`, `secrets`) can't be suppressed by learnings or dedupe. A learning that could quiet findings (`accepted_pattern`, `scoping`, `correction`) can't name one, and retrieval checks `mayLearningSuppress` for every finding a learning would quiet.
 - PR code is never executed.

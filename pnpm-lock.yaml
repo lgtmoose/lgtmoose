@@ -355,6 +355,31 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  packages/learnings:
+    dependencies:
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lgtmoose/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.45.4
+        version: 0.45.4(@electric-sql/pglite@0.5.16)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.16
+        version: 0.5.16
+      '@electric-sql/pglite-pgvector':
+        specifier: ^0.0.17
+        version: 0.0.17(@electric-sql/pglite@0.5.16)
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
   packages/pipeline:
     dependencies:
       '@lgtmoose/config':

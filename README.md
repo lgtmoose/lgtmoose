@@ -92,6 +92,7 @@ apps/egress-proxy/ the sandbox's only way out: CONNECT proxy with an exact-host 
 packages/core/   pure domain logic: findings, fingerprints, decision
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
+packages/learnings/ the learnings store and its write policy: permission, scope, redaction
 packages/evals/   eval fixtures, scores and the recall gate for prompt and harness changes
 packages/pipeline/ one whole review in-process, without posting (review --dry-run, evals)
 packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth

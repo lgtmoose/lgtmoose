@@ -51,6 +51,7 @@ describe("migrations", () => {
       "files_reviewed",
       "finding_events",
       "findings",
+      "learning_events",
       "learnings",
       "provider_cooldowns",
       "provider_usage",
