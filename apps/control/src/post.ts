@@ -196,8 +196,9 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
   }
 
-  await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
+  // Outdated first: a finding raised again at its new place (same fingerprint) is reopened.
   await deps.findings.markOutdated(outdated, pr.headSha);
+  await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
   await deps.runs.recordFiles(runId, report.reviewedFiles);
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,

@@ -531,6 +531,24 @@ describe("later runs", () => {
     expect(reviews(h)).toBe(2);
   });
 
+  it("reopens a finding raised again where its line moved to", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    // The loop line is rewritten with a new variable name: its old line is gone, but the same
+    // problem (same fingerprint: names don't count) is found on the new one.
+    const renamed = HEAD_TOTAL.replaceAll("[i]", "[j]").replace(
+      "let i = 0; i < items.length - 1; i++",
+      "let j = 0; j < items.length - 1; j++",
+    );
+    headSha = await commit({ "src/total.ts": renamed }, "rename");
+    const again = { ...finding(), evidence: "for (let j = 0; j < items.length - 1; j++) {" };
+
+    const { posted } = await review(h, 2, [again]);
+
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 1 });
+    expect(h.findings.rows).toMatchObject([{ status: "open", raisedAtSha: headSha }]);
+  });
+
   it("falls back to a full review after a force-push, skipping files whose blob didn't change", async () => {
     const h = harness();
     await addOther();
