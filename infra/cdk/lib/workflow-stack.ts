@@ -155,6 +155,16 @@ export class WorkflowStack extends Stack {
     props.githubAppSecret.grantRead(controlRole);
     props.databaseSecret.grantRead(controlRole);
     props.artifactBucket.grantReadWrite(controlRole);
+    // Post's review claim names the claiming task; a later attempt asks whether it still runs.
+    controlRole.addToPrincipalPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ecs:DescribeTasks"],
+        resources: [
+          `arn:${this.partition}:ecs:${this.region}:${this.account}:task/${this.cluster.clusterName}/*`,
+        ],
+      }),
+    );
 
     const sandboxes = new Map<string, FargateTaskDefinition>();
     const sandboxContainers = new Map<string, ContainerDefinition>();

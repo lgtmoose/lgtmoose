@@ -1,5 +1,7 @@
+import { ECSClient } from "@aws-sdk/client-ecs";
 import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
+import { currentTaskArn, taskStatus } from "./ecs.js";
 import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
 import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
 import { runCommand } from "./run.js";
@@ -35,12 +37,16 @@ async function main(): Promise<void> {
     }
   }
   const deps = await awsControlDeps(env, { shadow: settings.shadow });
+  const ecs = new ECSClient({});
+  const taskArn = command.command === "post" ? await currentTaskArn(process.env) : undefined;
   try {
     await runCommand(
       {
         ...deps,
         executionStatus: (arn) => describeStatus(sfn, arn),
         heartbeat: (token) => sendHeartbeat(sfn, token),
+        taskArn,
+        taskStatus: (arn) => taskStatus(ecs, arn),
       },
       command,
       settings,

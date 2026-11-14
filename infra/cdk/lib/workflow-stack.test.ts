@@ -245,7 +245,24 @@ describe("review state machine", () => {
     // A control task that dies before reporting fails the step in minutes, not half an hour,
     // with room for a cold Fargate start before the first heartbeat.
     expect(States.Post?.HeartbeatSeconds).toBe(300);
-    // Post resumes from its recorded progress, so a failed write or a dead task is retried.
+    // Post resumes from its recorded progress, so a failed write or a dead task is retried,
+    // without jitter, for longer in all than the heartbeat timeout.
+    const retry = States.Post?.Retry?.[1] as
+      | {
+          IntervalSeconds?: number;
+          MaxAttempts?: number;
+          BackoffRate?: number;
+          JitterStrategy?: string;
+        }
+      | undefined;
+    expect(retry?.JitterStrategy ?? "NONE").toBe("NONE");
+    const waits = Array.from(
+      { length: retry?.MaxAttempts ?? 0 },
+      (_, i) => (retry?.IntervalSeconds ?? 0) * (retry?.BackoffRate ?? 1) ** i,
+    );
+    expect(waits.reduce((sum, wait) => sum + wait, 0)).toBeGreaterThan(
+      States.Post?.HeartbeatSeconds ?? Infinity,
+    );
     expect(States.Post?.Retry?.map((retry) => retry.ErrorEquals)).toEqual([
       ["ECS.AmazonECSException", "ECS.ServerException"],
       ["Lgtmoose.PostFailed", "States.HeartbeatTimeout"],
@@ -400,6 +417,7 @@ describe("review state machine", () => {
         "states:SendTaskSuccess",
         "states:SendTaskFailure",
         "states:DescribeExecution",
+        "ecs:DescribeTasks",
       ]),
     );
   });

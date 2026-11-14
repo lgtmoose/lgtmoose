@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { statusLabels } from "@lgtmoose/config";
 import type { ReviewEvent } from "@lgtmoose/core";
 import {
@@ -7,7 +8,7 @@ import {
   type BatchOutcome,
   type ReviewReport,
 } from "@lgtmoose/pipeline";
-import { annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
+import { GitHubError, annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import type { ControlDeps } from "./ports.js";
@@ -119,39 +120,81 @@ export function reviewMarker(runId: string): string {
   return `lgtmoose-run:${runId}`;
 }
 
-/**
- * How long a review claim is honoured without its review showing up on GitHub. An attempt
- * posts within seconds of claiming, so past this it's taken to have died before posting, and
- * the review is posted. Shorter than the Post step's retries take, so they get past it.
- */
-export const REVIEW_CLAIM_TTL_MS = 2 * 60_000;
+/** Who a post attempt is, for the review claim. */
+export interface PostAttempt {
+  /** Unique to the attempt. */
+  id: string;
+  /** The ECS task running it; undefined off ECS. */
+  taskArn: string | undefined;
+}
 
-const claimSchema = z.object({ claimedAt: z.number() });
+/** What `post` needs besides the control task's dependencies. */
+export interface PostOptions {
+  /** Whether the run's execution is still running (not stopped). */
+  running?: () => Promise<boolean>;
+  /** This attempt. */
+  attempt?: PostAttempt;
+  /** An ECS task's last status (RUNNING, STOPPED…, or MISSING), for a claim's holder. */
+  taskStatus?: (taskArn: string) => Promise<string>;
+}
+
+const claimSchema = z.object({ attempt: z.string(), taskArn: z.string().optional() });
+
+/** A claim's holder is done with it: its task has stopped, or ECS no longer knows the task. */
+const HOLDER_GONE = new Set(["STOPPED", "DEPROVISIONING", "MISSING"]);
 
 /**
- * Claims the run's review for this attempt, before it posts it, so two attempts (a retry and
- * the attempt it replaced, still alive) can't both post. Returns true when another attempt has
- * already posted it; throws when another attempt holds a recent claim and its review isn't on
- * GitHub yet (the step's retry tries again); returns false when this attempt should post.
+ * Claims the run's review for this attempt before it posts it, so two attempts (a retry and
+ * the attempt it replaced, still alive) can't both post. The claim names the attempt's ECS
+ * task. Returns the claim's ETag when this attempt holds it and should post, or "posted" when
+ * the review is already on GitHub. When another attempt holds it and hasn't posted:
+ * - its task has stopped (or is gone): the claim is taken over, with a write conditional on
+ *   the claim being unchanged, so two attempts can't both take it over;
+ * - its task is still running, or can't be told: the step fails, and its retry tries later.
  */
-async function reviewClaimed(
+async function claimReview(
   deps: ControlDeps,
-  github: Awaited<ReturnType<ControlDeps["github"]>>,
-  pull: PullRef,
-  runId: string,
+  options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
+  reviewPosted: () => Promise<boolean>,
   claimKey: string,
-): Promise<boolean> {
-  const now = Date.now();
-  if (await deps.store.putTextIfAbsent(claimKey, JSON.stringify({ claimedAt: now }))) return false;
-  if (await github.reviewPosted(pull, reviewMarker(runId))) return true;
-  const claim = claimSchema.safeParse(parseJson(await deps.store.getText(claimKey)));
-  // An unreadable claim is no claim.
-  const age = claim.success ? now - claim.data.claimedAt : Number.POSITIVE_INFINITY;
-  if (age < REVIEW_CLAIM_TTL_MS) {
-    throw new Error("Another attempt claimed this run's review and may be posting it.");
+): Promise<{ etag: string } | "posted"> {
+  const mine = JSON.stringify({
+    attempt: options.attempt.id,
+    ...(options.attempt.taskArn === undefined ? {} : { taskArn: options.attempt.taskArn }),
+  });
+  const created = await deps.store.createText(claimKey, mine);
+  if (created !== undefined) return { etag: created };
+  if (await reviewPosted()) return "posted";
+  const current = await deps.store.getTagged(claimKey);
+  // Released since: claim it afresh, once.
+  if (current === undefined) {
+    const again = await deps.store.createText(claimKey, mine);
+    if (again !== undefined) return { etag: again };
+    throw new Error("Another attempt claimed this run's review just now.");
   }
-  deps.log("review claim expired; posting", { runId, ageMs: age });
-  return false;
+  const holder = claimSchema.safeParse(parseJson(current.text));
+  const holderTask = holder.success ? holder.data.taskArn : undefined;
+  if (holder.success && holderTask === undefined) {
+    throw new Error("Another attempt, off ECS, holds this run's review claim.");
+  }
+  // An unreadable claim has no holder to wait for.
+  if (holderTask !== undefined) {
+    const status = await options.taskStatus(holderTask);
+    if (!HOLDER_GONE.has(status)) {
+      throw new Error(`Another attempt (task ${status}) holds this run's review claim.`);
+    }
+    // It may have posted just before it stopped.
+    if (await reviewPosted()) return "posted";
+  }
+  const taken = await deps.store.replaceText(claimKey, mine, current.etag);
+  if (taken === undefined) throw new Error("Another attempt took over this run's review claim.");
+  deps.log("took over the review claim of a stopped attempt", { holderTask });
+  return { etag: taken };
+}
+
+/** GitHub refused the request outright: it wasn't carried out, so nothing was posted. */
+function refused(error: unknown): boolean {
+  return error instanceof GitHubError && error.status >= 400 && error.status < 500;
 }
 
 /** Why a run for `headSha` no longer counts, given the PR as GitHub has it now. */
@@ -182,8 +225,11 @@ function costOf(report: ReviewReport): number | undefined {
 export async function post(
   deps: ControlDeps,
   runId: string,
-  running: () => Promise<boolean> = async () => true,
+  options: PostOptions = {},
 ): Promise<PostOutput> {
+  const running = options.running ?? (async () => true);
+  const attempt = options.attempt ?? { id: randomUUID(), taskArn: undefined };
+  const taskStatus = options.taskStatus ?? (async () => "MISSING");
   const run = await deps.runs.getRun(runId);
   if (run === undefined) throw new Error(`No review run ${runId}.`);
   const keys = runKeys(runId);
@@ -260,13 +306,24 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
   try {
-    if (!progress.review && (await reviewClaimed(deps, github, pull, runId, keys.reviewClaim))) {
-      // Posted by an attempt that died before it saved its progress.
-      progress.review = true;
-      await save();
-    }
     if (!progress.review) {
-      await poster.submitReview(pull, pr.headSha, payload);
+      const claim = await claimReview(
+        deps,
+        { attempt, taskStatus },
+        () => github.reviewPosted(pull, reviewMarker(runId)),
+        keys.reviewClaim,
+      );
+      if (claim !== "posted") {
+        try {
+          await poster.submitReview(pull, pr.headSha, payload);
+        } catch (error) {
+          // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise
+          // (a timeout, a 5xx) it may be, and the claim stays until this task has stopped.
+          if (refused(error)) await deps.store.deleteIfMatch(keys.reviewClaim, claim.etag);
+          throw error;
+        }
+      }
+      // Posted, by this attempt or by one that died before it saved its progress.
       progress.review = true;
       await save();
     }
@@ -283,9 +340,8 @@ export async function post(
     }
     // The summary comment and the label are the PR's, not this head's: once a newer run has
     // posted they're its, and an older run finishing late leaves them alone.
-    const prLevel =
-      !(progress.summary && progress.label) && !(await deps.runs.newerRunPosted(runId));
-    if (!progress.summary && prLevel) {
+    // Checked right before each write: a newer run may finish posting in between.
+    if (!progress.summary && !(await deps.runs.newerRunPosted(runId))) {
       const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
       const comment = await poster.upsertSummaryComment(pull, report.summary, summaryId);
       const id = comment.id ?? summaryId;
@@ -293,7 +349,11 @@ export async function post(
       progress.summary = true;
       await save();
     }
-    if (decision.label !== undefined && !progress.label && prLevel) {
+    if (
+      decision.label !== undefined &&
+      !progress.label &&
+      !(await deps.runs.newerRunPosted(runId))
+    ) {
       const labels = await syncStatusLabel(poster.labels(pull), {
         target: decision.label,
         statusLabels: statusLabels(config),

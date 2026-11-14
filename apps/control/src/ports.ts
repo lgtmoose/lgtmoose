@@ -5,8 +5,18 @@ import type { Poster, PullRef } from "@lgtmoose/poster";
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
-  /** Writes the object only if there's none yet; false when there was one. */
-  putTextIfAbsent(key: string, body: string): Promise<boolean>;
+  /**
+   * Conditional writes, for the review claim. Each returns the object's new ETag, or undefined
+   * when the condition failed. A write racing another of the same key throws.
+   */
+  /** Writes the object only if there's none yet. */
+  createText(key: string, body: string): Promise<string | undefined>;
+  /** Overwrites the object only if it's still the version with `etag`. */
+  replaceText(key: string, body: string, etag: string): Promise<string | undefined>;
+  /** The object's text and ETag, or undefined when there's no such object. */
+  getTagged(key: string): Promise<{ text: string; etag: string } | undefined>;
+  /** Deletes the object only if it's still the version with `etag`; else leaves it. */
+  deleteIfMatch(key: string, etag: string): Promise<void>;
   /** Uploads a local file, such as the checkout archive. */
   putFile(key: string, path: string, contentType: string): Promise<void>;
   /** The object's text, or undefined when there's no such object. */

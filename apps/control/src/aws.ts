@@ -3,7 +3,12 @@ import { createReadStream } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { pullRequests, reviewRuns } from "@lgtmoose/db";
@@ -15,6 +20,7 @@ import {
   GitHubPoster,
   ShadowPoster,
   installationTokenProvider,
+  repoPath,
   reviewMarkerComment,
 } from "@lgtmoose/poster";
 import { and, eq, gt, inArray } from "drizzle-orm";
@@ -25,6 +31,29 @@ import { z } from "zod";
 import type { ControlEnv } from "./env.js";
 import { errorName } from "./sfn.js";
 import type { ArtifactStore, ControlDeps, RunRecord, RunStore, TaskTokens } from "./ports.js";
+
+/** Longest a GitHub request may take: well under the post step's 5-minute heartbeat timeout. */
+export const GITHUB_TIMEOUT_MS = 60_000;
+
+/**
+ * A conditional PutObject: the new ETag, or undefined when the condition failed (412). A 409
+ * (another conditional write of the key in flight) throws, for the caller to retry.
+ */
+async function conditionalPut(
+  client: Pick<S3Client, "send">,
+  input: { Bucket: string; Key: string; Body: string; IfNoneMatch?: string; IfMatch?: string },
+): Promise<string | undefined> {
+  try {
+    const reply = await client.send(
+      new PutObjectCommand({ ...input, ContentType: "application/json" }),
+    );
+    if (reply.ETag === undefined) throw new Error(`S3 returned no ETag for ${input.Key}.`);
+    return reply.ETag;
+  } catch (error) {
+    if (errorName(error) === "PreconditionFailed") return undefined;
+    throw error;
+  }
+}
 
 /** The artifact bucket over S3. */
 export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore {
@@ -39,23 +68,29 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
         }),
       );
     },
-    async putTextIfAbsent(key, body) {
+    async createText(key, body) {
+      return conditionalPut(client, { Bucket: bucket, Key: key, Body: body, IfNoneMatch: "*" });
+    },
+    async replaceText(key, body, etag) {
+      return conditionalPut(client, { Bucket: bucket, Key: key, Body: body, IfMatch: etag });
+    },
+    async getTagged(key) {
       try {
-        await client.send(
-          new PutObjectCommand({
-            Bucket: bucket,
-            Key: key,
-            Body: body,
-            ContentType: "application/json",
-            IfNoneMatch: "*",
-          }),
-        );
-        return true;
+        const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        if (object.ETag === undefined) throw new Error(`S3 returned no ETag for ${key}.`);
+        return { text: (await object.Body?.transformToString("utf8")) ?? "", etag: object.ETag };
       } catch (error) {
-        // 412: it exists. 409: another write of it is in flight.
-        const name = errorName(error);
-        if (name === "PreconditionFailed" || name === "ConditionalRequestConflict") return false;
+        if (errorName(error) === "NoSuchKey") return undefined;
         throw error;
+      }
+    },
+    async deleteIfMatch(key, etag) {
+      try {
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key, IfMatch: etag }));
+      } catch (error) {
+        // Changed or gone since: someone else's now, or no one's.
+        const name = errorName(error);
+        if (name !== "PreconditionFailed" && name !== "NoSuchKey") throw error;
       }
     },
     async putFile(key, path, contentType) {
@@ -355,7 +390,8 @@ export async function awsControlDeps(
         privateKey: app.privateKey,
         installationId,
       });
-      const client = new GitHubClient({ token });
+      // Bounded well under the post step's heartbeat timeout: a hung write fails the attempt.
+      const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         token,
@@ -372,7 +408,7 @@ export async function awsControlDeps(
           if (options.shadow) return false;
           const comment = reviewMarkerComment(marker);
           const reviews = await client.list<{ body?: unknown }>(
-            `/repos/${pull.owner}/${pull.repo}/pulls/${pull.pull}/reviews`,
+            `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
           );
           return reviews.some(
             (review) => typeof review.body === "string" && review.body.includes(comment),

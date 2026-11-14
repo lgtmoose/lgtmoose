@@ -7,6 +7,8 @@ export interface GitHubClientOptions {
   token: TokenProvider;
   fetch?: typeof fetch;
   userAgent?: string;
+  /** Gives up on a request after this long (an AbortSignal timeout). No limit by default. */
+  timeoutMs?: number;
 }
 
 /** GitHub said no. `githubMessage` is GitHub's short reason; it never holds the token. */
@@ -41,12 +43,14 @@ export class GitHubClient {
   private readonly token: TokenProvider;
   private readonly fetchFn: typeof fetch;
   private readonly userAgent: string;
+  private readonly timeoutMs: number | undefined;
 
   constructor(options: GitHubClientOptions) {
     this.apiUrl = (options.apiUrl ?? "https://api.github.com").replace(/\/+$/, "");
     this.token = options.token;
     this.fetchFn = options.fetch ?? fetch;
     this.userAgent = options.userAgent ?? "lgtmoose";
+    this.timeoutMs = options.timeoutMs;
   }
 
   async request<T = unknown>(method: string, path: string, body?: object): Promise<T> {
@@ -61,6 +65,7 @@ export class GitHubClient {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(this.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(this.timeoutMs) }),
     });
     if (!response.ok) {
       const reply = (await response.json().catch(() => ({}))) as { message?: unknown };

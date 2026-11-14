@@ -30,6 +30,15 @@ describe("GitHubClient", () => {
     await expect(github.request("GET", "/user")).rejects.toThrow("Bad credentials");
   });
 
+  it("gives up on a request that takes longer than its timeout", async () => {
+    const hang: typeof fetch = (_url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: hang, timeoutMs: 20 });
+    await expect(github.request("POST", "/x", {})).rejects.toThrow();
+  });
+
   it("follows pages until a short one", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
     const { github, calls } = poster([

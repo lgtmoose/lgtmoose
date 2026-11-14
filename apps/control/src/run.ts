@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ControlCommand, ReviewSettings } from "./env.js";
 import { fail } from "./fail.js";
 import { parseJob } from "./job.js";
@@ -28,13 +29,23 @@ export interface StepDeps extends ControlDeps {
   heartbeatIntervalMs?: number;
   /** For tests: the wait between execution status checks after a dead token. */
   statusRetryMs?: number;
+  /** This task's ECS task ARN, which post's review claim names; undefined off ECS. */
+  taskArn: string | undefined;
+  /** An ECS task's last status, or MISSING: whether a review claim's holder still runs. */
+  taskStatus(taskArn: string): Promise<string>;
 }
 
-/** Tries to read the execution's status a few times; undefined if every try failed. */
-async function confirmedStatus(deps: StepDeps, executionArn: string): Promise<string | undefined> {
+/** What `confirmedStatus` says when every check failed. */
+const STATUS_UNKNOWN = "UNKNOWN";
+
+/**
+ * Tries to read the execution's status a few times: its status, MISSING when there's no such
+ * execution, or STATUS_UNKNOWN when every try failed.
+ */
+async function confirmedStatus(deps: StepDeps, executionArn: string): Promise<string> {
   for (let attempt = 1; attempt <= STATUS_ATTEMPTS; attempt += 1) {
     try {
-      return await deps.executionStatus(executionArn);
+      return (await deps.executionStatus(executionArn)) ?? "MISSING";
     } catch (error) {
       deps.log("execution status check failed", { attempt, error: causeOf(error) });
       if (attempt < STATUS_ATTEMPTS) {
@@ -42,7 +53,7 @@ async function confirmedStatus(deps: StepDeps, executionArn: string): Promise<st
       }
     }
   }
-  return undefined;
+  return STATUS_UNKNOWN;
 }
 
 const STATUS_ATTEMPTS = 3;
@@ -56,11 +67,11 @@ export class StepAbandoned extends Error {
  * Runs `work` while sending heartbeats on its task token: one at once, then every interval. A
  * failed heartbeat (throttling, a network blip) is logged and the beats go on. A dead token
  * stops them, and then:
- * - on an execution confirmed stopped (ABORTED), `work` finishes, and its outcome is found dead
- *   on the token afterwards (a stop mustn't cut a post short);
- * - otherwise, running or unknown (the status check failed every time), this attempt timed
- *   out and a retry may have the step: `work` is given up (StepAbandoned), so the two don't
- *   race. Post's review claim covers a retry that overlaps it anyway.
+ * - on an execution confirmed RUNNING, this attempt timed out and a retry has the step: `work`
+ *   is given up (StepAbandoned), so the two don't race;
+ * - otherwise (stopped, or unknown because every status check failed), `work` finishes and its
+ *   outcome is found dead on the token afterwards. A stop mustn't cut a post short, and if a
+ *   retry does overlap, post's review claim keeps it to one review.
  */
 async function withHeartbeat<T>(
   deps: StepDeps,
@@ -77,8 +88,8 @@ async function withHeartbeat<T>(
   abandoned.catch(() => undefined);
   const onDead = async () => {
     beating = false;
-    if ((await confirmedStatus(deps, executionArn)) !== "ABORTED") {
-      abandon(new StepAbandoned("a retry may have taken over this step"));
+    if ((await confirmedStatus(deps, executionArn)) === "RUNNING") {
+      abandon(new StepAbandoned("a retry has taken over this step"));
     }
   };
   const beat = () => {
@@ -121,7 +132,13 @@ async function report(
     await send();
   } catch (error) {
     if (!isDeadToken(error)) throw error;
-    const status = await deps.executionStatus(executionArn);
+    const status = await confirmedStatus(deps, executionArn);
+    if (status === STATUS_UNKNOWN) {
+      // Can't tell whether to mark the run: fail the task, and leave the run to MarkFailed or
+      // the dispatcher.
+      deps.log("task token dead, and the execution's status unknown", { executionArn });
+      throw error;
+    }
     if (status !== "ABORTED") {
       // Running: this attempt timed out and a retry reports. Ended any other way: the
       // execution's own steps recorded how.
@@ -133,9 +150,9 @@ async function report(
   }
 }
 
-/** A retry may have the step: this attempt reports nothing. The process exits with its work. */
+/** A retry has the step: this attempt reports nothing. The process exits with its work. */
 function gaveUp(deps: StepDeps, executionArn: string): void {
-  deps.log("gave up the step: a retry may have taken over", { executionArn });
+  deps.log("gave up the step: a retry has taken over", { executionArn });
 }
 
 /**
@@ -187,7 +204,11 @@ export async function runCommand(
       try {
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
         await withHeartbeat(deps, executionArn, command.taskToken, () =>
-          post(deps, command.runId, running),
+          post(deps, command.runId, {
+            running,
+            attempt: { id: randomUUID(), taskArn: deps.taskArn },
+            taskStatus: (taskArn) => deps.taskStatus(taskArn),
+          }),
         );
       } catch (error) {
         if (error instanceof StepAbandoned) return gaveUp(deps, executionArn);

@@ -67,6 +67,10 @@ const URL_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(15));
  */
 const PRESIGNER_SESSION = Duration.hours(1);
 
+/** How often, and from how far apart, a failed post step is retried. */
+export const POST_RETRIES = 3;
+export const POST_RETRY_INTERVAL = Duration.minutes(1);
+
 /** The task-token error for a failed post step (`POST_FAILED` in @lgtmoose/control). */
 const POST_FAILED = "Lgtmoose.PostFailed";
 
@@ -292,16 +296,17 @@ export class ReviewWorkflow extends Construct {
       jitterStrategy: JitterType.FULL,
     });
     // A GitHub write failed, or the task died: post records its progress in the run's
-    // objects, and claims the review before posting it, so a retry carries on from there and
-    // never posts a second review. A retry waiting out another attempt's claim fails until the
-    // claim expires (`REVIEW_CLAIM_TTL_MS` in @lgtmoose/control, 2 minutes), so the last
-    // attempt starts after it: 1 + 2 + 4 minutes.
+    // objects, and claims the review (naming its ECS task) before posting it, so a retry
+    // carries on from there and never posts a second review. A retry that finds the claim held
+    // by a task still running fails until that task has stopped; one that missed its heartbeat
+    // stops at its next beat, or ECS stops it. No jitter, so the retries surely span more than
+    // the heartbeat timeout: 1 + 2 + 4 = 7 minutes.
     post.addRetry({
       errors: [POST_FAILED, Errors.HEARTBEAT_TIMEOUT],
-      maxAttempts: 3,
-      interval: Duration.minutes(1),
+      maxAttempts: POST_RETRIES,
+      interval: POST_RETRY_INTERVAL,
       backoffRate: 2,
-      jitterStrategy: JitterType.FULL,
+      jitterStrategy: JitterType.NONE,
     });
 
     const failRun = runControl(
