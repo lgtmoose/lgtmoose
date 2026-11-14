@@ -543,15 +543,15 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
   });
 
-  it("covers a file renamed since its review at the depth it was read at", async () => {
-    // A file the PR adds, reviewed (say, at mechanical depth), then only renamed.
+  it("reviews a renamed file in full and records its old name only when its batch succeeds", async () => {
+    // A file the PR adds, reviewed, then only renamed.
     headSha = await commit({ "src/util.ts": "export const one = 1;\n" }, "add util");
     const reviewedHead = headSha;
     const first = await setUp();
     const records = [...ALL, "src/util.ts"].map((path) => ({
       path,
       blobSha: first.blobs.get(path) ?? "",
-      depth: path === "src/util.ts" ? ("mechanical" as const) : FULL,
+      depth: FULL,
       reviewedAt: reviewedHead,
     }));
     await git(work, "mv", "src/util.ts", "src/sum.ts");
@@ -571,10 +571,24 @@ describe("prepareReview and finishReview with earlier runs", () => {
       { reviewed: records },
     );
 
-    expect(prepared.files).toEqual([]);
-    expect(prepared.unchanged).toContainEqual(
-      expect.objectContaining({ path: "src/sum.ts", depth: "mechanical" }),
+    expect(prepared.files.map((file) => file.path)).toEqual(["src/sum.ts"]);
+    expect(prepared.unchanged.map((file) => file.path)).not.toContain("src/util.ts");
+    const index = prepared.jobs[0]?.index ?? 0;
+    const failed = await finishReview(repo, prepared, [], headSha);
+    expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/util.ts");
+    expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/sum.ts");
+    const succeeded = await finishReview(
+      repo,
+      prepared,
+      [{ index, findings: [], transcriptKeys: [] }],
+      headSha,
     );
+    expect(succeeded.reviewedFiles).toContainEqual({
+      path: "src/util.ts",
+      blobSha: "not-changed",
+      depth: "full",
+    });
+    expect(succeeded.reviewedFiles.map((file) => file.path)).toContain("src/sum.ts");
   });
 
   it("counts earlier open findings once and doesn't post them again", async () => {

@@ -9,6 +9,8 @@ export interface Repo {
   git(args: readonly string[], options?: Pick<RunOptions, "okExitCodes">): Promise<string>;
   /** Whether the commit is in this checkout (it may have been force-pushed away). */
   hasCommit(sha: string): Promise<boolean>;
+  /** Which of these commits are in this checkout, checked together. */
+  hasCommits(shas: Iterable<string>): Promise<Set<string>>;
   /**
    * Fetches more commits (with history, without file contents in a partial clone), in one
    * request when it can. Commits the remote no longer has are skipped: `hasCommit` says false.
@@ -253,6 +255,12 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
       // Present only if it's in head's history; a failed fetch already showed the remote lacks
       // it, so don't ask the remote again.
       return isLocalCommit(sha);
+    },
+    hasCommits: async (shas) => {
+      const list = [...new Set(shas)].filter((sha) => SHA.test(sha));
+      const known = list.filter((sha) => fetched.has(sha));
+      const local = await localCommits(list.filter((sha) => !fetched.has(sha)));
+      return new Set([...known, ...local]);
     },
     readBlobs,
     fetchCommits,

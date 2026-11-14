@@ -347,15 +347,14 @@ export async function prepareReview(
   if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
   const { files } = diff;
   const prFiles = new Map(diff.prFiles.map((file) => [file.path, file]));
-  const unchanged = diff.unchanged.map(({ path, reviewedAs }) => {
+  const unchanged = diff.unchanged.map((path) => {
     const file = prFiles.get(path);
     return {
       path,
       // The PR doesn't change the path at all now.
       blobSha: (file === undefined ? undefined : reviewedBlobOf(file)) ?? NOT_CHANGED,
-      // How closely it was read, under the name it had then. Every covered path has a record;
-      // without one, the lowest depth claims the least.
-      depth: reviewed.get(reviewedAs)?.depth ?? ("move" as const),
+      // Every covered path has a record; without one, the lowest depth claims the least.
+      depth: reviewed.get(path)?.depth ?? ("move" as const),
     };
   });
   const headers = await readHeaders(repo, files, { skip: config.skip, include: config.include });
@@ -724,9 +723,17 @@ function reviewedBatchFiles(
     finished.has(batch.index)
       ? batch.files.flatMap(({ file, depth }) => {
           const blobSha = reviewedBlobOf(file);
+          const read = doneDepth.get(file.path) ?? depth;
+          // Its earlier names (it was renamed since) are reviewed with it: the PR doesn't
+          // change them any more.
+          const names = (file.alsoReviewedAs ?? []).map((path) => ({
+            path,
+            blobSha: NOT_CHANGED,
+            depth: read,
+          }));
           return blobSha === undefined
-            ? []
-            : [{ path: file.path, blobSha, depth: doneDepth.get(file.path) ?? depth }];
+            ? names
+            : [{ path: file.path, blobSha, depth: read }, ...names];
         })
       : [],
   );

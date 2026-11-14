@@ -116,6 +116,7 @@ describe("cloneAtSha", () => {
     });
     expect(await repo.hasCommit(one)).toBe(true);
     expect(await repo.hasCommit(gone)).toBe(false);
+    expect(await repo.hasCommits([one, two, gone, head])).toEqual(new Set([one, head]));
     await repo.fetchCommits([two, gone]);
     expect(await repo.hasCommit(two)).toBe(true);
   });
