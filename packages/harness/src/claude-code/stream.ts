@@ -113,11 +113,11 @@ const CLAUDE_PLAN_LIMIT = new RegExp(
   [
     // "You've hit your limit", "… your 5-hour limit", "… your monthly spend limit",
     // "… your team's shared budget". Not a rate or request limit, which is throttling.
-    String.raw`hit your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}(?:limit|budget)`,
+    String.raw`hit your (?:(?!rate\b|rate-|requests?\b|context\b|tokens?\b)[\w'-]+ ){0,3}(?:limit|budget)`,
     // "You've reached your Fable limit"
-    String.raw`reached your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}limit`,
+    String.raw`reached your (?:(?!rate\b|rate-|requests?\b|context\b|tokens?\b)[\w'-]+ ){0,3}limit`,
     // "usage limit reached", "5-hour limit reached", "Weekly limit reached"
-    String.raw`(?<!\b(?:rate|requests?) )\blimit reached`,
+    String.raw`\b(?:usage|session|daily|weekly|monthly|\d+-hour|opus|sonnet|fable) limit reached`,
     String.raw`out of (?:usage )?credits`,
     // The API's prepaid balance: "Your credit balance is too low to access the Anthropic API."
     String.raw`credit balance is too low`,
@@ -128,7 +128,7 @@ const CLAUDE_PLAN_LIMIT = new RegExp(
 const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·∙]{1,60}?)\s*(?:$|\n|[·∙]|\.(?:\s|$))/i;
 /** One part of a relative reset ("3h", "20m", "2 days"). */
 const DURATION_PART =
-  /(\d+)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)(?![a-z])/gi;
+  /(\d+(?:\.\d+)?)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)(?![a-z])/gi;
 const UNIT_SECONDS: Record<string, number> = { d: 86_400, h: 3600, m: 60, s: 1 };
 
 /** Classifies a Claude failure message: Claude's plan wording first, then the shared patterns. */
@@ -153,6 +153,7 @@ function claudeReset(message: string): { resetsAt?: string; retryAfterSeconds?: 
     for (const [, count, unit] of text.matchAll(DURATION_PART)) {
       seconds += Number(count) * (UNIT_SECONDS[(unit ?? "s").charAt(0).toLowerCase()] ?? 0);
     }
+    seconds = Math.round(seconds);
     return seconds > 0 ? { retryAfterSeconds: seconds } : {};
   }
   const at = nextClockTime(text, new Date());
