@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { SECRET_NAMES } from "@lgtmoose/config";
-import { loadDeployConfig } from "../paths.js";
+import { CLI, loadDeployConfig } from "../paths.js";
 import { newState, startCallbackServer, DEFAULT_TIMEOUT_MS } from "./callback-server.js";
 import { renderConfigFile } from "./config-file.js";
 import type { CreatedApp, GitHubApi } from "./github.js";
@@ -272,10 +272,10 @@ function nextSteps(slug: string | undefined): string {
   return `
 Next steps:
   1. Connect a model provider. Bedrock works with no key; for others run
-     pnpm lgtmoose auth <claude|codex|cursor|api-key>   (coming in NIC-824)
+     ${CLI} auth <claude|codex|cursor|api-key>
   2. Deploy, which also points the App's webhook at your gateway. Until then the webhook
      aims at a placeholder and GitHub's deliveries are lost, so install after deploying:
-     pnpm lgtmoose deploy
+     ${CLI} deploy
   3. ${install}
 `;
 }

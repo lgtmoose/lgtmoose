@@ -149,8 +149,6 @@ const DEFINITE_CLIENT_ERRORS = new Set([
   "EncryptionFailure",
 ]);
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 /** Said whenever a restore stands with the old value in it. */
 function oldValueLive(
   providerId: string,
@@ -168,7 +166,6 @@ function oldValueLive(
 export interface CredentialStoreOptions {
   /** Waits between checks. Tests pass one that returns at once. */
   sleep?: (ms: number) => Promise<void>;
-  now?: () => Date;
 }
 
 export function awsCredentialStore(
@@ -178,66 +175,39 @@ export function awsCredentialStore(
 ): CredentialStore {
   const sleep =
     options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const now = options.now ?? (() => new Date());
   const context = (name: string, error: unknown) =>
     awsError("Secrets Manager", region, name, error);
 
   /**
-   * After UpdateSecret failed: did the version it asked for become current anyway? A timeout
-   * or a dropped connection can fail a call AWS still applied, and DescribeSecret can lag. So
-   * seeing the version stops at once, but not seeing it counts only once the last check also
-   * says so, unless AWS refused the update outright (`refused`), when one answer is enough.
-   * True when it's current; false when the deciding answer listed the versions without it;
-   * undefined when that answer never came.
+   * After an UpdateSecret that wasn't refused outright failed: did its version become current
+   * anyway? A timeout or a dropped connection can fail a call AWS still applied, and
+   * DescribeSecret can lag, so it asks a few times. True once it shows as current; undefined
+   * otherwise, since not seeing it doesn't prove it isn't coming.
    */
-  async function versionLanded(
-    name: string,
-    token: string,
-    refused: boolean,
-  ): Promise<boolean | undefined> {
-    let last: boolean | undefined;
+  async function versionLanded(name: string, token: string): Promise<true | undefined> {
     for (const [attempt, wait] of LANDED_CHECK_WAITS_MS.entries()) {
       if (attempt > 0) await sleep(wait);
       try {
         const { VersionIdsToStages } = await client.send(
           new DescribeSecretCommand({ SecretId: name }),
         );
-        if (VersionIdsToStages === undefined) {
-          last = undefined;
-          continue;
-        }
-        if (VersionIdsToStages[token]?.includes("AWSCURRENT")) return true;
-        if (refused) return false;
-        last = false;
+        if (VersionIdsToStages?.[token]?.includes("AWSCURRENT")) return true;
       } catch {
-        last = undefined;
+        // No answer this time; ask again.
       }
     }
-    return last;
-  }
-
-  /** When the secret was set to be deleted, read before restoring it. Undefined if unknown. */
-  async function deletedDate(name: string): Promise<Date | undefined> {
-    try {
-      return (await client.send(new DescribeSecretCommand({ SecretId: name }))).DeletedDate;
-    } catch {
-      return undefined;
-    }
+    return undefined;
   }
 
   /**
-   * The restore worked but the new value definitely didn't, so the OLD credential is live
-   * again. Schedules the deletion again with lgtmoose's window, and reports the date AWS gives.
-   * The earlier date isn't kept: AWS doesn't say which window the earlier removal chose. When
-   * it was removed more than RECOVERY_DAYS ago and still wasn't deleted, its window was
-   * longer (it wasn't `auth remove`), and this says it has been shortened.
+   * The restore worked but AWS refused the new value, so the OLD credential is live again.
+   * Schedules the deletion again with lgtmoose's window and reports the date AWS gives.
    */
   async function undoRestore(
     name: string,
     providerId: string,
     rerun: string | undefined,
     error: unknown,
-    deletedAt: Date | undefined,
   ): Promise<Error> {
     const reason = awsMessage(error);
     let deletionDate: Date | undefined;
@@ -255,15 +225,10 @@ export function awsCredentialStore(
     }
     const when =
       deletionDate === undefined ? `in ${RECOVERY_DAYS} days` : `on ${deletionDate.toISOString()}`;
-    const shortened =
-      deletedAt !== undefined && now().getTime() - deletedAt.getTime() > RECOVERY_DAYS * DAY_MS
-        ? ` It had been scheduled since ${deletedAt.toISOString()}, so it was removed with a ` +
-          `window longer than ${RECOVERY_DAYS} days, which this shortens.`
-        : "";
     return new Error(
       `Couldn't store the new value in ${name} (${region}): ${reason} It was restored first, ` +
-        `so it's scheduled for deletion again, ${when}; the earlier removal's date isn't ` +
-        `kept.${shortened}`,
+        `so it's been removed again. Scheduled for deletion ${when}. The earlier removal's ` +
+        "date isn't kept.",
       { cause: error },
     );
   }
@@ -290,10 +255,7 @@ export function awsCredentialStore(
         }
         outcome = scheduled ? "restored" : "updated";
       }
-      let scheduledDate: Date | undefined;
       if (outcome === "restored") {
-        // Read first, so an undo can tell whether it shortens the earlier window.
-        scheduledDate = await deletedDate(name);
         try {
           await client.send(new RestoreSecretCommand({ SecretId: name }));
         } catch (error) {
@@ -314,16 +276,14 @@ export function awsCredentialStore(
           }),
         );
       } catch (error) {
-        const refused = DEFINITE_CLIENT_ERRORS.has(errorName(error) ?? "");
-        const landed = await versionLanded(name, token, refused);
-        // Undo only when AWS refused outright and the version is confirmed absent; a timeout
-        // or a lagging answer could mean the new value is in, and undoing would delete it.
-        if (landed === false && refused) {
+        // A definite refusal means the version can't have landed: no need to look.
+        if (DEFINITE_CLIENT_ERRORS.has(errorName(error) ?? "")) {
           throw outcome === "restored"
-            ? await undoRestore(name, label.providerId, rerun, error, scheduledDate)
+            ? await undoRestore(name, label.providerId, rerun, error)
             : context(name, error);
         }
-        if (landed !== true) {
+        // Anything else may have been applied. Never undo then: it could delete the new value.
+        if ((await versionLanded(name, token)) !== true) {
           const holds =
             outcome === "restored"
               ? oldValueLive(label.providerId, rerun, "may")

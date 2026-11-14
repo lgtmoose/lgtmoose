@@ -462,7 +462,9 @@ describe("auth", () => {
     expect(result.stderr).toContain(
       `us.${OPUS} isn't an inference profile eu-west-2 can call: use global.${OPUS}`,
     );
-    expect(result.stderr).toContain("set that tier in the provider's models to an id listed as ok");
+    // Both are pinned the wrong way, not missing access: only the pinning advice.
+    expect(result.stderr).toContain("Set that tier in the provider's models to an id listed as ok");
+    expect(result.stderr).not.toContain("Request model access");
   });
 
   it("bedrock: without bedrock:ListInferenceProfiles, profile ids aren't checked but on-demand ids are", async () => {
@@ -497,6 +499,47 @@ describe("auth", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("throttled");
     expect(failing.bedrockCalls).toEqual(["profiles"]);
+  });
+
+  it("bedrock: blocked alias tiers get the note for their cause", async () => {
+    const REGION_NOTE = "Access is granted, but this region has no on-demand or inference-profile";
+    const ACCESS_NOTE = "Request model access in the Bedrock console";
+    const unreachable = (id: string) => model(id, { inferenceTypes: ["INFERENCE_PROFILE"] });
+    // Access granted everywhere, but opus can't be called here: only another region helps.
+    const region = await harness({
+      models: [model(HAIKU), model(SONNET), unreachable(OPUS)],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(region.exitCode).toBe(1);
+    expect(region.stderr).toContain(REGION_NOTE);
+    expect(region.stderr).not.toContain(ACCESS_NOTE);
+    // Opus lacks access but could be called once granted.
+    const access = await harness({
+      models: [model(HAIKU), model(SONNET), model(OPUS, { usable: false })],
+    }).go(["bedrock"]);
+    expect(access.stderr).toContain(ACCESS_NOTE);
+    expect(access.stderr).not.toContain(REGION_NOTE);
+    // One of each: both notes.
+    const mixed = await harness({
+      models: [model(HAIKU, { usable: false }), model(SONNET), unreachable(OPUS)],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(mixed.stderr).toContain(ACCESS_NOTE);
+    expect(mixed.stderr).toContain(REGION_NOTE);
+  });
+
+  it("bedrock: with nothing usable, asks for access when a blocked model could then be called", async () => {
+    const config = { ...baseConfig, providers: [baseConfig.providers[0]] };
+    const result = await harness({
+      config,
+      models: [
+        model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] }),
+        model(SONNET, { usable: false }),
+      ],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Request model access in the Bedrock console");
   });
 
   it("bedrock: says to pick another region when access is granted but nothing is callable", async () => {

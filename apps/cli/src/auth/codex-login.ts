@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { errorText } from "../errors.js";
 import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
+import { CLI } from "../paths.js";
 
 export interface CodexLoginOptions {
   run: InteractiveRunner;
@@ -121,7 +122,7 @@ export function checkAuthJson(text: string): void {
   if (typeof refresh !== "string" || refresh === "") {
     throw new CodexLoginError(
       "That auth.json has no ChatGPT sign-in (no refresh token). To use an OpenAI API key, " +
-        "run pnpm lgtmoose auth api-key --provider openai instead.",
+        `run ${CLI} auth api-key --provider openai instead.`,
     );
   }
 }

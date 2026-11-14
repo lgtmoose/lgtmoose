@@ -7,7 +7,7 @@ import {
   providerNeedsSecret,
   type DeployConfig,
 } from "@lgtmoose/config";
-import { loadDeployConfig } from "../paths.js";
+import { CLI, loadDeployConfig } from "../paths.js";
 import { PLACEHOLDER_WEBHOOK_URL, installUrl } from "../setup/manifest.js";
 import { isPromptCancel, type Prompter } from "../setup/prompter.js";
 import {
@@ -98,7 +98,7 @@ function parseFlags(argv: readonly string[], withPurge: boolean) {
 async function loadConfig(deps: DeployDeps): Promise<DeployConfig> {
   const config = await loadDeployConfig(deps.files, deps.configPath);
   if (config === undefined) {
-    throw new Error(`No config at ${deps.configPath}. Run pnpm lgtmoose setup first.`);
+    throw new Error(`No config at ${deps.configPath}. Run ${CLI} setup first.`);
   }
   return config;
 }
@@ -108,7 +108,7 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
   const app = await readAppCredentials(store);
   const webhook = await readWebhookSecret(store, app);
   if (webhook.problem !== undefined) {
-    throw new Error(`${webhook.problem} Run pnpm lgtmoose setup and create a new App to fix it.`);
+    throw new Error(`${webhook.problem} Run ${CLI} setup and create a new App to fix it.`);
   }
   const webhookSecret = webhook.secret;
   for (const provider of config.providers.filter(providerNeedsSecret)) {
@@ -120,7 +120,7 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
       // `lgtmoose auth remove` did this; running auth again restores it with a new value.
       throw new Error(
         `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which is ` +
-          `scheduled for deletion in ${config.region}. Run pnpm lgtmoose auth for it again ` +
+          `scheduled for deletion in ${config.region}. Run ${CLI} auth for it again ` +
           "to restore it, or remove the provider from the config.",
         { cause: error },
       );
@@ -128,7 +128,7 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
     if (value === undefined) {
       throw new Error(
         `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which doesn't ` +
-          `exist in ${config.region}. Run pnpm lgtmoose auth for it, or remove it from the config.`,
+          `exist in ${config.region}. Run ${CLI} auth for it, or remove it from the config.`,
       );
     }
   }
@@ -198,7 +198,7 @@ LGTMoose is deployed.
 Install the App on the repositories it should review:
   ${installUrl(info.slug)}
 
-To upgrade later: git pull && pnpm lgtmoose deploy
+To upgrade later: git pull && ${CLI} deploy
 `;
 }
 
@@ -267,7 +267,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
           .then(
             () => "Switched the Data stack back to keeping its data.",
             (restoreError: unknown) =>
-              `The Data stack is still set to delete its data, with no snapshot (${errorMessage(restoreError)}). Run pnpm lgtmoose deploy before anything deletes it.`,
+              `The Data stack is still set to delete its data, with no snapshot (${errorMessage(restoreError)}). Run ${CLI} deploy before anything deletes it.`,
           ),
       );
     }
@@ -279,7 +279,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
               ? "Turned the database's deletion protection back on."
               : `Database ${databaseId} is already gone or being deleted.`,
           (restoreError: unknown) =>
-            `Deletion protection is still off on ${databaseId} (${errorMessage(restoreError)}); run pnpm lgtmoose deploy or turn it on in the RDS console.`,
+            `Deletion protection is still off on ${databaseId} (${errorMessage(restoreError)}); run ${CLI} deploy or turn it on in the RDS console.`,
         ),
       );
     }
@@ -312,7 +312,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   }
   lines.push(
     `The GitHub App, ${SECRET_NAMES.githubApp} and ${SECRET_NAMES.githubWebhook} are kept. ${webhookNote}`,
-    "pnpm lgtmoose deploy starts again with a new, empty database.",
+    `${CLI} deploy starts again with a new, empty database.`,
   );
   return `${lines.join("\n")}\n${purgeNote}`;
 }

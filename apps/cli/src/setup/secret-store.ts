@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { SECRET_NAMES } from "@lgtmoose/config";
 import { z } from "zod";
 import { errorMessage } from "../errors.js";
+import { CLI } from "../paths.js";
 
 /**
  * Thrown by `SetupSecretStore.read` for a secret that's scheduled for deletion: it can't be
@@ -103,7 +104,7 @@ export type AppCredentials = z.infer<typeof credentialsSchema>;
 export async function readAppCredentials(store: SetupSecretStore): Promise<AppCredentials> {
   const raw = await store.read(SECRET_NAMES.githubApp);
   if (raw === undefined) {
-    throw new Error(`${SECRET_NAMES.githubApp} doesn't exist. Run pnpm lgtmoose setup first.`);
+    throw new Error(`${SECRET_NAMES.githubApp} doesn't exist. Run ${CLI} setup first.`);
   }
   let json: unknown;
   try {
@@ -115,7 +116,7 @@ export async function readAppCredentials(store: SetupSecretStore): Promise<AppCr
   if (!parsed.success) {
     throw new Error(
       `${SECRET_NAMES.githubApp} isn't the JSON setup writes (appId, slug, privateKey). ` +
-        "Fix it, or run pnpm lgtmoose setup and create a new App.",
+        `Fix it, or run ${CLI} setup and create a new App.`,
     );
   }
   return parsed.data;

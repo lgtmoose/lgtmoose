@@ -1,4 +1,5 @@
 import { parseDeployConfig, type DeployConfigInput } from "@lgtmoose/config";
+import { CLI } from "../paths.js";
 
 export type Profile = "lean" | "standard";
 
@@ -35,7 +36,7 @@ export default defineConfig({
   profile: ${JSON.stringify(config.profile)},
   // GitHub orgs or users whose repos may be reviewed.
   allowedOrgs: ${JSON.stringify(config.allowedOrgs)},
-  // Add more with \`pnpm lgtmoose auth\`. Bedrock uses the deployment's IAM role.
+  // Add more with \`${CLI} auth\`. Bedrock uses the deployment's IAM role.
   providers: [${config.providers.map(renderObject).join(", ")}],
 });
 `;
