@@ -63,6 +63,11 @@ export interface SummaryInput {
   tickets?: TicketCoverage;
   /** Convention files that matched but were left out of the prompt to stay within limits. */
   conventionFilesOmitted?: readonly string[];
+  /**
+   * Rule-pack entries or rules from `.lgtmoose.yaml` that were left out, and why, so the repo's
+   * owners can fix their config. May quote repository text; rendered as plain text.
+   */
+  rulePackProblems?: readonly string[];
   /** Findings past the per-run limit that were dropped, least severe first. */
   findingsOverLimit?: number;
   /** Status labels the repo doesn't have (from `syncStatusLabel`), so they couldn't be set. */
@@ -297,6 +302,14 @@ function renderStatus(input: SummaryInput): string {
     lines.push(
       `- **Convention files left out** (over the size limit): ${count(omitted.length, "file")}`,
       ...bullets(omitted),
+    );
+  }
+
+  const packProblems = input.rulePackProblems ?? [];
+  if (packProblems.length > 0) {
+    lines.push(
+      `- **Rule pack problems** (check \`rulepacks\` in \`.lgtmoose.yaml\` and the files in \`rules/\`): ${count(packProblems.length, "problem")}`,
+      ...bullets(packProblems),
     );
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReviewerPrompt, demoteHeadings, type ReviewerPromptInput } from "./reviewer.js";
+import { buildReviewerPrompt, type ReviewerPromptInput } from "./reviewer.js";
 import { loadRulePacks } from "./rule-packs.js";
 import { IMPORT_PATCH, TOTAL_PATCH, fileDiff } from "./testing/fixtures.js";
 
@@ -47,16 +47,6 @@ function blocks(prompt: string): Array<[string, string]> {
   }
   return found;
 }
-
-describe("demoteHeadings", () => {
-  it("moves headings down two levels, outside code fences", () => {
-    const text = "# Pack\n\n## tests\n\n```md\n# not a heading\n```\n#hashtag";
-    expect(demoteHeadings(text)).toBe(
-      "### Pack\n\n#### tests\n\n```md\n# not a heading\n```\n#hashtag",
-    );
-  });
-});
-
 describe("buildReviewerPrompt", () => {
   it("assembles the full prompt", () => {
     expect(buildReviewerPrompt(input)).toMatchSnapshot();

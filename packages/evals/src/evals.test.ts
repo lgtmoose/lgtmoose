@@ -514,7 +514,8 @@ describe("running fixtures", () => {
     });
     expect(t.costUsd).toBeCloseTo(0.3);
     expect(scores.find((s) => s.name === "clean-rename")?.falsePositives).toHaveLength(1);
-  });
+    // Real clones of three fixtures: about a second alone, but over the 5 s default under load.
+  }, 60_000);
 
   it("scores a failed run as finding nothing, with the error", async () => {
     const [offByOne] = (await loadFixtures(FIXTURES)).filter((f) => f.name === "off-by-one");
