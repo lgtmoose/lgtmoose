@@ -10,9 +10,7 @@ import {
   type HarnessRunOptions,
 } from "../harness.js";
 import { exitText, saveAttemptTranscript } from "../attempt.js";
-import { truncate } from "../answer.js";
-import { runProcess, type ProcessResult } from "../process.js";
-import { redact } from "../redact.js";
+import { runProcess } from "../process.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, TOOLS } from "./policy.js";
@@ -21,12 +19,11 @@ import {
   MAX_AUTH_RETRIES,
   checkAnswer,
   claudeSchemaFor,
-  failIfResultFailed,
+  failIfUnusable,
   findResult,
   isAuthRetry,
   withRepair,
   type ClaudeAttempt,
-  type ResultEvent,
 } from "./stream.js";
 
 export interface ClaudeCodeHarnessOptions {
@@ -117,7 +114,14 @@ export class ClaudeCodeHarness implements Harness {
         const key = transcriptKey(runId, n);
         await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
         const result = findResult(proc.stdout);
-        failIfUnusable(proc, result, secrets, keys, options.timeoutMs);
+        failIfUnusable(proc, result, {
+          secrets,
+          keys,
+          timeoutMs: options.timeoutMs,
+          name: "claude",
+          noResult: () =>
+            `claude exited (${exitText(proc)}) without a result: ${proc.stderr.trim() || "no output"}`,
+        });
         return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
@@ -126,29 +130,6 @@ export class ClaudeCodeHarness implements Harness {
       await rm(home, { recursive: true, force: true });
     }
   }
-}
-
-/** Throws the right HarnessError when a process didn't produce a successful result event. */
-function failIfUnusable(
-  proc: ProcessResult,
-  result: ResultEvent | undefined,
-  secrets: readonly string[],
-  keys: readonly string[],
-  timeoutMs: number,
-): asserts result is ResultEvent {
-  const fail = (kind: HarnessError["kind"], message: string): HarnessError =>
-    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys });
-  if (proc.spawnError) throw fail("process", `Could not start claude: ${proc.spawnError.message}`);
-  if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
-  if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
-  if (proc.stopped === "output_limit") {
-    throw fail("process", "claude wrote more output than allowed.");
-  }
-  if (!result) {
-    const detail = proc.stderr.trim() || "no output";
-    throw fail("process", `claude exited (${exitText(proc)}) without a result: ${detail}`);
-  }
-  failIfResultFailed(result, proc.stderr, secrets, keys, "claude");
 }
 
 export interface ClaudeArgsOptions {

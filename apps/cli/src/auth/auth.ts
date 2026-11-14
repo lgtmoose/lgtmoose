@@ -3,6 +3,7 @@ import {
   PROVIDER_ID_PATTERN,
   SECRET_NAMES,
   BEDROCK_MODEL_ID,
+  MODEL_ALIAS_FAMILIES,
   MODEL_MODIFIER,
   TIERS,
   isPlanCredential,
@@ -617,19 +618,6 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   };
 }
 
-/**
- * The families Claude Code's aliases follow. Claude Code (or an ANTHROPIC_DEFAULT_*_MODEL
- * override) picks the model at runtime, so all auth can check is that the family has one.
- * `opusplan` plans with Opus and works with Sonnet.
- */
-const ALIAS_FAMILIES: Readonly<Record<string, readonly string[]>> = {
-  haiku: ["haiku"],
-  sonnet: ["sonnet"],
-  opus: ["opus"],
-  best: ["opus"],
-  opusplan: ["opus", "sonnet"],
-};
-
 type ParsedModel = { configured: string } & (
   | { kind: "alias"; families: readonly string[] }
   | { kind: "id"; id: string; prefix: string | undefined }
@@ -640,7 +628,9 @@ type ParsedModel = { configured: string } & (
 /** What a tier's configured model value means under Bedrock auth. */
 function parseModel(configured: string): ParsedModel {
   const value = configured.replace(MODEL_MODIFIER, "");
-  const families = ALIAS_FAMILIES[value];
+  const families = Object.hasOwn(MODEL_ALIAS_FAMILIES, value)
+    ? MODEL_ALIAS_FAMILIES[value]
+    : undefined;
   if (families !== undefined) return { configured, kind: "alias", families };
   if (value === "default") {
     return { configured, kind: "unchecked", why: "Claude Code's default model, chosen at runtime" };

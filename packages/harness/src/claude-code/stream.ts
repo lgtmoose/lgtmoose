@@ -2,6 +2,7 @@ import { z } from "zod";
 import { HarnessError, type HarnessResult, type HarnessUsage } from "../harness.js";
 import { parseAnswer, repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
 import { success } from "../attempt.js";
+import type { ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { addUsage } from "../usage.js";
 import {
@@ -59,7 +60,12 @@ function parseLine(line: string): unknown {
 
 /** Whether a stream line reports a failed API call caused by the credential. */
 export function isAuthRetry(line: string): boolean {
-  const event = retryEvent.safeParse(parseLine(line));
+  return isAuthRetryMessage(parseLine(line));
+}
+
+/** `isAuthRetry` for a message already parsed. */
+export function isAuthRetryMessage(message: unknown): boolean {
+  const event = retryEvent.safeParse(message);
   return event.success && event.data.error !== undefined && AUTH_ERRORS.has(event.data.error);
 }
 
@@ -103,17 +109,42 @@ export function outputOf(
  * Claude's own plan-limit wording: "You've hit your 5-hour limit · resets 3:10pm (UTC)", "Claude
  * AI usage limit reached|1763125800". The shared patterns cover the rest.
  */
-const CLAUDE_PLAN_LIMIT = /hit your (?:[\w-]+ )?limit|usage limit reached/i;
-/** "resets 3:10pm (UTC)": the reset time as Claude Code wrote it. */
-const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·]{1,60}?)\s*(?:$|\n|·)/i;
+const CLAUDE_PLAN_LIMIT = new RegExp(
+  [
+    // "You've hit your limit", "… your 5-hour limit", "… your monthly spend limit",
+    // "… your team's shared budget"
+    String.raw`hit your (?:[\w'-]+ ){0,3}(?:limit|budget)`,
+    // "You've reached your Fable limit"
+    String.raw`reached your (?:[\w'-]+ ){0,3}limit`,
+    String.raw`usage limit reached`,
+    String.raw`out of (?:usage )?credits`,
+  ].join("|"),
+  "i",
+);
+/** "resets 3:10pm (UTC)" or "resets in 3h 20m": when Claude Code says the limit lifts. */
+const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·]{1,60}?)\s*(?:$|\n|·|\.(?:\s|$))/i;
+/** One part of a relative reset ("3h", "20m", "2 days"). */
+const DURATION_PART = /(\d+)\s*(d|days?|h|hours?|m|min(?:ute)?s?|s|sec(?:ond)?s?)\b/gi;
+const UNIT_SECONDS: Record<string, number> = { d: 86_400, h: 3600, m: 60, s: 1 };
 
 /** Classifies a Claude failure message: Claude's plan wording first, then the shared patterns. */
 export function classifyClaudeFailure(message: string): LimitFailure | undefined {
   if (CLAUDE_PLAN_LIMIT.test(message)) {
-    const at = CLAUDE_RESETS.exec(message)?.[1]?.trim();
-    return { kind: "plan_limit", ...limitTimes(message), ...(at ? { resetsAt: at } : {}) };
+    return { kind: "plan_limit", ...limitTimes(message), ...claudeReset(message) };
   }
   return classifyFailure(message);
+}
+
+/** The reset Claude Code wrote: a clock time as `resetsAt`, "in 3h 20m" as seconds. */
+function claudeReset(message: string): { resetsAt?: string; retryAfterSeconds?: number } {
+  const text = CLAUDE_RESETS.exec(message)?.[1]?.trim();
+  if (!text) return {};
+  if (!/^in\b/i.test(text)) return { resetsAt: text };
+  let seconds = 0;
+  for (const [, count, unit] of text.matchAll(DURATION_PART)) {
+    seconds += Number(count) * (UNIT_SECONDS[(unit ?? "s").charAt(0).toLowerCase()] ?? 0);
+  }
+  return seconds > 0 ? { retryAfterSeconds: seconds } : {};
 }
 
 /**
@@ -216,6 +247,35 @@ export function resumedUsage(first: HarnessUsage, second: HarnessUsage): Harness
 export function asResult(message: unknown): ResultEvent | undefined {
   const event = resultEvent.safeParse(message);
   return event.success ? event.data : undefined;
+}
+
+/**
+ * Throws the right HarnessError when a run didn't produce a usable result: it couldn't start,
+ * was stopped (deadline, output limit, credential retries) or ended without a result, or the
+ * result is an error (`failIfResultFailed`). `noResult` says why there was no result.
+ */
+export function failIfUnusable(
+  proc: ProcessResult,
+  result: ResultEvent | undefined,
+  context: {
+    secrets: readonly string[];
+    keys: readonly string[];
+    timeoutMs: number;
+    /** The CLI or SDK that ran, for messages. */
+    name: string;
+    noResult: () => string;
+  },
+): asserts result is ResultEvent {
+  const { secrets, keys, name } = context;
+  const fail = (kind: HarnessError["kind"], message: string): HarnessError =>
+    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys });
+  if (proc.spawnError) throw fail("process", `Could not start ${name}: ${proc.spawnError.message}`);
+  if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${context.timeoutMs} ms.`);
+  if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
+  if (proc.stopped === "output_limit")
+    throw fail("process", `${name} wrote more output than allowed.`);
+  if (!result) throw fail("process", context.noResult());
+  failIfResultFailed(result, proc.stderr, secrets, keys, name);
 }
 
 /**

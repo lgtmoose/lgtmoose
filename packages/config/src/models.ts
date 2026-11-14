@@ -1,10 +1,18 @@
 import type { ProviderConfig, Tier } from "./deploy.js";
 
 /**
- * Claude Code's model aliases, with an optional `[1m]`-style modifier. They resolve inside the
- * CLI, on Bedrock and Vertex to its own built-in model IDs.
+ * Claude Code's model aliases and the model families they follow. An alias may carry a
+ * `[1m]`-style modifier. Claude Code (or an ANTHROPIC_DEFAULT_*_MODEL override) resolves it at
+ * runtime, on Bedrock and Vertex to its own built-in model IDs.
  */
-const ALIAS = /^(?:default|best|opus|sonnet|haiku|opusplan)$/;
+export const MODEL_ALIAS_FAMILIES: Readonly<Record<string, readonly string[]>> = {
+  haiku: ["haiku"],
+  sonnet: ["sonnet"],
+  opus: ["opus"],
+  best: ["opus"],
+  // Plans with Opus and works with Sonnet.
+  opusplan: ["opus", "sonnet"],
+};
 
 /** Claude Code's `[1m]`-style modifier at the end of a model name. */
 export const MODEL_MODIFIER = /\[[^\]]*\]$/;
@@ -17,7 +25,9 @@ export const BEDROCK_MODEL_ID = /^(?:([a-z-]+)\.)?(anthropic\..+)$/;
 
 /** Whether a configured model is a Claude Code alias rather than a pinned model ID. */
 export function isModelAlias(model: string): boolean {
-  return ALIAS.test(model.replace(MODEL_MODIFIER, ""));
+  const name = model.replace(MODEL_MODIFIER, "");
+  // `default` is Claude Code's own pick for the account.
+  return name === "default" || Object.hasOwn(MODEL_ALIAS_FAMILIES, name);
 }
 
 /**

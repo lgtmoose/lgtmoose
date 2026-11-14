@@ -33,6 +33,7 @@ export {
 export { egressAllowlist, providerEgressHosts } from "./egress.js";
 export {
   BEDROCK_MODEL_ID,
+  MODEL_ALIAS_FAMILIES,
   MODEL_MODIFIER,
   isModelAlias,
   providerModelEnv,

@@ -17,6 +17,33 @@ describe("claudeLimitFailure", () => {
     ).toMatchObject({ kind: "plan_limit" });
   });
 
+  it("reads the pinned CLI's other limit messages", () => {
+    for (const message of [
+      "You've hit your monthly spend limit",
+      "You've hit your team's shared budget",
+      "You've reached your Fable limit",
+      "You're out of usage credits",
+    ]) {
+      expect(claudeLimitFailure(result({ result: message }), ""), message).toMatchObject({
+        kind: "plan_limit",
+      });
+    }
+  });
+
+  it("turns a relative reset into seconds, and stops a clock time at the sentence", () => {
+    expect(
+      claudeLimitFailure(result({ result: "You've hit your limit · resets in 3h 20m" }), ""),
+    ).toEqual({ kind: "plan_limit", retryAfterSeconds: 12_000 });
+    expect(
+      claudeLimitFailure(
+        result({
+          result: "You've hit your limit. It resets 5pm. Upgrade your plan to keep going.",
+        }),
+        "",
+      ),
+    ).toEqual({ kind: "plan_limit", resetsAt: "5pm" });
+  });
+
   it("treats HTTP 429 as throttling unless the message says the plan is used up", () => {
     expect(claudeLimitFailure(result({ api_error_status: 429, result: "Overloaded" }), "")).toEqual(
       {

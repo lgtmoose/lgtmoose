@@ -218,6 +218,20 @@ describe("AgentSdkHarness", () => {
     expect(out.output).toEqual({ findings: ["late"] });
   });
 
+  it("says what the CLI wrote to stderr when there's no result", async () => {
+    const query: AgentQuery = ({ options }) => ({
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          options.stderr?.("Could not load the default credentials");
+          return Promise.reject(new Error("Claude Code process exited with code 1"));
+        },
+      }),
+    });
+    const error = (await run(harness(query).harness).catch((e: unknown) => e)) as HarnessError;
+    expect(error.kind).toBe("process");
+    expect(error.message).toContain("exited with code 1: Could not load the default credentials");
+  });
+
   it("fails as process when the SDK throws before a result", async () => {
     const query: AgentQuery = () => ({
       [Symbol.asyncIterator]: () => ({

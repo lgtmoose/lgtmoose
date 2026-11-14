@@ -8,7 +8,6 @@ import {
   type Options,
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { truncate } from "../answer.js";
 import { saveAttemptTranscript } from "../attempt.js";
 import {
   HarnessError,
@@ -32,8 +31,8 @@ import {
   asResult,
   checkAnswer,
   claudeSchemaFor,
-  failIfResultFailed,
-  isAuthRetry,
+  failIfUnusable,
+  isAuthRetryMessage,
   withRepair,
   type ClaudeAttempt,
   type ResultEvent,
@@ -67,6 +66,8 @@ export interface AgentSdkHarnessOptions {
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** Kept from the CLI's stderr for errors and transcripts. */
 const MAX_STDERR_CHARS = 64 * 1024;
+/** How long the CLI may take to save the session and exit once the result is in. */
+const RESULT_GRACE_MS = 5000;
 
 /**
  * Runs a review through the Claude Agent SDK with the same read-only policy as the claude-code
@@ -147,7 +148,13 @@ export class AgentSdkHarness implements Harness {
         const key = transcriptKey(runId, n);
         await saveAttemptTranscript(this.options.transcripts, key, run.proc, n, secrets, keys);
         const { result } = run;
-        failIfUnusable(run, result, secrets, keys, options.timeoutMs);
+        failIfUnusable(run.proc, result, {
+          secrets,
+          keys,
+          timeoutMs: options.timeoutMs,
+          name: "The Agent SDK run",
+          noResult: () => noResultDetail(run),
+        });
         return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
@@ -232,6 +239,7 @@ async function collect(
   const lines: string[] = [];
   let bytes = 0;
   let authRetries = 0;
+  let grace: ReturnType<typeof setTimeout> | undefined;
   let error: unknown;
   try {
     const messages = query({
@@ -249,25 +257,31 @@ async function collect(
       const line = JSON.stringify(message);
       bytes += Buffer.byteLength(line) + 1;
       lines.push(line);
-      result = asResult(message);
-      // The result ends the turn: don't wait on the SDK's shutdown.
-      if (result !== undefined) break;
+      const event = asResult(message);
+      if (event !== undefined && result === undefined) {
+        // The result ends the turn. Let the CLI save the session (a repair turn resumes it,
+        // cost included) and exit, but don't wait on a slow shutdown.
+        grace = setTimeout(() => controller.abort(), RESULT_GRACE_MS);
+      }
+      result = event ?? result;
       if (bytes > MAX_OUTPUT_BYTES) {
         stopped = "output_limit";
         controller.abort();
         break;
       }
       // As the claude-code harness does: retries the credential caused won't get better.
-      if (isAuthRetry(line) && ++authRetries >= MAX_AUTH_RETRIES) {
+      if (isAuthRetryMessage(message) && ++authRetries >= MAX_AUTH_RETRIES) {
         stopped = "requested";
         controller.abort();
         break;
       }
     }
   } catch (caught) {
-    error = caught;
+    // An abort once the answer is in is how a slow shutdown ends, not a failure.
+    if (result === undefined) error = caught;
   } finally {
     clearTimeout(timer);
+    clearTimeout(grace);
   }
   const stdout = lines.length === 0 ? "" : `${lines.join("\n")}\n`;
   return {
@@ -283,24 +297,11 @@ async function collect(
   };
 }
 
-/** Throws the right HarnessError when a run didn't produce a successful result. */
-function failIfUnusable(
-  run: CollectedRun,
-  result: ResultEvent | undefined,
-  secrets: readonly string[],
-  keys: readonly string[],
-  timeoutMs: number,
-): asserts result is ResultEvent {
-  const fail = (kind: HarnessError["kind"], message: string): HarnessError =>
-    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys });
-  const { proc } = run;
-  if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
-  if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
-  if (proc.stopped === "output_limit")
-    throw fail("process", "The run wrote more output than allowed.");
-  if (!result) {
-    const why = run.error instanceof Error ? run.error.message : proc.stderr.trim() || "no output";
-    throw fail("process", `The Agent SDK run ended without a result: ${why}`);
-  }
-  failIfResultFailed(result, proc.stderr, secrets, keys, "The Agent SDK run");
+/** Why a run ended without a result: the SDK's error and the CLI's stderr, which says more. */
+function noResultDetail(run: CollectedRun): string {
+  const parts = [
+    run.error instanceof Error ? run.error.message : undefined,
+    run.proc.stderr.trim() || undefined,
+  ].filter((part) => part !== undefined);
+  return `The Agent SDK run ended without a result: ${parts.join(": ") || "no output"}`;
 }
