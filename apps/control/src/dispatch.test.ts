@@ -3,9 +3,10 @@ import {
   StartExecutionCommand,
   type StopExecutionCommand,
 } from "@aws-sdk/client-sfn";
+import type { SendMessageCommand } from "@aws-sdk/client-sqs";
 import type { ReviewJob } from "@lgtmoose/core";
 import { describe, expect, it, vi } from "vitest";
-import { executionArnOf, sfnExecutions } from "./dispatch-aws.js";
+import { executionArnOf, sfnExecutions, sqsDeadLetter } from "./dispatch-aws.js";
 import {
   PUSH_DEBOUNCE_SECONDS,
   dispatch,
@@ -59,6 +60,9 @@ function fakeDeps() {
   const runs = new Map<string, string>();
   const reviewedHeads = new Set<string>();
   const calls: string[] = [];
+  const deadLettered: { messageId: string; reason: string }[] = [];
+  /** Repositories whose jobs fail as if the database were down. */
+  const failing = new Set<string>();
   const logs: { message: string; fields?: Record<string, unknown> }[] = [];
   const pr = (repo: string, n: number) => `${repo.toLowerCase()}#${n}`;
   const deps: DispatchDeps = {
@@ -74,8 +78,8 @@ function fakeDeps() {
         const same = JSON.stringify(existing.input) === JSON.stringify(input);
         return { started: existing.status === "RUNNING" && same };
       },
-      async status(name) {
-        return executions.get(name)?.status;
+      async status(executionArn) {
+        return executions.get(executionArn.slice(executionArn.lastIndexOf(":") + 1))?.status;
       },
       async stop(executionArn) {
         calls.push(`stop ${executionArn}`);
@@ -85,6 +89,7 @@ function fakeDeps() {
     },
     store: {
       async latest(repo, n) {
+        if (failing.has(repo)) throw new Error("database unavailable");
         return latest.get(pr(repo, n));
       },
       async advance(repo, n, eventAt, closed) {
@@ -113,16 +118,32 @@ function fakeDeps() {
         return reviewedHeads.has(headSha);
       },
     },
+    async deadLetter(record, reason) {
+      deadLettered.push({ messageId: record.messageId, reason });
+    },
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
   };
   const status = (name: string) => executions.get(name)?.status;
-  return { deps, executions, recorded, runs, reviewedHeads, calls, logs, status };
+  return {
+    deps,
+    executions,
+    recorded,
+    runs,
+    reviewedHeads,
+    calls,
+    logs,
+    status,
+    deadLettered,
+    failing,
+  };
 }
 
 describe("executionName", () => {
   it("names the execution after the repository, the PR and the head", () => {
     const name = executionName("Acme/Shop", 12, NEW);
     expect(name).toMatch(/^acme_shop-[0-9a-f]{12}-12-b{40}$/);
+    // No dots: Step Functions advises against them in names with CloudWatch logging.
+    expect(executionName("acme/shop.js", 12, NEW)).toMatch(/^acme_shop-js-[0-9a-f]{12}-12-/);
     expect(name).toBe(executionName("acme/shop", 12, NEW));
   });
 
@@ -139,6 +160,7 @@ describe("executionName", () => {
   it("keeps repositories apart whose names only differ in the owner/name split", () => {
     expect(executionPrefix("a-b/c", 1)).not.toBe(executionPrefix("a/b-c", 1));
     expect(executionPrefix("a_b/c", 1)).not.toBe(executionPrefix("a/b_c", 1));
+    expect(executionPrefix("a/b.c", 1)).not.toBe(executionPrefix("a/b-c", 1));
   });
 });
 
@@ -222,6 +244,31 @@ describe("dispatch", () => {
     expect(f.status(nameOf(OLD))).toBe("RUNNING");
   });
 
+  it("stops older executions in parallel, and finishes the others when one fails", async () => {
+    const f = fakeDeps();
+    const shas = ["1", "2", "3"].map((c) => c.repeat(40));
+    for (const [i, sha] of shas.entries()) {
+      await dispatch(f.deps, job({ headSha: sha, eventAt: T1, deliveryId: `d-${i}` }));
+    }
+    const { executions } = f.deps;
+    const real = { ...executions };
+    let inFlight = 0;
+    let most = 0;
+    executions.stop = async (executionArn, cause) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      if (executionArn === arn(nameOf(shas[1] ?? ""))) throw new Error("throttled");
+      await real.stop(executionArn, cause);
+    };
+    await expect(dispatch(f.deps, job())).rejects.toThrow("throttled");
+    expect(most).toBe(3);
+    expect(f.status(nameOf(shas[0] ?? ""))).toBe("ABORTED");
+    expect(f.status(nameOf(shas[2] ?? ""))).toBe("ABORTED");
+    expect(f.recorded.get(arn(nameOf(shas[1] ?? "")))?.stopped).toBe(false);
+  });
+
   it("supersedes again when the same message is retried after a failed stop", async () => {
     const f = fakeDeps();
     await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
@@ -285,6 +332,21 @@ describe("dispatch", () => {
     expect(await dispatch(f.deps, reopened)).toMatchObject({ action: "duplicate", name: retry });
   });
 
+  it("doesn't start a second retry while the first still runs", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
+    await dispatch(f.deps, job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" }));
+    await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T3, deliveryId: "d-reopen" }));
+    const ready = job({
+      kind: "pr_ready",
+      eventAt: "2026-11-14T00:00:04.000Z",
+      deliveryId: "d-ready",
+    });
+    expect(await dispatch(f.deps, ready)).toMatchObject({ action: "duplicate", stopped: [] });
+    expect(f.status(nameOf(NEW, "d-reopen"))).toBe("RUNNING");
+    expect(f.executions.has(nameOf(NEW, "d-ready"))).toBe(false);
+  });
+
   it("doesn't retry a head that a run reviewed, or one still running", async () => {
     const f = fakeDeps();
     await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
@@ -317,12 +379,22 @@ describe("dispatch", () => {
     expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
-  it("falls back to the gateway's time for a job without an event time", async () => {
+  it("orders a job without an event time behind every job with one", async () => {
     const f = fakeDeps();
-    const untimed = job();
+    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
+    // Queued before jobs carried a time, received later than T1 by the gateway's clock.
+    const untimed = job({ deliveryId: "d-untimed" });
     delete untimed.eventAt;
-    await dispatch(f.deps, untimed);
-    expect(f.recorded.get(arn(nameOf(NEW)))?.eventAt).toEqual(new Date(untimed.receivedAt));
+    expect(await dispatch(f.deps, untimed)).toMatchObject({ action: "started", stopped: [] });
+    expect(f.status(nameOf(OLD))).toBe("RUNNING");
+    expect(f.recorded.get(arn(nameOf(NEW)))?.eventAt).toEqual(new Date(0));
+    // It doesn't move the PR's newest event on, so a timed job right after isn't stale, and
+    // that job stops it.
+    const next = job({ headSha: "c".repeat(40), eventAt: T1, deliveryId: "d-next" });
+    expect(await dispatch(f.deps, next)).toMatchObject({
+      action: "started",
+      stopped: [arn(nameOf(NEW))],
+    });
   });
 
   it("defers comment jobs to M5 and ignores a push without a head", async () => {
@@ -356,10 +428,11 @@ describe("dispatchBatch", () => {
 
   it("holds back the rest of a failed message's group, and only that group", async () => {
     const f = fakeDeps();
+    f.failing.add("acme/down");
     const result = await dispatchBatch(f.deps, [
       record("m1", "a", job()),
-      record("m2", "b", "not json"),
-      record("m3", "a", job({ repo: "acme/shop", eventAt: T3, headSha: OLD })),
+      record("m2", "b", job({ repo: "acme/down" })),
+      record("m3", "a", job({ eventAt: T3, headSha: OLD })),
       record("m4", "b", job({ repo: "acme/other" })),
       record("m5", "c", job({ repo: "acme/third" })),
     ]);
@@ -368,16 +441,37 @@ describe("dispatchBatch", () => {
     expect(f.executions.has(executionName("acme/other", 12, NEW))).toBe(false);
     expect(f.logs.find((l) => l.message === "dispatch failed")?.fields).toMatchObject({
       messageId: "m2",
-      error: "The message isn't JSON.",
+      error: "database unavailable",
     });
   });
 
   it("holds back everything after a failed message without a group", async () => {
     const f = fakeDeps();
+    f.failing.add("acme/down");
     const result = await dispatchBatch(f.deps, [
-      record("m1", undefined, "{}"),
+      record("m1", undefined, job({ repo: "acme/down" })),
       record("m2", "a", job()),
     ]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }]);
+  });
+
+  it("dead-letters a message that isn't a job and goes on with its group", async () => {
+    const f = fakeDeps();
+    const result = await dispatchBatch(f.deps, [
+      record("m1", "a", "not json"),
+      record("m2", "a", job()),
+    ]);
+    expect(result).toEqual({ batchItemFailures: [] });
+    expect(f.deadLettered).toEqual([{ messageId: "m1", reason: "The message isn't JSON." }]);
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
+  });
+
+  it("fails the message when it can't be dead-lettered", async () => {
+    const f = fakeDeps();
+    f.deps.deadLetter = async () => {
+      throw new Error("sqs down");
+    };
+    const result = await dispatchBatch(f.deps, [record("m1", "a", "{}"), record("m2", "a", job())]);
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }]);
   });
 
@@ -386,10 +480,10 @@ describe("dispatchBatch", () => {
     await dispatchBatch(f.deps, [
       record("m1", "a", { ...job(), repo: "secret value", prNumber: -1 }),
     ]);
-    const error = String(f.logs.find((l) => l.message === "dispatch failed")?.fields?.error);
-    expect(error).toContain("repo");
-    expect(error).toContain("prNumber");
-    expect(error).not.toContain("secret value");
+    const reason = f.deadLettered[0]?.reason ?? "";
+    expect(reason).toContain("repo");
+    expect(reason).toContain("prNumber");
+    expect(reason).not.toContain("secret value");
   });
 });
 
@@ -427,15 +521,15 @@ describe("sfnExecutions", () => {
     await expect(executions.start("n", { ...job(), debounceSeconds: 0 })).rejects.toThrow();
   });
 
-  it("reads an execution's status by name, and undefined when there's none", async () => {
+  it("reads an execution's status, and undefined when there's none", async () => {
     const c = client((command) => {
       const executionArn = (command as DescribeExecutionCommand).input.executionArn;
       if (executionArn?.endsWith(":gone")) throw named("ExecutionDoesNotExist");
       return { status: "ABORTED" };
     });
     const executions = sfnExecutions(c, SM);
-    expect(await executions.status("n")).toBe("ABORTED");
-    expect(await executions.status("gone")).toBeUndefined();
+    expect(await executions.status(arn("n"))).toBe("ABORTED");
+    expect(await executions.status(arn("gone"))).toBeUndefined();
     const sent = c.send.mock.calls[0]?.[0] as DescribeExecutionCommand | undefined;
     expect(sent?.input.executionArn).toBe(arn("n"));
   });
@@ -461,5 +555,24 @@ describe("sfnExecutions", () => {
     await executions.stop("arn:done", "why");
     await executions.stop("arn:never", "why");
     await expect(executions.stop("arn:busy", "why")).rejects.toThrow("ValidationException");
+  });
+});
+
+describe("sqsDeadLetter", () => {
+  it("sends the body to the dead-letter queue in its group, deduped by message ID", async () => {
+    const send = vi.fn(async (_command: SendMessageCommand) => ({}));
+    await sqsDeadLetter({ send }, "https://sqs/dlq")(
+      { messageId: "m1", body: "junk", attributes: { MessageGroupId: "acme/shop#12" } },
+      "The message isn't JSON.",
+    );
+    await sqsDeadLetter({ send }, "https://sqs/dlq")({ messageId: "m2", body: "junk" }, "why");
+    expect(send.mock.calls[0]?.[0].input).toEqual({
+      QueueUrl: "https://sqs/dlq",
+      MessageBody: "junk",
+      MessageGroupId: "acme/shop#12",
+      MessageDeduplicationId: "m1",
+      MessageAttributes: { reason: { DataType: "String", StringValue: "The message isn't JSON." } },
+    });
+    expect(send.mock.calls[1]?.[0].input.MessageGroupId).toBe("invalid");
   });
 });

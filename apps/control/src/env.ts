@@ -41,6 +41,8 @@ export function readControlEnv(env: Env): ControlEnv | { missing: string[] } {
 /** What the dispatcher Lambda reads from its environment, set by the Workflow stack. */
 export interface DispatchEnv {
   stateMachineArn: string;
+  /** Where messages that aren't valid jobs go. */
+  deadLetterQueueUrl: string;
   databaseSecretArn: string;
   databaseName: string;
 }
@@ -49,6 +51,7 @@ export interface DispatchEnv {
 export function readDispatchEnv(env: Env): DispatchEnv | { missing: string[] } {
   return readVariables(env, {
     stateMachineArn: "STATE_MACHINE_ARN",
+    deadLetterQueueUrl: "DEAD_LETTER_QUEUE_URL",
     databaseSecretArn: VARIABLES.databaseSecretArn,
     databaseName: VARIABLES.databaseName,
   });

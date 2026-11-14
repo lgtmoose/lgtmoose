@@ -141,7 +141,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
     },
     async succeedRun(runId, result) {
       const run = runs.get(runId);
-      if (run) Object.assign(run, { status: "succeeded", result });
+      if (run?.status === "running") Object.assign(run, { status: "succeeded", result });
     },
     async failRun(executionArn, error) {
       for (const run of runs.values()) {
@@ -160,6 +160,8 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
 interface Setup {
   /** The head the PR is at when it's read. */
   head?: string;
+  /** The PR's state when it's read. */
+  state?: string;
 }
 
 function harness(setup: Setup = {}) {
@@ -184,12 +186,16 @@ function harness(setup: Setup = {}) {
   };
   const runs = memoryRuns();
   const reader: PullReader = {
-    pull: async () => pull(setup.head ?? headSha),
+    pull: async () => ({ ...pull(setup.head ?? headSha), state: setup.state ?? "open" }),
     comments: async () => [],
   };
   const execution = { status: "RUNNING" as string | undefined };
+  const heartbeats = { count: 0 };
   const deps: StepDeps = {
     executionStatus: async () => execution.status,
+    heartbeat: async () => {
+      heartbeats.count += 1;
+    },
     store,
     runs,
     tokens: {
@@ -218,7 +224,7 @@ function harness(setup: Setup = {}) {
     archive: tarArchive,
     log: (message) => logs.push(message),
   };
-  return { deps, objects, files, runs, tokens, installations, logs, execution };
+  return { deps, objects, files, runs, tokens, installations, logs, execution, heartbeats };
 }
 
 const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
@@ -277,6 +283,41 @@ describe("prepare", () => {
 });
 
 describe("post", () => {
+  const shadowed = (h: ReturnType<typeof harness>) =>
+    [...h.objects.keys()].filter((key) => key.startsWith("shadow/"));
+
+  it.each([
+    ["the PR's head moved on", { head: "f".repeat(40) }, true],
+    ["the PR is closed", { state: "closed" }, true],
+    ["its execution was stopped", {}, false],
+  ])("posts nothing and records nothing when %s", async (reason, change, running) => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    Object.assign(setup, change);
+    const result = await post(h.deps, RUN_ID, async () => running);
+    expect(result).toMatchObject({ posted: false });
+    expect(shadowed(h)).toEqual([]);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    expect(h.logs).toContain("not posted");
+    expect(reason).toBeTruthy();
+  });
+
+  it("leaves the record to the newer run when it's stopped while posting", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    let checks = 0;
+    const result = await post(h.deps, RUN_ID, async () => {
+      checks += 1;
+      return checks === 1;
+    });
+    expect(result).toMatchObject({ posted: false });
+    expect(shadowed(h).length).toBeGreaterThan(0);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+  });
+
   it("posts the batches' findings as one review and records the run", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
@@ -286,6 +327,7 @@ describe("post", () => {
 
     expect(result).toEqual({
       runId: RUN_ID,
+      posted: true,
       event: "REQUEST_CHANGES",
       complete: true,
       findings: 1,
@@ -399,6 +441,16 @@ describe("runCommand", () => {
     };
     await runCommand(h.deps, { ...prepareCommand, job: "{}" }, { ...SETTINGS, shadow: true });
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: PREPARE_FAILED });
+  });
+
+  it("sends heartbeats while a step runs, and stops when it's done", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    const beats = h.heartbeats.count;
+    expect(beats).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.heartbeats.count).toBe(beats);
   });
 
   it("reports post on its task token, so stopping the execution can't cut it short", async () => {

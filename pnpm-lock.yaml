@@ -102,6 +102,9 @@ importers:
       '@aws-sdk/client-sfn':
         specifier: ^3.1167.0
         version: 3.1169.0
+      '@aws-sdk/client-sqs':
+        specifier: ^3.1167.0
+        version: 3.1167.0
       '@aws-sdk/client-sts':
         specifier: ^3.1167.0
         version: 3.1167.0

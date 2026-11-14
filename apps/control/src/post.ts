@@ -15,6 +15,11 @@ import type { RunManifest } from "./prepare.js";
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
   runId: string;
+  /**
+   * False when the run stopped counting before it posted: its execution was stopped, the PR's
+   * head moved on or the PR closed. Nothing was posted or recorded then.
+   */
+  posted: boolean;
   event: ReviewEvent;
   complete: boolean;
   findings: number;
@@ -76,8 +81,17 @@ function costOf(report: ReviewReport): number | undefined {
  * The post step: reads the prepared review and every batch's output, finishes the review
  * (placement, duplicates, decision, summary) and posts it: one review, the check run, the
  * summary comment and the status label. In shadow mode the poster records instead.
+ *
+ * A stopped execution's post task keeps running (it waits for a task token, so a stop can't
+ * cut it short). So it checks, before posting and again before recording, that the run still
+ * counts: `running()` (its execution isn't stopped), and the PR still open at the run's head.
+ * If not, it posts nothing and leaves the PR's record alone for the run that replaced it.
  */
-export async function post(deps: ControlDeps, runId: string): Promise<PostOutput> {
+export async function post(
+  deps: ControlDeps,
+  runId: string,
+  running: () => Promise<boolean> = async () => true,
+): Promise<PostOutput> {
   const run = await deps.runs.getRun(runId);
   if (run === undefined) throw new Error(`No review run ${runId}.`);
   const keys = runKeys(runId);
@@ -116,6 +130,21 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     await work.remove();
   }
 
+  const stale = async (): Promise<string | undefined> => {
+    if (!(await running())) return "its execution was stopped";
+    const latest = await github.reader.pull(target);
+    if (latest.state !== "open") return "the PR is closed";
+    if (latest.headSha !== pr.headSha) return "the PR's head moved on";
+    return undefined;
+  };
+  const skip = (reason: string): PostOutput => {
+    deps.log("not posted", { runId, reason });
+    const findings = report.inline.length + report.body.length;
+    return { runId, posted: false, event: report.decision.event, complete: false, findings };
+  };
+  const before = await stale();
+  if (before !== undefined) return skip(before);
+
   const { decision } = report;
   const payload = buildReview({
     event: decision.event,
@@ -143,6 +172,9 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
   }
 
+  // Posting takes a while: a stop or a push in the meantime means a newer run records the PR.
+  const after = await stale();
+  if (after !== undefined) return skip(after);
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,
     costUsd: costOf(report),
@@ -153,6 +185,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   deps.log("posted", { runId, event: decision.event, complete: report.complete });
   return {
     runId,
+    posted: true,
     event: decision.event,
     complete: report.complete,
     findings: report.inline.length + report.body.length,

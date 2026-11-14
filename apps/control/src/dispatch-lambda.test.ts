@@ -12,6 +12,7 @@ describe("dispatcher handler", () => {
     vi.stubEnv("DATABASE_SECRET_ARN", "arn:secret");
     vi.stubEnv("DATABASE_NAME", "lgtmoose");
     vi.stubEnv("STATE_MACHINE_ARN", "");
+    vi.stubEnv("DEAD_LETTER_QUEUE_URL", "https://sqs/dlq");
     const { handler } = await import("./dispatch-lambda.js");
     await expect(handler({ Records: [] })).rejects.toThrow(
       "Missing environment variables: STATE_MACHINE_ARN",

@@ -93,6 +93,8 @@ export interface WorkflowStackProps extends StackProps {
   providerSecrets: ReadonlyMap<string, ISecret>;
   /** The gateway's FIFO job queue, which the dispatcher consumes. */
   jobQueue: IQueue;
+  /** The job queue's dead-letter queue, where the dispatcher puts messages that aren't jobs. */
+  deadLetterQueue: IQueue;
 }
 
 /**
@@ -251,6 +253,7 @@ export class WorkflowStack extends Stack {
       securityGroups: [props.controlSecurityGroup],
       environment: {
         STATE_MACHINE_ARN: stateMachine.stateMachineArn,
+        DEAD_LETTER_QUEUE_URL: props.deadLetterQueue.queueUrl,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
         // Lets Node verify the RDS server certificate.
@@ -263,6 +266,7 @@ export class WorkflowStack extends Stack {
       }),
     });
     props.databaseSecret.grantRead(fn);
+    props.deadLetterQueue.grantSendMessages(fn);
     stateMachine.grantStartExecution(fn);
     stateMachine.grantExecution(fn, "states:StopExecution", "states:DescribeExecution");
     fn.addEventSource(

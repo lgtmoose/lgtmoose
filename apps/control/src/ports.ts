@@ -33,7 +33,10 @@ export interface RunStore {
   }): Promise<RunRecord>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   setFilesTotal(runId: string, filesTotal: number): Promise<void>;
-  /** Marks the run finished and records what it set on the PR. */
+  /**
+   * Marks the run finished and records what it set on the PR, if the run is still running: a
+   * run superseded or failed meanwhile is left as it is, and so is the PR.
+   */
   succeedRun(
     runId: string,
     result: {

@@ -75,6 +75,21 @@ describe("drizzleRunStore", () => {
     expect(await runRow(next.runId)).toMatchObject({ kind: "full" });
   });
 
+  it("doesn't succeed a run superseded meanwhile, or touch its PR", async () => {
+    const run = await start("arn:exec:9", 9);
+    await store.supersedeRun(run.runId);
+    await store.succeedRun(run.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      headSha: "a".repeat(40),
+      statusLabel: "lgtmoose: approved",
+      summaryCommentId: 5,
+    });
+    expect(await runRow(run.runId)).toMatchObject({ status: "superseded" });
+    const [pr] = await db.select().from(pullRequests).where(eq(pullRequests.id, run.pullRequestId));
+    expect(pr).toMatchObject({ lastReviewedSha: null, statusLabel: null, summaryCommentId: null });
+  });
+
   it("fails only an unfinished run of the execution", async () => {
     const run = await start("arn:exec:4", 4);
     await store.failRun("arn:exec:4", "States.TaskFailed");

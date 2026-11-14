@@ -1,9 +1,5 @@
-import {
-  DescribeExecutionCommand,
-  StartExecutionCommand,
-  StopExecutionCommand,
-  type SFNClient,
-} from "@aws-sdk/client-sfn";
+import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
+import { StartExecutionCommand, StopExecutionCommand, type SFNClient } from "@aws-sdk/client-sfn";
 import {
   dispatchedExecutions,
   pullRequestDispatches,
@@ -12,7 +8,8 @@ import {
 } from "@lgtmoose/db";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "./database.js";
-import type { DispatchStore, Executions } from "./dispatch.js";
+import { describeStatus } from "./sfn.js";
+import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
 
 function errorName(error: unknown): string | undefined {
   return error instanceof Error ? error.name : undefined;
@@ -21,20 +18,6 @@ function errorName(error: unknown): string | undefined {
 /** `arn:…:states:region:account:stateMachine:Name` → `…:execution:Name:<name>`. */
 export function executionArnOf(stateMachineArn: string, name: string): string {
   return `${stateMachineArn.replace(":stateMachine:", ":execution:")}:${name}`;
-}
-
-/** The status of an execution by ARN, or undefined when there's no such execution. */
-export async function describeStatus(
-  client: Pick<SFNClient, "send">,
-  executionArn: string,
-): Promise<string | undefined> {
-  try {
-    const reply = await client.send(new DescribeExecutionCommand({ executionArn }));
-    return reply.status;
-  } catch (error) {
-    if (errorName(error) === "ExecutionDoesNotExist") return undefined;
-    throw error;
-  }
 }
 
 /** The review state machine over Step Functions. */
@@ -55,7 +38,7 @@ export function sfnExecutions(
         return { started: false };
       }
     },
-    status: (name) => describeStatus(client, executionArnOf(stateMachineArn, name)),
+    status: (executionArn) => describeStatus(client, executionArn),
     async stop(executionArn, cause) {
       try {
         await client.send(new StopExecutionCommand({ executionArn, cause }));
@@ -65,6 +48,29 @@ export function sfnExecutions(
         if (status === "RUNNING") throw error;
       }
     },
+  };
+}
+
+/**
+ * Sends a message that isn't a valid job to the job queue's dead-letter queue (FIFO), with why.
+ * The message ID dedupes a redelivered copy.
+ */
+export function sqsDeadLetter(
+  client: Pick<SQSClient, "send">,
+  queueUrl: string,
+): DispatchDeps["deadLetter"] {
+  return async (record, reason) => {
+    await client.send(
+      new SendMessageCommand({
+        QueueUrl: queueUrl,
+        MessageBody: record.body,
+        MessageGroupId: record.attributes?.MessageGroupId ?? "invalid",
+        MessageDeduplicationId: record.messageId,
+        MessageAttributes: {
+          reason: { DataType: "String", StringValue: reason.slice(0, 1000) },
+        },
+      }),
+    );
   };
 }
 

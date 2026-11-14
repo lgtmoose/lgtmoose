@@ -16,10 +16,46 @@ export const POST_FAILED = "Lgtmoose.PostFailed";
  */
 const DEAD_TOKEN_ERRORS = new Set(["TaskTimedOut", "TaskDoesNotExist", "InvalidToken"]);
 
+/**
+ * How often a step tells Step Functions it's alive. Prepare and post wait for a task token
+ * with a heartbeat timeout (`TASK_HEARTBEAT` in the CDK app), so a control task that dies
+ * before it reports fails the step within that timeout, not the step's full one.
+ */
+export const HEARTBEAT_INTERVAL_MS = 30_000;
+
 /** What a step needs besides the control task's dependencies. */
 export interface StepDeps extends ControlDeps {
   /** The execution's status (RUNNING, ABORTED…), or undefined when there's no such execution. */
   executionStatus(executionArn: string): Promise<string | undefined>;
+  /** Sends a heartbeat on a task token. */
+  heartbeat(taskToken: string): Promise<void>;
+  /** For tests: the heartbeat interval. */
+  heartbeatIntervalMs?: number;
+}
+
+/**
+ * Runs `work` while sending heartbeats on its task token. A heartbeat that fails is logged and
+ * the beats stop: the step's outcome is reported (or found dead) on the token afterwards.
+ */
+async function withHeartbeat<T>(
+  deps: StepDeps,
+  taskToken: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  let beating = true;
+  const timer = setInterval(() => {
+    if (!beating) return;
+    deps.heartbeat(taskToken).catch((error: unknown) => {
+      beating = false;
+      deps.log("heartbeat failed", { error: causeOf(error) });
+    });
+  }, deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
+  timer.unref();
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 /** Message of an error, short, for the task token's cause. Never a credential: see the stages. */
@@ -76,7 +112,10 @@ export async function runCommand(
       let output;
       let failure: unknown;
       try {
-        output = await prepare(deps, parseJob(command.job), executionArn, settings);
+        const job = parseJob(command.job);
+        output = await withHeartbeat(deps, command.taskToken, () =>
+          prepare(deps, job, executionArn, settings),
+        );
       } catch (error) {
         failure = error;
         deps.log("prepare failed", { executionArn, error: causeOf(error) });
@@ -99,7 +138,8 @@ export async function runCommand(
     case "post": {
       let failure: unknown;
       try {
-        await post(deps, command.runId);
+        const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
+        await withHeartbeat(deps, command.taskToken, () => post(deps, command.runId, running));
       } catch (error) {
         failure = error;
         deps.log("post failed", { executionArn, error: causeOf(error) });

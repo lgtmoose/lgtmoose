@@ -191,7 +191,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       const run = await record(runId);
       if (run === undefined) throw new Error(`No review run ${runId}.`);
       await db.transaction(async (tx) => {
-        await tx
+        // Only a run still running: one superseded or failed meanwhile keeps its status, and
+        // the PR keeps what a newer run records.
+        const [updated] = await tx
           .update(reviewRuns)
           .set({
             status: "succeeded",
@@ -199,7 +201,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),
           })
-          .where(eq(reviewRuns.id, runId));
+          .where(and(eq(reviewRuns.id, runId), eq(reviewRuns.status, "running")))
+          .returning({ id: reviewRuns.id });
+        if (updated === undefined) return;
         await tx
           .update(pullRequests)
           .set({

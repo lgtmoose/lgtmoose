@@ -1,8 +1,9 @@
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SFNClient } from "@aws-sdk/client-sfn";
+import { SQSClient } from "@aws-sdk/client-sqs";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { databasePool } from "./database.js";
-import { drizzleDispatchStore, sfnExecutions } from "./dispatch-aws.js";
+import { drizzleDispatchStore, sfnExecutions, sqsDeadLetter } from "./dispatch-aws.js";
 import { dispatchBatch, type DispatchDeps, type QueueRecord } from "./dispatch.js";
 import { readDispatchEnv } from "./env.js";
 import { log } from "./log.js";
@@ -33,6 +34,7 @@ function dispatchDeps(): Promise<DispatchDeps> {
     return {
       executions: sfnExecutions(new SFNClient({}), env.stateMachineArn),
       store: drizzleDispatchStore(drizzle({ client: pool })),
+      deadLetter: sqsDeadLetter(new SQSClient({}), env.deadLetterQueueUrl),
       log,
     };
   })().catch((error: unknown) => {

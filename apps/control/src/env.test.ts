@@ -94,16 +94,18 @@ describe("readDispatchEnv", () => {
     expect(
       readDispatchEnv({
         STATE_MACHINE_ARN: " arn:sm ",
+        DEAD_LETTER_QUEUE_URL: "https://sqs/dlq",
         DATABASE_SECRET_ARN: "arn:secret",
         DATABASE_NAME: "lgtmoose",
       }),
     ).toEqual({
       stateMachineArn: "arn:sm",
+      deadLetterQueueUrl: "https://sqs/dlq",
       databaseSecretArn: "arn:secret",
       databaseName: "lgtmoose",
     });
     expect(readDispatchEnv({ STATE_MACHINE_ARN: "arn:sm", DATABASE_NAME: " " })).toEqual({
-      missing: ["DATABASE_SECRET_ARN", "DATABASE_NAME"],
+      missing: ["DEAD_LETTER_QUEUE_URL", "DATABASE_SECRET_ARN", "DATABASE_NAME"],
     });
   });
 });

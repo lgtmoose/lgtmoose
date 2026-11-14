@@ -179,6 +179,7 @@ interface State {
   MaxConcurrency?: number;
   ItemsPath?: string;
   SecondsPath?: string;
+  HeartbeatSeconds?: number;
   Parameters?: Record<string, unknown>;
   Retry?: { ErrorEquals: string[]; MaxAttempts?: number; BackoffRate?: number }[];
   Catch?: { ErrorEquals: string[]; Next: string }[];
@@ -241,6 +242,9 @@ describe("review state machine", () => {
     expect(States.Post).toMatchObject({ End: true });
     // A stop mustn't cut a post short: post reports on a task token instead of `.sync`.
     expect(States.Post?.Resource).toContain("ecs:runTask.waitForTaskToken");
+    // A control task that dies before reporting fails the step in minutes, not half an hour.
+    expect(States.Post?.HeartbeatSeconds).toBe(120);
+    expect(States.Prepare?.HeartbeatSeconds).toBe(120);
     expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 
     const items = States.Batches?.ItemProcessor;
@@ -445,8 +449,14 @@ describe("dispatcher", () => {
         "secretsmanager:GetSecretValue",
         "sqs:ReceiveMessage",
         "sqs:DeleteMessage",
+        "sqs:SendMessage",
       ]),
     );
+    // It sends only to the dead-letter queue, never to the job queue it consumes.
+    const sends = granted.filter((s) => actions([s]).includes("sqs:SendMessage"));
+    expect(sends.map((s) => JSON.stringify(s.Resource))).toEqual([
+      expect.stringContaining("JobDeadLetterQueue"),
+    ]);
     const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
     expect(secrets).toHaveLength(1);
     expect(actions(granted).some((a) => a.startsWith("s3:"))).toBe(false);
