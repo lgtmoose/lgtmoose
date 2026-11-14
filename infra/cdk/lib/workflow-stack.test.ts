@@ -245,6 +245,11 @@ describe("review state machine", () => {
     // A control task that dies before reporting fails the step in minutes, not half an hour,
     // with room for a cold Fargate start before the first heartbeat.
     expect(States.Post?.HeartbeatSeconds).toBe(300);
+    // Post resumes from its recorded progress, so a failed write or a dead task is retried.
+    expect(States.Post?.Retry?.map((retry) => retry.ErrorEquals)).toEqual([
+      ["ECS.AmazonECSException", "ECS.ServerException"],
+      ["Lgtmoose.PostFailed", "States.HeartbeatTimeout"],
+    ]);
     expect(States.Prepare?.HeartbeatSeconds).toBe(300);
     expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 

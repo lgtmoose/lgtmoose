@@ -4,7 +4,6 @@ import {
   type StopExecutionCommand,
 } from "@aws-sdk/client-sfn";
 import type { SendMessageCommand } from "@aws-sdk/client-sqs";
-import type { ReviewJob } from "@lgtmoose/core";
 import { describe, expect, it, vi } from "vitest";
 import { executionArnOf, sfnExecutions, sqsDeadLetter } from "./dispatch-aws.js";
 import {
@@ -14,6 +13,7 @@ import {
   executionName,
   executionPrefix,
   type DispatchDeps,
+  type DispatchJob,
   type DispatchedExecution,
   type WorkflowInput,
 } from "./dispatch.js";
@@ -25,7 +25,7 @@ const T1 = "2026-11-14T00:00:01.000Z";
 const T2 = "2026-11-14T00:00:02.000Z";
 const T3 = "2026-11-14T00:00:03.000Z";
 
-function job(overrides: Partial<ReviewJob> = {}): ReviewJob {
+function job(overrides: Partial<DispatchJob> = {}): DispatchJob {
   return {
     kind: "pr_updated",
     deliveryId: "d-new",
@@ -379,50 +379,6 @@ describe("dispatch", () => {
     expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
-  const untimed = (overrides: Partial<ReviewJob> = {}) => {
-    const value = job(overrides);
-    delete value.eventAt;
-    return value;
-  };
-
-  it("orders a job without an event time behind every job with one", async () => {
-    const f = fakeDeps();
-    // Queued before jobs carried a time: it starts, and stops nothing.
-    const first = untimed({ headSha: OLD, deliveryId: "d-untimed" });
-    expect(await dispatch(f.deps, first)).toMatchObject({ action: "started", stopped: [] });
-    expect(f.recorded.get(arn(nameOf(OLD)))?.eventAt).toEqual(new Date(0));
-    // It doesn't move the PR's newest event on, so the next timed job isn't stale, and stops it.
-    expect(await dispatch(f.deps, job({ eventAt: T1, deliveryId: "d-next" }))).toMatchObject({
-      action: "started",
-      stopped: [arn(nameOf(OLD))],
-    });
-    // Once the PR has timed events, an untimed job is older than all of them.
-    const late = untimed({ headSha: "c".repeat(40), deliveryId: "d-late" });
-    expect(await dispatch(f.deps, late)).toMatchObject({ action: "stale" });
-    expect(f.status(nameOf(NEW))).toBe("RUNNING");
-  });
-
-  it("stops every execution on an untimed close", async () => {
-    const f = fakeDeps();
-    await dispatch(f.deps, untimed({ headSha: OLD, deliveryId: "d-1" }));
-    await dispatch(f.deps, untimed({ deliveryId: "d-2" }));
-    const result = await dispatch(f.deps, untimed({ kind: "pr_closed", deliveryId: "d-3" }));
-    expect(result).toMatchObject({ action: "stopped" });
-    expect(f.status(nameOf(OLD))).toBe("ABORTED");
-    expect(f.status(nameOf(NEW))).toBe("ABORTED");
-  });
-
-  it("never retries for an untimed job", async () => {
-    const f = fakeDeps();
-    await dispatch(f.deps, untimed({ headSha: OLD, deliveryId: "d-1" }));
-    await dispatch(f.deps, untimed({ deliveryId: "d-2" }));
-    must(f.executions.get(nameOf(OLD))).status = "ABORTED";
-    // An untimed redelivery for the old head: its execution was aborted, never reviewed.
-    const again = untimed({ kind: "pr_opened", headSha: OLD, deliveryId: "d-3" });
-    expect(await dispatch(f.deps, again)).toMatchObject({ action: "duplicate" });
-    expect(f.executions.has(nameOf(OLD, "d-3"))).toBe(false);
-  });
-
   it("defers comment jobs to M5 and ignores a push without a head", async () => {
     const f = fakeDeps();
     expect(await dispatch(f.deps, job({ kind: "comment", commentId: 3 }))).toMatchObject({
@@ -479,6 +435,18 @@ describe("dispatchBatch", () => {
       record("m2", "a", job()),
     ]);
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }]);
+  });
+
+  it("dead-letters a job without an event time: it can't be ordered", async () => {
+    const f = fakeDeps();
+    const untimed: Partial<DispatchJob> = job();
+    delete untimed.eventAt;
+    const result = await dispatchBatch(f.deps, [record("m1", "a", untimed)]);
+    expect(result).toEqual({ batchItemFailures: [] });
+    expect(f.deadLettered).toEqual([
+      { messageId: "m1", reason: expect.stringContaining("eventAt") },
+    ]);
+    expect(f.executions.size).toBe(0);
   });
 
   it("dead-letters a message that isn't a job and goes on with its group", async () => {

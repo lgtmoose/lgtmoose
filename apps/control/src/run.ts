@@ -4,18 +4,12 @@ import { parseJob } from "./job.js";
 import type { ControlDeps } from "./ports.js";
 import { post } from "./post.js";
 import { prepare } from "./prepare.js";
-import { errorName } from "./sfn.js";
+import { isDeadToken } from "./sfn.js";
 
 /** The task-token error for a prepare step that failed, as the state machine's catch sees it. */
 export const PREPARE_FAILED = "Lgtmoose.PrepareFailed";
 /** The task-token error for a post step that failed. */
 export const POST_FAILED = "Lgtmoose.PostFailed";
-
-/**
- * What Step Functions answers a task token that no longer counts: its task timed out (and may
- * be running again as a retry), or its execution ended or was stopped.
- */
-const DEAD_TOKEN_ERRORS = new Set(["TaskTimedOut", "TaskDoesNotExist", "InvalidToken"]);
 
 /**
  * How often a step tells Step Functions it's alive. Prepare and post wait for a task token
@@ -34,30 +28,51 @@ export interface StepDeps extends ControlDeps {
   heartbeatIntervalMs?: number;
 }
 
+/** This attempt of the step was given up: a retry has taken over. */
+export class StepAbandoned extends Error {
+  override readonly name = "StepAbandoned";
+}
+
 /**
  * Runs `work` while sending heartbeats on its task token: one at once, then every interval. A
- * failed heartbeat (throttling, a network blip) is logged and the beats go on; only a dead
- * token stops them, since then nothing is waiting for this step. Its outcome is still reported
- * (or found dead) on the token afterwards.
+ * failed heartbeat (throttling, a network blip) is logged and the beats go on. A dead token
+ * stops them, and then:
+ * - on a running execution, this attempt timed out and a retry has the step: `work` is given
+ *   up (StepAbandoned), so the two don't race;
+ * - on a stopped one, `work` finishes, and its outcome is found dead on the token afterwards
+ *   (a stop mustn't cut a post short).
  */
 async function withHeartbeat<T>(
   deps: StepDeps,
+  executionArn: string,
   taskToken: string,
   work: () => Promise<T>,
 ): Promise<T> {
   let beating = true;
+  let abandon: (reason: StepAbandoned) => void = () => undefined;
+  const abandoned = new Promise<never>((_, reject) => {
+    abandon = reject;
+  });
+  // Rejected only to end the race below; never left unhandled.
+  abandoned.catch(() => undefined);
+  const onDead = async () => {
+    beating = false;
+    const status = await deps.executionStatus(executionArn).catch(() => undefined);
+    if (status === "RUNNING") abandon(new StepAbandoned("a retry has taken over this step"));
+  };
   const beat = () => {
     if (!beating) return;
-    deps.heartbeat(taskToken).catch((error: unknown) => {
-      if (DEAD_TOKEN_ERRORS.has(errorName(error) ?? "")) beating = false;
-      deps.log("heartbeat failed", { error: causeOf(error), stopping: !beating });
+    deps.heartbeat(taskToken).catch(async (error: unknown) => {
+      const dead = isDeadToken(error);
+      deps.log("heartbeat failed", { error: causeOf(error), stopping: dead });
+      if (dead) await onDead();
     });
   };
   beat();
   const timer = setInterval(beat, deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
   timer.unref();
   try {
-    return await work();
+    return await Promise.race([work(), abandoned]);
   } finally {
     clearInterval(timer);
   }
@@ -84,7 +99,7 @@ async function report(
   try {
     await send();
   } catch (error) {
-    if (!DEAD_TOKEN_ERRORS.has(errorName(error) ?? "")) throw error;
+    if (!isDeadToken(error)) throw error;
     const status = await deps.executionStatus(executionArn);
     if (status !== "ABORTED") {
       // Running: this attempt timed out and a retry reports. Ended any other way: the
@@ -95,6 +110,11 @@ async function report(
     await abandoned();
     deps.log("execution stopped during the step", { executionArn });
   }
+}
+
+/** A retry has the step: this attempt reports nothing. The process exits with its work. */
+function gaveUp(deps: StepDeps, executionArn: string): void {
+  deps.log("gave up the step: a retry has taken over", { executionArn });
 }
 
 /**
@@ -118,10 +138,11 @@ export async function runCommand(
       let failure: unknown;
       try {
         const job = parseJob(command.job);
-        output = await withHeartbeat(deps, command.taskToken, () =>
+        output = await withHeartbeat(deps, executionArn, command.taskToken, () =>
           prepare(deps, job, executionArn, settings),
         );
       } catch (error) {
+        if (error instanceof StepAbandoned) return gaveUp(deps, executionArn);
         failure = error;
         deps.log("prepare failed", { executionArn, error: causeOf(error) });
       }
@@ -144,8 +165,11 @@ export async function runCommand(
       let failure: unknown;
       try {
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
-        await withHeartbeat(deps, command.taskToken, () => post(deps, command.runId, running));
+        await withHeartbeat(deps, executionArn, command.taskToken, () =>
+          post(deps, command.runId, running),
+        );
       } catch (error) {
+        if (error instanceof StepAbandoned) return gaveUp(deps, executionArn);
         failure = error;
         deps.log("post failed", { executionArn, error: causeOf(error) });
       }

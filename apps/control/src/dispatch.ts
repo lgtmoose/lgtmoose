@@ -50,8 +50,12 @@ export const reviewJobSchema = workflowJobSchema.extend({
   reviewId: z.number().int().positive().optional(),
   threadNodeId: z.string().min(1).optional(),
   receivedAt: z.iso.datetime(),
-  eventAt: z.iso.datetime().optional(),
+  // Required: the dispatcher orders a PR's jobs by it. A job without one is invalid.
+  eventAt: z.iso.datetime(),
 });
+
+/** A queued job, as the dispatcher accepts it: with the event time it orders jobs by. */
+export type DispatchJob = ReviewJob & { eventAt: string };
 
 /** The review workflow's input: the job, and how long to wait before preparing. */
 export interface WorkflowInput extends ReviewJob {
@@ -93,16 +97,6 @@ export function executionName(
 export function debounceSeconds(job: Pick<ReviewJob, "kind">): number {
   return job.kind === "pr_updated" ? PUSH_DEBOUNCE_SECONDS : 0;
 }
-
-/**
- * The recorded event time of an execution started by a job without one (queued before jobs
- * carried it): older than any job with one. The gateway's receipt time can't stand in for it,
- * since it isn't on GitHub's clock or in its whole seconds.
- */
-export const UNTIMED = new Date(0);
-
-/** Later than any event: an untimed close stops every execution. */
-const END = new Date(8.64e15);
 
 /** The review state machine, as the dispatcher uses it. */
 export interface Executions {
@@ -215,18 +209,15 @@ async function startExecution(
 async function review(
   deps: DispatchDeps,
   job: ReviewJob & { headSha: string },
-  timed: Date | undefined,
+  eventAt: Date,
 ): Promise<DispatchResult> {
-  if (timed !== undefined) await deps.store.advance(job.repo, job.prNumber, timed, false);
-  // An untimed job stops nothing: nothing is older than it.
-  const eventAt = timed ?? UNTIMED;
+  await deps.store.advance(job.repo, job.prNumber, eventAt, false);
   let name = executionName(job.repo, job.prNumber, job.headSha);
   let { started, executionArn } = await startExecution(deps, job, name, eventAt);
   let action: "started" | "retried" = "started";
   const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
-  // A job for a head that was reviewed, or is being, is a duplicate. So is an untimed one: it
-  // can't be told from a late redelivery of an old push.
-  if (!started && timed !== undefined && (await needsRetry(deps, job, name, unstopped))) {
+  // A job for a head that was reviewed, or is being, is a duplicate.
+  if (!started && (await needsRetry(deps, job, name, unstopped))) {
     name = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
     ({ started, executionArn } = await startExecution(deps, job, name, eventAt));
     action = "retried";
@@ -269,7 +260,7 @@ async function conversation(_deps: DispatchDeps, job: ReviewJob): Promise<Dispat
 }
 
 /** Handles one job. Throws when it should be retried (and, in the end, dead-lettered). */
-export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
+export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<DispatchResult> {
   switch (job.kind) {
     case "comment":
     case "review":
@@ -283,13 +274,9 @@ export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<Disp
     case "pr_closed":
       break;
   }
-  const eventAt = job.eventAt === undefined ? undefined : new Date(job.eventAt);
+  const eventAt = new Date(job.eventAt);
   const latest = await deps.store.latest(job.repo, job.prNumber);
-  // An untimed job was queued before jobs carried a time, so before every timed job of its PR.
-  if (eventAt === undefined && latest !== undefined) {
-    return { action: "stale", reason: "untimed, and the PR has newer timed events" };
-  }
-  if (eventAt !== undefined && latest !== undefined) {
+  if (latest !== undefined) {
     const last = latest.eventAt.getTime();
     const at = eventAt.getTime();
     // A close wins a tie: a reopen in the same second as the close is taken as before it.
@@ -301,11 +288,9 @@ export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<Disp
     }
   }
   if (job.kind === "pr_closed") {
-    // Untimed (with no timed events seen), it's the newest thing known about the PR: stop
-    // everything. Stopping is safe even if it's wrong, since post checks the PR is open.
-    if (eventAt !== undefined) await deps.store.advance(job.repo, job.prNumber, eventAt, true);
+    await deps.store.advance(job.repo, job.prNumber, eventAt, true);
     const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
-    const stopped = await stopOlder(deps, unstopped, "Pull request closed.", eventAt ?? END, {
+    const stopped = await stopOlder(deps, unstopped, "Pull request closed.", eventAt, {
       inclusive: true,
     });
     return { action: "stopped", stopped };
@@ -315,7 +300,7 @@ export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<Disp
 }
 
 /** A queue message's job. Errors name the bad fields, never their values. */
-export function parseQueuedJob(body: string): ReviewJob {
+export function parseQueuedJob(body: string): DispatchJob {
   let value: unknown;
   try {
     value = JSON.parse(body);
@@ -329,7 +314,7 @@ export function parseQueuedJob(body: string): ReviewJob {
   }
   // JSON has no undefined, so an optional field is absent rather than set to undefined, as
   // ReviewJob's exact optional properties want.
-  return parsed.data as ReviewJob;
+  return parsed.data as DispatchJob;
 }
 
 /** One SQS record, as Lambda delivers it. */
@@ -362,7 +347,7 @@ export async function dispatchBatch(
       failures.push({ itemIdentifier: record.messageId });
       continue;
     }
-    let job: ReviewJob | undefined;
+    let job: DispatchJob | undefined;
     try {
       try {
         job = parseQueuedJob(record.body);

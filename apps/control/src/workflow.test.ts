@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
 import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@lgtmoose/pipeline";
-import { ShadowPoster } from "@lgtmoose/poster";
+import { ShadowPoster, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
 import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
@@ -117,10 +117,16 @@ interface Run extends RunRecord {
   result?: Parameters<RunStore["succeedRun"]>[1];
 }
 
-function memoryRuns(): RunStore & { runs: Map<string, Run> } {
+function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boolean } } {
   const runs = new Map<string, Run>();
+  /** Whether a newer run of the PR has posted, as the test sets it. */
+  const newer = { posted: false };
   return {
     runs,
+    newer,
+    async newerRunPosted() {
+      return newer.posted;
+    },
     async startRun(input) {
       const run: Run = {
         runId: RUN_ID,
@@ -306,6 +312,85 @@ describe("post", () => {
     expect(reason).toBeTruthy();
   });
 
+  /** Counts the poster's calls, and fails the first `fail` calls of the named one. */
+  function countingPoster(
+    h: ReturnType<typeof harness>,
+    fail?: { what: keyof Poster; times: number },
+  ) {
+    const calls: string[] = [];
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const real = await github(installationId);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          const wrap =
+            <K extends keyof Poster>(what: K) =>
+            async (...args: Parameters<Poster[K]>) => {
+              calls.push(what);
+              if (fail?.what === what && fail.times > 0) {
+                fail.times -= 1;
+                throw new Error("GitHub 502");
+              }
+              return (poster[what] as (...a: Parameters<Poster[K]>) => unknown)(...args);
+            };
+          return {
+            ...poster,
+            submitReview: wrap("submitReview"),
+            completeCheckRun: wrap("completeCheckRun"),
+            upsertSummaryComment: wrap("upsertSummaryComment"),
+            startCheckRun: wrap("startCheckRun"),
+            labels: (ref) => {
+              calls.push("labels");
+              return poster.labels(ref);
+            },
+          } as Poster;
+        },
+      };
+    };
+    return calls;
+  }
+
+  it("records the review when a later write fails, and a retry finishes the rest", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h, { what: "upsertSummaryComment", times: 1 });
+    await expect(post(h.deps, RUN_ID)).rejects.toThrow("GitHub 502");
+    // The review is on GitHub, so the run is recorded, with the summary comment it already had.
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({
+      status: "succeeded",
+      result: { headSha, summaryCommentId: 41 },
+    });
+    // The retry doesn't post the review or the check run again.
+    calls.length = 0;
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
+  it("carries on a retry whose review is posted even if the head moved meanwhile", async () => {
+    const setup: Setup = {};
+    const h = harness(setup);
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    countingPoster(h, { what: "completeCheckRun", times: 1 });
+    await expect(post(h.deps, RUN_ID)).rejects.toThrow("GitHub 502");
+    setup.head = "f".repeat(40);
+    expect(await post(h.deps, RUN_ID, async () => false)).toMatchObject({ posted: true });
+  });
+
+  it("leaves the summary and label to a newer run that already posted", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    h.runs.newer.posted = true;
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+  });
+
   it("records what it posted when it's stopped while posting", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
@@ -450,6 +535,8 @@ describe("runCommand", () => {
   it("beats at once, keeps beating after a failed beat, and stops on a dead token", async () => {
     const h = harness();
     h.deps.heartbeatIntervalMs = 5;
+    // Stopped: the step finishes its work, and reports nothing on the dead token.
+    h.execution.status = "ABORTED";
     const errors = [new Error("throttled"), dead()];
     let beats = 0;
     h.deps.heartbeat = async () => {
@@ -464,6 +551,38 @@ describe("runCommand", () => {
     expect(atStart).toBe(1);
     expect(beats).toBe(2);
     expect(h.logs.filter((line) => line === "heartbeat failed")).toHaveLength(2);
+    expect(h.tokens.succeeded).toHaveLength(1);
+  });
+
+  it("gives the step up when its token dies on a running execution: a retry has it", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    let beats = 0;
+    let died: () => void = () => undefined;
+    const tokenDied = new Promise<void>((resolve) => {
+      died = resolve;
+    });
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      if (beats === 1) return;
+      died();
+      throw dead();
+    };
+    // The clone waits until the token has died, so the step is mid-work when it does.
+    let cloned = false;
+    const clone = h.deps.clone.bind(h.deps);
+    h.deps.clone = async (options) => {
+      await tokenDied;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cloned = true;
+      return clone(options);
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(cloned).toBe(false);
+    expect(h.logs).toContain("gave up the step: a retry has taken over");
+    // Nothing reported on the token, and the retry's outcome isn't touched.
+    expect(h.tokens.succeeded).toEqual([]);
+    expect(h.tokens.failed).toEqual([]);
   });
 
   it("sends heartbeats while a step runs, and stops when it's done", async () => {

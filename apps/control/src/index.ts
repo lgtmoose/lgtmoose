@@ -1,6 +1,6 @@
 import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
-import { describeStatus, errorName, sendHeartbeat } from "./sfn.js";
+import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
 import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
 import { runCommand } from "./run.js";
 
@@ -19,10 +19,20 @@ async function main(): Promise<void> {
   const sfn = new SFNClient({});
   // The heartbeat clock started when the step scheduled the task: beat before the slow setup
   // (secrets, the database) so a cold start doesn't use it up. The step beats on from there.
+  // A dead token means this attempt no longer counts (a retry has the step, or the execution
+  // was stopped) and nothing has been done yet: stop now rather than race the retry.
   if (command.command !== "fail") {
-    await sendHeartbeat(sfn, command.taskToken).catch((error: unknown) => {
+    try {
+      await sendHeartbeat(sfn, command.taskToken);
+    } catch (error) {
+      if (isDeadToken(error)) {
+        process.stdout.write(
+          `${JSON.stringify({ message: "task token dead at start; exiting" })}\n`,
+        );
+        return;
+      }
       process.stderr.write(`early heartbeat failed: ${errorName(error) ?? "unknown"}\n`);
-    });
+    }
   }
   const deps = await awsControlDeps(env, { shadow: settings.shadow });
   try {
@@ -40,7 +50,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+// Exit once the step is done: an attempt that gave up (see StepAbandoned) may still have work
+// in flight, such as a clone, that must not carry on.
+main()
+  .catch((error: unknown) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  })
+  .finally(() => process.exit());

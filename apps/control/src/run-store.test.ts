@@ -99,7 +99,11 @@ describe("drizzleRunStore", () => {
   it("leaves the PR to a newer run that already posted", async () => {
     const older = await start("arn:exec:10", 10);
     const newer = await start("arn:exec:11", 10);
+    expect(await store.newerRunPosted(older.runId)).toBe(false);
     await store.succeedRun(newer.runId, posted("b".repeat(40), 7));
+    // The older run can tell before it writes the PR's summary or label.
+    expect(await store.newerRunPosted(older.runId)).toBe(true);
+    expect(await store.newerRunPosted(newer.runId)).toBe(false);
     await store.succeedRun(older.runId, posted("a".repeat(40), 6));
     expect(await runRow(older.runId)).toMatchObject({ status: "succeeded" });
     expect(await prRow(newer.pullRequestId)).toMatchObject({

@@ -16,12 +16,13 @@ import {
   ShadowPoster,
   installationTokenProvider,
 } from "@lgtmoose/poster";
-import { and, eq, gt, inArray, ne } from "drizzle-orm";
+import { and, eq, gt, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
 import type { ControlEnv } from "./env.js";
+import { errorName } from "./sfn.js";
 import type { ArtifactStore, ControlDeps, RunRecord, RunStore, TaskTokens } from "./ports.js";
 
 /** The artifact bucket over S3. */
@@ -54,7 +55,7 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
         const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
         return (await object.Body?.transformToString("utf8")) ?? "";
       } catch (error) {
-        if (error instanceof Error && error.name === "NoSuchKey") return undefined;
+        if (errorName(error) === "NoSuchKey") return undefined;
         throw error;
       }
     },
@@ -109,6 +110,25 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 
 /** Any drizzle Postgres database: node-postgres in the task, PGlite in tests. */
 type Db = PgDatabase<PgQueryResultHKT>;
+
+/** Whether a run of the PR created after `run` has succeeded: posted its review. */
+async function newerRunPosted(
+  db: Pick<Db, "select">,
+  run: { pullRequestId: string; createdAt: Date },
+): Promise<boolean> {
+  const [newer] = await db
+    .select({ id: reviewRuns.id })
+    .from(reviewRuns)
+    .where(
+      and(
+        eq(reviewRuns.pullRequestId, run.pullRequestId),
+        eq(reviewRuns.status, "succeeded"),
+        gt(reviewRuns.createdAt, run.createdAt),
+      ),
+    )
+    .limit(1);
+  return newer !== undefined;
+}
 
 /** `review_runs` and `pull_requests` with drizzle. */
 export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): RunStore {
@@ -188,11 +208,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       await db.update(reviewRuns).set({ filesTotal }).where(eq(reviewRuns.id, runId));
     },
     async succeedRun(runId, result) {
-      const run = await record(runId);
-      if (run === undefined) throw new Error(`No review run ${runId}.`);
       await db.transaction(async (tx) => {
         // It posted, so it succeeded, even if it was superseded or failed while posting.
-        const [updated] = await tx
+        const [run] = await tx
           .update(reviewRuns)
           .set({
             status: "succeeded",
@@ -201,23 +219,18 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
-          .returning({ createdAt: reviewRuns.createdAt });
-        if (updated === undefined) return;
+          .returning({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt });
+        if (run === undefined) throw new Error(`No review run ${runId}.`);
+        // Two runs of a PR finishing at once take turns here, so the newer-run check below
+        // sees the other's committed status (each statement reads afresh under READ COMMITTED).
+        await tx
+          .select({ id: pullRequests.id })
+          .from(pullRequests)
+          .where(eq(pullRequests.id, run.pullRequestId))
+          .for("update");
         // The PR's record is the newest posted run's: an older run that finished posting later
         // (stopped mid-post, say) leaves it to the newer one.
-        const [newer] = await tx
-          .select({ id: reviewRuns.id })
-          .from(reviewRuns)
-          .where(
-            and(
-              eq(reviewRuns.pullRequestId, run.pullRequestId),
-              eq(reviewRuns.status, "succeeded"),
-              ne(reviewRuns.id, runId),
-              gt(reviewRuns.createdAt, updated.createdAt),
-            ),
-          )
-          .limit(1);
-        if (newer !== undefined) return;
+        if (await newerRunPosted(tx, run)) return;
         await tx
           .update(pullRequests)
           .set({
@@ -228,6 +241,14 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           })
           .where(eq(pullRequests.id, run.pullRequestId));
       });
+    },
+    async newerRunPosted(runId) {
+      const [run] = await db
+        .select({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt })
+        .from(reviewRuns)
+        .where(eq(reviewRuns.id, runId));
+      if (run === undefined) throw new Error(`No review run ${runId}.`);
+      return newerRunPosted(db, run);
     },
     async failRun(executionArn, error) {
       // A run that already finished (or was superseded) keeps its status.

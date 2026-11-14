@@ -9,6 +9,7 @@ import {
 } from "@lgtmoose/pipeline";
 import { annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
+import { z } from "zod";
 import type { ControlDeps } from "./ports.js";
 import type { RunManifest } from "./prepare.js";
 
@@ -68,6 +69,39 @@ function withoutUndefined<T extends object>(
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as {
     [K in keyof T]: Exclude<T[K], undefined>;
   };
+}
+
+/** What the post step has posted for a run, so far. */
+interface PostProgress {
+  review?: boolean;
+  checkRun?: boolean;
+  summary?: boolean;
+  summaryCommentId?: number;
+  label?: boolean;
+}
+
+const postProgressSchema = z.object({
+  review: z.boolean().optional(),
+  checkRun: z.boolean().optional(),
+  summary: z.boolean().optional(),
+  summaryCommentId: z.number().int().positive().optional(),
+  label: z.boolean().optional(),
+});
+
+/** Next to the run's prepared review: `runs/<id>/posted.json`. */
+export function postProgressKey(runId: string): string {
+  return runKeys(runId).prepared.replace(/prepared\.json$/, "posted.json");
+}
+
+/** An earlier attempt's progress. Unreadable progress counts as none: posting starts over. */
+function readProgress(text: string | undefined): PostProgress {
+  if (text === undefined) return {};
+  try {
+    const parsed = postProgressSchema.safeParse(JSON.parse(text));
+    return parsed.success ? withoutUndefined(parsed.data) : {};
+  } catch {
+    return {};
+  }
 }
 
 /** Why a run for `headSha` no longer counts, given the PR as GitHub has it now. */
@@ -141,7 +175,16 @@ export async function post(
 
   // Why the run no longer counts, if it doesn't. Marked superseded here, since the dispatcher
   // may never stop this execution (it may not have seen the event that made it stale).
-  const stale = (await running()) ? staleReason(latest, pr.headSha) : "its execution was stopped";
+  // What an earlier attempt of this step posted: a retry carries on from there, and once the
+  // review is posted the run is recorded whatever happens to the PR meanwhile.
+  const progressKey = postProgressKey(runId);
+  const progress = readProgress(await deps.store.getText(progressKey));
+  const save = () => deps.store.putText(progressKey, JSON.stringify(progress));
+
+  let stale: string | undefined;
+  if (!progress.review) {
+    stale = (await running()) ? staleReason(latest, pr.headSha) : "its execution was stopped";
+  }
   if (stale !== undefined) {
     await deps.runs.supersedeRun(runId);
     deps.log("not posted", { runId, reason: stale });
@@ -157,32 +200,71 @@ export async function post(
     files: prepared.files,
     nitCap: config.gate.nit_cap,
   });
-  await poster.submitReview(pull, pr.headSha, payload);
-  if (decision.conclusion !== undefined) {
-    await poster.completeCheckRun(pull, {
+  const record = () =>
+    deps.runs.succeedRun(runId, {
+      filesDone: report.plan.reviewed,
+      costUsd: costOf(report),
       headSha: pr.headSha,
-      conclusion: decision.conclusion,
-      title: CHECK_TITLE[decision.event],
-      summary: report.summary,
-      annotations: annotationsFor([...report.inline, ...report.body]),
+      // The label it set, or meant to: the reconciler re-syncs a label that didn't take.
+      statusLabel: decision.label,
+      summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
-  }
-  const comment = await poster.upsertSummaryComment(pull, report.summary, run.summaryCommentId);
-  if (decision.label !== undefined) {
-    const labels = await syncStatusLabel(poster.labels(pull), {
-      target: decision.label,
-      statusLabels: statusLabels(config),
-    });
-    if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
+  try {
+    if (!progress.review) {
+      await poster.submitReview(pull, pr.headSha, payload);
+      progress.review = true;
+      await save();
+    }
+    if (decision.conclusion !== undefined && !progress.checkRun) {
+      await poster.completeCheckRun(pull, {
+        headSha: pr.headSha,
+        conclusion: decision.conclusion,
+        title: CHECK_TITLE[decision.event],
+        summary: report.summary,
+        annotations: annotationsFor([...report.inline, ...report.body]),
+      });
+      progress.checkRun = true;
+      await save();
+    }
+    // The summary comment and the label are the PR's, not this head's: once a newer run has
+    // posted they're its, and an older run finishing late leaves them alone.
+    if (!progress.summary && !(await deps.runs.newerRunPosted(runId))) {
+      const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
+      const comment = await poster.upsertSummaryComment(pull, report.summary, summaryId);
+      const id = comment.id ?? summaryId;
+      if (id !== undefined) progress.summaryCommentId = id;
+      progress.summary = true;
+      await save();
+    }
+    if (
+      decision.label !== undefined &&
+      !progress.label &&
+      !(await deps.runs.newerRunPosted(runId))
+    ) {
+      const labels = await syncStatusLabel(poster.labels(pull), {
+        target: decision.label,
+        statusLabels: statusLabels(config),
+      });
+      if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
+      progress.label = true;
+      await save();
+    }
+  } catch (error) {
+    // The review is on GitHub: record the run, with the summary comment if it got that far, so
+    // a later run edits that comment and doesn't review the head again. Then fail the step,
+    // whose retry finishes the rest.
+    if (progress.review) {
+      await record().catch((recordError: unknown) => {
+        deps.log("recording a partly posted run failed", {
+          runId,
+          error: recordError instanceof Error ? recordError.message : String(recordError),
+        });
+      });
+    }
+    throw error;
   }
 
-  await deps.runs.succeedRun(runId, {
-    filesDone: report.plan.reviewed,
-    costUsd: costOf(report),
-    headSha: pr.headSha,
-    statusLabel: decision.label,
-    summaryCommentId: comment.id ?? run.summaryCommentId,
-  });
+  await record();
   deps.log("posted", { runId, event: decision.event, complete: report.complete });
   return {
     runId,

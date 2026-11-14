@@ -67,6 +67,9 @@ const URL_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(15));
  */
 const PRESIGNER_SESSION = Duration.hours(1);
 
+/** The task-token error for a failed post step (`POST_FAILED` in @lgtmoose/control). */
+const POST_FAILED = "Lgtmoose.PostFailed";
+
 /** RunTask failing to start a task: no capacity, throttling. Safe to retry for any step. */
 const ECS_START_ERRORS = ["ECS.AmazonECSException", "ECS.ServerException"];
 
@@ -280,11 +283,20 @@ export class ReviewWorkflow extends Construct {
       IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       JsonPath.DISCARD,
     );
-    // Posting twice would post two reviews: only retry when the task never started.
+    // The task never started: safe to retry at once.
     post.addRetry({
       errors: ECS_START_ERRORS,
       maxAttempts: 3,
       interval: Duration.seconds(30),
+      backoffRate: 2,
+      jitterStrategy: JitterType.FULL,
+    });
+    // A GitHub write failed, or the task died: post records its progress in the run's
+    // objects, so a retry carries on from there and never posts a second review.
+    post.addRetry({
+      errors: [POST_FAILED, Errors.HEARTBEAT_TIMEOUT],
+      maxAttempts: 2,
+      interval: Duration.minutes(1),
       backoffRate: 2,
       jitterStrategy: JitterType.FULL,
     });

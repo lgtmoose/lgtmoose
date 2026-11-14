@@ -49,6 +49,11 @@ export interface RunStore {
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */
   failRun(executionArn: string, error: string): Promise<void>;
+  /**
+   * Whether a run of the same PR created after this one has succeeded. Its summary comment and
+   * label are then the PR's, and an older run mustn't write over them.
+   */
+  newerRunPosted(runId: string): Promise<boolean>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
 }
