@@ -115,6 +115,40 @@ describe("awsCredentialStore", () => {
     });
   });
 
+  it("puts the deletion back when a restored secret can't take the new value", async () => {
+    const scheduled = () => {
+      throw awsErr("InvalidRequestException", "already scheduled for deletion.");
+    };
+    const updateFails = () => {
+      throw awsErr("AccessDeniedException", "not allowed to update");
+    };
+    const { client, sent } = fake([scheduled, () => ({}), updateFails, () => ({})]);
+    const error = await awsCredentialStore(client, "eu-west-2")
+      .put(LABEL, "VALUE-SECRET")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("not allowed to update");
+    expect(String(error)).toContain("scheduled for deletion again, in 7 days");
+    expect(String(error)).not.toContain("VALUE-SECRET");
+    expect((sent[3] as DeleteSecretCommand).input).toEqual({
+      SecretId: "lgtmoose/provider/codex",
+      RecoveryWindowInDays: 7,
+    });
+  });
+
+  it("says the OLD credential is live when it can't put the deletion back either", async () => {
+    const scheduled = () => {
+      throw awsErr("InvalidRequestException", "already scheduled for deletion.");
+    };
+    const fails = () => {
+      throw awsErr("AccessDeniedException", "no");
+    };
+    const { client } = fake([scheduled, () => ({}), fails, fails]);
+    const error = await awsCredentialStore(client, "eu-west-2")
+      .put(LABEL, "VALUE")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("It holds the OLD credential again");
+  });
+
   it("wraps other errors without the value", async () => {
     const { client } = fake([
       () => {
@@ -203,7 +237,7 @@ describe("awsCredentialStore", () => {
     const store = awsCredentialStore(client, "eu-west-2");
     expect(await store.remove("codex", 7)).toEqual({
       status: "already-scheduled",
-      deletionDate: earlier,
+      scheduledSince: earlier,
     });
     expect(sent[1]).toBeInstanceOf(DescribeSecretCommand);
     // The date is a nicety: not being able to read it doesn't fail the remove.

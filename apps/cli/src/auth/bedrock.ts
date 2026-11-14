@@ -3,7 +3,7 @@ import {
   GetFoundationModelAvailabilityCommand,
   ListFoundationModelsCommand,
 } from "@aws-sdk/client-bedrock";
-import { awsError } from "../aws-errors.js";
+import { awsError, awsMessage, errorName } from "../aws-errors.js";
 
 /** Whether this account can call one Bedrock model in the region. */
 export interface ModelAccess {
@@ -18,6 +18,13 @@ export interface ModelAccess {
   /** Why it isn't usable. Empty when usable. */
   problems: string[];
   /**
+   * How it can be called: `ON_DEMAND` by its own id, `INFERENCE_PROFILE` through a
+   * cross-region profile id such as `us.<id>`. Empty when Bedrock doesn't say.
+   */
+  inferenceTypes: string[];
+  /** Bedrock marks it LEGACY: still callable for now, but on its way out. */
+  legacy: boolean;
+  /**
    * Whether the identity running this CLI may call the model. It says nothing about the
    * sandbox task role, which deploy grants its own Bedrock access, so it never makes a model
    * unusable. Undefined when the check couldn't run.
@@ -27,7 +34,7 @@ export interface ModelAccess {
 
 /** The Bedrock calls `auth bedrock` makes. Tests swap in a fake. */
 export interface BedrockAccess {
-  /** Anthropic's current base text models in the region, and whether this account may use each. */
+  /** Anthropic's base text models in the region, and whether this account may use each. */
   anthropicModels(): Promise<ModelAccess[]>;
 }
 
@@ -55,11 +62,14 @@ export interface BedrockSender {
 /** Context-window variants such as `…-v1:0:200k` share their base model's access. */
 export const CONTEXT_VARIANT = /:\d+k$/;
 
-/**
- * Ways a model is called without buying provisioned throughput. Newer Claude models are only
- * offered through inference profiles, so ON_DEMAND alone would miss them.
- */
+/** Ways a model is called without buying provisioned throughput. */
 const CALLABLE = new Set(["ON_DEMAND", "INFERENCE_PROFILE"]);
+
+/**
+ * Errors about one model id, which make only that model unusable. Anything else (access
+ * denied, throttling, expired credentials) is about the whole account and fails the check.
+ */
+const PER_MODEL_ERRORS = new Set(["ValidationException", "ResourceNotFoundException"]);
 
 export function awsBedrockAccess(client: BedrockSender, region: string): BedrockAccess {
   return {
@@ -76,7 +86,6 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         (model): model is typeof model & { modelId: string } =>
           model.modelId !== undefined &&
           !CONTEXT_VARIANT.test(model.modelId) &&
-          model.modelLifecycle?.status !== "LEGACY" &&
           // Bedrock leaves this out for some models; only drop the ones it says are provisioned-only.
           (model.inferenceTypesSupported === undefined ||
             model.inferenceTypesSupported.some((type) => CALLABLE.has(type))),
@@ -84,21 +93,28 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
       // One at a time: Bedrock's control plane throttles bursts, and there are only a few dozen.
       const results: ModelAccess[] = [];
       for (const model of base) {
-        const name = model.modelName ?? model.modelId;
+        const entry = {
+          modelId: model.modelId,
+          name: model.modelName ?? model.modelId,
+          inferenceTypes: model.inferenceTypesSupported ?? [],
+          legacy: model.modelLifecycle?.status === "LEGACY",
+        };
         let availability;
         try {
           availability = await client.send(
             new GetFoundationModelAvailabilityCommand({ modelId: model.modelId }),
           );
         } catch (error) {
-          // One model Bedrock won't describe is that model's problem, not the whole check's.
-          const reason = error instanceof Error ? error.message : String(error);
-          results.push({
-            modelId: model.modelId,
-            name,
-            usable: false,
-            problems: [`couldn't check (${reason.replace(/\.$/, "")})`],
-          });
+          if (!PER_MODEL_ERRORS.has(errorName(error) ?? "")) {
+            throw awsError(
+              "Bedrock",
+              region,
+              `GetFoundationModelAvailability ${model.modelId}`,
+              error,
+            );
+          }
+          const reason = awsMessage(error).replace(/\.$/, "");
+          results.push({ ...entry, usable: false, problems: [`couldn't check (${reason})`] });
           continue;
         }
         const problems: string[] = [];
@@ -113,8 +129,7 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
           problems.push(`agreement ${agreement.toLowerCase().replaceAll("_", " ")}`);
         }
         results.push({
-          modelId: model.modelId,
-          name,
+          ...entry,
           usable: problems.length === 0,
           problems,
           callerAuthorized: availability.authorizationStatus === "AUTHORIZED",

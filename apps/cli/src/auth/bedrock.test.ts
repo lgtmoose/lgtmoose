@@ -50,12 +50,32 @@ describe("awsBedrockAccess", () => {
     const models = await awsBedrockAccess(client, "us-east-1").anthropicModels();
     expect(models).toEqual([
       // The caller's own IAM permission is reported, but doesn't make the model unusable.
-      { modelId: "anthropic.ok", name: "OK", usable: true, problems: [], callerAuthorized: false },
+      {
+        modelId: "anthropic.ok",
+        name: "OK",
+        usable: true,
+        problems: [],
+        inferenceTypes: ["INFERENCE_PROFILE"],
+        legacy: false,
+        callerAuthorized: false,
+      },
+      // Legacy models are kept, marked, so a tier that pins one can still be checked.
+      {
+        modelId: "anthropic.old",
+        name: "anthropic.old",
+        usable: false,
+        problems: ["model access not granted", "agreement not available"],
+        inferenceTypes: [],
+        legacy: true,
+        callerAuthorized: true,
+      },
       {
         modelId: "anthropic.blocked",
         name: "anthropic.blocked",
         usable: false,
         problems: ["model access not granted", "agreement not available"],
+        inferenceTypes: ["ON_DEMAND"],
+        legacy: false,
         callerAuthorized: true,
       },
     ]);
@@ -63,7 +83,7 @@ describe("awsBedrockAccess", () => {
       byProvider: "Anthropic",
       byOutputModality: "TEXT",
     });
-    expect(sent.filter((c) => c instanceof GetFoundationModelAvailabilityCommand)).toHaveLength(2);
+    expect(sent.filter((c) => c instanceof GetFoundationModelAvailabilityCommand)).toHaveLength(3);
   });
 
   it("treats one model Bedrock won't describe as that model's problem", async () => {
@@ -88,15 +108,42 @@ describe("awsBedrockAccess", () => {
         name: "anthropic.weird",
         usable: false,
         problems: ["couldn't check (bad model id)"],
+        inferenceTypes: [],
+        legacy: false,
       },
       {
         modelId: "anthropic.ok",
         name: "anthropic.ok",
         usable: true,
         problems: [],
+        inferenceTypes: [],
+        legacy: false,
         callerAuthorized: true,
       },
     ]);
+  });
+
+  it("fails the whole check on an account-wide error, with the sign-in hint", async () => {
+    for (const name of ["AccessDeniedException", "ThrottlingException", "ExpiredTokenException"]) {
+      const client: BedrockSender = {
+        send: (command) =>
+          command instanceof ListFoundationModelsCommand
+            ? Promise.resolve({ modelSummaries: [{ modelId: "anthropic.ok" }] })
+            : Promise.reject(Object.assign(new Error("nope"), { name })),
+      };
+      await expect(awsBedrockAccess(client, "us-east-1").anthropicModels()).rejects.toThrow(
+        "AWS Bedrock (us-east-1) failed on GetFoundationModelAvailability anthropic.ok: nope.",
+      );
+    }
+    const expired: BedrockSender = {
+      send: (command) =>
+        command instanceof ListFoundationModelsCommand
+          ? Promise.resolve({ modelSummaries: [{ modelId: "anthropic.ok" }] })
+          : Promise.reject(Object.assign(new Error("expired"), { name: "ExpiredTokenException" })),
+    };
+    await expect(awsBedrockAccess(expired, "us-east-1").anthropicModels()).rejects.toThrow(
+      "aws sso login",
+    );
   });
 
   it("wraps a failed listing with the region", async () => {

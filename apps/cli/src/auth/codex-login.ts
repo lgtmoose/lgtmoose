@@ -43,7 +43,7 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     () => controller.abort(),
     () => rmSync(home, { recursive: true, force: true }),
   );
-  let authJson: string;
+  let outcome: { authJson: string } | { error: unknown };
   try {
     await chmod(home, 0o700);
     await writeFile(join(home, "config.toml"), CONFIG_TOML, { mode: 0o600 });
@@ -56,6 +56,7 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     if (code !== 0) {
       throw new CodexLoginError(`codex login exited with code ${code ?? "unknown"}.`);
     }
+    let authJson: string;
     try {
       authJson = await readFile(join(home, "auth.json"), "utf8");
     } catch {
@@ -64,19 +65,36 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
       );
     }
     checkAuthJson(authJson);
-  } finally {
-    // Remove before untrapping, so a Ctrl+C during the removal can't leave the file behind.
-    // Untrap even if the removal fails, or Ctrl+C would stop working for the rest of the run.
-    try {
-      await (options.removeDir ?? ((path) => rm(path, { recursive: true, force: true })))(home);
-    } finally {
-      untrap();
-    }
+    outcome = { authJson };
+  } catch (error) {
+    outcome = { error };
   }
-  // A Ctrl+C after codex exited still means stop: nothing gets uploaded. After untrap a
-  // later one has its normal effect, and there's nothing left on disk to clean up.
-  if (controller.signal.aborted) throw new LoginInterrupted("codex login was interrupted.");
-  return authJson;
+
+  // Remove before untrapping, so a Ctrl+C during the removal can't leave the file behind, and
+  // untrap even if the removal fails, or Ctrl+C would stop working for the rest of the run.
+  let leftover: string | undefined;
+  try {
+    await (options.removeDir ?? ((path) => rm(path, { recursive: true, force: true })))(home);
+  } catch (error) {
+    leftover =
+      ` Also couldn't delete ${home} (${error instanceof Error ? error.message : String(error)}); ` +
+      "delete it yourself, as it may hold the sign-in.";
+  } finally {
+    untrap();
+  }
+
+  // A Ctrl+C at any point means stop, whatever else went wrong, and nothing gets uploaded.
+  // After untrap a later one has its normal effect.
+  if (controller.signal.aborted) {
+    throw new LoginInterrupted(`codex login was interrupted.${leftover ?? ""}`);
+  }
+  if ("error" in outcome) {
+    if (leftover === undefined) throw outcome.error;
+    const reason = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+    throw new CodexLoginError(`${reason}${leftover}`, { cause: outcome.error });
+  }
+  if (leftover !== undefined) throw new CodexLoginError(`Nothing stored.${leftover}`);
+  return outcome.authJson;
 }
 
 /** Checks the file is a ChatGPT sign-in. Never puts any of its content in a message. */

@@ -30,11 +30,16 @@ const CREDENTIAL_ERRORS = new Set([
  * credentials are missing or expired. AWS error messages never contain secret values.
  */
 export function awsError(service: string, region: string, what: string, error: unknown): Error {
+  return new Error(`AWS ${service} (${region}) failed on ${what}: ${awsMessage(error)}`, {
+    cause: error,
+  });
+}
+
+/** An AWS SDK error's message as one sentence, with the sign-in hint when it applies. */
+export function awsMessage(error: unknown): string {
   const hint = CREDENTIAL_ERRORS.has(errorName(error) ?? "")
     ? " Sign in to AWS first (for example `aws sso login`), then try again."
     : "";
   const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
-  return new Error(`AWS ${service} (${region}) failed on ${what}: ${message}.${hint}`, {
-    cause: error,
-  });
+  return `${message}.${hint}`;
 }

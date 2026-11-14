@@ -18,7 +18,15 @@ Each command stores the credential for the provider in `lgtmoose.config.ts` that
 
 Before storing a plan credential, auth shows a warning about vendor terms and asks you to confirm. Plan credentials are `oauth-token`, `chatgpt-login`, a Codex `access-token` (it belongs to a ChatGPT plan) and a Cursor user `api-key` (it bills to that user's Cursor plan). A Cursor `service-account` key belongs to the team, so it gets no warning. `--accept-vendor-terms` answers yes. NIC-820 will update the warning with what each vendor's terms allow.
 
-`auth bedrock` checks the model each Bedrock provider uses for each tier: its `models`, or the harness default. An alias such as `sonnet` has to work for the newest model in that family. The command fails if any tier can't run. It checks access for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note.
+`auth bedrock` checks the model each Bedrock provider uses for each tier: its `models`, or the harness default. The command fails if a tier can't run.
+
+- A bare model id must be callable on demand.
+- A cross-region profile id (`us.`, `eu.`, `apac.` and so on) must suit the region. `global.` suits any region.
+- A context-window suffix such as `:200k` is checked as its base model.
+- A pinned legacy model is checked too, and flagged.
+- Claude Code aliases (`sonnet`, `opus`, `haiku`, `opusplan`, `default`, with or without `[1m]`) and ARNs are reported as not checked. Claude Code picks the Bedrock model for an alias itself, so pin a model id in `models` to have it checked.
+
+Access is checked for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note. An account-wide error, such as access denied or throttling, fails the command.
 
 ## Secret contract
 

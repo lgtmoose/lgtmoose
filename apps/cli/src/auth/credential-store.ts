@@ -16,7 +16,7 @@ import {
   type AuthMethod,
   type Harness,
 } from "@lgtmoose/config";
-import { awsError, errorName, isScheduledForDeletion } from "../aws-errors.js";
+import { awsError, awsMessage, errorName, isScheduledForDeletion } from "../aws-errors.js";
 
 /** What a provider credential is for. Stored as tags, never with the value. */
 export interface CredentialLabel {
@@ -44,12 +44,15 @@ export interface PutResult {
   tagError?: string;
 }
 
-export interface RemoveResult {
-  /** "already-scheduled": an earlier remove scheduled it, and its date still applies. */
-  status: "scheduled" | "already-scheduled" | "missing";
-  /** When Secrets Manager will delete it, when it says. */
-  deletionDate?: Date;
-}
+export type RemoveResult =
+  /** This remove scheduled it. `deletionDate` is when Secrets Manager deletes it, as it says. */
+  | { status: "scheduled"; deletionDate?: Date }
+  /**
+   * An earlier remove scheduled it, with a window this can't learn. `scheduledSince` is when
+   * that remove ran (DescribeSecret's DeletedDate), not when the secret goes.
+   */
+  | { status: "already-scheduled"; scheduledSince?: Date }
+  | { status: "missing" };
 
 /** The Secrets Manager calls `lgtmoose auth` makes. Tests swap in an in-memory version. */
 export interface CredentialStore {
@@ -110,11 +113,36 @@ export interface CredentialSender {
   }>;
 }
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+/** How long a removed credential can be restored. `auth remove` uses it too. */
+export const RECOVERY_DAYS = 7;
 
 export function awsCredentialStore(client: CredentialSender, region: string): CredentialStore {
   const context = (name: string, error: unknown) =>
     awsError("Secrets Manager", region, name, error);
+
+  /**
+   * The restore worked but the new value didn't, so the OLD credential is live again.
+   * Schedules the deletion again, and says plainly if even that fails.
+   */
+  async function undoRestore(name: string, error: unknown): Promise<Error> {
+    const reason = awsMessage(error);
+    try {
+      await client.send(
+        new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: RECOVERY_DAYS }),
+      );
+    } catch {
+      return new Error(
+        `Restored ${name} (${region}) but couldn't store the new value: ${reason} It holds ` +
+          "the OLD credential again, and sandbox tasks will use it. Run this again, or remove it.",
+        { cause: error },
+      );
+    }
+    return new Error(
+      `Couldn't store the new value in ${name} (${region}): ${reason} It was restored first, ` +
+        `so it's scheduled for deletion again, in ${RECOVERY_DAYS} days.`,
+      { cause: error },
+    );
+  }
 
   return {
     async put(label, value) {
@@ -137,10 +165,14 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
         }
         outcome = scheduled ? "restored" : "updated";
       }
-      try {
-        if (outcome === "restored") {
+      if (outcome === "restored") {
+        try {
           await client.send(new RestoreSecretCommand({ SecretId: name }));
+        } catch (error) {
+          throw context(name, error);
         }
+      }
+      try {
         // A new version of the value. The provider's harness or auth may have changed since
         // the secret was created, so the description and tags are rewritten too.
         await client.send(
@@ -151,13 +183,14 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
           }),
         );
       } catch (error) {
+        if (outcome === "restored") throw await undoRestore(name, error);
         throw context(name, error);
       }
       try {
         await client.send(new TagResourceCommand({ SecretId: name, Tags: credentialTags(label) }));
       } catch (error) {
         // The value is stored, so this isn't a failure to store it.
-        return { outcome, tagError: message(error) };
+        return { outcome, tagError: awsMessage(error).replace(/\.$/, "") };
       }
       return { outcome };
     },
@@ -206,13 +239,13 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
         if (errorName(error) === "ResourceNotFoundException") return { status: "missing" };
         if (!isScheduledForDeletion(error)) throw context(name, error);
       }
-      // Removed before: the earlier date applies. The date is a nicety, so a failure to read
-      // it doesn't fail the command.
+      // Removed before, and that schedule stands. DeletedDate is when that remove ran; the
+      // window it used isn't returned. It's a nicety, so failing to read it doesn't fail this.
       try {
         const { DeletedDate } = await client.send(new DescribeSecretCommand({ SecretId: name }));
         return {
           status: "already-scheduled",
-          ...(DeletedDate ? { deletionDate: DeletedDate } : {}),
+          ...(DeletedDate ? { scheduledSince: DeletedDate } : {}),
         };
       } catch {
         return { status: "already-scheduled" };

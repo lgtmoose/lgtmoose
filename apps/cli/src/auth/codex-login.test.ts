@@ -123,6 +123,38 @@ describe("codexLogin", () => {
     expect(untrapped).toEqual(["off"]);
   });
 
+  it("keeps the real error when the removal also fails, and names the leftover directory", async () => {
+    const run: InteractiveRunner = async () => 3;
+    const removeDir = () => Promise.reject(new Error("EACCES"));
+    const error = await codexLogin({
+      run,
+      trapSignals: noTrap,
+      deviceAuth: false,
+      tmpRoot,
+      removeDir,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CodexLoginError);
+    expect(String(error)).toContain("exited with code 3");
+    expect(String(error)).toMatch(/couldn't delete .*lgtmoose-codex-auth-.*EACCES/);
+  });
+
+  it("a Ctrl+C wins over an error reading auth.json", async () => {
+    let fire: (() => void) | undefined;
+    const trap: SignalTrap = (onSignal) => {
+      fire = onSignal;
+      return () => {};
+    };
+    // codex exits 0 having written nothing; the Ctrl+C lands while auth.json is being read.
+    const run: InteractiveRunner = async () => {
+      setImmediate(() => fire?.());
+      return 0;
+    };
+    await expect(
+      codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot }),
+    ).rejects.toThrow(LoginInterrupted);
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
   it("the forced cleanup removes the directory on its own", async () => {
     const trap: SignalTrap = (_onSignal, forceCleanup) => {
       forceCleanup();

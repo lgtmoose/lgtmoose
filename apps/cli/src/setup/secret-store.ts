@@ -2,9 +2,30 @@ import { createHash } from "node:crypto";
 import { SECRET_NAMES } from "@lgtmoose/config";
 import { z } from "zod";
 
+/**
+ * Thrown by `SetupSecretStore.read` for a secret that's scheduled for deletion: it can't be
+ * read, and can't be created again until it's restored.
+ */
+export class SecretScheduledForDeletion extends Error {
+  override name = "SecretScheduledForDeletion";
+  constructor(
+    readonly secretName: string,
+    region: string,
+  ) {
+    super(
+      `${secretName} is scheduled for deletion in ${region}. Restore it first ` +
+        `(aws secretsmanager restore-secret --secret-id ${secretName} --region ${region}), ` +
+        "or wait until it's deleted.",
+    );
+  }
+}
+
 /** The only Secrets Manager calls setup makes. Tests swap in an in-memory version. */
 export interface SetupSecretStore {
-  /** The secret's current value, or undefined when it doesn't exist. */
+  /**
+   * The secret's current value, or undefined when it doesn't exist. Throws
+   * `SecretScheduledForDeletion` for a secret scheduled for deletion.
+   */
   read(name: string): Promise<string | undefined>;
   /** Creates the secret if it's missing, otherwise stores a new version. */
   write(name: string, value: string, description: string): Promise<"created" | "updated">;

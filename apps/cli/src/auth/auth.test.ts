@@ -319,75 +319,107 @@ describe("auth", () => {
     expect(result.stderr).toContain("Nothing stored");
   });
 
-  const model = (modelId: string, usable = true, callerAuthorized = true): ModelAccess => ({
-    modelId,
-    name: modelId,
-    usable,
-    problems: usable ? [] : ["model access not granted"],
-    callerAuthorized,
+  const model = (
+    modelId: string,
+    options: Partial<Omit<ModelAccess, "modelId">> = {},
+  ): ModelAccess => {
+    const usable = options.usable ?? true;
+    return {
+      modelId,
+      name: modelId,
+      usable,
+      problems: usable ? [] : ["model access not granted"],
+      inferenceTypes: ["ON_DEMAND", "INFERENCE_PROFILE"],
+      legacy: false,
+      callerAuthorized: true,
+      ...options,
+    };
+  };
+  const HAIKU = "anthropic.claude-3-5-haiku-20241022-v1:0";
+  const SONNET = "anthropic.claude-sonnet-4-5-20250929-v1:0";
+  const OPUS = "anthropic.claude-opus-4-6-v1";
+  const pinned = (models: Record<string, string>) => ({
+    ...baseConfig,
+    region: "eu-west-2",
+    providers: [{ id: "bedrock", harness: "claude-code", auth: "bedrock", models }],
   });
-  const allTiers = [
-    model("anthropic.claude-3-5-haiku-20241022-v1:0"),
-    model("anthropic.claude-sonnet-4-5-20250929-v1:0"),
-    model("anthropic.claude-opus-4-1-20250805-v1:0"),
-  ];
 
-  it("bedrock: checks each configured tier's model and stores nothing", async () => {
-    const h = harness({ models: [...allTiers, model("anthropic.claude-instant-v1", false)] });
+  it("bedrock: lists model access, and doesn't guess what an alias resolves to", async () => {
+    const h = harness({
+      models: [model(SONNET), model("anthropic.claude-instant-v1", { usable: false })],
+    });
     const result = await h.go(["bedrock"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(
       "  blocked  anthropic.claude-instant-v1: model access not granted",
     );
-    expect(result.stdout).toContain(
-      "  ok       bedrock standard (sonnet): newest: anthropic.claude-sonnet-4-5-20250929-v1:0",
+    // The defaults are aliases (haiku, sonnet, opus): reported, never failed.
+    expect(result.stdout).toMatch(
+      /not checked {2}bedrock standard \(sonnet\): an alias Claude Code/,
     );
     expect(result.stdout).toContain("needs no stored secret");
     expect(h.puts).toEqual([]);
   });
 
-  it("bedrock: fails when a tier's newest model isn't usable, though another model is", async () => {
+  it("bedrock: Claude Code modifiers and special aliases aren't failed", async () => {
+    const config = pinned({ fast: "haiku", standard: "sonnet[1m]", deep: "opusplan" });
+    const result = await harness({ config, models: [model(SONNET)] }).go(["bedrock"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.match(/not checked/g)).toHaveLength(3);
+  });
+
+  it("bedrock: a bare id must be callable on demand; a profile must suit the region", async () => {
+    const config = pinned({
+      fast: `eu.${HAIKU}`,
+      standard: SONNET,
+      deep: `us.${OPUS}`,
+    });
     const models = [
-      ...allTiers,
-      model("anthropic.claude-opus-4-5-20251101-v1:0", false),
-      model("anthropic.claude-3-opus-20240229-v1:0"),
+      model(HAIKU),
+      model(SONNET, { inferenceTypes: ["INFERENCE_PROFILE"] }),
+      model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] }),
     ];
-    const result = await harness({ models }).go(["bedrock"]);
+    const result = await harness({ config, models }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ok {11}bedrock fast .*: eu\.anthropic\.claude-3-5-haiku/);
     expect(result.stderr).toContain(
-      "blocked  bedrock deep (opus): newest: anthropic.claude-opus-4-5-20251101-v1:0 is model access not granted",
+      `${SONNET} can only be called through an inference profile, such as eu.${SONNET}`,
     );
+    expect(result.stderr).toContain("eu-west-2 can't call us. profiles; use eu. or global.");
     expect(result.stderr).toContain("A configured tier can't run here");
   });
 
-  it("bedrock: resolves a pinned inference profile or variant to its model, and skips ARNs", async () => {
-    const config = {
-      ...baseConfig,
-      providers: [
-        {
-          id: "bedrock",
-          harness: "claude-code",
-          auth: "bedrock",
-          models: {
-            // A cross-region profile of a context-window variant: checked as its base model.
-            fast: "us.anthropic.claude-3-5-haiku-20241022-v1:0:200k",
-            standard: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/x",
-            deep: "anthropic.claude-opus-9-v1:0",
-          },
-        },
-      ],
-    };
-    const result = await harness({ config, models: allTiers }).go(["bedrock", "--id", "bedrock"]);
+  it("bedrock: checks a context variant as its base, allows a pinned legacy model, skips ARNs", async () => {
+    const config = pinned({
+      fast: `global.${HAIKU}:200k`,
+      standard: "arn:aws:bedrock:eu-west-2:123456789012:application-inference-profile/x",
+      deep: "anthropic.claude-3-opus-20240229-v1:0",
+    });
+    const models = [model(HAIKU), model("anthropic.claude-3-opus-20240229-v1:0", { legacy: true })];
+    const result = await harness({ config, models }).go(["bedrock"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`fast (global.${HAIKU}:200k): global.${HAIKU}`);
+    expect(result.stdout).toContain("not checked  bedrock standard");
+    expect(result.stdout).toContain("(legacy: Bedrock is retiring it)");
+    // Legacy models aren't in the general list.
+    expect(result.stdout).not.toMatch(/^ {2}ok {7}anthropic\.claude-3-opus/m);
+  });
+
+  it("bedrock: fails on a pinned model that isn't usable or isn't offered", async () => {
+    const config = pinned({ fast: HAIKU, standard: "anthropic.claude-nope-v1:0" });
+    const result = await harness({
+      config,
+      models: [model(HAIKU, { usable: false })],
+    }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
-    const text = result.stderr;
-    expect(text).toMatch(/ok {7}bedrock fast .*: anthropic\.claude-3-5-haiku-20241022-v1:0/);
-    expect(text).toContain("unknown  bedrock standard");
-    expect(text).toContain("anthropic.claude-opus-9-v1:0 isn't offered here");
+    expect(result.stderr).toContain(`${HAIKU} is model access not granted`);
+    expect(result.stderr).toContain("anthropic.claude-nope-v1:0 isn't offered in eu-west-2");
   });
 
   it("bedrock: the caller's own IAM permission is a note, not a failure", async () => {
-    const models = allTiers.map((m) => ({ ...m, callerAuthorized: false }));
-    const result = await harness({ models }).go(["bedrock"]);
+    const result = await harness({ models: [model(SONNET, { callerAuthorized: false })] }).go([
+      "bedrock",
+    ]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Your own AWS identity isn't allowed");
   });
@@ -396,7 +428,7 @@ describe("auth", () => {
     const config = { ...baseConfig, providers: [baseConfig.providers[0]] };
     const result = await harness({
       config,
-      models: [model("anthropic.a", false)],
+      models: [model("anthropic.a", { usable: false })],
     }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Request model access");
@@ -468,12 +500,15 @@ describe("auth", () => {
       "Scheduled lgtmoose/provider/old for deletion on 2026-11-20 08:30 UTC",
     );
     const again = await harness({
-      remove: { status: "already-scheduled", deletionDate: date },
+      remove: { status: "already-scheduled", scheduledSince: date },
     }).go(["remove", "old", "-y"]);
     expect(again.exitCode).toBe(0);
     expect(again.stdout).toContain("already scheduled for deletion by an earlier remove");
     expect(again.stdout).toContain("2026-11-20 08:30 UTC");
     expect(again.stdout).not.toContain("7 days");
+    // DescribeSecret gives when the earlier remove ran, not when the secret goes.
+    expect(again.stdout).toContain("by an earlier remove on 2026-11-20 08:30 UTC");
+    expect(again.stdout).not.toContain("deletion on");
   });
 
   it("remove: --yes skips the question; a missing secret fails; no means nothing deleted", async () => {

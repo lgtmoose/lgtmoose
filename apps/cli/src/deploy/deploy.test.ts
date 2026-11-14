@@ -3,7 +3,11 @@ import { CDK_CONTEXT, SECRET_NAMES, STACK_NAMES } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { PLACEHOLDER_WEBHOOK_URL } from "../setup/manifest.js";
 import type { Prompter } from "../setup/prompter.js";
-import { webhookFingerprint, type SetupSecretStore } from "../setup/secret-store.js";
+import {
+  SecretScheduledForDeletion,
+  webhookFingerprint,
+  type SetupSecretStore,
+} from "../setup/secret-store.js";
 import type { Cdk, DeployOptions, StackOutputs } from "./cdk.js";
 import { runDeploy, runDestroy, type DeployDeps } from "./deploy.js";
 import type { GitHubAppApi, WebhookConfig } from "./github-app.js";
@@ -37,6 +41,8 @@ function harness(
   options: {
     config?: unknown;
     secrets?: Record<string, string>;
+    /** Secrets that read as scheduled for deletion. */
+    scheduled?: string[];
     /** Data stack status; "" for no stack. */
     dataStatus?: string;
     outputs?: StackOutputs;
@@ -52,7 +58,10 @@ function harness(
 ) {
   const secrets = new Map(Object.entries(options.secrets ?? goodSecrets));
   const store: SetupSecretStore = {
-    read: (name) => Promise.resolve(secrets.get(name)),
+    read: (name) =>
+      options.scheduled?.includes(name)
+        ? Promise.reject(new SecretScheduledForDeletion(name, "eu-west-2"))
+        : Promise.resolve(secrets.get(name)),
     write: () => Promise.reject(new Error("deploy never writes secrets")),
   };
   const calls: string[] = [];
@@ -242,6 +251,19 @@ describe("lgtmoose deploy", () => {
     const result = await run(runDeploy, [], h);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("doesn't belong to this App");
+    expect(h.calls).toEqual([]);
+  });
+
+  it("says to run auth again for a provider credential scheduled for deletion", async () => {
+    const config = {
+      ...bedrockConfig,
+      providers: [{ id: "codex", harness: "codex", auth: "chatgpt-login" }],
+    };
+    const h = harness({ config, scheduled: [SECRET_NAMES.provider("codex")] });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("is scheduled for deletion in eu-west-2");
+    expect(result.stderr).toContain("pnpm lgtmoose auth for it again");
     expect(h.calls).toEqual([]);
   });
 

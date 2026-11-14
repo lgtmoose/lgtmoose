@@ -13,6 +13,7 @@ import { isPromptCancel, type Prompter } from "../setup/prompter.js";
 import {
   readAppCredentials,
   readWebhookSecret,
+  SecretScheduledForDeletion,
   type AppCredentials,
   type SetupSecretStore,
 } from "../setup/secret-store.js";
@@ -110,7 +111,20 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
   }
   const webhookSecret = webhook.secret;
   for (const provider of config.providers.filter(providerNeedsSecret)) {
-    if ((await store.read(SECRET_NAMES.provider(provider.id))) === undefined) {
+    let value: string | undefined;
+    try {
+      value = await store.read(SECRET_NAMES.provider(provider.id));
+    } catch (error) {
+      if (!(error instanceof SecretScheduledForDeletion)) throw error;
+      // `lgtmoose auth remove` did this; running auth again restores it with a new value.
+      throw new Error(
+        `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which is ` +
+          `scheduled for deletion in ${config.region}. Run pnpm lgtmoose auth for it again ` +
+          "to restore it, or remove the provider from the config.",
+        { cause: error },
+      );
+    }
+    if (value === undefined) {
       throw new Error(
         `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which doesn't ` +
           `exist in ${config.region}. Run pnpm lgtmoose auth for it, or remove it from the config.`,

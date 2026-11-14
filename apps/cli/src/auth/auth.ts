@@ -16,7 +16,7 @@ import { isPromptCancel } from "../setup/prompter.js";
 import type { SetupFiles } from "../setup/setup.js";
 import { CONTEXT_VARIANT, type BedrockAccess, type ModelAccess } from "./bedrock.js";
 import { codexLogin, LoginInterrupted } from "./codex-login.js";
-import type { CredentialStore } from "./credential-store.js";
+import { RECOVERY_DAYS, type CredentialStore } from "./credential-store.js";
 import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
 
 /** The prompts auth asks. Matches @inquirer/prompts, so tests can script the answers. */
@@ -92,8 +92,6 @@ class UsageError extends Error {}
 
 /** Thrown for a problem the person can fix; shown as-is. */
 class AuthError extends Error {}
-
-const RECOVERY_DAYS = 7;
 
 /** A harness and auth method a command can store a credential for. */
 interface Target {
@@ -452,8 +450,10 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   }
   deps.out(`Checking Anthropic model access on Bedrock in ${config.region}…\n`);
   const models = await deps.bedrock(config.region).anthropicModels();
-  const usable = models.filter((model) => model.usable);
-  const lines = models
+  // Legacy models only matter when a tier pins one, so they're left out of the list.
+  const current = models.filter((model) => !model.legacy);
+  const usable = current.filter((model) => model.usable);
+  const lines = current
     .toSorted((a, b) => a.modelId.localeCompare(b.modelId))
     .map((model) =>
       model.usable
@@ -469,10 +469,10 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     for (const tier of TIERS) {
       const model = modelFor(provider, tier);
       if (model === undefined) continue;
-      const verdict = tierVerdict(model, models);
+      const verdict = tierVerdict(model, models, config.region);
       if (verdict.state === "blocked") tiersOk = false;
       tierLines.push(
-        `  ${verdict.state.padEnd(7)}  ${provider.id} ${tier} (${model}): ${verdict.detail}`,
+        `  ${verdict.state.padEnd(11)}  ${provider.id} ${tier} (${model}): ${verdict.detail}`,
       );
     }
   }
@@ -492,7 +492,7 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   }
   if (usable.length === 0) {
     notes.unshift(
-      models.length === 0
+      current.length === 0
         ? `Bedrock offers no Anthropic models in ${config.region}. Pick another region.`
         : "This account can't call any Anthropic model here. Request model access in the " +
             `Bedrock console (${config.region}), then run this again.`,
@@ -512,41 +512,92 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   };
 }
 
-/** Claude Code and the Agent SDK aliases that pick the newest model of a family. */
-const FAMILY_ALIASES = new Set(["haiku", "sonnet", "opus"]);
+/**
+ * Model values Claude Code resolves itself, to a Bedrock model of its choosing (or the one an
+ * ANTHROPIC_DEFAULT_*_MODEL override names). auth can't know which, so it doesn't guess.
+ */
+const CLAUDE_CODE_ALIASES = new Set(["default", "haiku", "sonnet", "opus", "opusplan"]);
 
-/** Cross-region inference profile prefixes: `us.anthropic.…` runs the model `anthropic.…`. */
-const PROFILE_PREFIX = /^(?:us|eu|apac|jp|au|ca|us-gov|global)\./;
+/** A Claude Code modifier such as `[1m]` (the 1M-token context window): `sonnet[1m]`. */
+const MODIFIER = /\[[^\]]*\]$/;
 
-/** The YYYYMMDD release date in a Bedrock model id, for finding a family's newest model. */
-const releaseDate = (modelId: string) => /-(\d{8})-/.exec(modelId)?.[1] ?? "";
+/** A Bedrock model id, bare (`anthropic.…`) or through a cross-region profile (`us.anthropic.…`). */
+const BEDROCK_ID = /^(?:([a-z-]+)\.)?(anthropic\..+)$/;
 
 /**
- * Whether a tier's model can run on Bedrock here. "unknown" for a model this can't
- * resolve, such as an inference profile ARN; that's reported but doesn't fail the check.
+ * The cross-region profile prefixes a region may call. Undefined for regions this doesn't
+ * know, where the prefix isn't checked. `global.` works from anywhere.
+ */
+function profilePrefixes(region: string): readonly string[] | undefined {
+  if (region.startsWith("us-gov-")) return ["us-gov"];
+  if (region.startsWith("us-")) return ["us"];
+  if (region.startsWith("eu-")) return ["eu"];
+  if (region === "ap-northeast-1" || region === "ap-northeast-3") return ["apac", "jp"];
+  if (region === "ap-southeast-2" || region === "ap-southeast-4") return ["apac", "au"];
+  if (region.startsWith("ap-")) return ["apac"];
+  return undefined;
+}
+
+type TierState = "ok" | "blocked" | "not checked";
+
+/**
+ * Whether a tier's model can run on Bedrock here. "not checked" covers what auth can't
+ * resolve the way the harness will (aliases, ARNs, unknown ids); it's reported, never failed.
  */
 function tierVerdict(
-  model: string,
+  configured: string,
   models: readonly ModelAccess[],
-): { state: "ok" | "blocked" | "unknown"; detail: string } {
-  const state = (access: ModelAccess) => (access.usable ? "ok" : "blocked");
-  const why = (access: ModelAccess) =>
-    access.usable ? access.modelId : `${access.modelId} is ${access.problems.join(", ")}`;
-  if (FAMILY_ALIASES.has(model)) {
-    // The alias follows the family's newest model, so that's the one that has to work.
-    const family = new RegExp(`^anthropic\\.claude-(?:[\\d-]+-)?${model}(?:-|$)`);
-    const newest = models
-      .filter((access) => family.test(access.modelId))
-      .toSorted((a, b) => releaseDate(b.modelId).localeCompare(releaseDate(a.modelId)))[0];
-    if (newest === undefined) return { state: "blocked", detail: `no ${model} model offered here` };
-    return { state: state(newest), detail: `newest: ${why(newest)}` };
+  region: string,
+): { state: TierState; detail: string } {
+  const notChecked = (detail: string) => ({ state: "not checked" as const, detail });
+  const model = configured.replace(MODIFIER, "");
+  if (CLAUDE_CODE_ALIASES.has(model)) {
+    return notChecked(
+      "an alias Claude Code resolves itself; pin a Bedrock model id in models to have it checked",
+    );
   }
-  if (model.startsWith("arn:")) return { state: "unknown", detail: "can't check an ARN" };
-  // A context-window variant (`…:0:200k`) shares its base model's access.
-  const base = model.replace(PROFILE_PREFIX, "").replace(CONTEXT_VARIANT, "");
-  const access = models.find((candidate) => candidate.modelId === base);
-  if (access === undefined) return { state: "blocked", detail: `${base} isn't offered here` };
-  return { state: state(access), detail: why(access) };
+  if (model.startsWith("arn:")) return notChecked("an ARN, which this can't look up");
+  const match = BEDROCK_ID.exec(model);
+  const prefix = match?.[1];
+  const id = match?.[2]?.replace(CONTEXT_VARIANT, "");
+  if (id === undefined) return notChecked("not a Bedrock model id");
+
+  const access = models.find((candidate) => candidate.modelId === id);
+  if (access === undefined) return { state: "blocked", detail: `${id} isn't offered in ${region}` };
+  if (!access.usable) {
+    return { state: "blocked", detail: `${id} is ${access.problems.join(", ")}` };
+  }
+  const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
+  const supports = (type: string) =>
+    access.inferenceTypes.length === 0 || access.inferenceTypes.includes(type);
+  if (prefix === undefined) {
+    if (!supports("ON_DEMAND")) {
+      const geo = profilePrefixes(region)?.[0] ?? "global";
+      return {
+        state: "blocked",
+        detail: `${id} can only be called through an inference profile, such as ${geo}.${id}`,
+      };
+    }
+    return { state: "ok", detail: `${id}${legacy}` };
+  }
+  if (!supports("INFERENCE_PROFILE")) {
+    return { state: "blocked", detail: `${id} has no cross-region inference profile` };
+  }
+  if (prefix !== "global") {
+    const allowed = profilePrefixes(region);
+    if (allowed === undefined) {
+      return notChecked(
+        `${id} is usable, but this can't tell if ${region} may call ${prefix}. profiles`,
+      );
+    }
+    if (!allowed.includes(prefix)) {
+      return {
+        state: "blocked",
+        detail: `${region} can't call ${prefix}. profiles; use ${allowed.join(". or ")}. or global.`,
+      };
+    }
+  }
+  return { state: "ok", detail: `${prefix}.${id}${legacy}` };
 }
 
 async function authList(deps: AuthDeps): Promise<string> {
@@ -609,17 +660,28 @@ async function authRemove(flags: Flags, deps: AuthDeps): Promise<string> {
     });
     if (!go) throw new AuthError("Nothing deleted.");
   }
-  const { status, deletionDate } = await deps.credentials(config.region).remove(id, RECOVERY_DAYS);
-  if (status === "missing") throw new AuthError(`${name} doesn't exist in ${config.region}.`);
-  let when = status === "scheduled" ? `in ${RECOVERY_DAYS} days` : "on the date set then";
-  if (deletionDate !== undefined) {
-    when = `on ${deletionDate.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  const result = await deps.credentials(config.region).remove(id, RECOVERY_DAYS);
+  const restore = `Running auth for "${id}" before then restores it with the new value.\n`;
+  const utc = (date: Date) => `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  switch (result.status) {
+    case "missing":
+      throw new AuthError(`${name} doesn't exist in ${config.region}.`);
+    case "scheduled": {
+      const when =
+        result.deletionDate === undefined
+          ? `in ${RECOVERY_DAYS} days`
+          : `on ${utc(result.deletionDate)}`;
+      return `Scheduled ${name} for deletion ${when}. ${restore}`;
+    }
+    default: {
+      // Secrets Manager only says when the earlier remove ran, not its recovery window.
+      const since = result.scheduledSince === undefined ? "" : ` on ${utc(result.scheduledSince)}`;
+      return (
+        `${name} was already scheduled for deletion by an earlier remove${since}; that ` +
+        `schedule still applies (Secrets Manager deletes it 7 to 30 days after). ${restore}`
+      );
+    }
   }
-  const head =
-    status === "scheduled"
-      ? `Scheduled ${name} for deletion ${when}.`
-      : `${name} was already scheduled for deletion by an earlier remove; it's deleted ${when}.`;
-  return `${head} Running auth for "${id}" before then restores it with the new value.\n`;
 }
 
 /** `lgtmoose auth`. */
@@ -665,7 +727,9 @@ export async function runAuth(
     }
   } catch (error) {
     if (isPromptCancel(error) || error instanceof LoginInterrupted) {
-      return { exitCode: 130, stdout: "", stderr: "auth cancelled. Nothing stored.\n" };
+      // A LoginInterrupted can say the temporary directory couldn't be removed.
+      const detail = error instanceof LoginInterrupted ? ` ${error.message}` : "";
+      return { exitCode: 130, stdout: "", stderr: `auth cancelled. Nothing stored.${detail}\n` };
     }
     if (error instanceof UsageError) {
       return { exitCode: 1, stdout: "", stderr: `${error.message}\n\n${AUTH_HELP}` };

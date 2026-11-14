@@ -12,6 +12,7 @@ import {
   storeAppSecrets,
   webhookFingerprint,
   readWebhookSecret,
+  SecretScheduledForDeletion,
   type SetupSecretStore,
 } from "./secret-store.js";
 
@@ -76,7 +77,7 @@ describe("awsSecretStore", () => {
     await expect(fakeAws().store.read("lgtmoose/x")).resolves.toBeUndefined();
   });
 
-  it("reads a secret scheduled for deletion as undefined", async () => {
+  it("refuses to read a secret scheduled for deletion as missing", async () => {
     const send = vi.fn<SecretsManagerSender["send"]>(() =>
       Promise.reject(
         Object.assign(
@@ -87,9 +88,9 @@ describe("awsSecretStore", () => {
         ),
       ),
     );
-    await expect(
-      awsSecretStore({ send }, "us-east-1").read("lgtmoose/provider/x"),
-    ).resolves.toBeUndefined();
+    await expect(awsSecretStore({ send }, "us-east-1").read("lgtmoose/provider/x")).rejects.toThrow(
+      SecretScheduledForDeletion,
+    );
   });
 
   it("names the region and secret when AWS fails, without the value", async () => {
