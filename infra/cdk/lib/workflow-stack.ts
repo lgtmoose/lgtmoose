@@ -23,9 +23,10 @@ import type { IBucket } from "aws-cdk-lib/aws-s3";
 import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import { providerModelEnv, STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
+import { bedrockStatements } from "./bedrock.js";
 import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
@@ -194,6 +195,7 @@ export class WorkflowStack extends Stack {
           HTTPS_PROXY: props.proxyUrl,
           NO_PROXY: noProxy(this.region),
           AWS_REGION: this.region,
+          ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't
         // read any secret.
@@ -201,7 +203,11 @@ export class WorkflowStack extends Stack {
           ? {}
           : { secrets: { LGTMOOSE_PROVIDER_CREDENTIAL: EcsSecret.fromSecretsManager(secret) } }),
       });
-      if (provider.auth === "bedrock") this.grantBedrock(definition);
+      if (provider.auth === "bedrock") {
+        for (const statement of bedrockStatements(provider, this.partition, this.account)) {
+          definition.taskRole.addToPrincipalPolicy(statement);
+        }
+      }
       sandboxes.set(provider.id, definition);
       sandboxContainers.set(provider.id, sandboxContainer);
     }
@@ -350,19 +356,6 @@ export class WorkflowStack extends Stack {
       container.addMountPoints({ sourceVolume: volume, containerPath: path, readOnly: false });
     }
     return container;
-  }
-
-  private grantBedrock(definition: FargateTaskDefinition): void {
-    definition.taskRole.addToPrincipalPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources: [
-          `arn:${this.partition}:bedrock:*::foundation-model/*`,
-          `arn:${this.partition}:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      }),
-    );
   }
 }
 

@@ -31,6 +31,14 @@ export {
   type RepoConfigInput,
 } from "./repo.js";
 export { egressAllowlist, providerEgressHosts } from "./egress.js";
+export {
+  BEDROCK_MODEL_ID,
+  MODEL_ALIAS_FAMILIES,
+  MODEL_MODIFIER,
+  isModelAlias,
+  providerModelEnv,
+  vertexHost,
+} from "./models.js";
 export { jsonSchemas, serializeSchema } from "./json-schema.js";
 export {
   PROVIDER_CREDENTIAL_KIND,

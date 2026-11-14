@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { configPath, nodeFiles } from "../paths.js";
 import type { AuthDeps, AuthPrompter } from "./auth.js";
 import { createBedrockAccess } from "./bedrock.js";
@@ -24,5 +26,7 @@ export async function defaultAuthDeps(): Promise<AuthDeps> {
     run: spawnInteractive,
     trapSignals: trapProcessSignals,
     out: (text) => process.stdout.write(text),
+    // pnpm runs the CLI from the repo root; INIT_CWD is where the person typed the command.
+    readKeyFile: (path) => readFile(resolve(process.env.INIT_CWD ?? process.cwd(), path), "utf8"),
   };
 }

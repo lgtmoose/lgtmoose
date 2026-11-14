@@ -3,6 +3,7 @@ import {
   CDK_CONTEXT,
   STACK_NAMES,
   egressAllowlist,
+  modelFor,
   resolveRoles,
   type DeployConfig,
   type ProviderConfig,
@@ -109,9 +110,9 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
 }
 
 /**
- * The reviewer's model: the provider's standard tier, else Claude Code's Sonnet alias (its CLI
- * needs a model name) or, for other harnesses, their own default.
+ * The reviewer's model: the provider's standard tier, else the harness default (`sonnet` for
+ * Claude Code and the Agent SDK) or, for other harnesses, their CLI's own default.
  */
 export function reviewerModel(provider: ProviderConfig): string {
-  return provider.models?.standard ?? (provider.harness === "claude-code" ? "sonnet" : "");
+  return modelFor(provider, "standard") ?? "";
 }

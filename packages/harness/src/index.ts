@@ -5,6 +5,7 @@
 export {
   HarnessError,
   MODEL_TIERS,
+  fullPrompt,
   type Harness,
   type HarnessErrorKind,
   type HarnessResult,
@@ -39,7 +40,18 @@ export {
   type ClaudeArgsOptions,
   type ClaudeCodeHarnessOptions,
 } from "./claude-code/adapter.js";
-export { claudeAuthEnv, type ClaudeAuthEnv, type ClaudeAuthMethod } from "./claude-code/auth.js";
+export {
+  GOOGLE_CREDENTIALS_JSON,
+  claudeAuthEnv,
+  type ClaudeAuthEnv,
+  type ClaudeAuthMethod,
+} from "./claude-code/auth.js";
+export {
+  AgentSdkHarness,
+  gitGuardHook,
+  type AgentQuery,
+  type AgentSdkHarnessOptions,
+} from "./agent-sdk/adapter.js";
 export {
   ALLOWED_TOOLS,
   DISALLOWED_TOOLS,

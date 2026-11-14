@@ -28,6 +28,24 @@ describe("CLAUDE_CODE_VERSION", () => {
   });
 });
 
+describe("the Claude Agent SDK pin", () => {
+  it("is exact, and built for the pinned Claude Code version", async () => {
+    const pkg = JSON.parse(
+      await readFile(join(import.meta.dirname, "../package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    expect(pkg.dependencies["@anthropic-ai/claude-agent-sdk"]).toMatch(/^\d+\.\d+\.\d+$/);
+    // The SDK's package.json names the Claude Code version it drives.
+    const sdk = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, "../node_modules/@anthropic-ai/claude-agent-sdk/package.json"),
+        "utf8",
+      ),
+    ) as { version: string; claudeCodeVersion: string };
+    expect(sdk.version).toBe(pkg.dependencies["@anthropic-ai/claude-agent-sdk"]);
+    expect(sdk.claudeCodeVersion).toBe(CLAUDE_CODE_VERSION);
+  });
+});
+
 describe("CODEX_VERSION", () => {
   it("is an exact version that matches the sandbox image", async () => {
     expect(CODEX_VERSION).toMatch(/^\d+\.\d+\.\d+$/);

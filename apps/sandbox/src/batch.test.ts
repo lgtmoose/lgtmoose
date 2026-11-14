@@ -175,13 +175,23 @@ describe("credentialEnv", () => {
     expect(credentialEnv("cursor-agent", "service-account", "k")).toEqual({
       CURSOR_API_KEY: "k",
     });
+    expect(credentialEnv("agent-sdk", "api-key", "k")).toEqual({ ANTHROPIC_API_KEY: "k" });
+    expect(credentialEnv("agent-sdk", "bedrock", undefined)).toEqual({
+      CLAUDE_CODE_USE_BEDROCK: "1",
+    });
+    for (const harness of ["claude-code", "agent-sdk"]) {
+      expect(credentialEnv(harness, "vertex", '{"type":"service_account"}')).toEqual({
+        CLAUDE_CODE_USE_VERTEX: "1",
+        GOOGLE_APPLICATION_CREDENTIALS_JSON: '{"type":"service_account"}',
+      });
+    }
   });
 
   it("refuses a missing credential and unsupported providers, without the value", () => {
     expect(() => credentialEnv("claude-code", "api-key", " ")).toThrow("isn't set");
     for (const [harness, auth] of [
-      ["claude-code", "vertex"],
-      ["agent-sdk", "api-key"],
+      ["claude-code", "chatgpt-login"],
+      ["agent-sdk", "oauth-token"],
     ] as const) {
       const error = (() => {
         try {
@@ -210,5 +220,23 @@ describe("harnessEnv", () => {
         { ANTHROPIC_API_KEY: "secret" },
       ),
     ).toEqual({ PATH: "/bin", HTTPS_PROXY: "http://proxy:3128", ANTHROPIC_API_KEY: "secret" });
+  });
+
+  it("passes the task's model pins and Vertex settings", () => {
+    expect(
+      harnessEnv(
+        {
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          CLOUD_ML_REGION: "global",
+          ANTHROPIC_VERTEX_PROJECT_ID: "acme",
+          GOOGLE_APPLICATION_CREDENTIALS: "/elsewhere.json",
+        },
+        {},
+      ),
+    ).toEqual({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      CLOUD_ML_REGION: "global",
+      ANTHROPIC_VERTEX_PROJECT_ID: "acme",
+    });
   });
 });

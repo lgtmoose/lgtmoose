@@ -10,6 +10,7 @@
 | `auth cursor`                       | `cursor-agent` / `api-key` or `service-account` | Asks for a Cursor API key                                     |
 | `auth api-key --provider anthropic` | `claude-code` or `agent-sdk` / `api-key`        | Asks for an Anthropic API key                                 |
 | `auth api-key --provider openai`    | `codex` / `api-key`                             | Asks for an OpenAI API key                                    |
+| `auth vertex <key-file>`            | `claude-code` or `agent-sdk` / `vertex`         | Uploads a Google Cloud service-account key (JSON)             |
 | `auth bedrock`                      | any / `bedrock`                                 | Checks Anthropic model access in the region. Stores nothing   |
 | `auth list`                         |                                                 | Shows which providers have a credential, and stray secrets    |
 | `auth remove <id>`                  |                                                 | Schedules the credential for deletion, recoverable for 7 days |
@@ -34,6 +35,54 @@ Each blocked tier prints Bedrock's own problems, such as "model access not grant
 
 Access is checked for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note. An account-wide error, such as access denied or throttling, fails the command.
 
+## Bedrock with AWS credits
+
+This is the default setup path: the models run on Amazon Bedrock in the account LGTMoose is deployed to, so AWS credits pay for them and no secret is stored.
+
+1. In the Bedrock console for the region in `lgtmoose.config.ts`, request access to the Anthropic models.
+2. Add a provider with `auth: "bedrock"` and the `claude-code` or `agent-sdk` harness. Pin `models.fast`, `models.standard` and `models.deep` to the ids `auth bedrock` lists: a bare model id that can be called on demand, or a cross-region inference profile (`us.`, `eu.`, `apac.`, `global.`).
+3. Run `pnpm lgtmoose auth bedrock`, then `pnpm lgtmoose deploy`.
+
+What the deploy sets up for a Bedrock provider:
+
+- **Environment.** Sandbox tasks get `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_REGION`. Credentials come from the ECS task role, through the AWS SDK's default chain. Each pinned tier is passed as `ANTHROPIC_DEFAULT_HAIKU_MODEL` (fast), `ANTHROPIC_DEFAULT_SONNET_MODEL` (standard) and `ANTHROPIC_DEFAULT_OPUS_MODEL` (deep), so the aliases Claude Code uses on its own, such as the Haiku model for background tasks, resolve to the same pinned models. See [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock).
+- **IAM.** Only the sandbox task role gets Bedrock permissions, and only when a Bedrock provider is configured:
+  - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`. With all three tiers pinned to Anthropic ids, these are allowed on exactly those foundation models (in any region, since a cross-region profile routes to several) and their inference profiles in the account. When a tier still uses an alias, Claude Code picks the model at runtime, so they're allowed on every `anthropic.*` foundation model and Anthropic inference profile, and never on other vendors' models.
+  - `bedrock:ListInferenceProfiles` and `bedrock:GetInferenceProfile`, which Claude Code uses to find the profile for a model.
+- **Egress.** The proxy lets sandbox tasks reach `bedrock-runtime.<region>.amazonaws.com` (model calls) and `bedrock.<region>.amazonaws.com` (profile lookups).
+
+## Vertex AI
+
+For Claude on Google Cloud Vertex AI, add a provider with `auth: "vertex"` and the `claude-code` or `agent-sdk` harness:
+
+```ts
+{
+  id: "vertex",
+  harness: "claude-code",
+  auth: "vertex",
+  vertex: { region: "global", projectId: "acme-reviews" },
+  models: { fast: "claude-haiku-4-5@20251001", standard: "claude-sonnet-4-6", deep: "claude-opus-4-8" },
+}
+```
+
+- `vertex.region` is `CLOUD_ML_REGION`: `global` (the default), a multi-region (`us`, `eu`) or a region such as `us-east5`. `vertex.projectId` is `ANTHROPIC_VERTEX_PROJECT_ID`; left out, the key's `project_id` is used.
+- Create a service account with the Vertex AI User role (`roles/aiplatform.user`) in the project, enable the Claude models in Model Garden, and download a JSON key for the account. Then run `pnpm lgtmoose auth vertex path/to/key.json`. It checks the file is a service-account key and stores it; the file isn't changed or deleted.
+- At run time the sandbox writes the key to `google-credentials.json` in the run's temporary home, with mode 0600, and points `GOOGLE_APPLICATION_CREDENTIALS` at it. The home, key included, is deleted when the run ends. The key's JSON and its private key are redacted from transcripts and errors, and a review that contains either is refused.
+- Pinned tiers are passed as `ANTHROPIC_DEFAULT_*_MODEL`, as for Bedrock. See [Claude Code on Google Vertex AI](https://code.claude.com/docs/en/google-vertex-ai).
+- Egress allows the Vertex endpoint for the region (`aiplatform.googleapis.com` for `global`, `aiplatform.us.rep.googleapis.com` or `aiplatform.eu.rep.googleapis.com` for a multi-region, `<region>-aiplatform.googleapis.com` otherwise) and `oauth2.googleapis.com`, where the key is exchanged for an access token.
+
+## The agent-sdk harness
+
+`harness: "agent-sdk"` runs the review through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/typescript) in the sandbox process, instead of running `claude -p`. It takes `api-key`, `bedrock` and `vertex` auth. Claude subscription tokens (`oauth-token`) aren't allowed for products built on the Agent SDK, so it refuses them.
+
+It keeps the `claude-code` harness's policy: the same read-only tools (Read, Grep, Glob, and Bash limited to plain git reads), no settings files, CLAUDE.md files, MCP servers or slash commands from the checkout, and the same hardening variables. On top of that:
+
+- Bash commands are also checked in the SDK process by a `PreToolUse` hook, so the git read guard doesn't depend on a hook script alone.
+- The review rules and rule packs (`system`) are appended to Claude Code's own system prompt, the one `claude -p` uses. Per-run sections such as the working directory and git status move to the first user message, so the system prompt is the same on every run and is read from the prompt cache.
+- The answer is checked against the schema, with one repair turn in the same session, and limits are reported to the fallback chain as `rate_limit`, `plan_limit` and `auth` failures, as the other harnesses do.
+
+The SDK version (`@anthropic-ai/claude-agent-sdk` in `packages/harness`) tracks the Claude Code version the sandbox image installs, and the harness runs that installed `claude` binary.
+
 ## Secret contract
 
 The credential broker (NIC-825) and the CDK stacks rely on this.
@@ -43,6 +92,7 @@ The credential broker (NIC-825) and the CDK stacks rely on this.
   - `oauth-token`: the `sk-ant-oat…` token from `claude setup-token`
   - `api-key`: the vendor's API key
   - `access-token` and `service-account`: the token or key
+  - `vertex`: the Google Cloud service-account key file's JSON, on one line
   - `chatgpt-login`: the whole `auth.json` that `codex login` wrote, as JSON:
 
     ```json

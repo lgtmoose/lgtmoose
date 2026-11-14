@@ -1,25 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
 import {
   HarnessError,
+  fullPrompt,
   type Harness,
   type HarnessResult,
   type HarnessRunOptions,
-  type HarnessUsage,
 } from "../harness.js";
-import { exitText, saveAttemptTranscript, success } from "../attempt.js";
-import { repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
-import { isolatedEnv, networkEnv } from "../env.js";
-import { runProcess, type ProcessResult } from "../process.js";
-import { redact, valueContainsSecret } from "../redact.js";
+import { exitText, saveAttemptTranscript } from "../attempt.js";
+import { runProcess } from "../process.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
-import { addUsage } from "../usage.js";
 import { claudeAuthEnv } from "./auth.js";
-import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
-import { findResult, isAuthRetry, outputOf, usageOf, type ResultEvent } from "./stream.js";
+import { ALLOWED_TOOLS, DISALLOWED_TOOLS, TOOLS } from "./policy.js";
+import { prepareClaudeSession, removeRunHome } from "./session.js";
+import {
+  MAX_AUTH_RETRIES,
+  checkAnswer,
+  claudeSchemaFor,
+  failIfUnusable,
+  findResult,
+  isAuthRetry,
+  withRepair,
+  type ClaudeAttempt,
+} from "./stream.js";
 
 export interface ClaudeCodeHarnessOptions {
   /** Where each attempt's stream-json transcript is saved. */
@@ -44,12 +49,6 @@ export interface ClaudeCodeHarnessOptions {
 
 /** Stop a run whose stream-json passes this size. */
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
-/** Stop after this many API retries caused by the credential: retrying won't fix it. */
-const MAX_AUTH_RETRIES = 2;
-
-type Attempt<T> =
-  | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
-  | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
 
 /** Runs Claude Code headless (`claude -p`) with read-only tools. */
 export class ClaudeCodeHarness implements Harness {
@@ -68,24 +67,21 @@ export class ClaudeCodeHarness implements Harness {
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-claude-"));
     const keys: string[] = [];
     try {
-      const guardPath = join(home, "guard.cjs");
-      await writeFile(guardPath, guardScript());
-      await mkdir(join(home, ".claude"));
-      await mkdir(join(home, "tmp"));
-      const settings = JSON.stringify(
-        sessionSettings(`${shellQuote(process.execPath)} ${shellQuote(guardPath)}`),
+      const session = await prepareClaudeSession(
+        home,
+        source,
+        auth,
+        this.options.scrubSubprocessEnv === undefined
+          ? {}
+          : { scrubSubprocessEnv: this.options.scrubSubprocessEnv },
       );
-      const env: Record<string, string> = {
-        PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        ...networkEnv(source),
-        ...auth.env,
-        ...hardeningEnv(home, this.options.scrubSubprocessEnv ?? false),
-      };
-      const schema = jsonSchemaFor(options.schema);
+      const settings = JSON.stringify(session.settings);
+      const env = session.env;
+      const schema = claudeSchemaFor(options.schema);
       const sessionId = randomUUID();
       const secrets = auth.secrets;
 
-      const attempt = async (n: number, prompt: string): Promise<Attempt<T>> => {
+      const attempt = async (n: number, prompt: string): Promise<ClaudeAttempt<T>> => {
         const timeoutMs = deadline - Date.now();
         if (timeoutMs <= 0) {
           throw new HarnessError("timeout", `Timed out after ${options.timeoutMs} ms.`, {
@@ -100,7 +96,7 @@ export class ClaudeCodeHarness implements Harness {
             settings,
             sessionId,
             resume: n > 1,
-            ...(schema.flag === undefined ? {} : { jsonSchema: schema.flag }),
+            ...(schema.json === undefined ? {} : { jsonSchema: JSON.stringify(schema.json) }),
             ...(this.options.maxTurns === undefined ? {} : { maxTurns: this.options.maxTurns }),
           }),
           cwd: options.cwd,
@@ -118,97 +114,22 @@ export class ClaudeCodeHarness implements Harness {
         const key = transcriptKey(runId, n);
         await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
         const result = findResult(proc.stdout);
-        failIfUnusable(proc, result, secrets, keys, options.timeoutMs);
-        const usage = usageOf(result);
-        if (result.subtype === "error_max_structured_output_retries") {
-          return { kind: "invalid", problems: "No output matched the schema.", usage, key };
-        }
-        const parsed = outputOf(result);
-        if (!parsed.ok) return { kind: "invalid", problems: parsed.error, usage, key };
-        const checked = options.schema.safeParse(parsed.value);
-        if (!checked.success) {
-          return { kind: "invalid", problems: z.prettifyError(checked.error), usage, key };
-        }
-        // A prompt-injected model could try to post the credential in a finding.
-        if (valueContainsSecret(checked.data, secrets)) {
-          throw new HarnessError("invalid_output", "The output contained a model credential.", {
-            transcriptKeys: keys,
-          });
-        }
-        return { kind: "ok", output: checked.data, usage, key };
+        failIfUnusable(proc, result, {
+          secrets,
+          keys,
+          timeoutMs: options.timeoutMs,
+          name: "claude",
+          noResult: () =>
+            `claude exited (${exitText(proc)}) without a result: ${proc.stderr.trim() || "no output"}`,
+        });
+        return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
-      const first = await attempt(1, options.prompt + schema.promptSuffix);
-      if (first.kind === "ok") return success(first, first.usage, keys);
-
-      const second = await attempt(2, repairPrompt(first.problems));
-      if (second.kind === "ok") return success(second, addUsage(first.usage, second.usage), keys);
-      throw new HarnessError(
-        "invalid_output",
-        truncate(
-          redact(`The output was invalid after a repair retry: ${second.problems}`, secrets),
-        ),
-        { transcriptKeys: keys },
-      );
+      return await withRepair(attempt, fullPrompt(options) + schema.promptSuffix, secrets, keys);
     } finally {
-      await rm(home, { recursive: true, force: true });
+      await removeRunHome(home);
     }
   }
-}
-
-/** Throws the right HarnessError when a process didn't produce a successful result event. */
-function failIfUnusable(
-  proc: ProcessResult,
-  result: ResultEvent | undefined,
-  secrets: readonly string[],
-  keys: readonly string[],
-  timeoutMs: number,
-): asserts result is ResultEvent {
-  const fail = (kind: HarnessError["kind"], message: string): HarnessError =>
-    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys });
-  if (proc.spawnError) throw fail("process", `Could not start claude: ${proc.spawnError.message}`);
-  if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
-  if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
-  if (proc.stopped === "output_limit") {
-    throw fail("process", "claude wrote more output than allowed.");
-  }
-  if (!result) {
-    const detail = proc.stderr.trim() || "no output";
-    throw fail("process", `claude exited (${exitText(proc)}) without a result: ${detail}`);
-  }
-  if (result.api_error_status === 401 || result.api_error_status === 403) {
-    throw fail("auth", `The model API rejected the credential (HTTP ${result.api_error_status}).`);
-  }
-  // Running out of structured output retries is invalid output, which a repair retry can fix.
-  if (result.subtype === "error_max_structured_output_retries") return;
-  if (result.is_error || result.subtype !== "success") {
-    throw fail("process", `claude reported ${result.subtype}: ${result.result ?? "no detail"}`);
-  }
-}
-
-/** Quotes a path for the shell that runs hook commands. */
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-/**
- * Variables that keep the CLI and git from reading anything but the checkout: a fresh home and
- * config directory, no CLAUDE.md or memory, no updates or telemetry, and git without user or
- * system config, pager, prompts or lazy fetches.
- */
-function hardeningEnv(home: string, scrub: boolean): Record<string, string> {
-  return {
-    ...isolatedEnv(home),
-    CLAUDE_CONFIG_DIR: join(home, ".claude"),
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: scrub ? "1" : "0",
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    DISABLE_AUTOUPDATER: "1",
-    DISABLE_TELEMETRY: "1",
-    DISABLE_ERROR_REPORTING: "1",
-    CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
-    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-    CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1",
-  };
 }
 
 export interface ClaudeArgsOptions {
@@ -256,14 +177,4 @@ export function claudeArgs(options: ClaudeArgsOptions): string[] {
   if (options.jsonSchema !== undefined) args.push("--json-schema", options.jsonSchema);
   if (options.maxTurns !== undefined) args.push("--max-turns", String(options.maxTurns));
   return args;
-}
-
-/**
- * How to ask for the schema. An object schema goes to `--json-schema`, which makes the CLI check
- * the answer too. Anything else is described in the prompt.
- */
-function jsonSchemaFor(schema: z.ZodType): { flag?: string; promptSuffix: string } {
-  const json = schemaJson(schema);
-  if (json?.type === "object") return { flag: JSON.stringify(json), promptSuffix: "" };
-  return { promptSuffix: schemaPromptSuffix(json) };
 }

@@ -26,7 +26,33 @@ describe("egressAllowlist", () => {
       ...base,
       providers: [{ id: "bedrock", harness: "claude-code", auth: "bedrock" }],
     });
-    expect(egressAllowlist(config)).toEqual(["bedrock-runtime.eu-west-2.amazonaws.com"]);
+    expect(egressAllowlist(config)).toEqual([
+      "bedrock-runtime.eu-west-2.amazonaws.com",
+      "bedrock.eu-west-2.amazonaws.com",
+    ]);
+  });
+
+  it("uses the Vertex host for the provider's region", () => {
+    const hosts = (region?: string) =>
+      egressAllowlist(
+        parseDeployConfig({
+          ...base,
+          providers: [
+            {
+              id: "vertex",
+              harness: "agent-sdk",
+              auth: "vertex",
+              ...(region === undefined ? {} : { vertex: { region } }),
+            },
+          ],
+        }),
+      );
+    expect(hosts()).toEqual(["aiplatform.googleapis.com", "oauth2.googleapis.com"]);
+    expect(hosts("eu")).toEqual(["aiplatform.eu.rep.googleapis.com", "oauth2.googleapis.com"]);
+    expect(hosts("us-east5")).toEqual([
+      "oauth2.googleapis.com",
+      "us-east5-aiplatform.googleapis.com",
+    ]);
   });
 
   it("adds extraEgressHosts", () => {
