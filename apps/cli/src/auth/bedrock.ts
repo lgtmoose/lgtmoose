@@ -166,20 +166,17 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         if (availability.regionAvailability !== "AVAILABLE") {
           problems.push({ text: "not offered in this region", fix: "region" });
         } else {
+          // Both are reported as Bedrock says them: a pending agreement doesn't grant access.
+          if (availability.entitlementAvailability !== "AVAILABLE") {
+            problems.push({ text: "model access not granted", fix: "access" });
+          }
           const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
-          if (agreement === "PENDING") {
-            // On its way, and access with it most likely: waiting is the one thing to do.
-            problems.push({ text: "agreement pending", fix: "wait" });
-          } else {
-            if (availability.entitlementAvailability !== "AVAILABLE") {
-              problems.push({ text: "model access not granted", fix: "access" });
-            }
-            if (agreement !== "AVAILABLE") {
-              problems.push({
-                text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
-                fix: "access",
-              });
-            }
+          if (agreement !== "AVAILABLE") {
+            problems.push({
+              text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
+              // A pending agreement is on its way; anything else needs accepting.
+              fix: agreement === "PENDING" ? "wait" : "access",
+            });
           }
         }
         results.push({

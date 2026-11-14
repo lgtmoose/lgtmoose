@@ -93,28 +93,38 @@ describe("awsBedrockAccess", () => {
       send: (command) => {
         if (command instanceof ListFoundationModelsCommand) {
           return Promise.resolve({
-            modelSummaries: [{ modelId: "anthropic.away" }, { modelId: "anthropic.pending" }],
+            modelSummaries: [
+              { modelId: "anthropic.away" },
+              { modelId: "anthropic.pending" },
+              { modelId: "anthropic.both" },
+            ],
           });
         }
-        return Promise.resolve(
-          (command.input as { modelId?: string }).modelId === "anthropic.away"
-            ? {
-                regionAvailability: "NOT_AVAILABLE",
-                entitlementAvailability: "NOT_AVAILABLE",
-                agreementAvailability: { status: "NOT_AVAILABLE" },
-              }
-            : {
-                ...AVAILABLE,
-                // Access isn't granted yet either: the pending agreement is the one thing to wait on.
-                entitlementAvailability: "NOT_AVAILABLE",
-                agreementAvailability: { status: "PENDING" },
-              },
-        );
+        const id = (command.input as { modelId?: string }).modelId;
+        if (id === "anthropic.away") {
+          return Promise.resolve({
+            regionAvailability: "NOT_AVAILABLE",
+            entitlementAvailability: "NOT_AVAILABLE",
+            agreementAvailability: { status: "NOT_AVAILABLE" },
+          });
+        }
+        return Promise.resolve({
+          ...AVAILABLE,
+          // "both": access isn't granted, and the agreement is still pending.
+          entitlementAvailability: id === "anthropic.both" ? "NOT_AVAILABLE" : "AVAILABLE",
+          agreementAvailability: { status: "PENDING" },
+        });
       },
     };
-    const [away, pending] = await awsBedrockAccess(client, "eu-west-2").anthropicModels();
+    const [away, pending, both] = await awsBedrockAccess(client, "eu-west-2").anthropicModels();
     expect(away?.problems).toEqual([{ text: "not offered in this region", fix: "region" }]);
+    // Access granted, agreement on its way: only the wait.
     expect(pending?.problems).toEqual([{ text: "agreement pending", fix: "wait" }]);
+    // A pending agreement doesn't hide missing access: both, as Bedrock reports them.
+    expect(both?.problems).toEqual([
+      { text: "model access not granted", fix: "access" },
+      { text: "agreement pending", fix: "wait" },
+    ]);
   });
 
   it("treats one model Bedrock won't describe as that model's problem", async () => {

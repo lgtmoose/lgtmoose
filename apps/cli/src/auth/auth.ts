@@ -817,7 +817,9 @@ function idVerdict(
   const subject = prefix === undefined ? id : `${prefix}.${id}`;
   const ids = facts.reach.get(access.modelId);
   // Not offered here, or no way to call it here: that alone decides, whatever else is wrong.
-  const route = reachProblems(access, facts).filter((problem) => problem.fix.kind === "region");
+  let route = modelProblems(access).filter((problem) => problem.fix.kind === "region");
+  if (route.length === 0 && ids?.length === 0)
+    route = [{ text: NO_ROUTE, fix: { kind: "region" } }];
   if (route.length > 0) return blocked(subject, route);
 
   // The pin is checked whether or not access is granted, so both show in one run.

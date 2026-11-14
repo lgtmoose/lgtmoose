@@ -582,6 +582,27 @@ describe("auth", () => {
     expect(text.indexOf("needs no stored secret")).toBeLessThan(text.indexOf("To fix:"));
   });
 
+  it("bedrock: missing access with a pending agreement gives both fixes", async () => {
+    const result = await harness({
+      models: [
+        model(HAIKU),
+        model(SONNET),
+        model(OPUS, {
+          usable: false,
+          problems: [
+            { text: "model access not granted", fix: "access" },
+            { text: "agreement pending", fix: "wait" },
+          ],
+        }),
+      ],
+    }).go(["bedrock"]);
+    expect(result.stderr).toContain(`${OPUS} model access not granted, ${OPUS} agreement pending`);
+    expect(fixesOf(result.stderr)).toEqual([
+      ACCESS_FIX,
+      "  - Wait a few minutes for the model agreement to go through, then run this again.",
+    ]);
+  });
+
   it("bedrock: a model Bedrock couldn't check gets the recheck fix, not access", async () => {
     const result = await harness({
       models: [
