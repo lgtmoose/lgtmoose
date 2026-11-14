@@ -18,12 +18,11 @@ import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { addUsage } from "../usage.js";
-import { classifyMachineSignals, type LimitFailure } from "../limits.js";
+import { classifyReportedFailure } from "../limits.js";
 import { cursorAuth } from "./auth.js";
 import { cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
-  isGenericError,
   cursorUsage,
   findCursorResult,
   type CursorResult,
@@ -292,24 +291,6 @@ async function deliver(workspace: string, taskDir: string, n: number, prompt: st
   ].join(" ");
 }
 
-/** Whether a failed run hit a limit or a refused key, from its error result and stderr. */
-function classifyRun(
-  errorText: string | undefined,
-  stderr: string | undefined,
-): LimitFailure | undefined {
-  // Wording (limit phrases, bare connect code names) is read only in the JSON error result,
-  // which the CLI writes on purpose. Raw stderr carries banners, warnings and log lines, so it's
-  // only ever read for machine signals: with no error result, or behind a generic one.
-  if (errorText === undefined) {
-    return stderr === undefined ? undefined : classifyMachineSignals(stderr);
-  }
-  const fromResult = classifyCursorFailure(errorText);
-  if (fromResult !== undefined || stderr === undefined || !isGenericError(errorText)) {
-    return fromResult;
-  }
-  return classifyMachineSignals(stderr);
-}
-
 /** Throws the right HarnessError when a run didn't print a successful result. */
 function failIfUnusable(
   proc: ProcessResult,
@@ -339,11 +320,9 @@ function failIfUnusable(
   const errorText = (result?.is_error === true ? result.result : undefined)?.trim() || undefined;
   const stderr = proc.stderr.trim() || undefined;
   const detail = [errorText, stderr].filter(Boolean).join("\n") || "no output";
-  // The JSON error result says what went wrong when there is one. If it's too generic to say
-  // ("Request failed"), stderr may still give a machine signal (a connect code or an HTTP status),
-  // but never its wording, which a banner or warning could contain. Without an error result,
-  // stderr is all there is.
-  const limit = classifyRun(errorText, stderr);
+  // Wording only in the JSON error result; stderr for machine signals, without an error result
+  // or behind a generic one.
+  const limit = classifyReportedFailure(errorText, stderr, classifyCursorFailure);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;
     throw fail(kind, `agent stopped: ${detail}`, extra);

@@ -16,41 +16,42 @@ const CONNECT_CODES: Readonly<Record<string, number>> = {
 
 /** Status texts that may follow a code: "401 Unauthorized", "429 (Too Many Requests)". */
 const STATUS_TEXT = String.raw`\(?(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b`;
-/**
- * The count rule, for every form: a code followed by a word ("429 rows", "401 tests failed") is
- * a count, not a status, unless the word is a status text or "status" ("401 status code").
- */
-const NOT_A_COUNT = String.raw`(?![ \t]+(?!status\b|${STATUS_TEXT})[A-Za-z])`;
-/** Where a verb's code may end: the end of a clause, or a status text. */
+/** Where a weak verb's code may end: the end of a clause, or a status text. */
 const CLAUSE_END = String.raw`(?=[ \t]*(?:$|[.,;:!)\]]|${STATUS_TEXT}))`;
 /** Where a bare "error" or "code" prefix's code may end: the end of the line, or a status text. */
 const LINE_END = String.raw`(?=[ \t]*(?:$|${STATUS_TEXT}))`;
 
 /**
- * The text forms, each capturing the code. All of them follow the count rule (`NOT_A_COUNT`).
- * - "[unauthenticated]", "[resource_exhausted]" (the name is the capture);
- * - "HTTP 429", "HTTP/1.1 401", "HTTP error 429";
- * - "401 Unauthorized", "429 (Too Many Requests)";
- * - an error class name and a colon: "AuthenticationError: 401", "HTTPError: 401";
- * - a status field: "status: 429", "statusCode=401", "status_code: 401", "errorCode: 429",
- *   `"statusCode": 401`;
- * - after a verb or "status", at the end of a clause or before a status text: "returned 401",
- *   "responded with 429, retrying", "failed with 429.", "status 429", "status code 429";
+ * The text forms, each capturing the code.
+ *
+ * Strong forms count whatever follows the code, since a count can't take their place:
+ * - bracketed connect codes: "[unauthenticated]", "[resource_exhausted]" (the name is the
+ *   capture);
+ * - "HTTP 429", "HTTP/1.1 401", "HTTP error 429", "HTTP 401 from upstream";
+ * - the code with its status text: "401 Unauthorized", "429 (Too Many Requests)";
+ * - an error class and a colon: "RateLimitError: 429 Rate limit reached", "HTTPError: 401";
+ * - key-value fields: "statusCode: 429", "status_code=401", "errorCode: 429", "status=429",
+ *   "code=401", `"status": 429`, and `{ code: 429, … }` in an object literal.
+ *
+ * Weak forms follow the count rule: the code must end its clause or carry a status text, so
+ * "status 429 rows" and "search returned 429 results" don't count:
+ * - after "returned", "responded with", "failed with", "status" or "status code": "server
+ *   returned 401", "responded with 429, retrying", "status: 429", "status code 429";
  * - after a bare "error" or "code", or an error class without a colon, only at the end of the
- *   line or before a status text: "Error: 401", "code: 429", "HTTPError 401", "Response code
- *   401 (Unauthorized)"; not "found error 401." or "Error: 429, Passed: 12".
+ *   line or before a status text: "Error: 401", "code: 429", "HTTPError 401", "Response code 401
+ *   (Unauthorized)"; not "found error 401." or "Error: 429, Passed: 12".
  */
 const FORMS: readonly RegExp[] = [
   /\[(unauthenticated|resource_exhausted|permission_denied)\]/gi,
-  new RegExp(String.raw`\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b${NOT_A_COUNT}`, "gi"),
+  /\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?:? (\d{3})\b/gi,
   new RegExp(String.raw`\b(\d{3}) ${STATUS_TEXT}`, "gi"),
-  new RegExp(String.raw`\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b${NOT_A_COUNT}`, "g"),
+  /\b[A-Za-z]\w*(?:Error|Exception): ?(\d{3})\b/g,
+  /\b(?:statusCode|status_code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b/gi,
+  /\b(?:status|code) ?= ?"?(\d{3})\b/gi,
+  /"(?:status|code)" ?: ?"?(\d{3})\b/gi,
+  /[{,]\s*(?:status|code)\s*:\s*(\d{3})\b/gi,
   new RegExp(
-    String.raw`\b(?:status|statusCode|status_code|status code|errorCode|error_code)"? ?[:=] ?"?(\d{3})\b${NOT_A_COUNT}`,
-    "gi",
-  ),
-  new RegExp(
-    String.raw`\b(?:returned|responded with|failed with|status code|status) (\d{3})${CLAUSE_END}`,
+    String.raw`\b(?:returned|responded with|failed with|status code:?|status:?) (\d{3})${CLAUSE_END}`,
     "gim",
   ),
   new RegExp(

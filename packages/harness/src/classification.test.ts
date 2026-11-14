@@ -4,8 +4,13 @@
  * negative row for each false positive found.
  */
 import { describe, expect, it } from "vitest";
-import { classifyCursorFailure, isGenericError } from "./cursor/result.js";
-import { classifyFailure, classifyMachineSignals } from "./limits.js";
+import { classifyCursorFailure } from "./cursor/result.js";
+import {
+  classifyFailure,
+  classifyMachineSignals,
+  classifyReportedFailure,
+  isGenericError,
+} from "./limits.js";
 import { statusesIn } from "./status.js";
 
 type Kind = "plan_limit" | "rate_limit" | "auth" | undefined;
@@ -84,6 +89,18 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   ["ServerError: 429", R, R],
   ["RateLimitException: 429", R, R],
   ["Error: 401", A, A],
+  // Strong forms count whatever follows the code (round 8).
+  ["HTTP 429 requests queued", R, R],
+  ["HTTP 401 from upstream", A, A],
+  ["statusCode: 429 rows", R, R],
+  ["ServerError: 429 items", R, R],
+  ["RateLimitError: 429 Rate limit reached for requests", R, R],
+  ["AuthenticationError: 401 invalid x-api-key", A, A],
+  ["level=error status=429 url=https://api2.cursor.sh/x", R, R],
+  ["statusCode=401 path=/v1", A, A],
+  ["code=429 msg=slow", R, R],
+  ['{ code: 429, message: "slow down" }', R, R],
+  ["{ status: 401, statusText: 'nope' }", A, A],
   // Status fields and words.
   ["statusCode: 429", R, R],
   ['"statusCode": 401', A, A],
@@ -128,13 +145,11 @@ const KINDS: readonly (readonly [string, Kind, Kind])[] = [
   ['{"count": 429}', N, N],
   ['{"status": "ok", "items": 401}', N, N],
   ["{ not json at all 401 }", N, N],
-  // The count rule holds after "status" and every other prefix: a word after the code that
-  // isn't a status text makes it a count (round 7).
+  // The count rule holds after the weak prefixes ("status" as a plain word, "returned", ...): a
+  // word after the code that isn't a status text makes it a count (rounds 7 and 8).
   ["status 429 rows", N, N],
   ["status 429 from server", N, N],
-  ["HTTP 429 requests queued", N, N],
-  ["statusCode: 429 rows", N, N],
-  ["ServerError: 429 items", N, N],
+  ["status: 429 rows", N, N],
   // A bare "error" or "code" prefix only at the end of the line or before a status text.
   ["found error 401.", N, N],
   ["Error: 429, Passed: 12", N, N],
@@ -227,11 +242,42 @@ const GENERIC: readonly (readonly [string, boolean])[] = [
   ["Request failed. Try again later.", true],
   ["Request failed. The model is overloaded.", false],
   ["An unexpected error occurred. Your API key was revoked.", false],
+  // Identifiers say nothing about the cause; an HTTP status as the code may (round 8).
+  ["Request failed. Request ID: 1234.", true],
+  ["Unknown error. Trace ID: 9f8e7d.", true],
+  ["An error occurred. Error code: 13.", true],
+  ["Request failed. Correlation ID: abc-123", true],
+  ["Request failed. Error code: 429.", false],
+  // Sentences split at line breaks too (round 8).
+  ["Request failed\nPlease try again", true],
+  ["Request failed\nThe model is overloaded", false],
 ];
 
 describe.each(GENERIC)("error result %j", (text, generic) => {
   it(`is ${generic ? "" : "not "}generic`, () => {
     expect(isGenericError(text)).toBe(generic);
+  });
+});
+
+/**
+ * [reported error, stderr, classifyReportedFailure]: wording only in the report; stderr for
+ * machine signals, without a report or behind a generic one. Shared by Cursor and Codex.
+ */
+const REPORTED: readonly (readonly [string | undefined, string | undefined, Kind])[] = [
+  ["You've hit your usage limit", undefined, P],
+  [undefined, "You've hit your usage limit", N],
+  [undefined, "Error: [unauthenticated] token revoked", A],
+  ["Request failed", "HTTPError: 401", A],
+  ["Error: Request failed. Request ID: 12.", '{"status":429}', R],
+  ["Request failed", "Rate limit reached for requests", N],
+  ["The model returned malformed tool calls.", "HTTPError: 401", N],
+  [undefined, undefined, N],
+];
+
+describe.each(REPORTED)("reported %j with stderr %j", (reported, stderr, kind) => {
+  it(`is ${kind ?? "nothing"}`, () => {
+    expect(classifyReportedFailure(reported, stderr, classifyCursorFailure)?.kind).toBe(kind);
+    expect(classifyReportedFailure(reported, stderr, classifyFailure)?.kind).toBe(kind);
   });
 });
 

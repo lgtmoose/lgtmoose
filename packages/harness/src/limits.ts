@@ -94,3 +94,66 @@ export function limitTimes(message: string): { retryAfterSeconds?: number; reset
     ...(at === undefined ? {} : { resetsAt: at }),
   };
 }
+
+/** Error-class prefixes ("Error: ", "ConnectError: ") a generic message may carry. */
+const ERROR_PREFIX = /^(?:[a-z]*error\s*:\s*)+/i;
+/** Error results too generic to say what went wrong. */
+const GENERIC_ERROR =
+  /^(?:request failed|unknown error|internal error|error|failed|an? (?:unexpected |unknown |internal )?error(?: occurred| has occurred)?|something went wrong)$/i;
+/**
+ * Sentences that say nothing about the cause: what to do next, or only an identifier ("Request
+ * ID: 1234", "Trace ID: abc", "Error code: 13"). An error code that is an HTTP status (4xx, 5xx)
+ * isn't a hint: it may be the cause.
+ */
+const HINT = new RegExp(
+  [
+    String.raw`(?:please )?(?:try again(?: later| in a (?:moment|few minutes))?|retry(?: later)?)`,
+    String.raw`see .{0,200} for (?:more )?details`,
+    String.raw`check the logs(?: for (?:more )?details)?`,
+    String.raw`contact support`,
+    String.raw`(?:request|trace|correlation|span) id:? ?[\w-]{1,100}`,
+    String.raw`error code:? ?(?![45]\d\d\b)[\w-]{1,40}`,
+  ]
+    .map((form) => `^(?:${form})$`)
+    .join("|"),
+  "i",
+);
+
+/**
+ * Whether an error result's text says nothing about the cause. Its error-class prefixes go,
+ * then its sentences (split at sentence ends and line breaks) that are only hints or
+ * identifiers ("Please try again.", "Request ID: 1234."). What's left must be empty or one
+ * generic phrase ("Request failed", "An unexpected error occurred"); any other sentence names a
+ * cause, which makes the result specific.
+ */
+export function isGenericError(text: string): boolean {
+  const sentences = text
+    .trim()
+    .replace(ERROR_PREFIX, "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim().replace(/[.!?]+$/, ""))
+    .filter((sentence) => sentence !== "" && !HINT.test(sentence));
+  return (
+    sentences.length === 0 || (sentences.length === 1 && GENERIC_ERROR.test(sentences[0] ?? ""))
+  );
+}
+
+/**
+ * Classifies a failed run from the error the CLI reported on purpose (`reported`: Cursor's JSON
+ * error result, Codex's failure event) and its raw stderr. Wording is read only in the report,
+ * with `classify`. stderr is read for machine signals only (`classifyMachineSignals`): when
+ * there's no report, or when the report is generic ("Request failed") and so may have its
+ * cause in stderr. A specific report that doesn't classify is left alone.
+ */
+export function classifyReportedFailure(
+  reported: string | undefined,
+  stderr: string | undefined,
+  classify: (message: string) => LimitFailure | undefined,
+): LimitFailure | undefined {
+  const raw = stderr?.trim() || undefined;
+  const report = reported?.trim() || undefined;
+  if (report === undefined) return raw === undefined ? undefined : classifyMachineSignals(raw);
+  const fromReport = classify(report);
+  if (fromReport !== undefined || raw === undefined || !isGenericError(report)) return fromReport;
+  return classifyMachineSignals(raw);
+}

@@ -101,30 +101,3 @@ export function classifyCursorFailure(whole: string): LimitFailure | undefined {
   if (RESOURCE_EXHAUSTED.test(message)) return { kind: "rate_limit", ...limitTimes(message) };
   return AUTH_FAILURE.test(message) ? { kind: "auth" } : undefined;
 }
-
-/** Error-class prefixes ("Error: ", "ConnectError: ") a generic message may carry. */
-const ERROR_PREFIX = /^(?:[a-z]*error\s*:\s*)+/i;
-/** Error results too generic to say what went wrong. */
-const GENERIC_ERROR =
-  /^(?:request failed|unknown error|internal error|error|failed|an? (?:unexpected |unknown |internal )?error(?: occurred| has occurred)?|something went wrong)$/i;
-/** Sentences that only say what to do next, not what went wrong. */
-const HINT =
-  /^(?:please )?(?:try again(?: later| in a (?:moment|few minutes))?|retry(?: later)?|see .{0,200} for (?:more )?details|check the logs(?: for (?:more )?details)?|contact support)$/i;
-
-/**
- * Whether an error result's text says nothing about the cause: once its error-class prefixes
- * and its hint sentences ("Please try again.", "See the logs for details.") are dropped, what's
- * left is empty or a generic phrase ("Request failed", "An unexpected error occurred"). Any
- * other sentence names a cause, which makes the result specific.
- */
-export function isGenericError(text: string): boolean {
-  const sentences = text
-    .trim()
-    .replace(ERROR_PREFIX, "")
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim().replace(/[.!?]+$/, ""))
-    .filter((sentence) => sentence !== "" && !HINT.test(sentence));
-  return (
-    sentences.length === 0 || (sentences.length === 1 && GENERIC_ERROR.test(sentences[0] ?? ""))
-  );
-}

@@ -189,6 +189,28 @@ describe("CodexHarness", () => {
     if (kind === "plan_limit") expect(error.resetsAt).toBe("Nov 14, 2026 3:45 PM");
   });
 
+  it.each([
+    ["Request failed", "HTTPError: 401", "auth"],
+    ["Request failed", "You've hit your usage limit", "process"],
+    ["sandbox error: something broke", "HTTPError: 401", "process"],
+  ] as const)(
+    "reads stderr's machine signals behind a generic failure event: %j with %j is %s",
+    async (message, stderr, kind) => {
+      const harness = await harnessFor([
+        {
+          lines: [
+            { type: "thread.started", thread_id: "t" },
+            { type: "turn.started" },
+            { type: "turn.failed", error: { message } },
+          ],
+          stderr,
+          exitCode: 1,
+        },
+      ]);
+      expect((await failure(run(harness))).kind).toBe(kind);
+    },
+  );
+
   it("kills the run early when errors say the credential is refused", async () => {
     const authError = { type: "error", message: "unexpected status 401 Unauthorized" };
     const harness = await harnessFor([{ lines: [authError, authError], hang: true }]);

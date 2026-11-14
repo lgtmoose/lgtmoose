@@ -58,6 +58,8 @@ export { authJsonSecrets, codexAuth, type CodexAuth, type CodexAuthMethod } from
 export {
   classifyFailure,
   classifyMachineSignals,
+  classifyReportedFailure,
+  isGenericError,
   limitTimes,
   type LimitFailure,
 } from "./limits.js";
@@ -73,7 +75,7 @@ export {
 } from "./cursor/adapter.js";
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
 export { CURSOR_DENIED_TOOLS, cursorPermissions, DENIED_ROOTS } from "./cursor/policy.js";
-export { classifyCursorFailure, isGenericError } from "./cursor/result.js";
+export { classifyCursorFailure } from "./cursor/result.js";
 export { statusesIn } from "./status.js";
 export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
 export { isInside } from "./paths.js";

@@ -20,7 +20,7 @@ import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { authJsonSecrets, codexAuth } from "./auth.js";
 import { dropOptionalNulls, strictSchema } from "./schema.js";
-import { classifyFailure, classifyMachineSignals } from "../limits.js";
+import { classifyFailure, classifyReportedFailure } from "../limits.js";
 import { parseCodexEvents, type CodexRun } from "./stream.js";
 
 export interface CodexHarnessOptions {
@@ -377,9 +377,9 @@ function failIfUnusable(
     throw fail("process", "codex wrote more output than allowed.");
   if (run.completed && run.failure === undefined) return;
   const detail = run.failure ?? (proc.stderr.trim() || "no output");
-  // Wording only in Codex's own failure event; raw stderr only for machine signals.
-  const limit =
-    run.failure === undefined ? classifyMachineSignals(proc.stderr) : classifyFailure(run.failure);
+  // Wording only in Codex's own failure event; stderr for machine signals, without a failure
+  // event or behind a generic one, as for Cursor.
+  const limit = classifyReportedFailure(run.failure, proc.stderr, classifyFailure);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;
     throw fail(kind, `codex stopped: ${detail}`, extra);
