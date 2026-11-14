@@ -63,9 +63,14 @@ function runKind(
 
 /**
  * The finished batches of the PR's recent runs that never posted (stopped by a newer push,
- * superseded or failed): each batch's files at the blobs it saw, and its findings. They're
- * recorded as reviewed under their own run, so the record outlives the run's objects, and this
- * run skips the files whose blobs haven't changed and posts their findings.
+ * superseded or failed): the files each batch's prompt covered, at the blobs it saw, and its
+ * findings. This run skips the files whose blobs haven't changed and posts their findings.
+ * They're also recorded under their own run, for the record; only a posted run's files count
+ * as reviewed later (see `RunStore.reviewedFiles`).
+ *
+ * Files a batch had as done already are left out: their findings, if any, came from an older
+ * run, and are picked up from that run while it's among the recent ones. Past that, the file
+ * is reviewed again rather than its findings lost.
  */
 async function resumableWork(
   deps: ControlDeps,
@@ -81,6 +86,7 @@ async function resumableWork(
     const review = (JSON.parse(text) as RunManifest).review;
     const byPath = new Map(review.files.map((file) => [file.path, file]));
     const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
+    const alreadyDone = new Set(review.done);
     const jobs = review.jobs.filter((job) => job.prompt !== undefined);
     const outcomes = await Promise.all(
       jobs.map((job) => readOutcome(deps.store, earlierId, job.index)),
@@ -88,8 +94,9 @@ async function resumableWork(
     for (const [i, job] of jobs.entries()) {
       const outcome = outcomes[i];
       if (outcome?.findings === undefined) continue;
-      const paths = new Set(job.files);
-      const files = job.files.flatMap((path) => {
+      const covered = job.files.filter((path) => !alreadyDone.has(path));
+      const paths = new Set(covered);
+      const files = covered.flatMap((path) => {
         const file = byPath.get(path);
         return file === undefined ? [] : [{ path, oldBlob: file.oldBlob, newBlob: file.newBlob }];
       });

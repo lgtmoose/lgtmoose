@@ -87,7 +87,11 @@ export interface RunStore {
       fromSha: string | undefined;
     },
   ): Promise<void>;
-  /** Every file version any run of the PR recorded as reviewed. */
+  /**
+   * Every file version a posted (succeeded) run of the PR recorded as reviewed. Unposted runs'
+   * files are left out: their findings were never posted, so the files only count as done
+   * while those findings can still be picked up (see `unpostedRuns`).
+   */
   reviewedFiles(pullRequestId: string): Promise<{ path: string; blobSha: string }[]>;
   /** Records file versions a run reviewed. Recording one twice is a no-op. */
   recordFiles(runId: string, files: readonly FileRecord[]): Promise<void>;

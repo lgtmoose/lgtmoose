@@ -20,7 +20,7 @@ import type {
   RunStore,
 } from "./ports.js";
 import { post } from "./post.js";
-import { prepare, type RunManifest } from "./prepare.js";
+import { RESUME_RUNS, prepare, type RunManifest } from "./prepare.js";
 import { PREPARE_FAILED, runCommand } from "./run.js";
 
 const exec = promisify(execFile);
@@ -173,7 +173,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
     },
     async reviewedFiles() {
       return [...runs.values()].flatMap((run) =>
-        run.files.map(({ path, blobSha }) => ({ path, blobSha })),
+        run.status === "succeeded" ? run.files.map(({ path, blobSha }) => ({ path, blobSha })) : [],
       );
     },
     async recordFiles(id, files) {
@@ -578,6 +578,30 @@ describe("later runs", () => {
     expect(h.runs.runs.get(stopped.runId)?.files.map((file) => file.path)).toContain(
       "src/total.ts",
     );
+  });
+
+  it("reviews a file again rather than lose findings from a run too far back to pick up", async () => {
+    const h = harness();
+    await addOther();
+    const first = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    h.objects.set(runKeys(first.runId).batchOutput(0), JSON.stringify(output()));
+    await h.deps.runs.supersedeRun(first.runId);
+    // Newer pushes to src/other.ts, each stopped after its batch: src/total.ts stays done.
+    for (let n = 2; n <= 1 + RESUME_RUNS; n++) {
+      headSha = await commit({ "src/other.ts": `export const rate = ${10 + n};\n` }, `push ${n}`);
+      const stopped = await prepare(h.deps, JOB, exec(n), SETTINGS);
+      expect(promptOf(h, stopped.runId)).not.toContain("src/total.ts");
+      h.objects.set(
+        runKeys(stopped.runId).batchOutput(0),
+        JSON.stringify(output({ findings: [] })),
+      );
+      await h.deps.runs.supersedeRun(stopped.runId);
+    }
+    headSha = await commit({ "src/other.ts": "export const rate = 99;\n" }, "last push");
+
+    // The first run, the only one with the finding, is now out of reach.
+    const { prepared } = await review(h, 9);
+    expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
   });
 
   it("reviews no batch when the head is the one reviewed last", async () => {

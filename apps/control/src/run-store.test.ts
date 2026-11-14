@@ -84,15 +84,26 @@ describe("drizzleRunStore", () => {
     expect(await runRow(next.runId)).toMatchObject({ kind: "full", fromSha: null, filesTotal: 1 });
   });
 
-  it("records reviewed files once and lists them for every run of the PR", async () => {
+  it("records reviewed files once and lists those of the PR's posted runs", async () => {
+    const succeed = (runId: string) =>
+      store.succeedRun(runId, {
+        filesDone: 1,
+        costUsd: undefined,
+        headSha: "a".repeat(40),
+        statusLabel: undefined,
+        summaryCommentId: undefined,
+      });
     const first = await start("arn:exec:files:1", 20);
     const second = await start("arn:exec:files:2", 20);
     const file = { path: "src/a.ts", blobSha: "c".repeat(40), depth: "full" as const };
     await store.recordFiles(first.runId, [file]);
     await store.recordFiles(first.runId, [file]);
     await store.recordFiles(second.runId, [file, { ...file, path: "src/b.ts" }]);
-    const other = await start("arn:exec:files:3", 21);
+    const unposted = await start("arn:exec:files:3", 20);
+    await store.recordFiles(unposted.runId, [{ ...file, path: "src/unposted.ts" }]);
+    const other = await start("arn:exec:files:4", 21);
     await store.recordFiles(other.runId, [{ ...file, path: "src/other.ts" }]);
+    for (const run of [first, second, other]) await succeed(run.runId);
 
     const files = await store.reviewedFiles(first.pullRequestId);
     expect(files.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([

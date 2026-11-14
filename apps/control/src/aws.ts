@@ -213,7 +213,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .selectDistinct({ path: filesReviewed.path, blobSha: filesReviewed.blobSha })
         .from(filesReviewed)
         .innerJoin(reviewRuns, eq(filesReviewed.runId, reviewRuns.id))
-        .where(eq(reviewRuns.pullRequestId, pullRequestId));
+        .where(
+          and(eq(reviewRuns.pullRequestId, pullRequestId), eq(reviewRuns.status, "succeeded")),
+        );
     },
     async recordFiles(runId, files) {
       for (let i = 0; i < files.length; i += INSERT_CHUNK) {
