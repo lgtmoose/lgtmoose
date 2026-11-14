@@ -1,9 +1,10 @@
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { describe, expect, it } from "vitest";
 import { annotationsFor } from "./check-run.js";
+import { MAX_MARKER_LENGTH, SUMMARY_MARKER_ROOM } from "@lgtmoose/summary";
 import { GitHubClient, GitHubError } from "./github.js";
 import { GitHubPoster } from "./poster.js";
-import { buildReview } from "./review.js";
+import { buildReview, reviewMarkerComment } from "./review.js";
 import { ShadowPoster } from "./shadow.js";
 import { fakeFetch, fileDiff, finding } from "./testing/fixtures.js";
 
@@ -287,6 +288,54 @@ describe("GitHubPoster", () => {
       created: true,
     });
     expect(calls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
+  });
+
+  it("rethrows a 403 that's a rate limit instead of creating a second comment", async () => {
+    for (const reply of [
+      { message: "You have exceeded a secondary rate limit." },
+      { message: "API rate limit exceeded for installation." },
+    ]) {
+      const { poster: p, calls } = poster([{ status: 403, body: reply }]);
+      await expect(p.upsertSummaryComment(PULL, "b", 5, "lgtmoose-summary")).rejects.toThrow(
+        "HTTP 403",
+      );
+      expect(calls.map((c) => c.method)).toEqual(["PATCH"]);
+    }
+    const limited: typeof fetch = async () =>
+      new Response(JSON.stringify({ message: "Forbidden" }), {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0" },
+      });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: limited });
+    const error = await github.request("PATCH", "/x", {}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ status: 403, rateLimited: true });
+  });
+
+  it("finds its own review by marker, matching the App's bot user", async () => {
+    const reviews = [
+      { body: "<!-- lgtmoose-run:r1 -->", user: { login: "other-app[bot]", type: "Bot" } },
+      { body: "> <!-- lgtmoose-run:r2 -->", user: { login: "dev", type: "User" } },
+      { body: "x\n\n<!-- lgtmoose-run:r3 -->", user: { login: "lgtmoose[bot]", type: "Bot" } },
+    ];
+    const fake = fakeFetch([
+      { status: 200, body: reviews },
+      { status: 200, body: reviews },
+      { status: 200, body: reviews },
+    ]);
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+    const p = new GitHubPoster(github, { appSlug: "lgtmoose" });
+    expect(await p.reviewPosted(PULL, "lgtmoose-run:r1")).toBe(false);
+    expect(await p.reviewPosted(PULL, "lgtmoose-run:r2")).toBe(false);
+    expect(await p.reviewPosted(PULL, "lgtmoose-run:r3")).toBe(true);
+  });
+
+  it("leaves room in the summary for the longest marker", async () => {
+    const longest = "m".repeat(MAX_MARKER_LENGTH);
+    const { poster: p, calls } = poster([{ status: 200, body: { id: 1 } }]);
+    await p.upsertSummaryComment(PULL, "x".repeat(65_536 - SUMMARY_MARKER_ROOM), 1, longest);
+    const body = (calls[0]?.body as { body: string } | undefined)?.body ?? "";
+    expect(body.length).toBe(65_536);
+    expect(() => reviewMarkerComment(`${longest}m`)).toThrow();
   });
 
   it("fits the summary comment's marker in the room the summary leaves", async () => {

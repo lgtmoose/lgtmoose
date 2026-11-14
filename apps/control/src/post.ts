@@ -75,6 +75,9 @@ function withoutUndefined<T extends object>(
 
 /** What the post step has posted for a run, so far. */
 interface PostProgress {
+  /** The attempt that saved it, and how many saves it has made: no two writers' match. */
+  attempt?: string;
+  writes?: number;
   review?: boolean;
   checkRun?: boolean;
   summary?: boolean;
@@ -83,6 +86,8 @@ interface PostProgress {
 }
 
 const postProgressSchema = z.object({
+  attempt: z.string().optional(),
+  writes: z.number().int().nonnegative().optional(),
   review: z.boolean().optional(),
   checkRun: z.boolean().optional(),
   summary: z.boolean().optional(),
@@ -152,54 +157,50 @@ const HOLDER_GONE = new Set(["DEPROVISIONING", "STOPPED", "DELETED", TASK_MISSIN
 export const SUMMARY_MARKER = "lgtmoose-summary";
 
 /**
- * Claims the run's review for this attempt before it posts it, so two attempts (a retry and
- * the attempt it replaced, still alive) can't both post. The claim names the attempt's ECS
- * task. Returns the claim's ETag when this attempt holds it and should post, or "posted" when
- * the review is already on GitHub. When another attempt holds it and hasn't posted:
+ * Claims the run's post for this attempt before it writes anything to GitHub, so two attempts
+ * (a retry and the attempt it replaced, still alive) never write at once: only the holder
+ * posts the review, sends check-run annotations, or saves progress. The claim names the
+ * attempt's ECS task. Returns the claim's ETag. When another attempt holds it:
  * - its task has stopped (or is gone): the claim is taken over, with a write conditional on
  *   the claim being unchanged, so two attempts can't both take it over;
  * - its task is still running, or can't be told: the step fails, and its retry tries later.
+ * Our own write that S3 applied but answered 412 to the SDK's retry counts as ours (see
+ * `conditionalPut`): the claim's body names this attempt.
  */
-async function claimReview(
+async function holdClaim(
   deps: ControlDeps,
   options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
-  reviewPosted: () => Promise<boolean>,
   claimKey: string,
-): Promise<{ etag: string } | "posted"> {
+): Promise<string> {
   const mine = JSON.stringify({
     attempt: options.attempt.id,
     ...(options.attempt.taskArn === undefined ? {} : { taskArn: options.attempt.taskArn }),
   });
   const created = await deps.store.createText(claimKey, mine);
-  if (created !== undefined) return { etag: created };
-  if (await reviewPosted()) return "posted";
+  if (created !== undefined) return created;
   const current = await deps.store.getTagged(claimKey);
   // Released since: claim it afresh, once.
   if (current === undefined) {
     const again = await deps.store.createText(claimKey, mine);
-    if (again !== undefined) return { etag: again };
-    throw new Error("Another attempt claimed this run's review just now.");
+    if (again !== undefined) return again;
+    throw new Error("Another attempt claimed this run's post just now.");
   }
   const holder = claimSchema.safeParse(parseJson(current.text));
-  // Our own create, applied by S3 but answered 412 to the SDK's retry of it.
-  if (holder.success && holder.data.attempt === options.attempt.id) return { etag: current.etag };
   const holderTask = holder.success ? holder.data.taskArn : undefined;
   if (holder.success && holderTask === undefined) {
-    throw new Error("Another attempt, off ECS, holds this run's review claim.");
+    throw new Error("Another attempt, off ECS, holds this run's post claim.");
   }
   // An unreadable claim has no holder to wait for.
   if (holderTask !== undefined) {
     const status = await options.taskStatus(holderTask);
     if (!HOLDER_GONE.has(status)) {
-      throw new Error(`Another attempt (task ${status}) holds this run's review claim.`);
+      throw new Error(`Another attempt (task ${status}) holds this run's post claim.`);
     }
-    // It may have posted just before it stopped.
-    if (await reviewPosted()) return "posted";
   }
   const taken = await deps.store.replaceText(claimKey, mine, current.etag);
-  if (taken === undefined) throw new Error("Another attempt took over this run's review claim.");
-  deps.log("took over the review claim of a stopped attempt", { holderTask });
-  return { etag: taken };
+  if (taken === undefined) throw new Error("Another attempt took over this run's post claim.");
+  deps.log("took over the post claim of a stopped attempt", { holderTask });
+  return taken;
 }
 
 /** GitHub refused the request outright: it wasn't carried out, so nothing was posted. */
@@ -289,21 +290,19 @@ export async function post(
   // overlapping attempts can't overwrite each other's progress: the second fails its step.
   let progressEtag = saved?.etag;
   const save = async () => {
+    // Our attempt ID and a write count make the body ours alone, so a 412 answering the SDK's
+    // retry of a write S3 applied is told from another attempt's write (see `conditionalPut`).
+    progress.attempt = attempt.id;
+    progress.writes = (progress.writes ?? 0) + 1;
     const body = JSON.stringify(progress);
     const etag =
       progressEtag === undefined
         ? await deps.store.createText(keys.posted, body)
         : await deps.store.replaceText(keys.posted, body, progressEtag);
-    if (etag !== undefined) {
-      progressEtag = etag;
-      return;
-    }
-    // A 412 can answer the SDK's retry of a write S3 already applied: then what's there is ours.
-    const now = await deps.store.getTagged(keys.posted);
-    if (now?.text !== body) {
+    if (etag === undefined) {
       throw new Error("Another attempt saved this post's progress meanwhile.");
     }
-    progressEtag = now.etag;
+    progressEtag = etag;
   };
 
   let stale: string | undefined;
@@ -336,28 +335,24 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
   try {
+    // Every write below is the claim holder's alone: an earlier attempt still running makes
+    // this one fail its step until it has stopped.
+    const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim);
     if (!progress.review) {
-      const claim = await claimReview(
-        deps,
-        { attempt, taskStatus },
-        () => github.reviewPosted(pull, reviewMarker(runId)),
-        keys.reviewClaim,
-      );
-      if (claim !== "posted") {
+      // An earlier holder may have posted it and stopped before saving its progress.
+      if (!(await poster.reviewPosted(pull, reviewMarker(runId)))) {
         try {
           await poster.submitReview(pull, pr.headSha, payload);
         } catch (error) {
           // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise
           // (a timeout, a 5xx) it may be, and the claim stays until this task has stopped.
           if (refused(error)) {
-            await deps.store
-              .deleteIfMatch(keys.reviewClaim, claim.etag)
-              .catch((release: unknown) => {
-                deps.log("releasing the review claim failed", {
-                  runId,
-                  error: release instanceof Error ? release.message : String(release),
-                });
+            await deps.store.deleteIfMatch(keys.reviewClaim, claim).catch((release: unknown) => {
+              deps.log("releasing the review claim failed", {
+                runId,
+                error: release instanceof Error ? release.message : String(release),
               });
+            });
           }
           throw error;
         }

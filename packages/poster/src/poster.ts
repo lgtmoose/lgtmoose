@@ -50,6 +50,15 @@ export interface Poster {
   ): Promise<SummaryCommentResult>;
   /** Status label calls for this PR, for `syncStatusLabel`. */
   labels(pull: PullRef): LabelClient;
+  /**
+   * Whether the PR has a review by us whose body carries `marker` (see `reviewMarkerComment`).
+   * Always false in shadow mode, where reviews are recorded, not posted.
+   */
+  reviewPosted(pull: PullRef, marker: string): Promise<boolean>;
+}
+
+function rateLimited(error: unknown): boolean {
+  return error instanceof GitHubError && error.rateLimited;
 }
 
 function isStatus(error: unknown, ...statuses: number[]): boolean {
@@ -109,10 +118,18 @@ interface ListedCheckRun {
 
 export interface GitHubPosterOptions {
   /**
-   * The App's ID. A summary comment found by its marker must be the App's own: anyone can
-   * quote a marker, and editing their comment would fail on every run.
+   * The App's ID and slug. A comment or review found by its marker must be the App's own:
+   * anyone can quote a marker. Comments carry the App's ID; reviews only its bot user,
+   * `<slug>[bot]`.
    */
   appId?: number;
+  appSlug?: string;
+}
+
+/** A review as the reviews endpoint lists it. */
+interface ListedReview {
+  body?: string | null;
+  user?: { login?: string; type?: string } | null;
 }
 
 /** Posts to GitHub with an installation token. */
@@ -128,6 +145,24 @@ export class GitHubPoster implements Poster {
       return comment.performed_via_github_app?.id === this.options.appId;
     }
     return comment.user?.type === "Bot";
+  }
+
+  /** Whether the App's bot wrote the review (or, without its slug, a bot did). */
+  private ourReview(review: ListedReview): boolean {
+    if (review.user?.type !== "Bot") return false;
+    return (
+      this.options.appSlug === undefined || review.user.login === `${this.options.appSlug}[bot]`
+    );
+  }
+
+  async reviewPosted(pull: PullRef, marker: string): Promise<boolean> {
+    const comment = reviewMarkerComment(marker);
+    const reviews = await this.github.list<ListedReview>(
+      `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
+    );
+    return reviews.some(
+      (review) => this.ourReview(review) && review.body?.includes(comment) === true,
+    );
   }
 
   async submitReview(
@@ -253,9 +288,10 @@ export class GitHubPoster implements Poster {
         });
         return { id: commentId, created: false };
       } catch (error) {
-        // Deleted by someone (404), or not ours to edit (403): post a new one, and the caller
-        // stores the new ID.
-        if (!isStatus(error, 403, 404)) throw error;
+        // Deleted by someone (404), or not ours to edit (a 403 that isn't a rate limit): post
+        // a new one, and the caller stores the new ID.
+        const gone = isStatus(error, 404) || (isStatus(error, 403) && !rateLimited(error));
+        if (!gone) throw error;
       }
     }
     const comment = await this.github.request<{ id: number }>(

@@ -1,5 +1,6 @@
 import { severityRank, type Finding, type ReviewEvent } from "@lgtmoose/core";
 import { commentTarget, type CommentPosition, type FileDiff } from "@lgtmoose/git";
+import { MAX_MARKER_LENGTH } from "@lgtmoose/summary";
 import { clip, paragraphs } from "@lgtmoose/summary";
 import { GITHUB_BODY_LIMIT, findingHeading, findingLocation, formatComment } from "./format.js";
 
@@ -46,8 +47,9 @@ export interface ReviewPayload {
 
 /** The hidden comment a marked review's body ends with. */
 export function reviewMarkerComment(marker: string): string {
-  if (!/^[\w:-]{1,100}$/.test(marker))
-    throw new Error("A review marker is letters, digits, -, _ and :.");
+  if (marker.length > MAX_MARKER_LENGTH || !/^[\w:-]+$/.test(marker)) {
+    throw new Error(`A marker is 1 to ${MAX_MARKER_LENGTH} letters, digits, -, _ and :.`);
+  }
   return `<!-- ${marker} -->`;
 }
 

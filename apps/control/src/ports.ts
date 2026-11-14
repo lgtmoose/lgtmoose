@@ -89,11 +89,6 @@ export interface ControlDeps {
     reader: PullReader;
     token: () => Promise<string>;
     poster: (runId: string, pull: PullRef) => Poster;
-    /**
-     * Whether the PR has a review whose body carries `marker` (see `reviewMarkerComment`).
-     * Always false in shadow mode, where reviews are recorded, not posted.
-     */
-    reviewPosted: (pull: PullRef, marker: string) => Promise<boolean>;
   }>;
   clone(options: CloneOptions): Promise<Repo>;
   cloneUrl(owner: string, repo: string): string;

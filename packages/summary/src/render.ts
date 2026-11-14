@@ -6,11 +6,15 @@ import { clip, inline, link, paragraphs } from "./markdown.js";
 /** GitHub refuses issue and PR comments longer than this. */
 export const GITHUB_COMMENT_LIMIT = 65_536;
 
+/** Longest hidden marker the poster puts in a body (`reviewMarkerComment` in @lgtmoose/poster). */
+export const MAX_MARKER_LENGTH = 100;
+
 /**
  * Room to leave under the limit for the hidden marker the poster appends to the comment
- * (`upsertSummaryComment` in @lgtmoose/poster), so the comment never has to be cut to fit it.
+ * (`upsertSummaryComment` in @lgtmoose/poster), so the comment never has to be cut to fit it:
+ * the longest marker, in its comment, after a blank line.
  */
-export const SUMMARY_MARKER_ROOM = 100;
+export const SUMMARY_MARKER_ROOM = `\n\n<!--  -->`.length + MAX_MARKER_LENGTH;
 
 /** The review event the decision maps to. */
 export type ReviewEvent = "APPROVE" | "COMMENT" | "REQUEST_CHANGES";

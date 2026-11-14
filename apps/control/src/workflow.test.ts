@@ -195,12 +195,15 @@ function harness(setup: Setup = {}) {
     async putFile(key, path) {
       files.set(key, await readFile(path));
     },
+    // Like `conditionalPut` in aws.ts: a failed condition on an object holding exactly this
+    // body counts as our own earlier write.
     async createText(key, body) {
-      if (objects.has(key)) return undefined;
+      if (objects.has(key)) return objects.get(key) === body ? etags.get(key) : undefined;
       return tagged(key, body);
     },
     async replaceText(key, body, etag) {
-      return etags.get(key) === etag && objects.has(key) ? tagged(key, body) : undefined;
+      if (etags.get(key) === etag && objects.has(key)) return tagged(key, body);
+      return objects.get(key) === body ? etags.get(key) : undefined;
     },
     async getTagged(key) {
       const text = objects.get(key);
@@ -252,9 +255,15 @@ function harness(setup: Setup = {}) {
       return {
         reader,
         token: async () => "",
-        poster: (runId) =>
-          new ShadowPoster({ store: { put: (key, body) => store.putText(key, body) }, runId }),
-        reviewPosted: async (_pull, marker) => reviewsOnGitHub.has(marker),
+        poster: (runId) => {
+          const shadow = new ShadowPoster({
+            store: { put: (key, body) => store.putText(key, body) },
+            runId,
+          });
+          // As if the reviews were on GitHub, for the tests that put them there.
+          shadow.reviewPosted = async (_pull, marker) => reviewsOnGitHub.has(marker);
+          return shadow;
+        },
       };
     },
     clone: cloneAtSha,
@@ -405,7 +414,8 @@ describe("post", () => {
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     const calls = countingPoster(h, { what: "upsertSummaryComment", times: 1 });
-    await expect(post(h.deps, RUN_ID)).rejects.toThrow("GitHub 502");
+    const attempt = { attempt: { id: "a1", taskArn: undefined } };
+    await expect(post(h.deps, RUN_ID, attempt)).rejects.toThrow("GitHub 502");
     // The review is on GitHub, so the run is recorded, with the summary comment it already had.
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({
       status: "succeeded",
@@ -413,7 +423,7 @@ describe("post", () => {
     });
     // The retry doesn't post the review or the check run again.
     calls.length = 0;
-    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(await post(h.deps, RUN_ID, attempt)).toMatchObject({ posted: true });
     expect(calls).toEqual(["upsertSummaryComment", "labels"]);
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
   });
@@ -424,9 +434,10 @@ describe("post", () => {
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     countingPoster(h, { what: "completeCheckRun", times: 1 });
-    await expect(post(h.deps, RUN_ID)).rejects.toThrow("GitHub 502");
+    const attempt = { attempt: { id: "a1", taskArn: undefined } };
+    await expect(post(h.deps, RUN_ID, attempt)).rejects.toThrow("GitHub 502");
     setup.head = "f".repeat(40);
-    expect(await post(h.deps, RUN_ID, { running: async () => false })).toMatchObject({
+    expect(await post(h.deps, RUN_ID, { ...attempt, running: async () => false })).toMatchObject({
       posted: true,
     });
   });
@@ -594,24 +605,35 @@ describe("post", () => {
     expect(calls).toEqual(["submitReview"]);
   });
 
-  it("takes a 412 on a write S3 already applied as its own", async () => {
+  it("saves progress that names its attempt and counts its writes", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
-    const { store } = h.deps;
-    // The SDK retries each conditional write once after S3 applied it: the retry gets a 412.
-    const createText = store.createText.bind(store);
-    const replaceText = store.replaceText.bind(store);
-    store.createText = async (key, body) => {
-      await createText(key, body);
-      return undefined;
-    };
-    store.replaceText = async (key, body, etag) => {
-      await replaceText(key, body, etag);
-      return undefined;
-    };
-    expect(await post(h.deps, RUN_ID, as(TASK_A))).toMatchObject({ posted: true });
-    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+    await post(h.deps, RUN_ID, as(TASK_A, "attempt-1"));
+    expect(JSON.parse(h.objects.get(runKeys(RUN_ID).posted) ?? "{}")).toMatchObject({
+      attempt: "attempt-1",
+      writes: 4,
+      review: true,
+      checkRun: true,
+      summary: true,
+    });
+  });
+
+  it("waits for a live earlier attempt before writing anything, the review posted or not", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "RUNNING");
+    // It posted the review and saved that, and is still sending annotations.
+    await h.deps.store.createText(runKeys(RUN_ID).posted, JSON.stringify({ review: true }));
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).rejects.toThrow(
+      "task RUNNING",
+    );
+    expect(calls).toEqual([]);
+    h.tasks.set(TASK_A, "STOPPED");
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).not.toContain("submitReview");
   });
 
   it("creates its check run and summary comment idempotently", async () => {

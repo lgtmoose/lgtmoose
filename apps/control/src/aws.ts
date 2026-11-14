@@ -20,8 +20,7 @@ import {
   GitHubPoster,
   ShadowPoster,
   installationTokenProvider,
-  repoPath,
-  reviewMarkerComment,
+  appJwt,
 } from "@lgtmoose/poster";
 import { and, eq, gt, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -38,6 +37,10 @@ export const GITHUB_TIMEOUT_MS = 60_000;
 /**
  * A conditional PutObject: the new ETag, or undefined when the condition failed (412). A 409
  * (another conditional write of the key in flight) throws, for the caller to retry.
+ *
+ * A 412 can also answer the SDK's own retry of a write S3 already applied. So on a 412 the
+ * object is read back: if it holds exactly our body, the write was ours. Callers make bodies
+ * unique to the writer (an attempt ID, a write count), so another writer's can't match.
  */
 async function conditionalPut(
   client: Pick<S3Client, "send">,
@@ -50,7 +53,23 @@ async function conditionalPut(
     if (reply.ETag === undefined) throw new Error(`S3 returned no ETag for ${input.Key}.`);
     return reply.ETag;
   } catch (error) {
-    if (errorName(error) === "PreconditionFailed") return undefined;
+    if (errorName(error) !== "PreconditionFailed") throw error;
+    const stored = await getTagged(client, input.Bucket, input.Key);
+    return stored?.text === input.Body ? stored.etag : undefined;
+  }
+}
+
+async function getTagged(
+  client: Pick<S3Client, "send">,
+  bucket: string,
+  key: string,
+): Promise<{ text: string; etag: string } | undefined> {
+  try {
+    const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    if (object.ETag === undefined) throw new Error(`S3 returned no ETag for ${key}.`);
+    return { text: (await object.Body?.transformToString("utf8")) ?? "", etag: object.ETag };
+  } catch (error) {
+    if (errorName(error) === "NoSuchKey") return undefined;
     throw error;
   }
 }
@@ -74,16 +93,7 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
     async replaceText(key, body, etag) {
       return conditionalPut(client, { Bucket: bucket, Key: key, Body: body, IfMatch: etag });
     },
-    async getTagged(key) {
-      try {
-        const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-        if (object.ETag === undefined) throw new Error(`S3 returned no ETag for ${key}.`);
-        return { text: (await object.Body?.transformToString("utf8")) ?? "", etag: object.ETag };
-      } catch (error) {
-        if (errorName(error) === "NoSuchKey") return undefined;
-        throw error;
-      }
-    },
+    getTagged: (key) => getTagged(client, bucket, key),
     async deleteIfMatch(key, etag) {
       try {
         await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key, IfMatch: etag }));
@@ -379,6 +389,23 @@ export async function awsControlDeps(
     max: 2,
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
+  // The App's slug, read once with the App's own JWT.
+  let slugOnce: Promise<string> | undefined;
+  const slug = () => {
+    slugOnce ??= new GitHubClient({
+      token: async () => appJwt(app.appId, app.privateKey),
+      timeoutMs: GITHUB_TIMEOUT_MS,
+    })
+      .request<{ slug?: unknown }>("GET", "/app")
+      .then((reply) => {
+        if (typeof reply.slug !== "string") throw new Error("GET /app returned no slug.");
+        return reply.slug;
+      });
+    slugOnce.catch(() => {
+      slugOnce = undefined;
+    });
+    return slugOnce;
+  };
 
   return {
     store,
@@ -393,6 +420,8 @@ export async function awsControlDeps(
       });
       // Bounded well under the post step's heartbeat timeout: a hung write fails the attempt.
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
+      // The App's bot is `<slug>[bot]`: how its own reviews are told from others'.
+      const appSlug = options.shadow ? undefined : await slug();
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         token,
@@ -404,21 +433,10 @@ export async function awsControlDeps(
                 log,
                 labelReader: new GitHubLabelClient(client, pull),
               })
-            : new GitHubPoster(client, { appId: app.appId }),
-        async reviewPosted(pull, marker) {
-          if (options.shadow) return false;
-          const comment = reviewMarkerComment(marker);
-          const reviews = await client.list<{ body?: unknown; user?: { type?: string } | null }>(
-            `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
-          );
-          // A bot's review only: anyone can quote the marker in theirs.
-          return reviews.some(
-            (review) =>
-              review.user?.type === "Bot" &&
-              typeof review.body === "string" &&
-              review.body.includes(comment),
-          );
-        },
+            : new GitHubPoster(client, {
+                appId: app.appId,
+                ...(appSlug === undefined ? {} : { appSlug }),
+              }),
       };
     },
     clone: cloneAtSha,

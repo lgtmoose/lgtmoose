@@ -18,6 +18,11 @@ export class GitHubError extends Error {
     readonly githubMessage: string | undefined,
     readonly method: string,
     readonly path: string,
+    /**
+     * A rate limit, primary or secondary (GitHub answers some with 403): no requests left,
+     * a Retry-After, or a message that says so. Worth retrying later, not a refusal.
+     */
+    readonly rateLimited = false,
   ) {
     super(
       `GitHub ${method} ${path} failed (HTTP ${status}${githubMessage === undefined ? "" : `: ${githubMessage}`}).`,
@@ -73,7 +78,15 @@ export class GitHubClient {
         typeof reply.message === "string" && reply.message !== ""
           ? redactToken(reply.message, token).slice(0, MESSAGE_LIMIT)
           : undefined;
-      throw new GitHubError(response.status, message, method, path);
+      throw new GitHubError(
+        response.status,
+        message,
+        method,
+        path,
+        response.headers.get("x-ratelimit-remaining") === "0" ||
+          response.headers.has("retry-after") ||
+          /rate limit/i.test(message ?? ""),
+      );
     }
     if (response.status === 204) return undefined as T;
     // A body cut off (a timeout mid-read) throws from text(); an empty or broken one is an
