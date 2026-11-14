@@ -1,6 +1,7 @@
 import type { Repo } from "./clone.js";
 import { importLines, languageOf } from "./imports.js";
 import { parsePatch, type FilePatch, type Hunk } from "./patch.js";
+import { pool } from "./pool.js";
 import { listTree } from "./tree.js";
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed" | "type-changed";
@@ -399,26 +400,17 @@ async function baseline(
   };
 }
 
+/**
+ * The file with these lines it no longer adds. A file with some can't count as only moved: what
+ * it dropped is what's left to read.
+ */
+function withRemoved(file: FileDiff, removed: readonly string[]): FileDiff {
+  if (removed.length === 0) return file;
+  return { ...file, moved: false, removedSinceLastReview: [...removed] };
+}
+
 /** How many baselines are diffed at once. */
 const BASELINES_AT_ONCE = 4;
-
-/** Runs `work` on every item, at most `limit` at a time, each starting as soon as one ends. */
-async function pool<T, R>(
-  items: readonly T[],
-  limit: number,
-  work: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = Array.from({ length: items.length });
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await work(items[i] as T);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
 
 /**
  * What changed in one file's PR change since its baseline: the file with its incremental
@@ -442,7 +434,7 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
     : [];
   const renamedSince = changed?.status === "renamed" && file.status === "renamed";
   if (newLines.length === 0 && removed.length === 0 && !renamedSince) return undefined;
-  return { ...file, changedSinceLastReview: newLines, removedSinceLastReview: removed };
+  return withRemoved({ ...file, changedSinceLastReview: newLines }, removed);
 }
 
 /**
@@ -516,7 +508,7 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   const unchanged = new Set<string>();
   const handled = new Set<string>();
   const plan = (file: FileDiff, otherNames: readonly string[] = []) => {
-    const names = otherNames.filter((name) => name !== file.path);
+    const names = [...new Set(otherNames)].filter((name) => name !== file.path);
     planned.set(file.path, names.length > 0 ? { ...file, alsoReviewedAs: names } : file);
     unchanged.delete(file.path);
     handled.add(file.path);
@@ -544,13 +536,18 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     ];
     const renamedSince = base?.since.get(file.path)?.oldPath !== undefined;
     if (otherNames.length > 0 || renamedSince) {
-      for (const name of otherNames) if (baseOf(name) === undefined) gone.add(name);
-      if (reviewedAt.has(file.path) && base === undefined) gone.add(file.path);
-      // Still list what it stopped adding since then, from its diff under each earlier name.
-      const removed = [file.path, ...new Set(otherNames)].flatMap((name) =>
-        removedTexts(baseOf(name)?.previous.get(name), file),
+      // Named in the fallback reason when an earlier review it had is gone.
+      const anyGone = [file.path, ...otherNames].some(
+        (name) => reviewedAt.has(name) && baseOf(name) === undefined,
       );
-      plan(removed.length > 0 ? { ...file, removedSinceLastReview: removed } : file, otherNames);
+      if (anyGone) gone.add(file.path);
+      // Still list what it stopped adding since then, from its diff under each earlier name;
+      // rewordings drop out against what changed since.
+      const removed = [file.path, ...new Set(otherNames)].flatMap((name) => {
+        const earlier = baseOf(name);
+        return removedTexts(earlier?.previous.get(name), file, earlier?.since.get(file.path));
+      });
+      plan(withRemoved(file, removed), otherNames);
       continue;
     }
     if (base === undefined) {
@@ -600,8 +597,11 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     }
     const earlier = planned.get(path);
     if (earlier !== undefined) {
-      // Already reviewed in full under that name: record this name with it.
-      plan(earlier, [...(earlier.alsoReviewedAs ?? []), before.path]);
+      // Already planned under that name: record this name with it, and what it no longer adds.
+      plan(withRemoved(earlier, [...(earlier.removedSinceLastReview ?? []), ...removed]), [
+        ...(earlier.alsoReviewedAs ?? []),
+        before.path,
+      ]);
       continue;
     }
     if (removed.length === 0) {
@@ -629,15 +629,11 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     );
   }
   // Records for paths the PR doesn't change and that weren't in their baseline's diff: nothing
-  // to review. Covered at this head when that's known: the baseline is here, or the path still
-  // exists at head. A path whose commit is gone and that's gone from head may have been renamed
-  // away; it isn't claimed as covered.
-  const rest = [...reviewedAt.keys()].filter((path) => !handled.has(path));
-  const unknown = rest.filter((path) => baseOf(path) === undefined);
-  const existing = await blobsAt(repo, repo.headSha, unknown);
-  for (const path of rest) {
-    if (baseOf(path) !== undefined || existing.has(path)) cover(path);
-    else gone.add(path);
+  // to review, covered at this head. That holds whether or not their commit is still here: the
+  // PR doesn't change them now (if it renamed one away, the new name is in the PR, planned and
+  // carrying the old name). Covering them also stops a gone commit being asked for again.
+  for (const path of reviewedAt.keys()) {
+    if (!handled.has(path)) cover(path);
   }
 
   for (const path of unchanged) {
@@ -650,7 +646,10 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     unchanged: [...unchanged],
     ...(gone.size > 0
       ? {
-          fallbackReason: `The commit ${gone.size === 1 ? `${[...gone][0] ?? ""} was` : `${gone.size} files were`} last reviewed at is no longer in the repository (force-pushed away), so ${gone.size === 1 ? "it is" : "they are"} reviewed in full where the PR still changes ${gone.size === 1 ? "it" : "them"}.`,
+          fallbackReason:
+            gone.size === 1
+              ? `${[...gone][0] ?? ""} is reviewed in full: the commit it was last reviewed at is no longer in the repository (force-pushed away).`
+              : `${gone.size} files are reviewed in full: the commits they were last reviewed at are no longer in the repository (force-pushed away).`,
         }
       : {}),
   };

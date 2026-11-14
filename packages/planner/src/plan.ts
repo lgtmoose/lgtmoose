@@ -152,6 +152,8 @@ const byPath = (a: string, b: string) => {
 };
 
 export function readingDepth(file: FileDiff): ReadingDepth {
+  // Lines it stopped adding since the last review always need a read, moved or not.
+  if ((file.removedSinceLastReview?.length ?? 0) > 0) return "full";
   if (file.moved) return "move";
   if (file.mechanical) return "mechanical";
   return "full";

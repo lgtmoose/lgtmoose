@@ -61,6 +61,12 @@ describe("readingDepth", () => {
     expect(readingDepth(diff("a.ts", { mechanical: true }))).toBe("mechanical");
     expect(readingDepth(diff("a.ts"))).toBe("full");
   });
+
+  it("reads a file with lines it stopped adding in full, moved or not", () => {
+    const dropped = { removedSinceLastReview: ["requireAdmin(user);"] };
+    expect(readingDepth(diff("a.ts", { moved: true, status: "renamed", ...dropped }))).toBe("full");
+    expect(readingDepth(diff("a.ts", { mechanical: true, ...dropped }))).toBe("full");
+  });
 });
 
 describe("changedLines", () => {

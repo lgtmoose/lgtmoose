@@ -165,8 +165,16 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     }
     return present;
   };
-  const isLocalCommit = async (sha: string): Promise<boolean> =>
-    (await localCommits([sha])).has(sha);
+  /**
+   * Present only if fetched or in head's history; a failed fetch already showed the remote
+   * lacks it, so the remote isn't asked again.
+   */
+  const hasCommits = async (shas: Iterable<string>): Promise<Set<string>> => {
+    const list = [...new Set(shas)].filter((sha) => SHA.test(sha));
+    const known = list.filter((sha) => fetched.has(sha));
+    const local = await localCommits(list.filter((sha) => !fetched.has(sha)));
+    return new Set([...known, ...local]);
+  };
   /**
    * Fetches commits in one request; if one of them is gone, the request fails as a whole, so
    * they're fetched one at a time instead, skipping the ones that are gone.
@@ -249,19 +257,8 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
     headSha: options.headSha,
     fullCheckout: options.checkout !== "none",
     git: async (args, extra) => (await run(args, extra)).stdout,
-    hasCommit: async (sha) => {
-      if (fetched.has(sha)) return true;
-      if (!SHA.test(sha)) return false;
-      // Present only if it's in head's history; a failed fetch already showed the remote lacks
-      // it, so don't ask the remote again.
-      return isLocalCommit(sha);
-    },
-    hasCommits: async (shas) => {
-      const list = [...new Set(shas)].filter((sha) => SHA.test(sha));
-      const known = list.filter((sha) => fetched.has(sha));
-      const local = await localCommits(list.filter((sha) => !fetched.has(sha)));
-      return new Set([...known, ...local]);
-    },
+    hasCommit: async (sha) => (await hasCommits([sha])).has(sha),
+    hasCommits,
     readBlobs,
     fetchCommits,
     checkoutPaths: async (paths) => {

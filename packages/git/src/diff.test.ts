@@ -522,6 +522,96 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.unchanged).toEqual([]);
   });
 
+  it("never lets a renamed file with dropped lines count as only moved", async () => {
+    const base = await setUp({ "a.ts": lines(20), "z.ts": lines(3) });
+    await fixture.write({
+      "a.ts": lines(20).replace("line 10\n", "line 10\nrequireAdmin(user);\n"),
+    });
+    const reviewed = await fixture.commit("add the check");
+    // The check is dropped and the file renamed: against the base, a pure move.
+    await fixture.write({ "a.ts": lines(20) });
+    await fixture.move("a.ts", "b.ts");
+    const head = await fixture.commit("drop it and move");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["a.ts", reviewed]]),
+    });
+    const [file] = diff.files;
+    expect(file).toMatchObject({ path: "b.ts", moved: false, alsoReviewedAs: ["a.ts"] });
+    expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
+  });
+
+  it("covers a gone-from-head path whose recorded commit is gone, without a fallback", async () => {
+    const base = await setUp({ "keep.ts": lines(3) });
+    await fixture.write({ "keep.ts": lines(4) });
+    const head = await fixture.commit("edit keep.ts");
+
+    const diff = await reviewDiff(await clone(head, [base]), {
+      baseSha: base,
+      reviewedAt: new Map([
+        ["keep.ts", head],
+        ["vanished.ts", "e".repeat(40)],
+      ]),
+    });
+    expect(diff.unchanged.toSorted()).toEqual(["keep.ts", "vanished.ts"]);
+    expect(diff.fallbackReason).toBeUndefined();
+  });
+
+  it("names an old name once", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.write({ "a.ts": lines(10).replace("line 2\n", "pr\n") });
+    const reviewed = await fixture.commit("edit a.ts");
+    await fixture.move("a.ts", "b.ts");
+    const head = await fixture.commit("rename it");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["a.ts", reviewed]]),
+    });
+    expect(diff.files.map((file) => file.alsoReviewedAs)).toEqual([["a.ts"]]);
+  });
+
+  it("keeps what a reverted rename no longer adds when its old name is planned anyway", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.move("a.ts", "b.ts");
+    await fixture.write({ "b.ts": lines(10).replace("line 3\n", "line 3\nrequireAdmin(user);\n") });
+    const reviewed = await fixture.commit("rename, add the check");
+    // b.ts goes; a.ts comes back rewritten (too different to count as the same file).
+    await fixture.remove("b.ts");
+    await fixture.write({ "a.ts": lines(10, "other") });
+    const head = await fixture.commit("rewrite a.ts");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["b.ts", reviewed]]),
+    });
+    const [file] = diff.files;
+    expect(diff.files).toHaveLength(1);
+    expect(file).toMatchObject({ path: "a.ts", alsoReviewedAs: ["b.ts"] });
+    expect(file?.removedSinceLastReview).toContain("requireAdmin(user);");
+  });
+
+  it("leaves rewordings out of what a renamed file stopped adding", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.write({
+      "a.ts": lines(10).replace("line 5\n", "line 5\nlog('old wording here');\n"),
+    });
+    const reviewed = await fixture.commit("add a log");
+    await fixture.write({
+      "a.ts": lines(10).replace("line 5\n", "line 5\nlog('new wording here');\n"),
+    });
+    await fixture.move("a.ts", "b.ts");
+    const head = await fixture.commit("reword and rename");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["a.ts", reviewed]]),
+    });
+    expect(diff.files[0]?.path).toBe("b.ts");
+    expect(diff.files[0]?.removedSinceLastReview ?? []).toEqual([]);
+  });
+
   it("has nothing to review when a pure rename is undone", async () => {
     const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
     await fixture.move("a.ts", "b.ts");
@@ -572,7 +662,7 @@ describe("reviewDiff: incremental review", () => {
       ["new.ts", ["old.ts"]],
     ]);
     expect(diff.unchanged).toEqual([]);
-    expect(diff.fallbackReason).toContain("old.ts");
+    expect(diff.fallbackReason).toContain("new.ts is reviewed in full");
   });
 
   it("lists a reverted rename once, and never both plans and covers a path", async () => {
@@ -608,6 +698,8 @@ describe("reviewDiff: incremental review", () => {
     });
     // Re-recorded at this head, so the gone commit isn't asked for again.
     expect(diff.unchanged).toEqual(["b.ts"]);
+    // Nothing is reviewed in full because of it.
+    expect(diff.fallbackReason).toBeUndefined();
     expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
   });
 
