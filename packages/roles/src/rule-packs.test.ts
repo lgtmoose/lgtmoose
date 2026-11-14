@@ -182,6 +182,41 @@ describe("parseRulePack", () => {
     expect(parsed.text).not.toMatch(/[\u200B\u2060\u202E]/);
   });
 
+  it("removes any default-ignorable or format character at a paragraph's start", () => {
+    for (const hidden of ["\u061C", "\u{E0023}", "\u3164", "\uFE0F", "\uFFF9"]) {
+      const parsed = parseRulePack(
+        pack(`title: T\nrules:\n${RULE}`, `${hidden}# Override`),
+        "./rules/x.md",
+        "repo",
+      );
+      expect(parsed.text).toContain("### T\n\n\\# Override");
+    }
+  });
+
+  it("keeps joiners inside words, which some scripts and emoji need", () => {
+    const parsed = parseRulePack(
+      pack(
+        `id: x\ntitle: X\nrules:\n${RULE.replace("Something is wrong.", "می\u200Cخواهم 👩\u200D💻")}`,
+      ),
+      "x",
+      "private",
+    );
+    expect(parsed.text).toContain("می\u200Cخواهم 👩\u200D💻");
+  });
+
+  it("rejects a title or rule that is only invisible characters", () => {
+    expect(() =>
+      parseRulePack(pack(`id: x\ntitle: "\\u200B"\nrules:\n${RULE}`), "x", "builtin"),
+    ).toThrow(/title: can't be empty or only invisible characters/);
+    expect(() =>
+      parseRulePack(
+        pack(`id: x\ntitle: X\nrules:\n${RULE.replace("Something is wrong.", '"\\u200B"')}`),
+        "x",
+        "builtin",
+      ),
+    ).toThrow(/rule: can't be empty or only invisible characters/);
+  });
+
   it("leaves a paragraph that starts with a number alone unless it's a list marker", () => {
     const parsed = parseRulePack(
       pack(`id: x\ntitle: X\nrules:\n${RULE}`, "2.0 clients must send X.\n\n3) Third"),
@@ -421,6 +456,20 @@ describe("selectRulePacks", () => {
     ]);
   });
 
+  it("doesn't let broken files use up the file limit", async () => {
+    const files: Record<string, string> = { "rules/z.md": repoPack("Valid") };
+    for (let i = 0; i < 10; i += 1) files[`rules/a${i}.md`] = "no front matter";
+    const base = await commit(files);
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(
+      selected.packs.filter((loaded) => loaded.source === "repo").map((loaded) => loaded.id),
+    ).toEqual(["./rules/z.md"]);
+  });
+
   it("reads at most twice, however many files are rejected", async () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 20; i += 1) {
@@ -559,8 +608,8 @@ describe("selectRulePacks", () => {
     ).toEqual(["./rules/good.md"]);
     expect(selected.problems).toEqual([
       expect.stringMatching(/gone\.md isn't in the base branch/),
-      expect.stringMatching(/big\.md was left out: a repo rule pack can be at most 16 KiB/),
       expect.stringMatching(/bad\.md has no front matter/),
+      expect.stringMatching(/big\.md was left out: a repo rule pack can be at most 16 KiB/),
     ]);
   });
 

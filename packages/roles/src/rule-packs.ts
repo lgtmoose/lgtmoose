@@ -58,13 +58,19 @@ const RULE_PACK_ID = /^[a-z0-9][a-z0-9-]*$/;
 /** A repo pack entry in `.lgtmoose.yaml`: one file in the repo's `rules` folder, or all of them. */
 const REPO_PACK_ENTRY = /^\.\/rules\/([a-z0-9][a-z0-9-]*|\*)\.md$/;
 
+/** Text that isn't empty once whitespace and invisible characters are left out. */
+const visibleText = z
+  .string()
+  .trim()
+  .refine((text) => visibleStart(text) !== "", "can't be empty or only invisible characters");
+
 const ruleSchema = z
   .object({
     id: z.string().regex(RULE_PACK_ID, "rule ids are lowercase letters, digits and hyphens"),
     // The same shape as a finding's rule_category, so a rule's category can be reported as is.
     category: z.string().regex(/^[a-z][a-z0-9_]*$/, "categories are lowercase snake_case"),
     severity: z.enum(SEVERITIES),
-    rule: z.string().trim().min(1).max(1000),
+    rule: visibleText.max(1000),
     example: z.string().trim().min(1).max(1500),
   })
   .strict();
@@ -72,7 +78,7 @@ const ruleSchema = z
 const packSchema = z
   .object({
     id: z.string().regex(RULE_PACK_ID).optional(),
-    title: z.string().trim().min(1).max(100),
+    title: visibleText.max(100),
     description: z.string().trim().max(1000).optional(),
     rules: z.array(ruleSchema).min(1).max(60),
   })
@@ -116,18 +122,21 @@ function indent(text: string, by: string): string {
 
 /** Collapses whitespace and line breaks of every kind, so a field stays on its one line. */
 function oneLine(text: string): string {
-  return text
-    .replace(INVISIBLE, "")
-    .replace(/[\s\u0085]+/g, " ")
-    .trim();
+  return text.replace(/[\s\u0085]+/g, " ").trim();
 }
 
 /**
- * Invisible characters (zero-width spaces and joiners, soft hyphens, word joiners, bidi marks
- * and overrides, the BOM), removed from rendered pack text so none can hide what a line
- * starts with.
+ * Whitespace and invisible characters (default-ignorable code points and format characters:
+ * zero-width spaces and joiners, bidi marks, tag characters, variation selectors and the like)
+ * at the start of a text. Removed there only, where they could hide what a line starts with;
+ * inside a word they're kept, as some scripts and emoji need them.
  */
-const INVISIBLE = /\u034F|[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+const LEADING_INVISIBLE = /^[\s\u0085\p{Default_Ignorable_Code_Point}\p{Cf}]+/u;
+
+/** Text with its leading whitespace and invisible characters removed. */
+function visibleStart(text: string): string {
+  return text.replace(LEADING_INVISIBLE, "");
+}
 
 /** A character that can start a markdown block (heading, quote, list, fence, rule, HTML). */
 const BLOCK_START = /^[#>*+\-=_`~<|]/;
@@ -145,7 +154,7 @@ function plainParagraphs(text: string): string {
     .split(LINE_BREAK)
     .join("\n")
     .split(/\n[ \t]*\n/)
-    .map((paragraph) => oneLine(paragraph))
+    .map((paragraph) => visibleStart(oneLine(paragraph)))
     .filter((paragraph) => paragraph !== "")
     .map((paragraph) =>
       paragraph.replace(BLOCK_START, (char) => `\\${char}`).replace(ORDERED_START, "$1\\$2"),
@@ -176,12 +185,12 @@ function renderPack(
       `#### ${category}`,
       ...group.map(
         (rule) =>
-          `- ${rule.id} (default severity: ${rule.severity}): ${oneLine(rule.rule)}\n  Example:\n\n${indent(rule.example, "      ")}`,
+          `- ${rule.id} (default severity: ${rule.severity}): ${visibleStart(oneLine(rule.rule))}\n  Example:\n\n${indent(rule.example, "      ")}`,
       ),
     ].join("\n\n"),
   );
   return [
-    `### ${oneLine(title)}`,
+    `### ${visibleStart(oneLine(title))}`,
     plainParagraphs(description ?? ""),
     plainParagraphs(body),
     ...sections,
@@ -454,6 +463,7 @@ async function readRepoPacks(
   wanted: ReadonlySet<string>,
   problems: string[],
   warnings: string[],
+  accept: (path: string, text: string) => boolean,
 ): Promise<{ path: string; text: string }[]> {
   const listing = await repo.git(["ls-tree", "-z", sha, "--", "rules/"]);
   const all = wanted.has("rules/*.md");
@@ -507,8 +517,12 @@ async function readRepoPacks(
           `./${entry.path} was left out: repo rule packs are limited to ${maxTotalBytes / 1024} KiB in all.`,
         );
       } else {
-        chosen.push({ path: entry.path, text: content.toString("utf8") });
-        total += content.length;
+        // Only a pack that's used takes a slot, so broken files can't crowd out valid ones.
+        const text = content.toString("utf8");
+        if (accept(entry.path, text)) {
+          chosen.push({ path: entry.path, text });
+          total += content.length;
+        }
       }
     }
   }
@@ -583,27 +597,24 @@ export async function selectRulePacks(
       return { packs, problems, warnings };
     }
     const floors = severityFloors(packs);
-    for (const file of await readRepoPacks(
-      options.repo,
-      options.baseSha,
-      repoPaths,
-      problems,
-      warnings,
-    )) {
-      const name = `./${file.path}`;
+    const accept = (path: string, text: string): boolean => {
+      const name = `./${path}`;
       let parsed: ParsedPack;
       try {
-        parsed = parsePackFile(file.text, name, "repo");
+        parsed = parsePackFile(text, name, "repo");
       } catch (error) {
         if (!(error instanceof RulePackError)) throw error;
         problems.push(...error.issues);
-        continue;
+        return false;
       }
       const soft = softRules(parsed.rules, floors);
       problems.push(...soft.map((entry) => `${name}: ${entry.reason}, so that rule was left out.`));
       const rules = parsed.rules.filter((rule) => !soft.some((entry) => entry.rule === rule));
-      if (rules.length > 0) packs.push(toPack({ ...parsed, rules }, name, "repo"));
-    }
+      if (rules.length === 0) return false;
+      packs.push(toPack({ ...parsed, rules }, name, "repo"));
+      return true;
+    };
+    await readRepoPacks(options.repo, options.baseSha, repoPaths, problems, warnings, accept);
   }
   return { packs, problems, warnings };
 }
