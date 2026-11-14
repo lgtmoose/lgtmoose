@@ -1,6 +1,6 @@
 # Provider credentials
 
-`lgtmoose auth` stores each model provider's credential in AWS Secrets Manager, in the region from `lgtmoose.config.ts`. Values are read without echo, and are never printed, logged or saved to disk. The one exception is `auth codex`, which needs a temporary `CODEX_HOME` for `codex login`. That directory is private (mode 0700) and is deleted once the sign-in is uploaded, if anything fails, or on Ctrl+C.
+`lgtmoose auth` stores each model provider's credential in AWS Secrets Manager, in the region from `lgtmoose.config.ts`. Values are read without echo, and are never printed, logged or saved to disk. The one exception is `auth codex`, which needs a temporary `CODEX_HOME` for `codex login`. That directory is private (mode 0700) and is deleted as soon as `codex login` finishes, before the upload, whether it worked, failed or was stopped with Ctrl+C.
 
 | Command                             | Harness / auth                                  | What it does                                                  |
 | ----------------------------------- | ----------------------------------------------- | ------------------------------------------------------------- |

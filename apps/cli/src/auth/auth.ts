@@ -14,7 +14,7 @@ import type { SetupFiles } from "../setup/setup.js";
 import type { BedrockAccess } from "./bedrock.js";
 import { codexLogin, LoginInterrupted } from "./codex-login.js";
 import type { CredentialStore } from "./credential-store.js";
-import type { InteractiveRunner, SignalTrap } from "./process.js";
+import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
 
 /** The prompts auth asks. Matches @inquirer/prompts, so tests can script the answers. */
 export interface AuthPrompter {
@@ -368,7 +368,11 @@ async function authClaude(flags: Flags, deps: AuthDeps): Promise<string> {
       "\nRunning claude setup-token. Sign in, then copy the token it prints. " +
         "You'll paste it here next; LGTMoose doesn't read Claude's output.\n\n",
     );
-    const code = await deps.run("claude", ["setup-token"], {});
+    const code = await deps.run("claude", ["setup-token"], {}).catch((error: unknown) => {
+      throw error instanceof CommandNotFound
+        ? new AuthError(`${error.message} Install Claude Code, or paste a token with --paste.`)
+        : error;
+    });
     if (code !== 0) {
       throw new AuthError(
         `claude setup-token exited with code ${code ?? "unknown"}. Nothing stored. ` +
@@ -388,14 +392,18 @@ async function authCodex(flags: Flags, deps: AuthDeps): Promise<string> {
     return store(config, provider, await ask(KINDS.codexAccessToken, deps), deps);
   }
   deps.out(
-    "\nRunning codex login in a temporary CODEX_HOME. It's deleted as soon as the sign-in " +
-      "is uploaded, or if anything fails.\n\n",
+    "\nRunning codex login in a temporary CODEX_HOME. It's deleted as soon as codex " +
+      "finishes, whatever happens; the sign-in is uploaded from memory.\n\n",
   );
   const authJson = await codexLogin({
     run: deps.run,
     trapSignals: deps.trapSignals,
     deviceAuth: flags.deviceAuth,
     ...(deps.tmpRoot === undefined ? {} : { tmpRoot: deps.tmpRoot }),
+  }).catch((error: unknown) => {
+    throw error instanceof CommandNotFound
+      ? new AuthError(`${error.message} Install the Codex CLI (npm install -g @openai/codex).`)
+      : error;
   });
   return store(config, provider, authJson, deps);
 }

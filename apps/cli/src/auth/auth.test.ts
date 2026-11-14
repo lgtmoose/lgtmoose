@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTH_HELP, PLAN_CREDENTIAL_WARNING, runAuth, type AuthDeps } from "./auth.js";
 import type { ModelAccess } from "./bedrock.js";
 import type { CredentialLabel, CredentialStore, StoredCredential } from "./credential-store.js";
-import type { InteractiveRunner } from "./process.js";
+import { CommandNotFound, type InteractiveRunner } from "./process.js";
 
 const CONFIG_PATH = "/repo/lgtmoose.config.ts";
 const OAUTH = "sk-ant-oat01-SECRET-OAUTH";
@@ -171,6 +171,16 @@ describe("auth", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("exited with code 1");
     expect(h.puts).toEqual([]);
+  });
+
+  it("says how to install a missing vendor CLI", async () => {
+    const missing = (name: string) => () =>
+      Promise.reject(new CommandNotFound(`${name} isn't installed, or isn't on your PATH.`));
+    const claude = await harness({ run: missing("claude") }).go(["claude"]);
+    expect(claude.stderr).toContain("Install Claude Code, or paste a token with --paste");
+    const codex = await harness({ run: missing("codex") }).go(["codex"]);
+    expect(codex.stderr).toContain("npm install -g @openai/codex");
+    expect(await readdir(tmpRoot)).toEqual([]);
   });
 
   it("codex: uploads auth.json from a temporary CODEX_HOME, then deletes it", async () => {
