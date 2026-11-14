@@ -33,6 +33,7 @@ describe("parseDeployConfig", () => {
       providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
       roles: {},
       maxConcurrency: 4,
+      shadow: true,
       extraEgressHosts: [],
       dashboard: true,
     });

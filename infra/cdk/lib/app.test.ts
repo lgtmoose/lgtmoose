@@ -2,7 +2,7 @@ import type { CloudAssembly } from "aws-cdk-lib/cx-api";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { STACK_NAMES, STACK_OUTPUTS, parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
-import { LGTMOOSE_VERSION, buildApp, type LgtmooseStacks } from "./app.js";
+import { LGTMOOSE_VERSION, buildApp, reviewerModel, type LgtmooseStacks } from "./app.js";
 import { EXAMPLE_CONFIG } from "./load-config.js";
 import { appWithoutBundling } from "./test-utils.js";
 
@@ -66,5 +66,20 @@ describe("buildApp", () => {
       Name: "/lgtmoose/version",
       Value: LGTMOOSE_VERSION,
     });
+  });
+});
+
+describe("reviewerModel", () => {
+  it("uses the provider's standard tier, else the harness's default", () => {
+    expect(
+      reviewerModel({
+        id: "c",
+        harness: "claude-code",
+        auth: "api-key",
+        models: { standard: "opus" },
+      }),
+    ).toBe("opus");
+    expect(reviewerModel({ id: "c", harness: "claude-code", auth: "api-key" })).toBe("sonnet");
+    expect(reviewerModel({ id: "x", harness: "codex", auth: "api-key" })).toBe("");
   });
 });

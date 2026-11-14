@@ -31,6 +31,8 @@ export const STACK_OUTPUTS = {
     sandboxSecurityGroupId: "SandboxSecurityGroupId",
     /** JSON: provider id → that provider's sandbox task definition ARN. */
     sandboxTaskDefinitionArns: "SandboxTaskDefinitionArns",
+    /** The review state machine, for the dispatcher (NIC-812) to start executions of. */
+    stateMachineArn: "StateMachineArn",
   },
 } as const;
 

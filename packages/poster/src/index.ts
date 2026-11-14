@@ -4,6 +4,7 @@
  * annotations, the summary comment edited in place, and the status-label calls. Shadow mode
  * records the same calls to an object store and the log instead.
  */
+export { appJwt, installationTokenProvider, type InstallationTokenOptions } from "./app-auth.js";
 export {
   GitHubClient,
   GitHubError,

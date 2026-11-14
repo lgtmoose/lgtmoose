@@ -27,7 +27,8 @@
     "@lgtmoose/harness": "workspace:*",
     "@lgtmoose/planner": "workspace:*",
     "@lgtmoose/roles": "workspace:*",
-    "@lgtmoose/summary": "workspace:*"
+    "@lgtmoose/summary": "workspace:*",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "catalog:"

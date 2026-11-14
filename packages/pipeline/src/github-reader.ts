@@ -1,6 +1,11 @@
 import { z } from "zod";
-import { githubRequest } from "../github-request.js";
-import type { PullComment, PullReader, PullTarget } from "@lgtmoose/pipeline";
+import type { PullComment, PullReader, PullTarget } from "./pull.js";
+
+/**
+ * One authenticated GitHub REST GET, resolving to the JSON body: the CLI's request helper with
+ * a local token, or the control task's client with an installation token.
+ */
+export type GitHubGet = (path: string) => Promise<unknown>;
 
 const SHA = z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/);
 
@@ -27,9 +32,8 @@ const reviewCommentSchema = issueCommentSchema.extend({
 
 const PAGE_SIZE = 100;
 
-/** Reads PRs with the REST API and a token (from GITHUB_TOKEN, GH_TOKEN or `gh auth token`). */
-export function githubPullReader(fetchFn: typeof fetch, apiUrl: string, token: string): PullReader {
-  const get = (path: string) => githubRequest(fetchFn, apiUrl, "GET", path, { jwt: token });
+/** Reads PRs and their comments with the REST API, through `get`. */
+export function githubPullReader(get: GitHubGet): PullReader {
   const base = (t: PullTarget) =>
     `/repos/${encodeURIComponent(t.owner)}/${encodeURIComponent(t.repo)}`;
 

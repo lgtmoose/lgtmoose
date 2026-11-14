@@ -1,15 +1,67 @@
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
+import { ClaudeCodeHarness, CodexHarness, type Harness } from "@lgtmoose/harness";
+import { runSandboxBatch } from "./batch.js";
+import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
 
+/** Writable volumes on the task; the root filesystem is read-only. */
+const WORK = "/work";
+const TMP = "/tmp";
+
+function extract(archive: string, dir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    void mkdir(dir, { recursive: true }).then(() => {
+      const child = spawn("tar", ["-xzf", archive, "-C", dir, "--no-same-owner"], {
+        stdio: ["ignore", "ignore", "inherit"],
+      });
+      child.on("error", reject);
+      child.on("close", (code) =>
+        code === 0 ? resolve() : reject(new Error(`tar exited with ${code}.`)),
+      );
+    }, reject);
+  });
+}
+
+function log(message: string, fields: Record<string, unknown> = {}): void {
+  process.stdout.write(`${JSON.stringify({ message, ...fields })}\n`);
+}
+
 /**
- * Entry point of the sandbox task. The Workflow stack (NIC-810) defines the task; the review
- * workflow that runs a batch here comes with NIC-811. Until then it checks its settings and
- * stops with an error, so a misconfigured task definition shows in the logs. It never prints a
- * credential.
+ * Entry point of the sandbox task: runs the reviewer on one batch (see `runSandboxBatch`). It
+ * never prints a credential or a presigned URL's signature.
  */
-const env = readSandboxEnv(process.env);
-process.stderr.write(
-  "missing" in env
-    ? `Missing environment variables: ${env.missing.join(", ")}\n`
-    : "The sandbox task's batch run isn't implemented until NIC-811 (Step Functions review workflow).\n",
-);
-process.exitCode = 1;
+async function main(): Promise<void> {
+  const env = readSandboxEnv(process.env);
+  if ("missing" in env) {
+    throw new Error(`Missing environment variables: ${env.missing.join(", ")}`);
+  }
+  const harnessVars = harnessEnv(
+    process.env,
+    credentialEnv(env.harness, env.auth, process.env.LGTMOOSE_PROVIDER_CREDENTIAL),
+  );
+  await runSandboxBatch(
+    {
+      fetch,
+      writeFile: (path, body) =>
+        pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
+      extract,
+      harness: (transcripts): Harness =>
+        env.harness === "codex"
+          ? new CodexHarness({ transcripts, env: harnessVars, tmpRoot: TMP })
+          : new ClaudeCodeHarness({ transcripts, env: harnessVars, tmpRoot: TMP }),
+      workDir: WORK,
+      log,
+    },
+    env.batchUrls,
+  );
+}
+
+main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

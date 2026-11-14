@@ -1,0 +1,74 @@
+import { describe, expect, it } from "vitest";
+import {
+  batchOutputSchema,
+  batchRunId,
+  batchTranscriptKeys,
+  batchUrlsSchema,
+  runKeys,
+} from "./workflow.js";
+
+const RUN = "0f0e8c2a-4b1d-4c3e-9a7f-1234567890ab";
+
+describe("runKeys", () => {
+  it("keeps a run's objects under its own prefix", () => {
+    const keys = runKeys(RUN);
+    expect(keys.prepared).toBe(`runs/${RUN}/prepared.json`);
+    expect(keys.checkout).toBe(`runs/${RUN}/checkout.tar.gz`);
+    expect(keys.batchInput(3)).toBe(`runs/${RUN}/batches/3/input.json`);
+    expect(keys.batchOutput(3)).toBe(`runs/${RUN}/batches/3/output.json`);
+    expect(keys.batchTranscript(3, "transcripts/x/1.jsonl")).toBe(
+      `runs/${RUN}/batches/3/transcripts/x/1.jsonl`,
+    );
+  });
+
+  it.each(["../other", "", "abc", `${RUN}/../x`])("refuses a run ID like %j", (id) => {
+    expect(() => runKeys(id)).toThrow("Not a run ID");
+  });
+
+  it("refuses a negative or fractional batch index", () => {
+    expect(() => runKeys(RUN).batchInput(-1)).toThrow();
+    expect(() => runKeys(RUN).batchInput(1.5)).toThrow();
+  });
+});
+
+describe("batch transcripts", () => {
+  it("names one key per attempt, under the batch's harness run ID", () => {
+    expect(batchRunId(RUN, 2)).toBe(`${RUN}-batch-2`);
+    expect(batchTranscriptKeys(RUN, 2)).toEqual([
+      `transcripts/${RUN}-batch-2/1.jsonl`,
+      `transcripts/${RUN}-batch-2/2.jsonl`,
+      `transcripts/${RUN}-batch-2/3.jsonl`,
+    ]);
+  });
+});
+
+describe("batchOutputSchema", () => {
+  it("takes findings or an error, not both or neither", () => {
+    const base = { version: 1, index: 0, transcriptKeys: [] };
+    expect(batchOutputSchema.safeParse({ ...base, findings: [] }).success).toBe(true);
+    expect(batchOutputSchema.safeParse({ ...base, error: "timeout" }).success).toBe(true);
+    expect(batchOutputSchema.safeParse(base).success).toBe(false);
+    expect(batchOutputSchema.safeParse({ ...base, findings: [], error: "x" }).success).toBe(false);
+  });
+
+  it("refuses unknown fields", () => {
+    expect(
+      batchOutputSchema.safeParse({ version: 1, index: 0, transcriptKeys: [], findings: [], x: 1 })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("batchUrlsSchema", () => {
+  it("takes only https URLs", () => {
+    const ok = {
+      checkout: "https://b.s3.amazonaws.com/c",
+      input: "https://b.s3.amazonaws.com/i",
+      output: "https://b.s3.amazonaws.com/o",
+      transcripts: {},
+    };
+    expect(batchUrlsSchema.safeParse(ok).success).toBe(true);
+    expect(batchUrlsSchema.safeParse({ ...ok, input: "http://b/i" }).success).toBe(false);
+    expect(batchUrlsSchema.safeParse({ ...ok, input: "file:///etc/passwd" }).success).toBe(false);
+  });
+});

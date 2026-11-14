@@ -1,14 +1,28 @@
-import { readControlEnv } from "./env.js";
+import { awsControlDeps } from "./aws.js";
+import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
+import { runCommand } from "./run.js";
 
 /**
- * Entry point of the control task. The Workflow stack (NIC-810) defines the task; the review
- * workflow that runs it (the prepare and post steps) comes with NIC-811. Until then it checks
- * its settings and stops with an error, so a misconfigured task definition shows in the logs.
+ * Entry point of the control task. The review state machine starts it once per step, with
+ * `LGTMOOSE_COMMAND` (prepare, post or fail) and the step's inputs as container overrides.
+ * Errors are printed as messages only; no step puts a credential in one.
  */
-const env = readControlEnv(process.env);
-process.stderr.write(
-  "missing" in env
-    ? `Missing environment variables: ${env.missing.join(", ")}\n`
-    : "The control task's steps aren't implemented until NIC-811 (Step Functions review workflow).\n",
-);
-process.exitCode = 1;
+async function main(): Promise<void> {
+  const env = readControlEnv(process.env);
+  if ("missing" in env) {
+    throw new Error(`Missing environment variables: ${env.missing.join(", ")}`);
+  }
+  const command = readCommand(process.env);
+  const settings = readReviewSettings(process.env);
+  const deps = await awsControlDeps(env, { shadow: settings.shadow });
+  try {
+    await runCommand(deps, command, settings);
+  } finally {
+    await deps.close();
+  }
+}
+
+main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

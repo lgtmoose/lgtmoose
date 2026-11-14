@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { ClaudeCodeHarness } from "@lgtmoose/harness";
-import { githubPullReader } from "./github.js";
+import { FileTranscriptStore, githubPullReader } from "@lgtmoose/pipeline";
+import { githubRequest } from "../github-request.js";
 import type { ReviewEnvironmentFactory } from "./review.js";
 import { resolveGitHubToken } from "./token.js";
-import { FileTranscriptStore } from "@lgtmoose/pipeline";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -23,7 +23,9 @@ export const defaultReviewEnvironment: ReviewEnvironmentFactory = async (flags) 
   return {
     transcriptDir,
     deps: {
-      github: githubPullReader(fetch, GITHUB_API, token),
+      github: githubPullReader((path) =>
+        githubRequest(fetch, GITHUB_API, "GET", path, { jwt: token }),
+      ),
       clone: cloneAtSha,
       cloneUrl: (target) => githubCloneUrl(target.owner, target.repo),
       token,
