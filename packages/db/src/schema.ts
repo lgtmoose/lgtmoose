@@ -51,6 +51,10 @@ export const findingEventType = pgEnum("finding_event_type", [
   "dispute_answered",
   "resolved",
   "outdated",
+  // Raised again more severely: the finding now has the higher severity.
+  "escalated",
+  // A person unresolved the finding's review thread after resolving it: open again.
+  "unresolved",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [
@@ -88,6 +92,13 @@ export const pullRequests = pgTable(
     commentsThrough: timestamp("comments_through", { withTimezone: true }),
     statusLabel: text("status_label"),
     summaryCommentId: bigint("summary_comment_id", { mode: "number" }),
+    /**
+     * The event of the last review we posted (APPROVE, COMMENT or REQUEST_CHANGES), so a run
+     * with nothing new can tell whether the review on GitHub still says the right thing.
+     */
+    lastReviewEvent: text("last_review_event"),
+    /** That review's GitHub ID, to tell whether an approval was dismissed since. */
+    lastReviewId: bigint("last_review_id", { mode: "number" }),
     paused: boolean("paused").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -137,6 +148,11 @@ export const filesReviewed = pgTable(
       .references(() => reviewRuns.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
     blobSha: text("blob_sha").notNull(),
+    /**
+     * The version on the base side of the PR's diff (the merge base's), when there is one: a
+     * file is only reviewed already when both sides match.
+     */
+    baseBlobSha: text("base_blob_sha"),
     depth: reviewDepth("depth").notNull(),
     createdAt: createdAt(),
   },
@@ -155,6 +171,9 @@ export const findings = pgTable(
     ruleCategory: text("rule_category").notNull(),
     severity: severity("severity").notNull(),
     path: text("path"),
+    // The file's name on the base side of the PR's diff when the finding was raised: the file an
+    // old-side (LEFT) line is in. Followed through the base's renames, never the head's.
+    basePath: text("base_path"),
     line: integer("line"),
     startLine: integer("start_line"),
     side: diffSide("side"),

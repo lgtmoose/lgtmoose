@@ -99,6 +99,28 @@ describe("cloneAtSha", () => {
     expect(await repo.hasCommit(gone)).toBe(false);
   });
 
+  it("still fetches the other commits when one of them is gone", async () => {
+    const head = await fixture.commit("first");
+    // Commits off head's history, so only a fetch brings them.
+    await fixture.checkout("side", true);
+    await fixture.write({ "a.txt": "one\n" });
+    const one = await fixture.commit("one");
+    await fixture.write({ "a.txt": "two\n" });
+    const two = await fixture.commit("two");
+    const gone = "f".repeat(40);
+    const repo = await cloneAtSha({
+      url: fixture.url,
+      dir: await fixture.cloneDir(),
+      headSha: head,
+      otherShas: [one, gone],
+    });
+    expect(await repo.hasCommit(one)).toBe(true);
+    expect(await repo.hasCommit(gone)).toBe(false);
+    expect(await repo.hasCommits([one, two, gone, head])).toEqual(new Set([one, head]));
+    await repo.fetchCommits([two, gone]);
+    expect(await repo.hasCommit(two)).toBe(true);
+  });
+
   it("never writes the token to disk or into errors", async () => {
     const head = await fixture.commit("first");
     const token = "ghs_FAKEINSTALLATIONTOKEN123";
@@ -232,6 +254,43 @@ describe("cloneAtSha", () => {
   describe("over HTTP, counting requests", () => {
     const token = "ghs_FAKE";
     const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+
+    it("fetches many other commits in one request", async () => {
+      await fixture.write({ "a.txt": "older\n" });
+      const older = await fixture.commit("older");
+      await fixture.write({ "a.txt": "head\n" });
+      const head = await fixture.commit("head");
+      await fixture.checkout("side", true);
+      const others: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        await fixture.write({ "a.txt": `${i}\n` });
+        others.push(await fixture.commit(`side ${i}`));
+      }
+      const server = await serveOverHttp(fixture.remote, auth);
+      try {
+        const counted = await cloneAtSha({
+          url: server.url,
+          dir: await fixture.cloneDir(),
+          headSha: head,
+          token,
+          checkout: "none",
+        });
+        const forHead = server.authorizations.length;
+        expect(await counted.hasCommit(others[0] ?? "")).toBe(false);
+        const before = server.authorizations.length;
+        await counted.fetchCommits(others);
+        for (const sha of others) expect(await counted.hasCommit(sha)).toBe(true);
+        // One fetch (a protocol v2 fetch is two HTTP requests), not one per commit.
+        expect(server.authorizations.length - before).toBeLessThanOrEqual(forHead);
+        // Commits it has already, fetched or in head's history, aren't asked for again.
+        const after = server.authorizations.length;
+        await counted.fetchCommits([...others, older]);
+        expect(server.authorizations.length).toBe(after);
+        expect(await counted.hasCommit(older)).toBe(true);
+      } finally {
+        await server.close();
+      }
+    });
 
     it("writes a directory with one fetch, not one per file", async () => {
       await fixture.write(

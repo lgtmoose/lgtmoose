@@ -10,6 +10,11 @@ export interface PullReader {
   pull(target: PullTarget): Promise<PullRequest>;
   /** Comments on the PR's conversation and on its diff, oldest first, up to `limit` of each. */
   comments(target: PullTarget, limit: number): Promise<PullComment[]>;
+  /**
+   * One of the PR's reviews: its state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED or
+   * PENDING) and the commit it was submitted on. Optional: the dry run doesn't need it.
+   */
+  review?(target: PullTarget, reviewId: number): Promise<{ state: string; commitId: string }>;
 }
 
 export interface PullRequest {
@@ -24,6 +29,8 @@ export interface PullRequest {
 }
 
 export interface PullComment {
+  /** GitHub's ID for the comment (a review comment's for comments on the diff). */
+  id?: number;
   author: string;
   body: string;
   /** Set for comments on the diff. */

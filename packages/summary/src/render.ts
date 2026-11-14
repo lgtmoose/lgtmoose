@@ -74,6 +74,11 @@ export interface SummaryInput {
   missingLabels?: readonly string[];
   /** Model usage per provider for this run (`summarizeUsage` in @lgtmoose/harness). */
   usage?: readonly ProviderUsage[];
+  /**
+   * Files the PR changed at an earlier review and no longer changes at all, with the lines it
+   * added then and no longer does (from the PR, so untrusted; escaped as text).
+   */
+  noLongerChanged?: readonly { path: string; lines: readonly string[] }[];
 }
 
 /** One provider's usage over a run, for the footer. */
@@ -103,6 +108,8 @@ export const GROUP_FILES_OVER = 10;
 const LIST_LIMIT = 25;
 const LOCKFILE_LIMIT = 10;
 const NOTES_PER_LOCKFILE = 5;
+const NO_LONGER_CHANGED_LIMIT = 10;
+const LINES_PER_NO_LONGER_CHANGED = 5;
 const REASON_LIMIT = 10;
 /** Longest single item (a path, a note, a reason) shown in a list. */
 const ITEM_LENGTH = 200;
@@ -275,6 +282,18 @@ function renderStatus(input: SummaryInput): string {
     }
     if (noted.length > LOCKFILE_LIMIT) {
       lines.push(`  - …and ${noted.length - LOCKFILE_LIMIT} more files`);
+    }
+  }
+
+  const dropped = input.noLongerChanged ?? [];
+  if (dropped.length > 0) {
+    lines.push("- **No longer changed by the PR** (it added these lines at an earlier review):");
+    for (const entry of dropped.slice(0, NO_LONGER_CHANGED_LIMIT)) {
+      lines.push(`  - ${inline(clip(entry.path, ITEM_LENGTH))}`);
+      lines.push(...bullets(entry.lines, LINES_PER_NO_LONGER_CHANGED).map((l) => `  ${l}`));
+    }
+    if (dropped.length > NO_LONGER_CHANGED_LIMIT) {
+      lines.push(`  - …and ${dropped.length - NO_LONGER_CHANGED_LIMIT} more files`);
     }
   }
 
