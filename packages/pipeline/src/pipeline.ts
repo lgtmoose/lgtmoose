@@ -106,6 +106,8 @@ export interface PreparedReview {
   files: FileDiff[];
   plan: Plan;
   conventionFilesOmitted: string[];
+  /** Rule-pack entries or rules left out, and why (see `selectRulePacks`). */
+  rulePackProblems?: string[];
   /** One entry per planned batch, in order. */
   jobs: BatchJob[];
 }
@@ -282,6 +284,7 @@ export async function prepareReview(
     files: diff.files,
     plan,
     conventionFilesOmitted: conventions.omitted,
+    rulePackProblems: selected.problems,
     jobs,
   };
 }
@@ -433,6 +436,7 @@ export async function finishReview(
     },
     findings: open,
     conventionFilesOmitted: prepared.conventionFilesOmitted,
+    rulePackProblems: prepared.rulePackProblems ?? [],
     findingsOverLimit: overLimit,
   });
 

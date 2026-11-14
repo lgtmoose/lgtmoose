@@ -1,9 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
-import { PROTECTED_CATEGORIES, SEVERITIES } from "@lgtmoose/core";
+import { PROTECTED_CATEGORIES, SEVERITIES, severityRank } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { readConventionFilesAt } from "./conventions.js";
 
 /**
  * Rule packs are markdown files with YAML front matter: the pack's id, title and rules, each
@@ -103,7 +102,7 @@ function renderPack(
   title: string,
   description: string | undefined,
   body: string,
-  rules: PackRule[],
+  rules: readonly PackRule[],
 ): string {
   const byCategory = new Map<string, PackRule[]>();
   for (const rule of rules) {
@@ -115,8 +114,9 @@ function renderPack(
     [
       `## ${category}`,
       ...group.map(
+        // The rule is one or two sentences: kept on one line, so it can't start a heading.
         (rule) =>
-          `- ${rule.id} (default severity: ${rule.severity}): ${rule.rule}\n  Example:\n\n${indent(rule.example, "      ")}`,
+          `- ${rule.id} (default severity: ${rule.severity}): ${rule.rule.replace(/\s+/g, " ")}\n  Example:\n\n${indent(rule.example, "      ")}`,
       ),
     ].join("\n\n"),
   );
@@ -125,11 +125,15 @@ function renderPack(
     .join("\n\n");
 }
 
-/**
- * Parses and checks one pack file. `name` is what the pack is called in messages and, for
- * built-in and private packs, the id its front matter must have.
- */
-export function parseRulePack(text: string, name: string, source: RulePackSource): RulePack {
+/** A pack file, parsed and checked but not yet rendered. */
+interface ParsedPack {
+  title: string;
+  description: string | undefined;
+  body: string;
+  rules: PackRule[];
+}
+
+function parsePackFile(text: string, name: string, source: RulePackSource): ParsedPack {
   const parts = splitFrontMatter(text);
   if (parts === undefined) {
     throw new RulePackError(`Rule pack ${name} has no front matter (a --- block at the top).`);
@@ -157,25 +161,43 @@ export function parseRulePack(text: string, name: string, source: RulePackSource
   for (const rule of pack.rules) {
     if (seen.has(rule.id)) throw new RulePackError(`Rule pack ${name} has rule ${rule.id} twice.`);
     seen.add(rule.id);
-    // A repo pack can add rules in a protected category, but not soften one.
-    if (
-      source === "repo" &&
-      PROTECTED_CATEGORIES.includes(rule.category) &&
-      rule.severity !== "blocking"
-    ) {
-      throw new RulePackError(
-        `Rule pack ${name}: rule ${rule.id} is in the protected category ${rule.category}, so its severity must be blocking.`,
-      );
-    }
   }
-  const id = source === "repo" ? name : (pack.id ?? name);
+  return { title: pack.title, description: pack.description, body: parts.body, rules: pack.rules };
+}
+
+function toPack(parsed: ParsedPack, id: string, source: RulePackSource): RulePack {
   return {
     id,
-    title: pack.title,
+    title: parsed.title,
     source,
-    rules: pack.rules,
-    text: renderPack(pack.title, pack.description, parts.body, pack.rules),
+    rules: parsed.rules,
+    text: renderPack(parsed.title, parsed.description, parsed.body, parsed.rules),
   };
+}
+
+/**
+ * Parses and checks one pack file. `name` is what the pack is called in messages and its id;
+ * for built-in and private packs, the id its front matter must have.
+ */
+export function parseRulePack(text: string, name: string, source: RulePackSource): RulePack {
+  return toPack(parsePackFile(text, name, source), name, source);
+}
+
+/**
+ * The least severe a repo pack's rule may be, per category: blocking in a protected category,
+ * and elsewhere the least severe the trusted packs already use for that category. A repo pack
+ * can add rules and make them stricter, but can't add a softer rule next to a built-in one.
+ */
+export function severityFloors(trusted: readonly RulePack[]): Map<string, number> {
+  const floors = new Map<string, number>();
+  for (const pack of trusted) {
+    for (const rule of pack.rules) {
+      const rank = severityRank(rule.severity);
+      floors.set(rule.category, Math.max(floors.get(rule.category) ?? 0, rank));
+    }
+  }
+  for (const category of PROTECTED_CATEGORIES) floors.set(category, severityRank("blocking"));
+  return floors;
 }
 
 async function idsIn(dir: URL): Promise<string[]> {
@@ -201,10 +223,39 @@ export interface RulePackDirs {
 
 const DEFAULT_DIRS: RulePackDirs = { builtin: RULE_PACK_DIR, private: PRIVATE_RULE_PACK_DIR };
 
-/** Ids of the built-in and private packs, sorted. A private id that clashes with a built-in one is left out. */
-export async function availableRulePacks(dirs: RulePackDirs = DEFAULT_DIRS): Promise<string[]> {
+/** The ids in each folder. A built-in id wins over a private one with the same name. */
+interface PackIndex {
+  dirs: RulePackDirs;
+  builtin: string[];
+  private: string[];
+}
+
+async function indexPacks(dirs: RulePackDirs): Promise<PackIndex> {
   const [builtin, priv] = await Promise.all([idsIn(dirs.builtin), idsIn(dirs.private)]);
-  return [...new Set([...builtin, ...priv])].sort();
+  return { dirs, builtin, private: priv };
+}
+
+function available(index: PackIndex): string[] {
+  return [...new Set([...index.builtin, ...index.private])].sort();
+}
+
+async function loadIndexed(id: string, index: PackIndex): Promise<RulePack> {
+  if (RULE_PACK_ID.test(id) && index.builtin.includes(id)) {
+    const text = await readFile(new URL(`${id}.md`, index.dirs.builtin), "utf8");
+    return parseRulePack(text, id, "builtin");
+  }
+  if (RULE_PACK_ID.test(id) && index.private.includes(id)) {
+    const text = await readFile(new URL(`${id}.md`, index.dirs.private), "utf8");
+    return parseRulePack(text, id, "private");
+  }
+  throw new RulePackError(
+    `Unknown rule pack "${id}". Available rule packs: ${available(index).join(", ")}.`,
+  );
+}
+
+/** Ids of the built-in and private packs, sorted. */
+export async function availableRulePacks(dirs: RulePackDirs = DEFAULT_DIRS): Promise<string[]> {
+  return available(await indexPacks(dirs));
 }
 
 /** Loads one built-in or private pack by id. Throws a RulePackError for a bad or unknown id. */
@@ -212,17 +263,7 @@ export async function loadRulePack(
   id: string,
   dirs: RulePackDirs = DEFAULT_DIRS,
 ): Promise<RulePack> {
-  const [builtin, priv] = await Promise.all([idsIn(dirs.builtin), idsIn(dirs.private)]);
-  if (RULE_PACK_ID.test(id) && builtin.includes(id)) {
-    return parseRulePack(await readFile(new URL(`${id}.md`, dirs.builtin), "utf8"), id, "builtin");
-  }
-  if (RULE_PACK_ID.test(id) && priv.includes(id)) {
-    return parseRulePack(await readFile(new URL(`${id}.md`, dirs.private), "utf8"), id, "private");
-  }
-  const available = [...new Set([...builtin, ...priv])].sort();
-  throw new RulePackError(
-    `Unknown rule pack "${id}". Available rule packs: ${available.join(", ")}.`,
-  );
+  return loadIndexed(id, await indexPacks(dirs));
 }
 
 /** Loads built-in or private packs in the order given, once each. Throws on the first bad one. */
@@ -230,7 +271,8 @@ export async function loadRulePacks(
   ids: readonly string[],
   dirs: RulePackDirs = DEFAULT_DIRS,
 ): Promise<RulePack[]> {
-  return Promise.all([...new Set(ids)].map((id) => loadRulePack(id, dirs)));
+  const index = await indexPacks(dirs);
+  return Promise.all([...new Set(ids)].map((id) => loadIndexed(id, index)));
 }
 
 export interface SelectRulePacksOptions {
@@ -242,90 +284,136 @@ export interface SelectRulePacksOptions {
 
 export interface SelectedRulePacks {
   packs: RulePack[];
-  /** Entries that couldn't be used, and why. The review goes on without them. */
+  /** Entries, or rules, that couldn't be used, and why. The review goes on without them. */
   problems: string[];
+}
+
+/** A pack file directly in the repo's `rules` folder, with a name a pack id allows. */
+const RULES_ENTRY =
+  /^(100644|100755) blob ([0-9a-f]{40,64}) +(\d+)\t(rules\/[a-z0-9][a-z0-9-]*\.md)$/;
+
+/**
+ * Reads the repo packs `wanted` names (paths, or `rules/*.md`) at `sha`, within the limits. A
+ * file over the per-file limit is skipped by its size in the tree, without being read, so it
+ * doesn't use up the total.
+ */
+async function readRepoPacks(
+  repo: Pick<Repo, "git" | "readBlobs">,
+  sha: string,
+  wanted: ReadonlySet<string>,
+  problems: string[],
+): Promise<{ path: string; text: string }[]> {
+  const listing = await repo.git(["ls-tree", "-z", "-l", sha, "--", "rules/"]);
+  const entries: { path: string; blob: string; size: number }[] = [];
+  for (const line of listing.split("\0")) {
+    const [, , blob, size, path] = RULES_ENTRY.exec(line) ?? [];
+    if (blob === undefined || size === undefined || path === undefined) continue;
+    if (wanted.has("rules/*.md") || wanted.has(path))
+      entries.push({ path, blob, size: Number(size) });
+  }
+  entries.sort((a, b) => Number(a.path > b.path) - Number(a.path < b.path));
+  for (const path of wanted) {
+    if (path !== "rules/*.md" && !entries.some((entry) => entry.path === path)) {
+      problems.push(`./${path} isn't in the base branch, or isn't a regular file.`);
+    }
+  }
+
+  const { maxBytes, maxFiles, maxTotalBytes } = REPO_RULE_PACK_LIMITS;
+  const chosen: typeof entries = [];
+  let total = 0;
+  for (const entry of entries) {
+    if (entry.size > maxBytes) {
+      problems.push(
+        `./${entry.path} was left out: a repo rule pack can be at most ${maxBytes / 1024} KiB.`,
+      );
+    } else if (chosen.length >= maxFiles || total + entry.size > maxTotalBytes) {
+      problems.push(
+        `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files and ${maxTotalBytes / 1024} KiB in all.`,
+      );
+    } else {
+      chosen.push(entry);
+      total += entry.size;
+    }
+  }
+  const blobs = await repo.readBlobs(chosen.map((entry) => entry.blob));
+  return chosen.flatMap((entry) => {
+    const content = blobs.get(entry.blob);
+    return content === undefined ? [] : [{ path: entry.path, text: content.toString("utf8") }];
+  });
 }
 
 /**
  * The packs for one review, from the `rulepacks` list in the base branch's `.lgtmoose.yaml`:
  * the mandatory packs first, then built-in and private packs by id, then repo packs. A bad
- * entry never fails the review: it's left out and reported in `problems`.
+ * entry never fails the review: it's left out and reported in `problems`, and so is a repo
+ * rule softer than the trusted packs allow (see `severityFloors`).
  */
 export async function selectRulePacks(
   entries: readonly string[],
   options: SelectRulePacksOptions = {},
 ): Promise<SelectedRulePacks> {
-  const dirs = options.dirs ?? DEFAULT_DIRS;
+  const index = await indexPacks(options.dirs ?? DEFAULT_DIRS);
   const problems: string[] = [];
   const named: string[] = [...MANDATORY_RULE_PACKS];
-  const repoGlobs: string[] = [];
+  const repoPaths = new Set<string>();
   for (const entry of entries) {
     if (entry.startsWith("./")) {
       const match = REPO_PACK_ENTRY.exec(entry);
       if (match === null) {
         problems.push(`"${entry}" isn't a repo rule pack: use ./rules/<name>.md or ./rules/*.md.`);
       } else {
-        repoGlobs.push(`rules/${match[1]}.md`);
+        repoPaths.add(`rules/${match[1]}.md`);
       }
     } else if (!named.includes(entry)) {
       named.push(entry);
     }
   }
 
-  const [builtin, priv] = await Promise.all([idsIn(dirs.builtin), idsIn(dirs.private)]);
-  for (const id of named.filter((id) => builtin.includes(id) && priv.includes(id))) {
+  for (const id of named.filter((id) => index.builtin.includes(id) && index.private.includes(id))) {
     problems.push(
       `The private rule pack "${id}" has a built-in pack's id, so the built-in one is used.`,
     );
   }
-
+  // Loaded together; problems are reported in the list's order, not the order loads finish.
+  const loaded = await Promise.all(
+    named.map((id) =>
+      loadIndexed(id, index).catch((error: unknown) => {
+        if (!(error instanceof RulePackError)) throw error;
+        return error;
+      }),
+    ),
+  );
   const packs: RulePack[] = [];
-  for (const id of named) {
-    try {
-      packs.push(await loadRulePack(id, dirs));
-    } catch (error) {
-      if (!(error instanceof RulePackError)) throw error;
-      problems.push(error.message);
-    }
+  for (const result of loaded) {
+    if (result instanceof RulePackError) problems.push(result.message);
+    else packs.push(result);
   }
 
-  if (repoGlobs.length > 0) {
+  if (repoPaths.size > 0) {
     if (options.repo === undefined || options.baseSha === undefined) {
       problems.push("Repo rule packs need the repository; they were left out.");
-    } else {
-      const read = await readConventionFilesAt(options.repo, options.baseSha, {
-        globs: [...new Set(repoGlobs)],
-        ...REPO_RULE_PACK_LIMITS,
-      });
-      for (const path of read.omitted) {
+      return { packs, problems };
+    }
+    const floors = severityFloors(packs);
+    for (const file of await readRepoPacks(options.repo, options.baseSha, repoPaths, problems)) {
+      const name = `./${file.path}`;
+      let parsed: ParsedPack;
+      try {
+        parsed = parsePackFile(file.text, name, "repo");
+      } catch (error) {
+        if (!(error instanceof RulePackError)) throw error;
+        problems.push(error.message);
+        continue;
+      }
+      const rules = parsed.rules.filter((rule) => {
+        const floor = floors.get(rule.category);
+        if (floor === undefined || severityRank(rule.severity) <= floor) return true;
         problems.push(
-          `./${path} was left out: repo rule packs are limited to ${REPO_RULE_PACK_LIMITS.maxFiles} files and ${REPO_RULE_PACK_LIMITS.maxTotalBytes / 1024} KiB.`,
+          `${name}: rule ${rule.id} was left out: a repo rule in ${rule.category} can't be softer than ${SEVERITIES[floor]}.`,
         );
-      }
-      for (const file of read.files) {
-        const name = `./${file.path}`;
-        if (file.truncated === true) {
-          problems.push(
-            `${name} was left out: a repo rule pack can be at most ${REPO_RULE_PACK_LIMITS.maxBytes / 1024} KiB, and all of them ${REPO_RULE_PACK_LIMITS.maxTotalBytes / 1024} KiB.`,
-          );
-          continue;
-        }
-        try {
-          packs.push(parseRulePack(file.text, name, "repo"));
-        } catch (error) {
-          if (!(error instanceof RulePackError)) throw error;
-          problems.push(error.message);
-        }
-      }
-      for (const glob of new Set(repoGlobs)) {
-        if (
-          !glob.includes("*") &&
-          !read.files.some((file) => file.path === glob) &&
-          !read.omitted.includes(glob)
-        ) {
-          problems.push(`./${glob} isn't in the base branch.`);
-        }
-      }
+        return false;
+      });
+      if (rules.length > 0) packs.push(toPack({ ...parsed, rules }, name, "repo"));
     }
   }
   return { packs, problems };

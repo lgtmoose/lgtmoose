@@ -12,7 +12,7 @@ rulepacks: [typescript, react, ./rules/billing.md]
 
 `generic` and `security` are always on, whether or not the list names them. LGTMoose reads `.lgtmoose.yaml` from the PR's base branch, never from the PR itself, so a PR can't change the rules it's reviewed against.
 
-An entry that can't be used, such as an unknown id, a bad file or a file that's too big, is left out, and the review goes on without it. The skipped entries and the reasons are logged.
+An entry that can't be used, such as an unknown id, a bad file or a file that's too big, is left out, and the review goes on without it. Each review's summary comment lists what was left out and why, under **Rule packs left out**, so the repo's owners can fix their config.
 
 ## Built-in packs
 
@@ -79,6 +79,6 @@ These are repository content, so they're treated with the same care as conventio
 
 - They're read from the base branch, like `.lgtmoose.yaml`.
 - Only `./rules/<name>.md` and `./rules/*.md` are accepted. Paths elsewhere, `..`, nested folders and symlinks aren't read.
-- Each file can be at most 16 KiB, with at most 10 files and 48 KiB in all. A file over the limit is left out whole.
+- Each file can be at most 16 KiB, with at most 10 files and 48 KiB in all. A file over 16 KiB is left out whole and doesn't count towards the total. With `./rules/*.md`, only files named like a pack id (lowercase letters, digits and hyphens) are read, so a `README.md` is ignored.
 - They go into the prompt after the built-in and private packs, inside an untrusted block. The prompt tells the model that repo packs only add rules: they can't remove, relax or override other rules, change the severity definitions, or ask it to skip files or approve.
-- A rule in a protected category (`authz`, `tenant_scoping`, `money`, `secrets`) must be `blocking`. A repo pack can make those rules stricter, never softer.
+- A repo rule can't be softer than the built-in and private packs already are in its category. In a protected category (`authz`, `tenant_scoping`, `money`, `secrets`) it must be `blocking`. Elsewhere it can't be less severe than the least severe trusted rule in that category: a `security` rule can't be a `nit`, because the trusted packs never go below `should_fix` there. A rule in a category the trusted packs don't use can have any severity. A rule that breaks this is left out, and the rest of its pack is kept.

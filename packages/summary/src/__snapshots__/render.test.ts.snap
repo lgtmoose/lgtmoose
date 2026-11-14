@@ -37,6 +37,8 @@ Moves sum into src\\/math and updates the import\\.
     - 1 package resolves from evil\\.example\\.com\\, not a known registry \\(first at line 10\\)
 - **Convention files left out** (over the size limit): 1 file
   - docs\\/agents\\/extra\\.md
+- **Rule packs left out** (check \`rulepacks\` in \`.lgtmoose.yaml\`): 1 problem
+  - Unknown rule pack \\"typscript\\"\\. Available rule packs\\: generic\\, security\\.
 
 ### Open findings
 
