@@ -233,8 +233,10 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-/** A stored finding: tracked while open or outdated, and kept once fixed. */
-type StoredFinding = Omit<FindingRecord, "status"> & { status: FindingRecord["status"] | "fixed" };
+/** A stored finding: tracked while open or outdated, and kept once cleared. */
+type StoredFinding = Omit<FindingRecord, "status"> & {
+  status: FindingRecord["status"] | "cleared";
+};
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
 function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
@@ -243,7 +245,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     rows,
     async trackedFindings() {
       return rows.flatMap((row) =>
-        row.status === "fixed" ? [] : [{ ...row, status: row.status }],
+        row.status === "cleared" ? [] : [{ ...row, status: row.status }],
       );
     },
     async saveFindings(_pr, _run, headSha, posted) {
@@ -271,9 +273,9 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       for (const row of rows)
         if (ids.includes(row.id) && row.status === "open") row.status = "outdated";
     },
-    async markFixed(ids) {
+    async markCleared(ids) {
       for (const row of rows)
-        if (ids.includes(row.id) && row.status === "open") row.status = "fixed";
+        if (ids.includes(row.id) && row.status === "open") row.status = "cleared";
     },
     async reopen(ids) {
       for (const row of rows)
@@ -601,7 +603,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(reviews(h)).toBe(2);
   });
 
-  it("resolves a finding the reviewer doesn't raise again when it reads the file again", async () => {
+  it("clears a finding the reviewer doesn't raise again when it reads the file again", async () => {
     const h = harness();
     await review(h, 1, [finding()]);
     // Another line of the file changes, so it's read again; the loop line is untouched.
@@ -614,7 +616,7 @@ describe("later runs", { timeout: 30_000 }, () => {
 
     const { posted } = await review(h, 2);
 
-    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+    expect(h.findings.rows).toMatchObject([{ status: "cleared" }]);
     expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
   });
 

@@ -659,10 +659,15 @@ export async function finishReview(
   const raisedLines = new Set(
     [...inline, ...body].map((finding) => `${finding.path}\0${finding.side}\0${finding.line}`),
   );
-  const stillRaised = (entry: EarlierFinding) =>
-    !reread.has(entry.finding.path) ||
-    raisedPrints.has(entry.fingerprint) ||
-    raisedLines.has(`${entry.finding.path}\0${entry.finding.side}\0${entry.finding.line}`);
+  const stillRaised = (entry: EarlierFinding) => {
+    // One recorded under an earlier name of a renamed file is on that file now.
+    const path = reread.get(entry.finding.path);
+    return (
+      path === undefined ||
+      raisedPrints.has(entry.fingerprint) ||
+      raisedLines.has(`${path}\0${entry.finding.side}\0${entry.finding.line}`)
+    );
+  };
   const earlier = (options.earlier ?? []).filter(stillRaised);
   const resolved = (options.earlier ?? []).filter((entry) => !stillRaised(entry));
   // The ones still open count once, as the earlier ones.
@@ -745,24 +750,29 @@ export async function finishReview(
 
 /**
  * Files this run read again: in a batch that produced a result and kept all its findings, read
- * at more than move depth, and not done already (done files weren't in the prompt).
+ * at more than move depth, and not done already (done files weren't in the prompt). Maps each
+ * of their names, the current one and those they had at earlier reviews, to the current one.
  */
 function rereadFiles(
   prepared: PreparedReview,
   batches: readonly BatchReport[],
   unsettled: ReadonlySet<string>,
-): Set<string> {
+): Map<string, string> {
   const finished = new Set(
     batches
       .filter((batch) => batch.error === undefined && batch.done !== true && batch.skipped !== true)
       .map((batch) => batch.index),
   );
   const done = new Set(prepared.done.map((entry) => entry.path));
-  return new Set(
+  return new Map(
     prepared.plan.batches.flatMap((batch) =>
       finished.has(batch.index)
         ? batch.files.flatMap(({ file, depth }) =>
-            depth === "move" || done.has(file.path) || unsettled.has(file.path) ? [] : [file.path],
+            depth === "move" || done.has(file.path) || unsettled.has(file.path)
+              ? []
+              : [file.path, ...(file.alsoReviewedAs ?? [])].map(
+                  (name) => [name, file.path] as const,
+                ),
           )
         : [],
     ),

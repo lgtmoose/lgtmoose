@@ -273,13 +273,26 @@ describe("drizzleFindingStore", () => {
       "raised",
     ]);
 
-    // Fixed when read again and not raised again; raising it later reopens it.
-    await findingStore.markFixed([first?.id ?? ""], sha("6"));
+    // Cleared (not fixed) when read again and not raised again; raising it later reopens it.
+    await findingStore.markCleared([first?.id ?? ""], sha("6"));
     expect(await open()).toEqual([]);
     expect(await findingStore.trackedFindings(run.pullRequestId)).toEqual([]);
+    const [cleared] = await db
+      .select({ status: findings.status })
+      .from(findings)
+      .where(eq(findings.id, first?.id ?? ""));
+    expect(cleared).toEqual({ status: "cleared" });
     await findingStore.saveFindings(run.pullRequestId, run.runId, sha("7"), [
       { finding: finding("First"), fingerprint: "fp1:a" },
     ]);
     expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("7") }]);
+    const later = await db
+      .select({ type: findingEvents.type, sha: findingEvents.sha })
+      .from(findingEvents)
+      .where(eq(findingEvents.findingId, first?.id ?? ""));
+    expect(later.filter((event) => event.sha === sha("6") || event.sha === sha("7"))).toEqual([
+      { type: "cleared", sha: sha("6") },
+      { type: "raised", sha: sha("7") },
+    ]);
   });
 });

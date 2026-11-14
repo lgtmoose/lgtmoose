@@ -74,10 +74,11 @@ export interface FindingStore {
   /** Reopens outdated findings at `sha`: the lines they're on exist again. */
   reopen(ids: readonly string[], sha: string): Promise<void>;
   /**
-   * Marks open findings fixed at `sha`: their file was reviewed again and they weren't raised
-   * again. Raising one later reopens it (see `saveFindings`).
+   * Marks open findings cleared at `sha`: the reviewer read their file again and didn't raise
+   * them again. That's the model's judgement, not a fix, so it's kept apart from `fixed`.
+   * Raising one later reopens it (see `saveFindings`).
    */
-  markFixed(ids: readonly string[], sha: string): Promise<void>;
+  markCleared(ids: readonly string[], sha: string): Promise<void>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

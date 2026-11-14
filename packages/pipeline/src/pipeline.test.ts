@@ -634,15 +634,32 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(prepared.files.map((file) => file.path)).toEqual(["src/sum.ts"]);
     expect(prepared.unchanged.map((file) => file.path)).not.toContain("src/util.ts");
     const index = prepared.jobs[0]?.index ?? 0;
-    const failed = await finishReview(repo, prepared, [], headSha);
+    // A finding recorded under the old name is on the renamed file.
+    const earlier = {
+      finding: finding({ path: "src/util.ts", line: 1 }),
+      fingerprint: "fp1:util",
+    };
+    const failed = await finishReview(repo, prepared, [], headSha, { earlier: [earlier] });
     expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/util.ts");
     expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/sum.ts");
+    expect(failed.resolved).toEqual([]);
+    // Raised again on the same line under the new name: it stands.
+    const raised = await finishReview(
+      repo,
+      prepared,
+      [{ index, findings: [finding({ path: "src/sum.ts", line: 1 })], transcriptKeys: [] }],
+      headSha,
+      { earlier: [earlier] },
+    );
+    expect(raised.resolved).toEqual([]);
     const succeeded = await finishReview(
       repo,
       prepared,
       [{ index, findings: [], transcriptKeys: [] }],
       headSha,
+      { earlier: [earlier] },
     );
+    expect(succeeded.resolved).toEqual(["fp1:util"]);
     expect(succeeded.reviewedFiles).toContainEqual({
       path: "src/util.ts",
       blobSha: "not-changed",

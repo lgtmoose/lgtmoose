@@ -389,7 +389,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 updatedAt: now(),
               },
               // A finding someone declined, disputed or resolved stays that way.
-              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed", "cleared"]),
             })
             .returning({ id: findings.id });
           // Every row may have hit a declined, disputed or resolved finding, left as it was.
@@ -407,15 +407,15 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
-    markFixed: (ids, sha) => moveStatus(ids, "open", "fixed", "fixed", sha),
+    markCleared: (ids, sha) => moveStatus(ids, "open", "cleared", "cleared", sha),
   };
 
   /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
   async function moveStatus(
     ids: readonly string[],
     from: "open" | "outdated",
-    to: "open" | "outdated" | "fixed",
-    event: "outdated" | "raised" | "fixed",
+    to: "open" | "outdated" | "cleared",
+    event: "outdated" | "raised" | "cleared",
     sha: string,
   ): Promise<void> {
     if (ids.length === 0) return;

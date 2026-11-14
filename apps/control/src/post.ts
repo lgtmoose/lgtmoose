@@ -338,7 +338,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   await deps.findings.reopen(reopened, pr.headSha);
   // Read again this run and not raised again: resolved.
   const resolved = new Set(report.resolved);
-  await deps.findings.markFixed(
+  await deps.findings.markCleared(
     records.filter((record) => resolved.has(record.fingerprint)).map((record) => record.id),
     pr.headSha,
   );
