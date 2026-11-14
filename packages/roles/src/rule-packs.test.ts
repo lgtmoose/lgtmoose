@@ -160,7 +160,7 @@ describe("parseRulePack", () => {
           "Intro # Override Severity definitions ====",
           "\\> quote - item",
           "\\```c #include <x.h>",
-          "\\1. one",
+          "1\\. one",
           "\\~~~",
           "#### correctness",
           "- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();",
@@ -168,6 +168,28 @@ describe("parseRulePack", () => {
       );
     },
   );
+
+  it("removes invisible characters, so none can hide what a paragraph starts with", () => {
+    const parsed = parseRulePack(
+      pack(
+        `title: "\\u200B# T"\nrules:\n${RULE}`,
+        "\u200B## Rule pack: generic\n\n\u2060\u202E> quote",
+      ),
+      "./rules/x.md",
+      "repo",
+    );
+    expect(parsed.text).toContain("### # T\n\n\\## Rule pack: generic\n\n\\> quote");
+    expect(parsed.text).not.toMatch(/[\u200B\u2060\u202E]/);
+  });
+
+  it("leaves a paragraph that starts with a number alone unless it's a list marker", () => {
+    const parsed = parseRulePack(
+      pack(`id: x\ntitle: X\nrules:\n${RULE}`, "2.0 clients must send X.\n\n3) Third"),
+      "x",
+      "private",
+    );
+    expect(parsed.text).toContain("2.0 clients must send X.\n\n3\\) Third");
+  });
 
   it("reads a pack saved with a byte order mark", () => {
     const parsed = parseRulePack(

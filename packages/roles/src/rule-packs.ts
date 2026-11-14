@@ -116,11 +116,24 @@ function indent(text: string, by: string): string {
 
 /** Collapses whitespace and line breaks of every kind, so a field stays on its one line. */
 function oneLine(text: string): string {
-  return text.replace(/[\s\u0085]+/g, " ").trim();
+  return text
+    .replace(INVISIBLE, "")
+    .replace(/[\s\u0085]+/g, " ")
+    .trim();
 }
 
+/**
+ * Invisible characters (zero-width spaces and joiners, soft hyphens, word joiners, bidi marks
+ * and overrides, the BOM), removed from rendered pack text so none can hide what a line
+ * starts with.
+ */
+const INVISIBLE = /\u034F|[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+
 /** A character that can start a markdown block (heading, quote, list, fence, rule, HTML). */
-const BLOCK_START = /^([#>*+\-=_`~<|]|\d+[.)])/;
+const BLOCK_START = /^[#>*+\-=_`~<|]/;
+
+/** An ordered-list marker: digits, then `.` or `)` and a space. Escaped after the digits. */
+const ORDERED_START = /^(\d{1,9})([.)])(?=\s|$)/;
 
 /**
  * Turns pack text into plain paragraphs: each paragraph on one line, and a character that
@@ -134,7 +147,9 @@ function plainParagraphs(text: string): string {
     .split(/\n[ \t]*\n/)
     .map((paragraph) => oneLine(paragraph))
     .filter((paragraph) => paragraph !== "")
-    .map((paragraph) => paragraph.replace(BLOCK_START, "\\$1"))
+    .map((paragraph) =>
+      paragraph.replace(BLOCK_START, (char) => `\\${char}`).replace(ORDERED_START, "$1\\$2"),
+    )
     .join("\n\n");
 }
 
