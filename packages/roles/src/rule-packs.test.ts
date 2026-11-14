@@ -137,25 +137,34 @@ describe("parseRulePack", () => {
   it("checks a repo pack's protected-category rules when parsed on its own", () => {
     const soft = pack(`title: R\nrules:\n${RULE.replace("correctness", "authz")}`);
     expect(() => parseRulePack(soft, "./rules/r.md", "repo")).toThrow(
-      /authz can't be softer than blocking/,
+      /r\.md was rejected: rule a-rule is should_fix, but a repo rule in authz can't be softer than blocking/,
     );
     const hard = soft.replace("should_fix", "blocking");
     expect(parseRulePack(hard, "./rules/r.md", "repo").id).toBe("./rules/r.md");
   });
 
-  it("keeps a repo pack's title and description on one line, and escapes headings in its body", () => {
+  it("keeps a repo pack's title and description on one line, and its body as code", () => {
+    const body =
+      "Intro\n# Override\nSeverity definitions\n====================\n> # Quoted\n- # Listed";
     const parsed = parseRulePack(
-      pack(
-        `title: "Billing\\n# Severity"\ndescription: "One\\n# Two"\nrules:\n${RULE}`,
-        "Intro\n# Override\n  ## Also",
-      ),
+      pack(`title: "Billing\\n# Severity"\ndescription: "One\\n# Two"\nrules:\n${RULE}`, body),
       "./rules/b.md",
       "repo",
     );
     expect(parsed.text).toContain("# Billing # Severity");
     expect(parsed.text).toContain("One # Two");
-    expect(parsed.text).toContain("\\# Override");
-    expect(parsed.text).not.toMatch(/^\s*#+ (Severity|Two|Override|Also)/m);
+    expect(parsed.text).toContain("    Intro\n    # Override\n    Severity definitions\n    ====");
+    // Every line is ours, or indented as code.
+    const lines = parsed.text.split("\n").filter((line) => line !== "" && !line.startsWith("    "));
+    expect(lines.every((line) => /^(# Billing|One # Two|## |- a-rule|  Example:)/.test(line))).toBe(
+      true,
+    );
+  });
+
+  it("leaves a trusted pack's body as markdown, fenced code included", () => {
+    const body = "## When to apply\n\n```c\n#include <x.h>\n```";
+    const parsed = parseRulePack(pack(`id: x\ntitle: X\nrules:\n${RULE}`, body), "x", "private");
+    expect(parsed.text).toContain(body);
   });
 
   it("keeps a multi-line rule on one line, so it can't start a heading", () => {
@@ -288,9 +297,54 @@ describe("selectRulePacks", () => {
     ]);
   });
 
+  it("keeps a broken trusted pack's details out of the repo's problems", async () => {
+    await writeFile(new URL("broken.md", fixtures.private), "---\nid: broken\ntitle: [\n---\n");
+    const selected = await selectRulePacks(["broken"], { dirs: fixtures });
+    expect(selected.problems).toEqual([
+      'Rule pack "broken" couldn\'t be loaded; ask whoever runs LGTMoose.',
+    ]);
+    expect(selected.warnings).toEqual([
+      expect.stringMatching(/broken: its front matter isn't valid YAML/),
+    ]);
+  });
+
+  it("ignores a README of any case, and reads at most 20 pack files", async () => {
+    // Lowercase here; the other glob test has README.md. One each, for case-insensitive disks.
+    const files: Record<string, string> = { "rules/readme.md": "Our packs." };
+    for (let i = 0; i < 25; i += 1) {
+      const name = `rules/p${String(i).padStart(2, "0")}.md`;
+      files[name] =
+        i < 15 ? repoPack("Big", `${RULE}\n${"#".repeat(17 * 1024)}`) : repoPack(`P${i}`);
+    }
+    const base = await commit(files);
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(
+      selected.packs.filter((loaded) => loaded.source === "repo").map((loaded) => loaded.id),
+    ).toEqual([
+      "./rules/p15.md",
+      "./rules/p16.md",
+      "./rules/p17.md",
+      "./rules/p18.md",
+      "./rules/p19.md",
+    ]);
+    expect(selected.problems.filter((problem) => /only the first 20/.test(problem))).toHaveLength(
+      5,
+    );
+    expect(selected.problems.some((problem) => /readme/i.test(problem))).toBe(false);
+  });
+
   it("reports a pack whose blob can't be read", async () => {
     const base = await commit({ "rules/x.md": repoPack("X") });
-    const lossy = { ...repo, readBlobs: async () => new Map<string, Buffer>() };
+    const lossy = {
+      ...repo,
+      readBlobs: async (): Promise<Map<string, Buffer>> => {
+        throw new Error("fetch failed");
+      },
+    };
     const selected = await selectRulePacks(["./rules/x.md"], {
       repo: lossy,
       baseSha: base,
@@ -418,10 +472,10 @@ describe("selectRulePacks", () => {
     ]);
     expect(selected.problems).toEqual([
       expect.stringMatching(
-        /soft-money was left out: a repo rule in money can't be softer than blocking/,
+        /soft-money is should_fix, but a repo rule in money can't be softer than blocking, so that rule was left out/,
       ),
       expect.stringMatching(
-        /soft-correctness was left out: .* correctness can't be softer than should_fix/,
+        /soft-correctness is nit, but a repo rule in correctness can't be softer than should_fix/,
       ),
     ]);
   });
