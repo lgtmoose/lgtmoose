@@ -114,9 +114,15 @@ async function standing(
     const followable = await repo.hasCommit(sha);
     const movedRight = followable ? await trackLines(repo, sha, headSha, refs(right)) : refs(right);
     let movedLeft: (LineRef | undefined)[] = refs(left);
+    // Old-side lines are followed from the base the finding was raised against; with no common
+    // history (exit 1, no output) they can't be.
+    let leftFollowable = false;
     if (followable && left.length > 0) {
-      const raisedBase = (await repo.git(["merge-base", sha, mergeBase])).trim();
-      movedLeft = await trackLines(repo, raisedBase, mergeBase, refs(left));
+      const raisedBase = (
+        await repo.git(["merge-base", sha, mergeBase], { okExitCodes: [1] })
+      ).trim();
+      leftFollowable = raisedBase !== "";
+      if (leftFollowable) movedLeft = await trackLines(repo, raisedBase, mergeBase, refs(left));
     }
     const at = new Map([
       ...right.map((record, i) => [record, movedRight[i]] as const),
@@ -131,7 +137,8 @@ async function standing(
       const followed =
         place !== undefined &&
         (!isLeft || (deletedLines.get(place.path)?.has(place.line) ?? false));
-      const stands = inPr && (followable ? followed : record.status === "open");
+      const canFollow = isLeft ? leftFollowable : followable;
+      const stands = inPr && (canFollow ? followed : record.status === "open");
       if (!stands) {
         if (record.status === "open") outdated.push(record.id);
         continue;

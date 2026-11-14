@@ -831,6 +831,28 @@ describe("later runs", () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
+  it("keeps an old-side finding whose raised-at commit shares no history with the base", async () => {
+    const h = harness();
+    const left = finding({
+      side: "LEFT",
+      line: 3,
+      title: "Old bound was right",
+      evidence: "for (let i = 0; i < items.length; i++) {",
+    });
+    await review(h, 1, [left]);
+    // A commit with no history in common with the PR (an orphan branch on the remote).
+    await git(work, "checkout", "--quiet", "--orphan", "unrelated");
+    const orphan = await commit({ "x.txt": "x\n" }, "orphan");
+    await git(work, "checkout", "--quiet", "feature");
+    const row = h.findings.rows[0];
+    if (row === undefined) throw new Error("expected a recorded finding");
+    row.raisedAtSha = orphan;
+    headSha = await commit({ "src/other.ts": "export const rate = 4;\n" }, "unrelated push");
+
+    await expect(review(h, 2)).resolves.toBeDefined();
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
   it("reviews a change again when it's re-applied after a full revert", async () => {
     const h = harness();
     await addOther();

@@ -204,8 +204,9 @@ export interface PrepareOptions {
   /** The commit the last posted review was for, for an incremental review. */
   lastReviewed?: string;
   /**
-   * File versions posted runs reviewed: a planned file at one of these blobs is done, if it was
-   * read at least as closely as this plan reads it.
+   * Each path's latest version a posted run reviewed (see `reviewedBlobOf`). A planned file at
+   * that version is done, if it was read at least as closely as this plan reads it; on an
+   * incremental review, a PR file outside the range that isn't covered is planned too.
    */
   reviewed?: readonly ReviewedBlob[];
   /** Unposted runs' finished batches: their files are done and their findings carried over. */
