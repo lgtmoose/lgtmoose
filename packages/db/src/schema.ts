@@ -8,6 +8,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -58,6 +59,9 @@ export const runStatus = pgEnum("run_status", [
   "succeeded",
   "failed",
   "superseded",
+  // Posted nothing: another run's review already covered its head. Its head counts as
+  // reviewed, but it never counts as a newer run that posted.
+  "covered",
 ]);
 export const reviewDepth = pgEnum("review_depth", ["full", "move", "mechanical", "skipped"]);
 export const learningKind = pgEnum("learning_kind", [
@@ -107,6 +111,16 @@ export const reviewRuns = pgTable(
     filesDone: integer("files_done").notNull().default(0),
     costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
     error: text("error"),
+    /**
+     * When the event the run reviews happened (the dispatcher's job time, the PR's
+     * `updated_at`): runs of a PR are ordered by it, not by when their rows were made.
+     */
+    eventAt: timestamp("event_at", { withTimezone: true }),
+    /**
+     * Whether the run wrote PR-level state (summary, label, the PR's record): set when it
+     * succeeds, and when a covered run writes the PR's outputs. Older runs defer to such a run.
+     */
+    wrotePr: boolean("wrote_pr").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -257,4 +271,48 @@ export const feedback = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("feedback_finding_actor_reaction_key").on(t.findingId, t.actor, t.reaction)],
+);
+
+/**
+ * What the dispatcher last acted on for each PR, so it can order deliveries that GitHub sends
+ * out of order. `repo` is lowercased owner/name. A job older than `last_event_at` is stale, and
+ * a close wins over a reopen with the same time.
+ */
+export const pullRequestDispatches = pgTable(
+  "pull_request_dispatches",
+  {
+    repo: text("repo").notNull(),
+    number: integer("number").notNull(),
+    /** The newest event time (the PR's `updated_at`) the dispatcher has acted on. */
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+    /** Set while the newest event closed the PR. */
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.repo, t.number] })],
+);
+
+/**
+ * Review executions the dispatcher started, until it stops them. A PR's unstopped rows are the
+ * executions a newer job may need to stop, so the dispatcher never lists the state machine's
+ * executions. `repo` is lowercased owner/name.
+ */
+export const dispatchedExecutions = pgTable(
+  "dispatched_executions",
+  {
+    executionArn: text("execution_arn").primaryKey(),
+    repo: text("repo").notNull(),
+    number: integer("number").notNull(),
+    headSha: text("head_sha").notNull(),
+    /** The event time of the job that started it. */
+    eventAt: timestamp("event_at", { withTimezone: true }).notNull(),
+    /** When the dispatcher stopped it, or found it had already ended. */
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("dispatched_executions_active_idx")
+      .on(t.repo, t.number)
+      .where(sql`${t.stoppedAt} is null`),
+  ],
 );

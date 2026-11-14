@@ -53,6 +53,7 @@ describe.skipIf(adminUrl === undefined)("runMigrations on Postgres", () => {
       "select tablename from pg_tables where schemaname = 'public' order by tablename",
     );
     expect(tables.map((row) => row.tablename)).toEqual([
+      "dispatched_executions",
       "feedback",
       "files_reviewed",
       "finding_events",
@@ -60,6 +61,7 @@ describe.skipIf(adminUrl === undefined)("runMigrations on Postgres", () => {
       "learnings",
       "provider_cooldowns",
       "provider_usage",
+      "pull_request_dispatches",
       "pull_requests",
       "review_runs",
     ]);

@@ -7,6 +7,8 @@ export interface GitHubClientOptions {
   token: TokenProvider;
   fetch?: typeof fetch;
   userAgent?: string;
+  /** Gives up on a request after this long (an AbortSignal timeout). No limit by default. */
+  timeoutMs?: number;
 }
 
 /** GitHub said no. `githubMessage` is GitHub's short reason; it never holds the token. */
@@ -16,6 +18,11 @@ export class GitHubError extends Error {
     readonly githubMessage: string | undefined,
     readonly method: string,
     readonly path: string,
+    /**
+     * A rate limit, primary or secondary (GitHub answers some with 403): no requests left,
+     * a Retry-After, or a message that says so. Worth retrying later, not a refusal.
+     */
+    readonly rateLimited = false,
   ) {
     super(
       `GitHub ${method} ${path} failed (HTTP ${status}${githubMessage === undefined ? "" : `: ${githubMessage}`}).`,
@@ -41,12 +48,14 @@ export class GitHubClient {
   private readonly token: TokenProvider;
   private readonly fetchFn: typeof fetch;
   private readonly userAgent: string;
+  private readonly timeoutMs: number | undefined;
 
   constructor(options: GitHubClientOptions) {
     this.apiUrl = (options.apiUrl ?? "https://api.github.com").replace(/\/+$/, "");
     this.token = options.token;
     this.fetchFn = options.fetch ?? fetch;
     this.userAgent = options.userAgent ?? "lgtmoose";
+    this.timeoutMs = options.timeoutMs;
   }
 
   async request<T = unknown>(method: string, path: string, body?: object): Promise<T> {
@@ -61,6 +70,7 @@ export class GitHubClient {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(this.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(this.timeoutMs) }),
     });
     if (!response.ok) {
       const reply = (await response.json().catch(() => ({}))) as { message?: unknown };
@@ -68,10 +78,25 @@ export class GitHubClient {
         typeof reply.message === "string" && reply.message !== ""
           ? redactToken(reply.message, token).slice(0, MESSAGE_LIMIT)
           : undefined;
-      throw new GitHubError(response.status, message, method, path);
+      throw new GitHubError(
+        response.status,
+        message,
+        method,
+        path,
+        response.headers.get("x-ratelimit-remaining") === "0" ||
+          response.headers.has("retry-after") ||
+          /rate limit/i.test(message ?? ""),
+      );
     }
     if (response.status === 204) return undefined as T;
-    return (await response.json().catch(() => undefined)) as T;
+    // A body cut off (a timeout mid-read) throws from text(); an empty or broken one is an
+    // error too, never `undefined` for a caller to read fields from.
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new Error(`GitHub ${method} ${path} answered ${response.status} without a JSON body.`);
+    }
   }
 
   /** Every item of a paginated list endpoint, a page of 100 at a time until a short page. */

@@ -73,6 +73,21 @@ describe("toReviewJob: pull_request", () => {
     },
   );
 
+  it("carries the PR's updated_at as the event time, and drops one that isn't a time", () => {
+    const at = toReviewJob(
+      "pull_request",
+      prEvent("synchronize", { updated_at: "2026-11-12T09:59:58Z" }),
+      options,
+    );
+    expect(at).toMatchObject({ eventAt: "2026-11-12T09:59:58.000Z" });
+    const bad = toReviewJob(
+      "pull_request",
+      prEvent("synchronize", { updated_at: "soon" }),
+      options,
+    );
+    expect(bad).not.toHaveProperty("eventAt");
+  });
+
   it("keeps only what the dispatcher needs", () => {
     const payload = prEvent("opened", { title: "Add widgets", body: "x".repeat(10_000) });
     const job = toReviewJob("pull_request", payload, options) as ReviewJob;

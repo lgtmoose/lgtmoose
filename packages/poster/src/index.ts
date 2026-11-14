@@ -23,6 +23,7 @@ export {
 export {
   buildReview,
   reviewBody,
+  reviewMarkerComment,
   withCommentsInBody,
   type ReviewComment,
   type ReviewInput,
@@ -41,6 +42,9 @@ export {
 export {
   GitHubLabelClient,
   GitHubPoster,
+  type GitHubPosterOptions,
+  type MarkedReview,
+  type OurCheckRun,
   type PostedReview,
   type Poster,
   type SummaryCommentResult,

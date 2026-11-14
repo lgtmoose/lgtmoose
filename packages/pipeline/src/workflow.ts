@@ -37,12 +37,31 @@ export function runKeys(runId: string) {
   const batch = (index: number) => `${root}batches/${assertIndex(index)}/`;
   return {
     prepared: `${root}prepared.json`,
+    /** What the post step has posted so far, for a retry to carry on from. */
+    posted: `${root}posted.json`,
+    /** Written once, before the run's review is posted: the attempt that writes it posts. */
+    reviewClaim: `${root}review-claim.json`,
     checkout: `${root}checkout.tar.gz`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,
     /** Where a transcript key from the harness is stored for this batch. */
     batchTranscript: (index: number, key: string) => `${batch(index)}${key}`,
+  };
+}
+
+/**
+ * Keys shared by every run of a PR at one head, under `runs/heads/`. `repo` is owner/name,
+ * lowercased here (GitHub's names are case-insensitive).
+ */
+export function headKeys(repo: string, prNumber: number, headSha: string) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error(`Not owner/name: ${repo}`);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("Not a PR number.");
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headSha)) throw new Error("Not a commit SHA.");
+  const root = `${RUN_PREFIX}heads/${repo.toLowerCase()}/${prNumber}/${headSha}/`;
+  return {
+    /** Held while a run checks the head for our review and submits one, so runs take turns. */
+    reviewClaim: `${root}review-claim.json`,
   };
 }
 

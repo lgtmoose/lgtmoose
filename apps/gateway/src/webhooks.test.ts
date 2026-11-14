@@ -149,6 +149,8 @@ describe("POST /webhooks/github: queued jobs", () => {
           headSha: "6dcb09b5b57875f334f61aebed695e2e4193db5e",
           actor: "octo-dev",
           receivedAt: NOW.toISOString(),
+          // The PR's updated_at in the fixture: the dispatcher orders a PR's jobs by it.
+          eventAt: "2026-11-12T09:58:11.000Z",
         },
         options: { groupId: "acme-corp/widgets#42", dedupeId: DELIVERY },
       },

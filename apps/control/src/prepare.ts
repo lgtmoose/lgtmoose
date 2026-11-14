@@ -69,6 +69,7 @@ export async function prepare(
     headSha: job.headSha ?? pr.headSha,
     baseSha: pr.baseSha,
     executionArn,
+    ...(job.eventAt === undefined ? {} : { eventAt: new Date(job.eventAt) }),
   });
   if (job.headSha !== undefined && job.headSha !== pr.headSha) {
     // A newer push has its own execution; this one reviews nothing.
