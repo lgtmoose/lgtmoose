@@ -20,7 +20,8 @@ import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
 import {
   OFF_ECS_CLAIM_TTL_MS,
   SUMMARY_MARKER,
-  headCovered,
+  coveringReviews,
+  markerRun,
   post,
   reviewMarker,
   type PostAttempt,
@@ -153,7 +154,6 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
         summaryCommentId: 41,
         headSha: input.headSha,
         lastReviewedSha: undefined,
-        order: input.eventAt ?? new Date(0),
         status: "running",
         executionArn: input.executionArn,
       };
@@ -247,6 +247,8 @@ function harness(setup: Setup = {}) {
   const runs = memoryRuns();
   /** Our reviews' markers "on GitHub" by commit, as the tests put them there. */
   const reviewsOnGitHub = new Map<string, MarkedReview[]>();
+  /** The external IDs of our check runs "on GitHub", as the post or the test put them there. */
+  const checkRunsOnGitHub = new Set<string>();
   /** ECS task statuses by ARN, as the test sets them. */
   const tasks = new Map<string, string>();
   const reader: PullReader = {
@@ -284,6 +286,14 @@ function harness(setup: Setup = {}) {
           });
           // As if the reviews were on GitHub, for the tests that put them there.
           shadow.markersAt = async (_pull, commitId) => [...(reviewsOnGitHub.get(commitId) ?? [])];
+          shadow.checkRunExists = async (_pull, _sha, externalId) =>
+            checkRunsOnGitHub.has(externalId);
+          const completeCheckRun = shadow.completeCheckRun.bind(shadow);
+          shadow.completeCheckRun = async (ref, input) => {
+            const done = await completeCheckRun(ref, input);
+            if (input.externalId !== undefined) checkRunsOnGitHub.add(input.externalId);
+            return done;
+          };
           return shadow;
         },
       };
@@ -308,9 +318,14 @@ function harness(setup: Setup = {}) {
     execution,
     heartbeats,
     reviewsOnGitHub,
-    /** Puts a review of ours with this marker on the commit. */
-    addReview: (commitId: string, marker: string, state = "COMMENTED") => {
+    checkRunsOnGitHub,
+    /**
+     * Puts a review of ours with this marker on the commit, and, `finished`, its run's check
+     * run too: that run finished the head.
+     */
+    addReview: (commitId: string, marker: string, state = "COMMENTED", finished = true) => {
       reviewsOnGitHub.set(commitId, [...(reviewsOnGitHub.get(commitId) ?? []), { marker, state }]);
+      if (finished) checkRunsOnGitHub.add(markerRun(marker));
     },
     tasks,
   };
@@ -568,6 +583,7 @@ describe("post", () => {
     h.objects.set(runKeys(runId).batchOutput(0), JSON.stringify(output()));
   }
   const RUN_2 = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a22";
+  const RUN_3 = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a33";
   /** The covering run's saved progress once it has written its check run and summary. */
   const theirOutputs = {
     attempt: "x",
@@ -643,24 +659,27 @@ describe("post", () => {
       posted: false,
       coveredBy: reviewMarker(RUN_ID, false),
     });
-    // It requests changes too, so it writes the check run, summary and label the head lacks;
-    // a run that would approve past the request writes none (see the verdict test below).
-    expect(calls).toEqual(["completeCheckRun", "upsertSummaryComment", "labels"]);
+    expect(calls).toEqual([]);
   });
 
-  it("covers a head by its reviews' completeness and state", () => {
-    const review = (complete: boolean, state = "COMMENTED") => ({
-      marker: reviewMarker(RUN_ID, complete),
+  it("lists the reviews that could cover a run by their completeness and state", () => {
+    const review = (complete: boolean, state = "COMMENTED", run = RUN_ID) => ({
+      marker: reviewMarker(run, complete),
       state,
     });
-    expect(headCovered([], true)).toBeUndefined();
-    expect(headCovered([review(true)], true)).toEqual(review(true));
-    expect(headCovered([review(true)], false)).toEqual(review(true));
-    expect(headCovered([review(false)], true)).toBeUndefined();
-    expect(headCovered([review(false)], false)).toEqual(review(false));
-    expect(headCovered([review(false, "CHANGES_REQUESTED")], true)).toEqual(
+    expect(coveringReviews([], true)).toEqual([]);
+    expect(coveringReviews([review(true)], true)).toEqual([review(true)]);
+    expect(coveringReviews([review(true)], false)).toEqual([review(true)]);
+    expect(coveringReviews([review(false)], true)).toEqual([]);
+    expect(coveringReviews([review(false)], false)).toEqual([review(false)]);
+    expect(coveringReviews([review(false, "CHANGES_REQUESTED")], true)).toEqual([
       review(false, "CHANGES_REQUESTED"),
-    );
+    ]);
+    // The complete ones first.
+    expect(coveringReviews([review(false), review(true, "COMMENTED", RUN_2)], false)).toEqual([
+      review(true, "COMMENTED", RUN_2),
+      review(false),
+    ]);
   });
 
   it("takes turns with another run at the same head, through the head's claim", async () => {
@@ -685,7 +704,7 @@ describe("post", () => {
     expect(h.objects.has(pullKey)).toBe(false);
   });
 
-  it("posts one review when two runs at one head overlap", async () => {
+  it("posts a second review when the run whose review is on the head never finished it", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
     // The first run's review goes up, then its check run fails; the second run comes along.
@@ -705,7 +724,7 @@ describe("post", () => {
             upsertSummaryComment: poster.upsertSummaryComment.bind(poster),
             markersAt: poster.markersAt.bind(poster),
             submitReview: async (ref, commitId, payload) => {
-              h.addReview(commitId, markerIn(payload.body), "CHANGES_REQUESTED");
+              h.addReview(commitId, markerIn(payload.body), "CHANGES_REQUESTED", false);
               return poster.submitReview(ref, commitId, payload);
             },
             completeCheckRun: async (ref, input) => {
@@ -720,17 +739,18 @@ describe("post", () => {
     };
     const first = post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
     await expect(first).rejects.toThrow("GitHub 502");
+    // The first run's check run never got in, so its review doesn't cover the second run,
+    // which posts one of its own, and its own check run, summary and label.
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      coveredBy: reviewMarker(RUN_ID, true),
+      posted: true,
     });
     expect(h.reviewsOnGitHub.get(headSha)?.map((review) => review.marker)).toEqual([
       reviewMarker(RUN_ID, true),
+      reviewMarker(RUN_2, true),
     ]);
-    // The first run's check run failed, so the covered run, reaching the same verdict, writes
-    // its own for the head.
     expect(checkIds).toEqual([RUN_ID, RUN_2]);
-    // One review in all: the first run's.
-    expect(reviews(calls)).toHaveLength(1);
+    expect(reviews(calls)).toHaveLength(2);
+    expect(h.runs.runs.get(RUN_2)?.status).toBe("succeeded");
   });
 
   it("takes over an off-ECS claim, of either kind, once it has expired", async () => {
@@ -796,7 +816,7 @@ describe("post", () => {
             upsertSummaryComment: poster.upsertSummaryComment.bind(poster),
             markersAt: poster.markersAt.bind(poster),
             submitReview: async (ref, commitId, payload) => {
-              h.addReview(commitId, markerIn(payload.body));
+              h.addReview(commitId, markerIn(payload.body), "COMMENTED", false);
               return poster.submitReview(ref, commitId, payload);
             },
             completeCheckRun: async (ref, input) => {
@@ -843,105 +863,63 @@ describe("post", () => {
     });
   });
 
-  it("writes the head's outputs itself when the covering run never wrote them", async () => {
+  it("posts its own review when the covering run never finished the head", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED");
-    // The covering run posted its review and died: no check run or summary, and its retries
-    // are spent. Even the PR's record at this head (its partial record) doesn't make up for it.
+    // The other run posted its review and died: no check run, and its retries are spent.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED", false);
     await h.deps.store.createText(
       runKeys(RUN_ID).posted,
       JSON.stringify({ attempt: "x", writes: 1, review: true }),
     );
-    const second = h.runs.runs.get(RUN_2);
-    if (second) second.lastReviewedSha = headSha;
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      posted: false,
+      posted: true,
+    });
+    expect(calls).toEqual(["submitReview", "completeCheckRun", "upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.status).toBe("succeeded");
+  });
+
+  it("is covered by a run that finished the head, past one that didn't", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    secondRun(h, RUN_3);
+    // RUN_ID's run died after its review; RUN_2 posted another and finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    h.addReview(headSha, reviewMarker(RUN_2, true));
+    expect(await post(h.deps, RUN_3, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_2, true),
+    });
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("finds the covering run's check run on GitHub when its progress is gone", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // No posted.json (it expires): the check run under that run's external ID says it finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
       coveredBy: reviewMarker(RUN_ID, true),
     });
-    // Its own check run, summary and label, from its own report, which reached the review's
-    // verdict; no second review.
-    expect(calls).toEqual(["completeCheckRun", "upsertSummaryComment", "labels"]);
-    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered" });
-    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
-    // A retry finds them written and writes nothing more.
-    calls.length = 0;
-    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
+    // Covered, with nothing to bring the PR up to: no summary or label of theirs to copy.
+    expect(calls).toEqual([]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
+    // Unreadable progress goes the same way.
+    secondRun(h, RUN_3);
+    await h.deps.store.createText(runKeys(RUN_ID).posted, "not json");
+    expect(await post(h.deps, RUN_3, { ...as(TASK_C), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
     expect(calls).toEqual([]);
   });
 
-  it("writes the check run when the covering run left it out", async () => {
+  it("records a covered run on the PR once it has written the PR's summary, even failing", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED");
-    // Its summary went up, but not its check run.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
     await h.deps.store.createText(
       runKeys(RUN_ID).posted,
-      JSON.stringify({ ...theirOutputs, checkRun: false }),
+      JSON.stringify({ ...theirOutputs, labelTarget: "Approved" }),
     );
-    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
-    // Its own check run; their summary, put back on the PR (another head's run may have
-    // replaced it since); no label, since they set none.
-    expect(calls).toEqual(["completeCheckRun", "upsertSummaryComment"]);
-    const [summary] = shadowRecords(h.objects, "summary-comment");
-    expect(summary).toMatchObject({ body: "their summary" });
-    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
-  });
-
-  it("writes none of its own outputs when its verdict isn't the review's on the head", async () => {
-    const { h, calls, taskStatus } = await ready();
-    secondRun(h, RUN_2);
-    // The covering run approved, then died; this run would request changes. Its outputs would
-    // contradict the review on the head, so it writes none: that's for the reconciler.
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "APPROVED");
-    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      coveredBy: reviewMarker(RUN_ID, true),
-    });
-    expect(calls).toEqual([]);
-    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
-  });
-
-  it("writes none of its own outputs when the covering run's progress can't be read", async () => {
-    const { h, calls, taskStatus } = await ready();
-    secondRun(h, RUN_2);
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED");
-    await h.deps.store.createText(runKeys(RUN_ID).posted, "not json");
-    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
-    expect(calls).toEqual([]);
-  });
-
-  it("writes the head's check run even when the PR has moved on from the head", async () => {
-    const setup: Setup = {};
-    const { h, calls, taskStatus } = await ready(setup);
-    secondRun(h, RUN_2);
-    // The verdict this run reaches once the head has moved: it comments, it doesn't block.
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED");
-    // The first attempt is covered, then fails to read the covering run's progress.
-    const getText = h.deps.store.getText.bind(h.deps.store);
-    let blips = 1;
-    h.deps.store.getText = async (key) => {
-      if (key === runKeys(RUN_ID).posted && blips > 0) {
-        blips -= 1;
-        throw new Error("S3 blip");
-      }
-      return getText(key);
-    };
-    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("S3 blip");
-    expect(calls).toEqual([]);
-    // Its retry comes after a push.
-    h.tasks.set(TASK_B, "STOPPED");
-    setup.head = "f".repeat(40);
-    await post(h.deps, RUN_2, { ...as(TASK_C), taskStatus });
-    // The check run is the head's; the summary and label are the PR's, now another head's.
-    expect(calls).toEqual(["completeCheckRun"]);
-    expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
-  });
-
-  it("records a covered run's PR outputs even when a later write fails", async () => {
-    const { h, taskStatus } = await ready();
-    secondRun(h, RUN_2);
-    h.addReview(headSha, reviewMarker(RUN_ID, true), "CHANGES_REQUESTED");
-    const calls = countingPoster(h);
     // The database blips before the label: the summary is written, the label isn't.
     const newer = h.runs.newerRunPosted.bind(h.runs);
     let looks = 0;
@@ -951,9 +929,12 @@ describe("post", () => {
       return newer(run);
     };
     await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("blip");
-    expect(calls).toContain("upsertSummaryComment");
-    expect(calls).not.toContain("labels");
-    // Its summary is on the PR: recorded there, so an older run defers to it meanwhile.
+    expect(calls).toEqual(["upsertSummaryComment"]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
+    // Its retry, with the covering run's progress gone meanwhile, still records it so.
+    h.objects.delete(runKeys(RUN_ID).posted);
+    h.tasks.set(TASK_B, "STOPPED");
+    await post(h.deps, RUN_2, { ...as(TASK_C), taskStatus });
     expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
   });
 

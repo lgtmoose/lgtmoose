@@ -46,13 +46,6 @@ const CHECK_TITLE: Record<ReviewEvent, string> = {
   REQUEST_CHANGES: "Changes requested",
 };
 
-/** The state GitHub gives a review submitted with the event. */
-const REVIEW_STATE: Record<ReviewEvent, string> = {
-  APPROVE: "APPROVED",
-  COMMENT: "COMMENTED",
-  REQUEST_CHANGES: "CHANGES_REQUESTED",
-};
-
 /**
  * One batch's outcome from its output object. A missing object (the sandbox task failed or
  * never ran) or one that doesn't validate counts as a failed batch, never as a clean one.
@@ -123,12 +116,12 @@ const postProgressSchema = z.object({
 });
 
 /**
- * Another run's saved progress, read for what it wrote. None saved, it wrote nothing past its
- * review (it saves right after that); unreadable, what it wrote is unknown: undefined.
+ * Another run's saved progress, read for what it wrote. Missing (it expires) or unreadable,
+ * what it wrote is unknown: undefined.
  */
 function readTheirs(text: string | undefined): PostProgress | undefined {
   try {
-    return readProgress(text);
+    return text === undefined ? undefined : readProgress(text);
   } catch {
     return undefined;
   }
@@ -173,7 +166,8 @@ export function reviewMarker(runId: string, complete: boolean): string {
 }
 
 /**
- * Our review on the head that makes another from this run moot, if there is one:
+ * Our reviews on the head that could make another from this run moot, the complete ones
+ * first. One does once its run has finished the head (see `post`):
  * - a complete review;
  * - an incomplete one that requested changes: until earlier runs' open findings count in a
  *   later run's decision, a complete run could approve with its blocking findings unanswered
@@ -182,16 +176,23 @@ export function reviewMarker(runId: string, complete: boolean): string {
  * A complete run posts over an incomplete COMMENT review. A COMMENT review sets no approval
  * state on GitHub, so nothing of it lingers for the new review to clear.
  */
-export function headCovered(
+export function coveringReviews(
   reviews: readonly MarkedReview[],
   complete: boolean,
-): MarkedReview | undefined {
-  const done = reviews.find((review) => review.marker.endsWith(":complete"));
-  if (done !== undefined) return done;
+): MarkedReview[] {
+  const done = reviews.filter((review) => review.marker.endsWith(":complete"));
   const incomplete = reviews.filter((review) => review.marker.endsWith(":incomplete"));
-  return complete
-    ? incomplete.find((review) => review.state === "CHANGES_REQUESTED")
-    : incomplete[0];
+  return [
+    ...done,
+    ...(complete
+      ? incomplete.filter((review) => review.state === "CHANGES_REQUESTED")
+      : incomplete),
+  ];
+}
+
+/** The run a review marker names. */
+export function markerRun(marker: string): string {
+  return marker.slice(REVIEW_MARKER_PREFIX.length).split(":")[0] ?? "";
 }
 
 /** Who a post attempt is, for the review claim. */
@@ -500,75 +501,73 @@ export async function post(
     progress.checkRun = true;
     await save();
   };
-  /** The label a covered run means to set on the PR, once it writes PR-level outputs. */
-  let coverLabel: string | undefined;
   /**
-   * Records the covered run; on the PR too once it (this attempt or an earlier one, from its
-   * saved progress) has written the PR's summary or label.
+   * Whether the run behind a review on the head finished the head: its check run is on GitHub
+   * too (from its saved progress, else looked up by its external ID, since saved progress
+   * expires). Without a check run (`gate.check_run: off`), the review alone does.
    */
-  const coveredRecord = () => {
-    const wrotePr = progress.summary === true || progress.label === true;
-    return deps.runs.coverRun(runId, {
-      ...counts,
-      ...(wrotePr
-        ? {
-            pr: {
-              headSha: pr.headSha,
-              statusLabel: progress.labelTarget ?? coverLabel,
-              summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
-            },
-          }
-        : {}),
-    });
+  const finishedHead = async (marker: string) => {
+    if (decision.conclusion === undefined) return true;
+    const theirRun = markerRun(marker);
+    const theirs = readTheirs(await deps.store.getText(runKeys(theirRun).posted));
+    return theirs?.checkRun === true || poster.checkRunExists(pull, pr.headSha, theirRun);
   };
   /**
-   * Records the covered run, first making sure its head has its outputs when the covering run
-   * didn't write them (it died after its review): the check run, and, while the head is the
-   * PR's, the summary comment and the label. Each is the covering run's when that run wrote
-   * it (from its saved progress), else this run's own, but only when this run reached the
-   * same verdict as the review on the head (its state): then they say what that review says.
-   * When the covering run wrote all of them and the PR's record is at this head, there's
-   * nothing to do; otherwise the PR is recorded at the head too. Like a posting run, it leaves
-   * the summary and label to a run for a later event that has written them.
+   * A covered run's record, from what its saved progress says it wrote (this attempt's or an
+   * earlier one's): on the PR's record too once it has written the PR's summary or label.
+   */
+  const coveredResult = (wrote: PostProgress) => ({
+    ...counts,
+    ...(wrote.summary === true || wrote.label === true
+      ? {
+          pr: {
+            headSha: pr.headSha,
+            statusLabel: wrote.labelTarget,
+            summaryCommentId: wrote.summaryCommentId ?? run.summaryCommentId,
+          },
+        }
+      : {}),
+  });
+  /**
+   * Records the covered run. When its head is still the PR's, the PR's record isn't there yet
+   * (the covering run's own record deferred to this newer run, say) and no run for a later
+   * event has written the PR's state, it brings the PR up to the head: the covering run's
+   * summary and label, from that run's saved progress, and the record. Never its own
+   * decision, which wasn't posted.
    */
   const cover = async (coveredBy: string) => {
-    const coveringRun = coveredBy.slice(REVIEW_MARKER_PREFIX.length).split(":")[0] ?? "";
-    const saved = readTheirs(await deps.store.getText(runKeys(coveringRun).posted));
-    const theirs = saved ?? {};
-    const covering = (await headReviews()).find((review) => review.marker === coveredBy);
-    // Unreadable progress: what the covering run wrote is unknown, so write nothing over it.
-    const ownFits = saved !== undefined && covering?.state === REVIEW_STATE[decision.event];
-    const checkMissing = decision.conclusion !== undefined && theirs.checkRun !== true;
-    // The check run is the head's: written whether or not the head is still the PR's.
-    if (checkMissing && ownFits) await writeCheckRun();
-    if (latest.headSha !== pr.headSha || (await deps.runs.newerRunPosted(run))) {
-      await coveredRecord();
-      return;
+    const catchUp =
+      latest.headSha === pr.headSha &&
+      run.lastReviewedSha !== pr.headSha &&
+      !(await deps.runs.newerRunPosted(run));
+    const theirs = catchUp
+      ? readTheirs(await deps.store.getText(runKeys(markerRun(coveredBy)).posted))
+      : undefined;
+    if (theirs?.summaryBody !== undefined) {
+      // Checked again right before each write, as on the posting path.
+      if (!progress.summary && !(await deps.runs.newerRunPosted(run))) {
+        await writeSummary(theirs.summaryBody);
+      }
+      const label = theirs.labelTarget;
+      if (label !== undefined && !progress.label && !(await deps.runs.newerRunPosted(run))) {
+        await writeLabel(label);
+      }
     }
-    const own = ownFits ? { summary: report.summary, label: decision.label } : {};
-    const summaryBody = theirs.summaryBody ?? own.summary;
-    const labelTarget = theirs.label === true ? theirs.labelTarget : own.label;
-    const theirsAll =
-      theirs.summaryBody !== undefined && (theirs.label === true || decision.label === undefined);
-    if (theirsAll && run.lastReviewedSha === pr.headSha) {
-      await coveredRecord();
-      return;
-    }
-    coverLabel = labelTarget;
-    if (!progress.summary && summaryBody !== undefined && !(await deps.runs.newerRunPosted(run))) {
-      await writeSummary(summaryBody);
-    }
-    if (!progress.label && labelTarget !== undefined && !(await deps.runs.newerRunPosted(run))) {
-      await writeLabel(labelTarget);
-    }
-    await coveredRecord();
+    await deps.runs.coverRun(runId, coveredResult(progress));
   };
   try {
     if (!progress.review) {
       // Our review on the head covers this run when it's complete, or when this run wouldn't
-      // be complete either (see `headCovered`). Holding the head's claim, nobody adds one
-      // between this look and the submit.
-      const coveredBy = headCovered(await headReviews(), report.complete)?.marker;
+      // be complete either (see `coveringReviews`), and its run finished the head. A run that
+      // didn't (it died after its review) leaves the head to this one, which posts a review
+      // of its own. Holding the head's claim, nobody adds one between this look and the submit.
+      let coveredBy: string | undefined;
+      for (const review of coveringReviews(await headReviews(), report.complete)) {
+        if (await finishedHead(review.marker)) {
+          coveredBy = review.marker;
+          break;
+        }
+      }
       if (coveredBy === undefined) {
         try {
           await poster.submitReview(pull, pr.headSha, payload);
@@ -614,10 +613,13 @@ export async function post(
   } catch (error) {
     // The review is on GitHub: record the run, with the summary comment if it got that far, so
     // a later run edits that comment and doesn't review the head again. Covered, it records
-    // as covered, on the PR's record only once it has written the PR's summary or label. Then
-    // fail the step, whose retry finishes the rest.
+    // as covered, and on the PR's record only once it has written the PR's summary or label.
+    // Then fail the step, whose retry finishes the rest.
     if (progress.review) {
-      const finish = progress.coveredBy === undefined ? record() : coveredRecord();
+      const finish =
+        progress.coveredBy === undefined
+          ? record()
+          : deps.runs.coverRun(runId, coveredResult(progress));
       await finish.catch((recordError: unknown) => {
         deps.log("recording a partly posted run failed", {
           runId,

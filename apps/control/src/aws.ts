@@ -22,7 +22,7 @@ import {
   installationTokenProvider,
   appJwt,
 } from "@lgtmoose/poster";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
@@ -181,9 +181,9 @@ const runOrder = sql<Date>`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdA
 
 async function newerRunPosted(
   db: Pick<Db, "select">,
-  run: { pullRequestId: string; order: Date },
+  run: { runId: string; pullRequestId: string },
 ): Promise<boolean> {
-  // A run that wrote PR-level state: it succeeded, or it was covered and wrote the PR's
+  // Another run that wrote PR-level state: it succeeded, or it was covered and wrote the PR's
   // outputs. A covered run that wrote nothing doesn't count: it never stands in for the run
   // that posted.
   const [newer] = await db
@@ -192,8 +192,14 @@ async function newerRunPosted(
     .where(
       and(
         eq(reviewRuns.pullRequestId, run.pullRequestId),
+        ne(reviewRuns.id, run.runId),
         eq(reviewRuns.wrotePr, true),
-        gt(runOrder, run.order),
+        // Against the run's own row, at Postgres's precision: its order read back into a Date
+        // (or a driver's string) can be coarser than the column.
+        gt(
+          runOrder,
+          sql`(select coalesce(r.event_at, r.created_at) from review_runs r where r.id = ${run.runId})`,
+        ),
       ),
     )
     .limit(1);
@@ -207,7 +213,7 @@ async function newerRunPosted(
  */
 async function recordOnPr(
   tx: Pick<Db, "select" | "update">,
-  run: { pullRequestId: string; order: Date },
+  run: { runId: string; pullRequestId: string },
   pr: { headSha: string; statusLabel: string | undefined; summaryCommentId: number | undefined },
   now: () => Date,
 ): Promise<void> {
@@ -238,8 +244,6 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         summaryCommentId: pullRequests.summaryCommentId,
         headSha: reviewRuns.headSha,
         lastReviewedSha: pullRequests.lastReviewedSha,
-        eventAt: reviewRuns.eventAt,
-        createdAt: reviewRuns.createdAt,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
@@ -252,7 +256,6 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           summaryCommentId: row.summaryCommentId ?? undefined,
           headSha: row.headSha,
           lastReviewedSha: row.lastReviewedSha ?? undefined,
-          order: row.eventAt ?? row.createdAt,
         };
   }
 
@@ -327,7 +330,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
-          .returning({ pullRequestId: reviewRuns.pullRequestId, order: runOrder });
+          .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });
         if (run === undefined) throw new Error(`No review run ${runId}.`);
         // The PR's record is the newest posted run's: an older run that finished posting later
         // (stopped mid-post, say) leaves it to the newer one.
@@ -347,7 +350,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
-          .returning({ pullRequestId: reviewRuns.pullRequestId, order: runOrder });
+          .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });
         if (run === undefined) throw new Error(`No review run ${runId}.`);
         if (result.pr !== undefined) await recordOnPr(tx, run, result.pr, now);
       });

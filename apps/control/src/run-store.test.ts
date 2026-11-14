@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { pullRequests, reviewRuns } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -168,7 +168,6 @@ describe("drizzleRunStore", () => {
     expect(await loaded(later.runId)).toMatchObject({
       headSha: "c".repeat(40),
       lastReviewedSha: "c".repeat(40),
-      order: new Date("2026-11-14T00:00:02Z"),
     });
   });
 
@@ -237,6 +236,27 @@ describe("drizzleRunStore", () => {
     await store.coverRun(backAtA.runId, { filesDone: 1, costUsd: undefined });
     expect(await runRow(backAtA.runId)).toMatchObject({ wrotePr: true });
     expect(await store.newerRunPosted(await loaded(atB.runId))).toBe(true);
+  });
+
+  it("never counts a run as newer than itself, whatever its row time's precision", async () => {
+    // No event time: the run's order is its row time, which Postgres keeps to the microsecond
+    // and a Date read back only to the millisecond.
+    const run = await start("arn:exec:27", 27);
+    await db
+      .update(reviewRuns)
+      .set({ createdAt: sql`'2026-11-14T00:00:00.123456Z'::timestamptz` })
+      .where(eq(reviewRuns.id, run.runId));
+    await store.succeedRun(run.runId, posted("a".repeat(40), 15));
+    expect(await prRow(run.pullRequestId)).toMatchObject({ lastReviewedSha: "a".repeat(40) });
+    expect(await store.newerRunPosted(await loaded(run.runId))).toBe(false);
+    // A later run in the same millisecond, though, is newer.
+    const later = await start("arn:exec:28", 27);
+    await db
+      .update(reviewRuns)
+      .set({ createdAt: sql`'2026-11-14T00:00:00.123789Z'::timestamptz` })
+      .where(eq(reviewRuns.id, later.runId));
+    await store.succeedRun(later.runId, posted("b".repeat(40), 15));
+    expect(await store.newerRunPosted(await loaded(run.runId))).toBe(true);
   });
 
   it("supersedes only a queued or running run", async () => {

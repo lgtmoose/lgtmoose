@@ -56,6 +56,11 @@ export interface Poster {
    * COMMENTED, DISMISSED). Always none in shadow mode, where reviews are recorded, not posted.
    */
   markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<MarkedReview[]>;
+  /**
+   * Whether our check run with this external ID (see `CheckRunInput.externalId`) is on the
+   * head. Always false in shadow mode.
+   */
+  checkRunExists(pull: PullRef, headSha: string, externalId: string): Promise<boolean>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -256,6 +261,10 @@ export class GitHubPoster implements Poster {
       });
     }
     return run.id;
+  }
+
+  async checkRunExists(pull: PullRef, headSha: string, externalId: string): Promise<boolean> {
+    return (await this.findCheckRun(pull, headSha, externalId)) !== undefined;
   }
 
   /** Our check run on the head with this external ID, if there is one. */

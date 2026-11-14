@@ -36,11 +36,6 @@ export interface RunRecord {
   headSha: string;
   /** The head the PR's record is at: the last posted review's. */
   lastReviewedSha: string | undefined;
-  /**
-   * Where the run stands among the PR's runs: its event time, or (without one) when its row
-   * was made. A run later in this order is newer.
-   */
-  order: Date;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

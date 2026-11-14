@@ -183,6 +183,14 @@ describe("GitHubPoster", () => {
     expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
   });
 
+  it("tells whether our check run with an external ID is on the head", async () => {
+    const listing = { status: 200, body: { check_runs: [{ id: 4, external_id: "run-1" }] } };
+    const { poster: p, calls } = poster([listing, listing]);
+    expect(await p.checkRunExists(PULL, "abc", "run-1")).toBe(true);
+    expect(await p.checkRunExists(PULL, "abc", "run-2")).toBe(false);
+    expect(calls[0]?.url).toContain("/commits/abc/check-runs?check_name=LGTMoose&filter=all");
+  });
+
   it("sends the annotation pages an earlier attempt didn't get to", async () => {
     const annotations = Array.from({ length: 120 }, (_, i) => ({
       path: "a.ts",
