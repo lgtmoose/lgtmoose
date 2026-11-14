@@ -48,8 +48,26 @@ describe("parseDeployConfig", () => {
       reconcileLookbackHours: 24,
       shadow: true,
       extraEgressHosts: [],
+      learnings: { embeddings: { provider: "none" } },
       dashboard: true,
     });
+  });
+
+  it("takes an embeddings provider for learnings, with each one's default model", () => {
+    expect(
+      parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "bedrock" } } })
+        .learnings,
+    ).toEqual({ embeddings: { provider: "bedrock", model: "amazon.titan-embed-text-v2:0" } });
+    expect(
+      parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "openai" } } })
+        .learnings,
+    ).toEqual({ embeddings: { provider: "openai", model: "text-embedding-3-small" } });
+    expect(
+      issuesOf({
+        ...minimal,
+        learnings: { embeddings: { provider: "openai", model: "ada-002" } },
+      }),
+    ).toEqual([expect.objectContaining({ path: "learnings.embeddings.model" })]);
   });
 
   it("accepts a full multi-provider config", () => {

@@ -19,8 +19,35 @@ export {
 } from "./policy.js";
 export { redactSensitive, type RedactionKind } from "./redact.js";
 export {
+  appliesTo,
+  byKeyword,
+  keywords,
+  learningsForPullRequest,
+  LEARNINGS_PER_BATCH,
+  MAX_QUERY_CHARS,
+  retireUnusedLearnings,
+  retrieveLearnings,
+  RETIRE_UNUSED_DAYS,
+  summarizeLearning,
+  type Embedder,
+  type LearningScope,
+  type LearningSummary,
+  type Retrieved,
+  type RetrievalDeps,
+  type RetrievalQuery,
+} from "./retrieval.js";
+export {
+  bedrockTitanEmbedder,
+  DEFAULT_BEDROCK_EMBEDDINGS_MODEL,
+  DEFAULT_OPENAI_EMBEDDINGS_MODEL,
+  openAiEmbedder,
+  type BedrockInvoke,
+} from "./embedders.js";
+export {
+  cosineDistance,
   LEARNING_KINDS,
   memoryLearningStore,
+  SYSTEM_ACTOR,
   PERMISSIONS,
   type Learning,
   type LearningEvent,

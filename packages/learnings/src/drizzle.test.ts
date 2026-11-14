@@ -122,4 +122,41 @@ describe("drizzleLearningStore", () => {
       "retired",
     ]);
   });
+
+  /** A unit vector along `axis`, mixed a little with the next axis. */
+  function unit(axis: number, mix = 0): number[] {
+    const vector = Array.from({ length: 1024 }, () => 0);
+    vector[axis] = 1;
+    vector[axis + 1] = mix;
+    return vector;
+  }
+
+  it("ranks by pgvector cosine distance, only against the same model's vectors", async () => {
+    const a = await store.insert(learning({ sourceCommentId: 200, text: "a" }), []);
+    const b = await store.insert(learning({ sourceCommentId: 201, text: "b" }), []);
+    const c = await store.insert(learning({ sourceCommentId: 202, text: "c" }), []);
+    const ids = [a.learning.id, b.learning.id, c.learning.id];
+    expect(await store.missingEmbeddings(ids, "m1")).toEqual(ids);
+    await store.setEmbedding(a.learning.id, "m1", unit(0));
+    await store.setEmbedding(b.learning.id, "m1", unit(1));
+    await store.setEmbedding(c.learning.id, "m2", unit(0));
+    // c has another model's vector: it's missing for m1, and never compared with m1's.
+    expect(await store.missingEmbeddings(ids, "m1")).toEqual([c.learning.id]);
+    expect(await store.nearest(ids, "m1", unit(1, 0.1), 5)).toEqual([b.learning.id, a.learning.id]);
+    expect(await store.nearest(ids, "m1", unit(0), 1)).toEqual([a.learning.id]);
+    // Reading a learning doesn't carry its vector.
+    expect(await store.get(a.learning.id)).not.toHaveProperty("embedding");
+  });
+
+  it("counts uses, and lists active learnings unused since a time", async () => {
+    const used = await store.insert(learning({ sourceCommentId: 300 }), []);
+    const idle = await store.insert(learning({ sourceCommentId: 301 }), []);
+    const at = new Date("2030-01-01T00:00:00Z");
+    await store.recordUse([used.learning.id, used.learning.id], at);
+    expect(await store.get(used.learning.id)).toMatchObject({ hits: 1, lastUsedAt: at });
+    const stale = await store.unusedSince(new Date("2029-12-31T00:00:00Z"), 1000);
+    const staleIds = stale.map((row) => row.id);
+    expect(staleIds).toContain(idle.learning.id);
+    expect(staleIds).not.toContain(used.learning.id);
+  });
 });

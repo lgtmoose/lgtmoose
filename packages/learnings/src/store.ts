@@ -20,9 +20,13 @@ export type OrgRole = (typeof ORG_ROLES)[number];
 
 /**
  * The access that was checked for someone, as recorded: their repo permission for a repo or
- * path learning, `org:<role>` for an org-wide one.
+ * path learning, `org:<role>` for an org-wide one, or `system` for LGTMoose itself (retiring a
+ * learning unused for too long).
  */
-export type CheckedPermission = Permission | `org:${OrgRole}`;
+export type CheckedPermission = Permission | `org:${OrgRole}` | "system";
+
+/** The actor LGTMoose records for what it does itself, such as retiring unused learnings. */
+export const SYSTEM_ACTOR = "lgtmoose";
 
 export interface Learning {
   id: string;
@@ -50,9 +54,12 @@ export interface Learning {
   authorPermission: CheckedPermission;
   createdAt: Date;
   retiredAt: Date | undefined;
+  /** How many review prompts it was added to, and when it last was. */
+  hits: number;
+  lastUsedAt: Date | undefined;
 }
 
-export type NewLearning = Omit<Learning, "id" | "createdAt" | "retiredAt">;
+export type NewLearning = Omit<Learning, "id" | "createdAt" | "retiredAt" | "hits" | "lastUsedAt">;
 
 export interface LearningEvent {
   learningId: string;
@@ -98,6 +105,43 @@ export interface LearningStore {
   list(filter: LearningFilter): Promise<Learning[]>;
   /** Oldest first. */
   events(learningId: string): Promise<LearningEvent[]>;
+  /** Of `ids`, the learnings without an embedding from `model` (none, or another model's). */
+  missingEmbeddings(ids: readonly string[], model: string): Promise<string[]>;
+  /** Stores a learning's embedding and the model it came from. */
+  setEmbedding(id: string, model: string, embedding: readonly number[]): Promise<void>;
+  /**
+   * Of `ids`, the `limit` learnings with an embedding from `model` nearest to `embedding` by
+   * cosine distance (pgvector `<=>`), nearest first. Learnings without one are left out.
+   */
+  nearest(
+    ids: readonly string[],
+    model: string,
+    embedding: readonly number[],
+    limit: number,
+  ): Promise<string[]>;
+  /** Counts a use of each learning: `hits` goes up by one and `lastUsedAt` becomes `at`. */
+  recordUse(ids: readonly string[], at: Date): Promise<void>;
+  /**
+   * Active learnings last used (or, never used, created) before `before`, oldest first, at
+   * most `limit`.
+   */
+  unusedSince(before: Date, limit: number): Promise<Learning[]>;
+}
+
+/** Cosine distance, as pgvector's `<=>` computes it: 1 - cosine similarity. */
+export function cosineDistance(a: readonly number[], b: readonly number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  if (na === 0 || nb === 0) return 1;
+  return 1 - dot / Math.sqrt(na * nb);
 }
 
 /** An in-memory `LearningStore`, for tests and for callers' tests. */
@@ -105,6 +149,7 @@ export function memoryLearningStore(now: () => Date = () => new Date()): Learnin
   all(): Learning[];
 } {
   const rows = new Map<string, Learning>();
+  const vectors = new Map<string, { model: string; embedding: number[] }>();
   const history: LearningEvent[] = [];
   let next = 1;
   const addEvents = (learningId: string, events: readonly NewLearningEvent[]) => {
@@ -125,6 +170,8 @@ export function memoryLearningStore(now: () => Date = () => new Date()): Learnin
         id: `learning-${next++}`,
         createdAt: now(),
         retiredAt: undefined,
+        hits: 0,
+        lastUsedAt: undefined,
       };
       rows.set(row.id, row);
       addEvents(row.id, events);
@@ -155,6 +202,40 @@ export function memoryLearningStore(now: () => Date = () => new Date()): Learnin
     },
     async events(learningId) {
       return history.filter((event) => event.learningId === learningId).map((e) => ({ ...e }));
+    },
+    async missingEmbeddings(ids, model) {
+      return ids.filter((id) => rows.has(id) && vectors.get(id)?.model !== model);
+    },
+    async setEmbedding(id, model, embedding) {
+      if (rows.has(id)) vectors.set(id, { model, embedding: [...embedding] });
+    },
+    async nearest(ids, model, embedding, limit) {
+      return ids
+        .flatMap((id) => {
+          const vector = vectors.get(id);
+          return vector === undefined || vector.model !== model
+            ? []
+            : [{ id, distance: cosineDistance(vector.embedding, embedding) }];
+        })
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, limit)
+        .map((entry) => entry.id);
+    },
+    async recordUse(ids, at) {
+      for (const id of new Set(ids)) {
+        const row = rows.get(id);
+        if (row === undefined) continue;
+        row.hits += 1;
+        row.lastUsedAt = at;
+      }
+    },
+    async unusedSince(before, limit) {
+      const since = (row: Learning) => (row.lastUsedAt ?? row.createdAt).getTime();
+      return [...rows.values()]
+        .filter((row) => row.status === "active" && since(row) < before.getTime())
+        .sort((a, b) => since(a) - since(b))
+        .slice(0, limit)
+        .map((row) => ({ ...row }));
     },
     all() {
       return [...rows.values()].map((row) => ({ ...row }));

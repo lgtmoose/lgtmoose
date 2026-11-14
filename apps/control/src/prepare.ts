@@ -245,8 +245,18 @@ export async function prepare(
       otherShas: [pr.baseSha, ...new Set(reviewed.map((file) => file.reviewedAt))],
       token: await github.token(),
     });
+    const { learnings } = deps;
     const prepared = await prepareReview(
-      { github: github.reader, progress: (line) => deps.log(line) },
+      {
+        github: github.reader,
+        progress: (line) => deps.log(line),
+        ...(learnings === undefined
+          ? {}
+          : {
+              learnings: (batch) =>
+                learnings({ org: target.owner, repo: `${target.owner}/${target.repo}`, ...batch }),
+            }),
+      },
       target,
       repo,
       pr,

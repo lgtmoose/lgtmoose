@@ -23,13 +23,14 @@ import { Schedule, ScheduleExpression } from "aws-cdk-lib/aws-scheduler";
 import { LambdaInvoke } from "aws-cdk-lib/aws-scheduler-targets";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
-import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
+import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   credentialConcurrency,
   modelFor,
   providerModelEnv,
+  SECRET_NAMES,
   STACK_OUTPUTS,
   type DeployConfig,
 } from "@lgtmoose/config";
@@ -126,6 +127,11 @@ export interface WorkflowStackProps extends StackProps {
   /** Hours back the reconciler queues reviews for. */
   reconcileLookbackHours: number;
   /**
+   * How the control task ranks learnings (`learnings.embeddings`): none (keywords), Bedrock in
+   * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
+   */
+  embeddings?: DeployConfig["learnings"]["embeddings"];
+  /**
    * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
    * (`sandboxBuildArgs`). Off by default.
    */
@@ -164,6 +170,7 @@ export class WorkflowStack extends Stack {
     super(scope, id, props);
     const lean = props.profile === "lean";
     const retention = lean ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH;
+    const embeddings = props.embeddings ?? { provider: "none" };
 
     this.cluster = new Cluster(this, "Cluster", { vpc: props.vpc });
 
@@ -190,12 +197,29 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),
         LGTMOOSE_SHADOW: String(props.shadow),
+        ...embeddingsEnvironment(embeddings),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
     props.githubAppSecret.grantRead(controlRole);
     props.databaseSecret.grantRead(controlRole);
     props.artifactBucket.grantReadWrite(controlRole);
+    // Learnings are ranked in the control task, never in the sandbox: only it may embed.
+    if (embeddings.provider === "bedrock") {
+      controlRole.addToPrincipalPolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ["bedrock:InvokeModel"],
+          resources: [
+            `arn:${this.partition}:bedrock:${this.region}::foundation-model/${embeddings.model}`,
+          ],
+        }),
+      );
+    } else if (embeddings.provider === "openai") {
+      Secret.fromSecretNameV2(this, "OpenAiEmbeddingsKey", SECRET_NAMES.openAiEmbeddings).grantRead(
+        controlRole,
+      );
+    }
     // Post's review claim names the claiming task; a later attempt asks whether it still runs.
     controlRole.addToPrincipalPolicy(
       new PolicyStatement({
@@ -537,6 +561,26 @@ export class WorkflowStack extends Stack {
       container.addMountPoints({ sourceVolume: volume, containerPath: path, readOnly: false });
     }
     return container;
+  }
+}
+
+/**
+ * The control task's embeddings settings (`readEmbeddingsSettings` in @lgtmoose/control). The
+ * OpenAI key is passed by its secret's name, never its value.
+ */
+export function embeddingsEnvironment(
+  embeddings: DeployConfig["learnings"]["embeddings"],
+): Record<string, string> {
+  switch (embeddings.provider) {
+    case "none":
+      return { LGTMOOSE_EMBEDDINGS: "none" };
+    case "bedrock":
+      return { LGTMOOSE_EMBEDDINGS: `bedrock:${embeddings.model}` };
+    case "openai":
+      return {
+        LGTMOOSE_EMBEDDINGS: `openai:${embeddings.model}`,
+        LGTMOOSE_EMBEDDINGS_SECRET_ID: SECRET_NAMES.openAiEmbeddings,
+      };
   }
 }
 

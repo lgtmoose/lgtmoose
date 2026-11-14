@@ -145,6 +145,8 @@ export interface ReconcileCounts {
   unreviewed: number;
   /** Unrecorded PRs and missed heads left alone: not updated within the lookback window. */
   skippedStale: number;
+  /** Active learnings retired for going unused 90 days (`retireUnusedLearnings`). */
+  learningsRetired: number;
   /** Installations, repositories or PRs that couldn't be checked, and failed label syncs. */
   errors: number;
 }
@@ -158,6 +160,7 @@ function emptyCounts(): ReconcileCounts {
     statesResynced: 0,
     unreviewed: 0,
     skippedStale: 0,
+    learningsRetired: 0,
     errors: 0,
   };
 }
@@ -402,6 +405,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     statesResynced: "StatesResynced",
     unreviewed: "Unreviewed",
     skippedStale: "SkippedStale",
+    learningsRetired: "LearningsRetired",
     errors: "ReconcileErrors",
   };
   const entries = Object.entries(names) as [keyof ReconcileCounts, string][];

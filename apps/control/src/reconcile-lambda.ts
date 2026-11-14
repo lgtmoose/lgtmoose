@@ -1,5 +1,10 @@
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
+import {
+  drizzleLearningStore,
+  retireUnusedLearnings,
+  type LearningStore,
+} from "@lgtmoose/learnings";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { databasePool, parseSecret, readSecret } from "./database.js";
@@ -22,10 +27,10 @@ const appSecretSchema = z.object({
   privateKey: z.string().min(1),
 });
 
-let deps: Promise<ReconcileDeps> | undefined;
+let deps: Promise<ReconcileDeps & { learnings: LearningStore }> | undefined;
 
 /** Built once per container: the pool outlives invocations. */
-function reconcileDeps(): Promise<ReconcileDeps> {
+function reconcileDeps(): Promise<ReconcileDeps & { learnings: LearningStore }> {
   deps ??= (async () => {
     const env = readReconcileEnv(process.env);
     if ("missing" in env) {
@@ -40,9 +45,11 @@ function reconcileDeps(): Promise<ReconcileDeps> {
     const pool = await databasePool(secrets, env.databaseSecretArn, env.databaseName, 1);
     // An idle connection can drop while the container is frozen; the next query reconnects.
     pool.on("error", (error) => log("database connection dropped", { error: error.message }));
+    const db = drizzle({ client: pool });
     return {
       github: githubReconcile(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
-      store: drizzleReconcileStore(drizzle({ client: pool })),
+      store: drizzleReconcileStore(db),
+      learnings: drizzleLearningStore(db),
       queue: sqsReconcileQueue(new SQSClient({}), env.jobQueueUrl),
       allowedOrgs: env.allowedOrgs,
       shadow: env.shadow,
@@ -58,7 +65,18 @@ function reconcileDeps(): Promise<ReconcileDeps> {
 }
 
 export async function handler(): Promise<ReconcileCounts> {
-  const counts = await reconcile(await reconcileDeps());
+  const ready = await reconcileDeps();
+  const counts = await reconcile(ready);
+  // Learnings unused for 90 days are retired here too: a small, model-free upkeep step that
+  // needs only the database. A failure is logged and counted, never thrown.
+  try {
+    counts.learningsRetired = await retireUnusedLearnings(ready.learnings);
+  } catch (error) {
+    counts.errors += 1;
+    log("reconcile: unused learnings not retired", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   process.stdout.write(`${metricsLine(counts, new Date())}\n`);
   return counts;
 }

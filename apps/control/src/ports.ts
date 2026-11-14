@@ -1,6 +1,6 @@
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
-import type { PullReader } from "@lgtmoose/pipeline";
+import type { LearningsForBatch, PullReader } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 
@@ -261,4 +261,11 @@ export interface ControlDeps {
   /** Writes a gzip tarball of `dir` (hidden files included) to `archive`. */
   archive(dir: string, archive: string): Promise<void>;
   log(message: string, fields?: Record<string, unknown>): void;
+  /**
+   * The team's learnings for one batch of a PR in `org`'s `repo` (owner/name): retrieved here,
+   * in the control task, never in the sandbox. Left out, prompts have none.
+   */
+  learnings?: (
+    query: { org: string; repo: string } & Parameters<LearningsForBatch>[0],
+  ) => ReturnType<LearningsForBatch>;
 }

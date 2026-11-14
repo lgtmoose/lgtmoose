@@ -24,9 +24,11 @@
     "@lgtmoose/core": "workspace:*",
     "@lgtmoose/db": "workspace:*",
     "drizzle-orm": "^0.45.4",
+    "picomatch": "^4.0.3",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/picomatch": "^4.0.3",
     "@electric-sql/pglite": "^0.5.16",
     "@electric-sql/pglite-pgvector": "^0.0.17",
     "typescript": "catalog:"

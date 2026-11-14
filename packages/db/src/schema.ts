@@ -251,6 +251,11 @@ export const learnings = pgTable(
     /** Redacted before it's stored: no secrets, tokens or personal data. */
     text: text("text").notNull(),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
+    /**
+     * The embeddings model `embedding` came from. Vectors are only compared with ones from the
+     * same model, so a change of provider re-embeds rather than comparing unlike vectors.
+     */
+    embeddingModel: text("embedding_model"),
     status: learningStatus("status").notNull().default("pending"),
     sourceRepo: text("source_repo"),
     sourcePr: integer("source_pr"),
