@@ -97,7 +97,12 @@ describe.skipIf(!hasSha256sum)("the sandbox image's Cursor install step", () => 
       .join(" ")
       .replace(/^RUN /, "")
       .replaceAll("/opt/cursor-agent", join(dir, "opt"))
-      .replaceAll("/tmp/agent.tar.gz", join(dir, "agent.tar.gz"));
+      .replaceAll("/tmp/agent.tar.gz", join(dir, "agent.tar.gz"))
+      .replaceAll("/var/lib/apt/lists", join(dir, "apt-lists"));
+    // Every path the step writes must have been moved into the temp dir: it must never touch
+    // the machine running the test.
+    const unmoved = script.match(/(?<![\w.-])\/(?:opt|tmp|var|usr|etc)\/[^\s;"]*/g) ?? [];
+    expect(unmoved.filter((path) => !path.startsWith(dir))).toEqual([]);
     const env = {
       PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`,
       TARGETARCH: "arm64",
