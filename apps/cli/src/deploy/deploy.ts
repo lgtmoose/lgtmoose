@@ -7,12 +7,13 @@ import {
   providerNeedsSecret,
   type DeployConfig,
 } from "@lgtmoose/config";
-import { loadDeployConfig } from "../paths.js";
+import { CLI, loadDeployConfig } from "../paths.js";
 import { PLACEHOLDER_WEBHOOK_URL, installUrl } from "../setup/manifest.js";
 import { isPromptCancel, type Prompter } from "../setup/prompter.js";
 import {
   readAppCredentials,
   readWebhookSecret,
+  SecretScheduledForDeletion,
   type AppCredentials,
   type SetupSecretStore,
 } from "../setup/secret-store.js";
@@ -21,6 +22,7 @@ import { isUpdatable, type StackLookup } from "./aws-cloudformation.js";
 import type { DatabaseControl } from "./aws-rds.js";
 import type { Cdk } from "./cdk.js";
 import { appJwt, appSettingsUrl, type GitHubAppApi } from "./github-app.js";
+import { errorMessage } from "../errors.js";
 
 /** Everything deploy and destroy touch outside their own process. */
 export interface DeployDeps {
@@ -89,14 +91,14 @@ function parseFlags(argv: readonly string[], withPurge: boolean) {
       purge: (values as { purge?: boolean }).purge === true,
     };
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    throw new UsageError(errorMessage(error));
   }
 }
 
 async function loadConfig(deps: DeployDeps): Promise<DeployConfig> {
   const config = await loadDeployConfig(deps.files, deps.configPath);
   if (config === undefined) {
-    throw new Error(`No config at ${deps.configPath}. Run pnpm lgtmoose setup first.`);
+    throw new Error(`No config at ${deps.configPath}. Run ${CLI} setup first.`);
   }
   return config;
 }
@@ -106,14 +108,27 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
   const app = await readAppCredentials(store);
   const webhook = await readWebhookSecret(store, app);
   if (webhook.problem !== undefined) {
-    throw new Error(`${webhook.problem} Run pnpm lgtmoose setup and create a new App to fix it.`);
+    throw new Error(`${webhook.problem} Run ${CLI} setup and create a new App to fix it.`);
   }
   const webhookSecret = webhook.secret;
   for (const provider of config.providers.filter(providerNeedsSecret)) {
-    if ((await store.read(SECRET_NAMES.provider(provider.id))) === undefined) {
+    let value: string | undefined;
+    try {
+      value = await store.read(SECRET_NAMES.provider(provider.id));
+    } catch (error) {
+      if (!(error instanceof SecretScheduledForDeletion)) throw error;
+      // `lgtmoose auth remove` did this; running auth again restores it with a new value.
+      throw new Error(
+        `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which is ` +
+          `scheduled for deletion in ${config.region}. Run ${CLI} auth for it again ` +
+          "to restore it, or remove the provider from the config.",
+        { cause: error },
+      );
+    }
+    if (value === undefined) {
       throw new Error(
         `Provider "${provider.id}" needs ${SECRET_NAMES.provider(provider.id)}, which doesn't ` +
-          `exist in ${config.region}. Run pnpm lgtmoose auth for it, or remove it from the config.`,
+          `exist in ${config.region}. Run ${CLI} auth for it, or remove it from the config.`,
       );
     }
   }
@@ -169,7 +184,7 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
     try {
       await deps.database(config.region).setDeletionProtection(databaseId, true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       deps.out(
         `Warning: couldn't check deletion protection on ${databaseId} (${message}). ` +
           "Turn it on in the RDS console if an earlier destroy was interrupted.\n",
@@ -183,7 +198,7 @@ LGTMoose is deployed.
 Install the App on the repositories it should review:
   ${installUrl(info.slug)}
 
-To upgrade later: git pull && pnpm lgtmoose deploy
+To upgrade later: git pull && ${CLI} deploy
 `;
 }
 
@@ -243,8 +258,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
     await cdk.destroyAll(context);
   } catch (error) {
     // Leave what's still there as it was: a stack that keeps its data, a protected database.
-    const message = error instanceof Error ? error.message : String(error);
-    const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    const message = errorMessage(error);
     const notes: string[] = [];
     if (purgeDeployed) {
       notes.push(
@@ -253,7 +267,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
           .then(
             () => "Switched the Data stack back to keeping its data.",
             (restoreError: unknown) =>
-              `The Data stack is still set to delete its data, with no snapshot (${describe(restoreError)}). Run pnpm lgtmoose deploy before anything deletes it.`,
+              `The Data stack is still set to delete its data, with no snapshot (${errorMessage(restoreError)}). Run ${CLI} deploy before anything deletes it.`,
           ),
       );
     }
@@ -265,7 +279,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
               ? "Turned the database's deletion protection back on."
               : `Database ${databaseId} is already gone or being deleted.`,
           (restoreError: unknown) =>
-            `Deletion protection is still off on ${databaseId} (${describe(restoreError)}); run pnpm lgtmoose deploy or turn it on in the RDS console.`,
+            `Deletion protection is still off on ${databaseId} (${errorMessage(restoreError)}); run ${CLI} deploy or turn it on in the RDS console.`,
         ),
       );
     }
@@ -280,7 +294,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
     const app = await readAppCredentials(deps.secrets(config.region));
     await deps.github.setWebhook(jwtFor(app, deps), { url: PLACEHOLDER_WEBHOOK_URL });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     webhookNote = `Couldn't reset the App's webhook URL (${message}). GitHub will keep trying the old one until the next deploy.`;
   }
 
@@ -298,7 +312,7 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   }
   lines.push(
     `The GitHub App, ${SECRET_NAMES.githubApp} and ${SECRET_NAMES.githubWebhook} are kept. ${webhookNote}`,
-    "pnpm lgtmoose deploy starts again with a new, empty database.",
+    `${CLI} deploy starts again with a new, empty database.`,
   );
   return `${lines.join("\n")}\n${purgeNote}`;
 }
@@ -327,7 +341,7 @@ async function runCommand(
   } catch (error) {
     if (isPromptCancel(error))
       return { exitCode: 130, stdout: "", stderr: `${command} cancelled.\n` };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return {
       exitCode: 1,
       stdout: "",

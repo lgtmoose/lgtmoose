@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ConfigError } from "./errors.js";
 import {
   defineConfig,
+  isPlanCredential,
   modelFor,
   parseDeployConfig,
   providerChain,
@@ -112,6 +113,18 @@ describe("parseDeployConfig", () => {
     expect(() => parseDeployConfig({ allowedOrgs: [], providers: [] })).toThrow(
       /lgtmoose\.config\.ts is invalid:\n {2}- allowedOrgs: .*\n {2}- providers: /,
     );
+  });
+});
+
+describe("isPlanCredential", () => {
+  it("covers subscription credentials, including a Codex access token and a Cursor user key", () => {
+    expect(isPlanCredential({ harness: "claude-code", auth: "oauth-token" })).toBe(true);
+    expect(isPlanCredential({ harness: "codex", auth: "chatgpt-login" })).toBe(true);
+    expect(isPlanCredential({ harness: "codex", auth: "access-token" })).toBe(true);
+    expect(isPlanCredential({ harness: "cursor-agent", auth: "api-key" })).toBe(true);
+    expect(isPlanCredential({ harness: "cursor-agent", auth: "service-account" })).toBe(false);
+    expect(isPlanCredential({ harness: "codex", auth: "api-key" })).toBe(false);
+    expect(isPlanCredential({ harness: "claude-code", auth: "bedrock" })).toBe(false);
   });
 });
 

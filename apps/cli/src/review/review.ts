@@ -5,6 +5,7 @@ import { GitHubRequestError } from "../github-request.js";
 import { formatJson, formatText, terminalSafe } from "./output.js";
 import { runReview, type ReviewDeps } from "@lgtmoose/pipeline";
 import { parseTarget, type PullTarget } from "./target.js";
+import { errorMessage } from "../errors.js";
 
 export const REVIEW_HELP = `Usage: lgtmoose review <owner/repo#123 | PR URL> --dry-run [options]
 
@@ -80,7 +81,7 @@ function parseFlags(argv: readonly string[]): ReviewCommandFlags | "help" {
       },
     });
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    throw new UsageError(errorMessage(error));
   }
   const { values, positionals } = parsed;
   if (values.help) return "help";
@@ -124,7 +125,7 @@ function failureText(error: unknown): string {
     return `${error.message}${hint}`;
   }
   if (error instanceof ConfigError) return error.message;
-  return error instanceof Error ? error.message : String(error);
+  return errorMessage(error);
 }
 
 /** `lgtmoose review`: a dry run of the whole review for one PR. */

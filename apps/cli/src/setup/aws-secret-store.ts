@@ -4,8 +4,8 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
-import { awsError, errorName } from "../aws-errors.js";
-import type { SetupSecretStore } from "./secret-store.js";
+import { awsError, errorName, isScheduledForDeletion } from "../aws-errors.js";
+import { SecretScheduledForDeletion, type SetupSecretStore } from "./secret-store.js";
 
 /** The subset of SecretsManagerClient we use, so tests can fake `send`. */
 export interface SecretsManagerSender {
@@ -26,6 +26,10 @@ export function awsSecretStore(client: SecretsManagerSender, region: string): Se
         return output.SecretString;
       } catch (error) {
         if (errorName(error) === "ResourceNotFoundException") return undefined;
+        // Not "missing": a writer can't create it until it's restored, so setup must stop
+        // before making anything that it would then fail to store. Deploy's provider check
+        // decides for itself what this means.
+        if (isScheduledForDeletion(error)) throw new SecretScheduledForDeletion(name, region);
         throw context(name, error);
       }
     },
