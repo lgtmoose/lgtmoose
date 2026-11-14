@@ -78,7 +78,7 @@ For Claude on Google Cloud Vertex AI, add a provider with `auth: "vertex"` and t
 It keeps the `claude-code` harness's policy: the same read-only tools (Read, Grep, Glob, and Bash limited to plain git reads), no settings files, CLAUDE.md files, MCP servers or slash commands from the checkout, and the same hardening variables. On top of that:
 
 - Bash commands are also checked in the SDK process by a `PreToolUse` hook, so the git read guard doesn't depend on a hook script alone.
-- The system prompt, such as the review rules and rule packs, is passed as a cacheable prefix, so repeated runs read it from the prompt cache.
+- The review rules and rule packs (`system`) are appended to Claude Code's own system prompt, the one `claude -p` uses. Per-run sections such as the working directory and git status move to the first user message, so the system prompt is the same on every run and is read from the prompt cache.
 - The answer is checked against the schema, with one repair turn in the same session, and limits are reported to the fallback chain as `rate_limit`, `plan_limit` and `auth` failures, as the other harnesses do.
 
 The SDK version (`@anthropic-ai/claude-agent-sdk` in `packages/harness`) tracks the Claude Code version the sandbox image installs, and the harness runs that installed `claude` binary.

@@ -44,6 +44,21 @@ describe("bedrockStatements", () => {
     ]);
   });
 
+  it("drops a [1m]-style modifier, which isn't part of the model ID", () => {
+    const [invoke] = json({
+      fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      standard: "us.anthropic.claude-sonnet-4-6[1m]",
+      deep: "anthropic.claude-opus-4-8",
+    });
+    expect(invoke?.Resource).toContain(
+      "arn:aws:bedrock:*:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6",
+    );
+    expect(invoke?.Resource).toContain(
+      "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6",
+    );
+    expect(JSON.stringify(invoke)).not.toContain("[1m]");
+  });
+
   it("allows a tier pinned to an application inference profile ARN as given", () => {
     const arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
     const [invoke, , get] = json({ standard: arn });

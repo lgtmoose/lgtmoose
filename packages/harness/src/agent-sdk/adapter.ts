@@ -4,25 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   query as sdkQuery,
-  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type HookCallbackMatcher,
   type Options,
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
-import { repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
-import { saveAttemptTranscript, success } from "../attempt.js";
+import { truncate } from "../answer.js";
+import { saveAttemptTranscript } from "../attempt.js";
 import {
   HarnessError,
   type Harness,
   type HarnessResult,
   type HarnessRunOptions,
-  type HarnessUsage,
 } from "../harness.js";
 import type { ProcessResult } from "../process.js";
-import { redact, valueContainsSecret } from "../redact.js";
+import { redact } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
-import { addUsage } from "../usage.js";
 import { claudeAuthEnv, type ClaudeAuthEnv } from "../claude-code/auth.js";
 import {
   ALLOWED_TOOLS,
@@ -34,10 +30,12 @@ import { prepareClaudeSession } from "../claude-code/session.js";
 import {
   MAX_AUTH_RETRIES,
   asResult,
+  checkAnswer,
+  claudeSchemaFor,
   failIfResultFailed,
   isAuthRetry,
-  outputOf,
-  usageOf,
+  withRepair,
+  type ClaudeAttempt,
   type ResultEvent,
 } from "../claude-code/stream.js";
 
@@ -70,10 +68,6 @@ const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** Kept from the CLI's stderr for errors and transcripts. */
 const MAX_STDERR_CHARS = 64 * 1024;
 
-type Attempt<T> =
-  | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
-  | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
-
 /**
  * Runs a review through the Claude Agent SDK with the same read-only policy as the claude-code
  * harness: only Read, Grep, Glob and Bash exist, `dontAsk` refuses anything not allowed, the
@@ -103,13 +97,12 @@ export class AgentSdkHarness implements Harness {
     const query = this.options.query ?? (sdkQuery as AgentQuery);
     try {
       const session = await prepareClaudeSession(home, source, auth);
-      const json = schemaJson(options.schema);
+      const { json, promptSuffix } = claudeSchemaFor(options.schema);
       const outputFormat =
-        json?.type === "object" ? { type: "json_schema" as const, schema: json } : undefined;
-      const promptSuffix = outputFormat === undefined ? schemaPromptSuffix(json) : "";
+        json === undefined ? undefined : { type: "json_schema" as const, schema: json };
       const sessionId = randomUUID();
 
-      const attempt = async (n: number, prompt: string): Promise<Attempt<T>> => {
+      const attempt = async (n: number, prompt: string): Promise<ClaudeAttempt<T>> => {
         const timeoutMs = deadline - Date.now();
         if (timeoutMs <= 0) {
           throw new HarnessError("timeout", `Timed out after ${options.timeoutMs} ms.`, {
@@ -119,9 +112,15 @@ export class AgentSdkHarness implements Harness {
         const sdkOptions: Options = {
           cwd: options.cwd,
           ...(options.model.trim() === "" ? {} : { model: options.model }),
-          ...(options.system === undefined
-            ? {}
-            : { systemPrompt: [options.system, SYSTEM_PROMPT_DYNAMIC_BOUNDARY] }),
+          // Claude Code's own prompt, as `claude -p` gets, with `system` appended. Without the
+          // per-run sections (working directory, git status), which go in the first user
+          // message instead, it stays the same across runs and is read from the prompt cache.
+          systemPrompt: {
+            type: "preset",
+            preset: "claude_code",
+            excludeDynamicSections: true,
+            ...(options.system === undefined ? {} : { append: options.system }),
+          },
           ...(outputFormat === undefined ? {} : { outputFormat }),
           ...(this.options.binaryPath === undefined
             ? {}
@@ -149,37 +148,11 @@ export class AgentSdkHarness implements Harness {
         await saveAttemptTranscript(this.options.transcripts, key, run.proc, n, secrets, keys);
         const { result } = run;
         failIfUnusable(run, result, secrets, keys, options.timeoutMs);
-        const usage = usageOf(result);
-        if (result.subtype === "error_max_structured_output_retries") {
-          return { kind: "invalid", problems: "No output matched the schema.", usage, key };
-        }
-        const parsed = outputOf(result);
-        if (!parsed.ok) return { kind: "invalid", problems: parsed.error, usage, key };
-        const checked = options.schema.safeParse(parsed.value);
-        if (!checked.success) {
-          return { kind: "invalid", problems: z.prettifyError(checked.error), usage, key };
-        }
-        // A prompt-injected model could try to post the credential in a finding.
-        if (valueContainsSecret(checked.data, secrets)) {
-          throw new HarnessError("invalid_output", "The output contained a model credential.", {
-            transcriptKeys: keys,
-          });
-        }
-        return { kind: "ok", output: checked.data, usage, key };
+        return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
-      const first = await attempt(1, options.prompt + promptSuffix);
-      if (first.kind === "ok") return success(first, first.usage, keys);
-      // Resume the session so the model sees its own answer.
-      const second = await attempt(2, repairPrompt(first.problems));
-      if (second.kind === "ok") return success(second, addUsage(first.usage, second.usage), keys);
-      throw new HarnessError(
-        "invalid_output",
-        truncate(
-          redact(`The output was invalid after a repair retry: ${second.problems}`, secrets),
-        ),
-        { transcriptKeys: keys },
-      );
+      // `system` goes in the system prompt, not the user turn.
+      return await withRepair(attempt, options.prompt + promptSuffix, secrets, keys);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -276,7 +249,9 @@ async function collect(
       const line = JSON.stringify(message);
       bytes += Buffer.byteLength(line) + 1;
       lines.push(line);
-      result = asResult(message) ?? result;
+      result = asResult(message);
+      // The result ends the turn: don't wait on the SDK's shutdown.
+      if (result !== undefined) break;
       if (bytes > MAX_OUTPUT_BYTES) {
         stopped = "output_limit";
         controller.abort();

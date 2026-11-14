@@ -1,7 +1,9 @@
 import { z } from "zod";
-import { HarnessError, type HarnessUsage } from "../harness.js";
-import { parseAnswer, truncate } from "../answer.js";
-import { redact } from "../redact.js";
+import { HarnessError, type HarnessResult, type HarnessUsage } from "../harness.js";
+import { parseAnswer, repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
+import { success } from "../attempt.js";
+import { redact, valueContainsSecret } from "../redact.js";
+import { addUsage } from "../usage.js";
 import {
   classifyFailure,
   classifyReportedFailure,
@@ -132,6 +134,84 @@ export function claudeLimitFailure(result: ResultEvent, stderr: string): LimitFa
 /** Stop after this many API retries caused by the credential: retrying won't fix it. */
 export const MAX_AUTH_RETRIES = 2;
 
+/**
+ * How to ask for the schema. An object schema goes to structured output (`--json-schema`, or
+ * the SDK's `outputFormat`), which makes the CLI check the answer too. Anything else is
+ * described in the prompt.
+ */
+export function claudeSchemaFor(schema: z.ZodType): {
+  json?: Record<string, unknown>;
+  promptSuffix: string;
+} {
+  const json = schemaJson(schema);
+  if (json?.type === "object") return { json, promptSuffix: "" };
+  return { promptSuffix: schemaPromptSuffix(json) };
+}
+
+/** One attempt's outcome: an answer, or what was wrong with it for the repair turn. */
+export type ClaudeAttempt<T> =
+  | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
+  | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
+
+/** Checks a usable result's answer against the schema, and that it holds no credential. */
+export function checkAnswer<T>(
+  result: ResultEvent,
+  schema: z.ZodType<T>,
+  secrets: readonly string[],
+  keys: readonly string[],
+  key: string,
+): ClaudeAttempt<T> {
+  const usage = usageOf(result);
+  if (result.subtype === "error_max_structured_output_retries") {
+    return { kind: "invalid", problems: "No output matched the schema.", usage, key };
+  }
+  const parsed = outputOf(result);
+  if (!parsed.ok) return { kind: "invalid", problems: parsed.error, usage, key };
+  const checked = schema.safeParse(parsed.value);
+  if (!checked.success) {
+    return { kind: "invalid", problems: z.prettifyError(checked.error), usage, key };
+  }
+  // A prompt-injected model could try to post the credential in a finding.
+  if (valueContainsSecret(checked.data, secrets)) {
+    throw new HarnessError("invalid_output", "The output contained a model credential.", {
+      transcriptKeys: keys,
+    });
+  }
+  return { kind: "ok", output: checked.data, usage, key };
+}
+
+/**
+ * Runs the first attempt and, if its answer was invalid, one repair turn that resumes the same
+ * session so the model sees its own answer.
+ */
+export async function withRepair<T>(
+  attempt: (n: number, prompt: string) => Promise<ClaudeAttempt<T>>,
+  firstPrompt: string,
+  secrets: readonly string[],
+  keys: string[],
+): Promise<HarnessResult<T>> {
+  const first = await attempt(1, firstPrompt);
+  if (first.kind === "ok") return success(first, first.usage, keys);
+  const second = await attempt(2, repairPrompt(first.problems));
+  if (second.kind === "ok") return success(second, resumedUsage(first.usage, second.usage), keys);
+  throw new HarnessError(
+    "invalid_output",
+    truncate(redact(`The output was invalid after a repair retry: ${second.problems}`, secrets)),
+    { transcriptKeys: keys },
+  );
+}
+
+/**
+ * Usage of a first attempt plus the repair turn that resumed its session. Tokens are per run,
+ * but Claude Code restores the session's cost on resume, so the repair's `total_cost_usd`
+ * already includes the first attempt's.
+ */
+export function resumedUsage(first: HarnessUsage, second: HarnessUsage): HarnessUsage {
+  const sum = addUsage(first, second);
+  if (second.costUsd !== undefined) sum.costUsd = Math.max(second.costUsd, first.costUsd ?? 0);
+  return sum;
+}
+
 /** Parses a message already in hand as a result event, as `findResult` does for a line. */
 export function asResult(message: unknown): ResultEvent | undefined {
   const event = resultEvent.safeParse(message);
@@ -157,7 +237,7 @@ export function failIfResultFailed(
   }
   if (result.subtype === "error_max_structured_output_retries") return;
   if (result.is_error === true || result.subtype !== "success") {
-    const detail = result.result ?? result.errors?.join("; ") ?? "no detail";
+    const detail = result.result || result.errors?.join("; ") || "no detail";
     const limit = claudeLimitFailure(result, stderr);
     if (limit !== undefined) {
       const { kind, ...extra } = limit;

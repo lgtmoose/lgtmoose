@@ -1,8 +1,11 @@
-import { isModelAlias, TIERS, type ProviderConfig } from "@lgtmoose/config";
+import {
+  BEDROCK_MODEL_ID,
+  MODEL_MODIFIER,
+  isModelAlias,
+  TIERS,
+  type ProviderConfig,
+} from "@lgtmoose/config";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
-
-/** Cross-region inference profile prefixes, such as the `us.` in `us.anthropic.claude-…`. */
-const PROFILE_PREFIX = /^(?:us-gov|us|eu|apac|jp|au|global)\./;
 
 /**
  * The IAM statements a Bedrock provider's sandbox task role needs, scoped to Anthropic's models
@@ -18,35 +21,32 @@ export function bedrockStatements(
   account: string,
 ): PolicyStatement[] {
   const pinned = TIERS.map((tier) => provider.models?.[tier]);
-  const exact = pinned.every(
-    (model) =>
-      model !== undefined &&
-      !isModelAlias(model) &&
-      !model.startsWith("arn:") &&
-      model.replace(PROFILE_PREFIX, "").startsWith("anthropic."),
+  // The ID Claude Code calls: without a `[1m]`-style modifier.
+  const ids = pinned.map((model) =>
+    model === undefined || isModelAlias(model)
+      ? undefined
+      : (BEDROCK_MODEL_ID.exec(model.replace(MODEL_MODIFIER, "")) ?? undefined),
   );
-  const models = exact ? [...new Set(pinned as string[])] : [];
+  const exact = ids.every((id) => id !== undefined);
   // A tier pinned to a Bedrock ARN, such as an application inference profile, is allowed as
   // given; the model it routes to is covered by the Anthropic foundation-model wildcard below.
   const arns = [
     ...new Set(pinned.filter((model): model is string => model?.startsWith("arn:") === true)),
   ];
+  const matches = exact ? (ids as RegExpExecArray[]) : [];
   const profiles = exact
     ? [
         ...new Set(
-          models
-            .filter((model) => PROFILE_PREFIX.test(model))
-            .map((model) => `arn:${partition}:bedrock:*:${account}:inference-profile/${model}`),
+          matches
+            .filter((match) => match[1] !== undefined)
+            .map((match) => `arn:${partition}:bedrock:*:${account}:inference-profile/${match[0]}`),
         ),
       ]
     : [`arn:${partition}:bedrock:*:${account}:inference-profile/*anthropic.*`, ...arns];
   const foundation = exact
     ? [
         ...new Set(
-          models.map(
-            (model) =>
-              `arn:${partition}:bedrock:*::foundation-model/${model.replace(PROFILE_PREFIX, "")}`,
-          ),
+          matches.map((match) => `arn:${partition}:bedrock:*::foundation-model/${match[2]}`),
         ),
       ]
     : [`arn:${partition}:bedrock:*::foundation-model/anthropic.*`];

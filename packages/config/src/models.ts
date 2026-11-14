@@ -4,11 +4,20 @@ import type { ProviderConfig, Tier } from "./deploy.js";
  * Claude Code's model aliases, with an optional `[1m]`-style modifier. They resolve inside the
  * CLI, on Bedrock and Vertex to its own built-in model IDs.
  */
-const ALIAS = /^(?:default|best|opus|sonnet|haiku|opusplan)(?:\[[\w-]+\])?$/;
+const ALIAS = /^(?:default|best|opus|sonnet|haiku|opusplan)$/;
+
+/** Claude Code's `[1m]`-style modifier at the end of a model name. */
+export const MODEL_MODIFIER = /\[[^\]]*\]$/;
+
+/**
+ * A Bedrock model ID, bare (`anthropic.…`) or through a cross-region inference profile
+ * (`us.anthropic.…`): group 1 is the profile prefix, group 2 the foundation model.
+ */
+export const BEDROCK_MODEL_ID = /^(?:([a-z-]+)\.)?(anthropic\..+)$/;
 
 /** Whether a configured model is a Claude Code alias rather than a pinned model ID. */
 export function isModelAlias(model: string): boolean {
-  return ALIAS.test(model);
+  return ALIAS.test(model.replace(MODEL_MODIFIER, ""));
 }
 
 /**

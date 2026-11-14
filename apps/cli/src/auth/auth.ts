@@ -2,6 +2,8 @@ import { parseArgs } from "node:util";
 import {
   PROVIDER_ID_PATTERN,
   SECRET_NAMES,
+  BEDROCK_MODEL_ID,
+  MODEL_MODIFIER,
   TIERS,
   isPlanCredential,
   modelFor,
@@ -624,14 +626,9 @@ const ALIAS_FAMILIES: Readonly<Record<string, readonly string[]>> = {
   haiku: ["haiku"],
   sonnet: ["sonnet"],
   opus: ["opus"],
+  best: ["opus"],
   opusplan: ["opus", "sonnet"],
 };
-
-/** A Claude Code modifier such as `[1m]` (the 1M-token context window): `sonnet[1m]`. */
-const MODIFIER = /\[[^\]]*\]$/;
-
-/** A Bedrock model id, bare (`anthropic.…`) or through a cross-region profile (`us.anthropic.…`). */
-const BEDROCK_ID = /^(?:([a-z-]+)\.)?(anthropic\..+)$/;
 
 type ParsedModel = { configured: string } & (
   | { kind: "alias"; families: readonly string[] }
@@ -642,7 +639,7 @@ type ParsedModel = { configured: string } & (
 
 /** What a tier's configured model value means under Bedrock auth. */
 function parseModel(configured: string): ParsedModel {
-  const value = configured.replace(MODIFIER, "");
+  const value = configured.replace(MODEL_MODIFIER, "");
   const families = ALIAS_FAMILIES[value];
   if (families !== undefined) return { configured, kind: "alias", families };
   if (value === "default") {
@@ -651,7 +648,7 @@ function parseModel(configured: string): ParsedModel {
   if (value.startsWith("arn:")) {
     return { configured, kind: "unchecked", why: "an ARN, which this can't look up" };
   }
-  const match = BEDROCK_ID.exec(value);
+  const match = BEDROCK_MODEL_ID.exec(value);
   const id = match?.[2];
   if (id === undefined) {
     return {

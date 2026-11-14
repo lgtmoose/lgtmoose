@@ -1,4 +1,4 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isolatedEnv, networkEnv } from "../env.js";
 import type { ClaudeAuthEnv } from "./auth.js";
@@ -42,9 +42,9 @@ export async function prepareClaudeSession(
   };
   if (auth.googleCredentials !== undefined) {
     const keyPath = join(home, "google-credentials.json");
-    await writeFile(keyPath, auth.googleCredentials, { mode: 0o600 });
-    // writeFile's mode is masked by the umask; make sure no one else can read the key.
-    await chmod(keyPath, 0o600);
+    // A new file in the run's fresh home: the umask can only narrow 0600. `wx` refuses to
+    // write through anything already there.
+    await writeFile(keyPath, auth.googleCredentials, { mode: 0o600, flag: "wx" });
     env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
   }
   return {

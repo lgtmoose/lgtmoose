@@ -105,11 +105,13 @@ describe("AgentSdkHarness", () => {
     expect(options.outputFormat?.type).toBe("json_schema");
     expect(options.model).toBe("sonnet");
     expect(options.cwd).toBe(tmp);
-    // The system prompt is cached up to the boundary marker.
-    expect(options.systemPrompt).toEqual([
-      "Rules: be strict.",
-      "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
-    ]);
+    // Claude Code's own prompt plus the rules, without per-run sections, so it stays cacheable.
+    expect(options.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      excludeDynamicSections: true,
+      append: "Rules: be strict.",
+    });
     // Only the run's own variables: the key, PATH and the hardening.
     expect(options.env?.ANTHROPIC_API_KEY).toBe(KEY);
     expect(options.env?.CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe("1");
@@ -124,11 +126,13 @@ describe("AgentSdkHarness", () => {
 
   it("resumes the session once to repair invalid output", async () => {
     const { query, calls } = fakeQuery([
-      () => [result({ structured_output: { findings: "nope" } })],
-      () => [result({ structured_output: { findings: [] } })],
+      () => [result({ structured_output: { findings: "nope" }, total_cost_usd: 0.4 })],
+      // Claude Code restores the session's cost on resume, so this includes the first 0.40.
+      () => [result({ structured_output: { findings: [] }, total_cost_usd: 0.55 })],
     ]);
     const out = await run(harness(query).harness);
     expect(out.output).toEqual({ findings: [] });
+    expect(out.usage).toMatchObject({ inputTokens: 20, outputTokens: 10, costUsd: 0.55 });
     expect(calls[0]!.options.sessionId).toBeDefined();
     expect(calls[1]!.options.resume).toBe(calls[0]!.options.sessionId);
     expect(calls[1]!.prompt).toMatch(/did not match/i);
