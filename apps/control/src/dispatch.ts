@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { REVIEW_JOB_KINDS, type ReviewJob } from "@lgtmoose/core";
 import { z } from "zod";
+import { workflowJobSchema } from "./job.js";
 import type { RunStore } from "./ports.js";
 
 /**
@@ -36,16 +37,9 @@ function hex(text: string, length: number): string {
 }
 
 /** The queue message, validated: the gateway wrote it, but it's still read from the network. */
-export const reviewJobSchema = z.object({
+export const reviewJobSchema = workflowJobSchema.extend({
   kind: z.enum(REVIEW_JOB_KINDS),
   deliveryId: z.string().min(1),
-  installationId: z.number().int().positive(),
-  repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "use owner/name"),
-  prNumber: z.number().int().positive(),
-  headSha: z
-    .string()
-    .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
-    .optional(),
   actor: z.string().min(1),
   commentId: z.number().int().positive().optional(),
   reviewId: z.number().int().positive().optional(),
