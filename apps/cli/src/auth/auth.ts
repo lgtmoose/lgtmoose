@@ -94,8 +94,8 @@ command below, then ${CLI} deploy:
   "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't be
 shared. Cursor's service accounts (Enterprise) are made for automation: set this provider's
 auth to "service-account" in lgtmoose.config.ts, store a service-account key, then
-${CLI} deploy. Without Enterprise, a claude-code provider on Bedrock or an API key avoids
-the question.`,
+${CLI} deploy. Without Enterprise, a claude-code provider on Bedrock, or one with an
+Anthropic API key (${CLI} auth api-key --provider anthropic), avoids the question.`,
 };
 
 /** The warning for one plan credential. */

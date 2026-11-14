@@ -189,7 +189,7 @@ describe("auth", () => {
     // Each names a way out that needs no plan credential, by command or auth value.
     expect(claude).toContain('Bedrock (auth "bedrock"');
     expect(token).toContain("auth api-key --provider openai");
-    expect(cursor).toContain("Bedrock or an API key avoids");
+    expect(cursor).toContain("auth api-key --provider anthropic");
   });
 
   it("gives advice for every plan credential isPlanCredential recognises", () => {
