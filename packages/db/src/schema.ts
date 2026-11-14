@@ -132,6 +132,14 @@ export const reviewRuns = pgTable(
      * succeeds, and when a covered run writes the PR's outputs. Older runs defer to such a run.
      */
     wrotePr: boolean("wrote_pr").notNull().default(false),
+    /**
+     * What a run that wrote PR-level state set there: the status label, and the review it posted
+     * (event and GitHub ID). The reconciler puts the PR back to these when its head returns to
+     * this run's head (a force-push back to a reviewed commit).
+     */
+    statusLabel: text("status_label"),
+    reviewEvent: text("review_event"),
+    reviewId: bigint("review_id", { mode: "number" }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

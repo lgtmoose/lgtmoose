@@ -15,8 +15,10 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 | Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                  |
 | Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch |
 | Credential broker | Control plane + Secrets Manager       | No                       | Hand each sandbox task one model credential; write back refreshed tokens |
-| Reconciler        | Scheduled Lambda                      | Yes (read)               | Re-queue anything missed. No model calls.                                |
+| Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels. No model calls.    |
 | State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                            |
+
+The reconciler runs every `reconcileIntervalMinutes` (30 by default). It queues a review only for a PR updated within `reconcileLookbackHours` (24 by default, at least the interval) whose head no run has started for. Older PRs are counted as `SkippedStale` and left alone, so a first run after a deploy, or a newly added repository, doesn't review every old open PR. Status-label re-syncs and the restore after a force-push back to a reviewed commit apply to every open PR, however old.
 
 ## Harnesses
 

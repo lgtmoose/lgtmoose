@@ -18,6 +18,8 @@ import {
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
 import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { Schedule, ScheduleExpression } from "aws-cdk-lib/aws-scheduler";
+import { LambdaInvoke } from "aws-cdk-lib/aws-scheduler-targets";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
 import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
@@ -32,6 +34,10 @@ import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
+const RECONCILE_HANDLER = join(REPO_ROOT, "apps/control/src/reconcile-lambda.ts");
+
+/** The reconciler's limit per run: listing every open PR of every installation. */
+export const RECONCILE_TIMEOUT = Duration.minutes(10);
 
 /**
  * The dispatcher's limit per batch. It's well under the job queue's visibility timeout (five
@@ -97,6 +103,12 @@ export interface WorkflowStackProps extends StackProps {
   jobQueue: IQueue;
   /** The job queue's dead-letter queue, where the dispatcher puts messages that aren't jobs. */
   deadLetterQueue: IQueue;
+  /** GitHub orgs or users whose repositories may be reviewed (the reconciler checks these). */
+  allowedOrgs: readonly string[];
+  /** Minutes between reconciler runs. */
+  reconcileIntervalMinutes: number;
+  /** Hours back the reconciler queues reviews for. */
+  reconcileLookbackHours: number;
   /**
    * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
    * (`sandboxBuildArgs`). Off by default.
@@ -128,6 +140,7 @@ export class WorkflowStack extends Stack {
   readonly sandboxTaskDefinitions: ReadonlyMap<string, FargateTaskDefinition>;
   readonly reviewWorkflow: ReviewWorkflow;
   readonly dispatchFunction: NodejsFunction;
+  readonly reconcileFunction: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -232,6 +245,7 @@ export class WorkflowStack extends Stack {
     });
 
     this.dispatchFunction = this.dispatcher(props, retention);
+    this.reconcileFunction = this.reconciler(props, retention);
 
     const subnetIds = (selection: SubnetSelection) =>
       Fn.join(",", props.vpc.selectSubnets(selection).subnetIds);
@@ -303,6 +317,52 @@ export class WorkflowStack extends Stack {
         maxConcurrency: DISPATCH_CONCURRENCY,
       }),
     );
+    return fn;
+  }
+
+  /**
+   * The reconciler: on a schedule, compares open PRs with the database, queues reviews and
+   * comments a missed webhook lost, and syncs drifted status labels (`reconcile` in
+   * @lgtmoose/control). It runs in the app subnets with the control security group, for the
+   * database and GitHub, and holds the GitHub App's credentials but no model credential. One
+   * at a time: a slow run isn't overtaken by the next.
+   */
+  private reconciler(props: WorkflowStackProps, retention: RetentionDays): NodejsFunction {
+    const fn = lgtmooseFunction(this, "ReconcileFunction", {
+      entry: RECONCILE_HANDLER,
+      description: "Queues missed reviews and syncs drifted status labels, on a schedule.",
+      memorySize: 256,
+      timeout: RECONCILE_TIMEOUT,
+      reservedConcurrentExecutions: 1,
+      vpc: props.vpc,
+      vpcSubnets: props.controlSubnets,
+      securityGroups: [props.controlSecurityGroup],
+      environment: {
+        JOB_QUEUE_URL: props.jobQueue.queueUrl,
+        DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
+        DATABASE_NAME: props.databaseName,
+        GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        ALLOWED_ORGS: props.allowedOrgs.join(","),
+        LGTMOOSE_SHADOW: String(props.shadow),
+        RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
+        // Lets Node verify the RDS server certificate.
+        NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
+      },
+      bundling: { externalModules: ["pg-native"] },
+      logGroup: new LogGroup(this, "ReconcileLogs", {
+        retention,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    props.databaseSecret.grantRead(fn);
+    props.githubAppSecret.grantRead(fn);
+    props.jobQueue.grantSendMessages(fn);
+    new Schedule(this, "ReconcileSchedule", {
+      description: "Runs the reconciler.",
+      schedule: ScheduleExpression.rate(Duration.minutes(props.reconcileIntervalMinutes)),
+      // The next run is soon; a failed one isn't retried.
+      target: new LambdaInvoke(fn, { retryAttempts: 0 }),
+    });
     return fn;
   }
 

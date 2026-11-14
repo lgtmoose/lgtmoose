@@ -57,6 +57,51 @@ export function readDispatchEnv(env: Env): DispatchEnv | { missing: string[] } {
   });
 }
 
+/** What the reconciler Lambda reads from its environment, set by the Workflow stack. */
+export interface ReconcileEnv {
+  /** The gateway's FIFO job queue, where missed PRs are queued. */
+  jobQueueUrl: string;
+  databaseSecretArn: string;
+  databaseName: string;
+  githubAppSecretArn: string;
+  /** GitHub orgs or users whose repositories may be reviewed. */
+  allowedOrgs: string[];
+  /** Labels are left alone in shadow mode. Anything but "false" is on. */
+  shadow: boolean;
+  /** `RECONCILE_LOOKBACK_HOURS`: reviews are queued only for PRs updated this recently. */
+  lookbackHours: number;
+}
+
+export const DEFAULT_RECONCILE_LOOKBACK_HOURS = 24;
+
+/** Reads the reconciler's settings, or says which variables are missing (blank counts). */
+export function readReconcileEnv(env: Env): ReconcileEnv | { missing: string[] } {
+  const read = readVariables(env, {
+    jobQueueUrl: "JOB_QUEUE_URL",
+    databaseSecretArn: VARIABLES.databaseSecretArn,
+    databaseName: VARIABLES.databaseName,
+    githubAppSecretArn: VARIABLES.githubAppSecretArn,
+    allowedOrgs: "ALLOWED_ORGS",
+  });
+  if ("missing" in read) return read;
+  const allowedOrgs = read.allowedOrgs
+    .split(",")
+    .map((org) => org.trim())
+    .filter((org) => org.length > 0);
+  if (allowedOrgs.length === 0) return { missing: ["ALLOWED_ORGS"] };
+  const lookback = env.RECONCILE_LOOKBACK_HOURS?.trim();
+  const lookbackHours = lookback ? Number(lookback) : DEFAULT_RECONCILE_LOOKBACK_HOURS;
+  if (!Number.isSafeInteger(lookbackHours) || lookbackHours <= 0) {
+    throw new Error("RECONCILE_LOOKBACK_HOURS must be a whole number of hours.");
+  }
+  return {
+    ...read,
+    allowedOrgs,
+    shadow: env.LGTMOOSE_SHADOW?.trim() !== "false",
+    lookbackHours,
+  };
+}
+
 /** How the review runs, from the deploy config. The Workflow stack sets these on the task. */
 export interface ReviewSettings {
   /** `LGTMOOSE_REVIEWER_MODEL`: the reviewer's model; empty for the harness's default. */

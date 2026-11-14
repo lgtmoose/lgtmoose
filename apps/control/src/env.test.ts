@@ -4,6 +4,7 @@ import {
   readCommand,
   readControlEnv,
   readDispatchEnv,
+  readReconcileEnv,
   readReviewSettings,
 } from "./env.js";
 
@@ -106,6 +107,43 @@ describe("readDispatchEnv", () => {
     });
     expect(readDispatchEnv({ STATE_MACHINE_ARN: "arn:sm", DATABASE_NAME: " " })).toEqual({
       missing: ["DEAD_LETTER_QUEUE_URL", "DATABASE_SECRET_ARN", "DATABASE_NAME"],
+    });
+  });
+});
+
+describe("readReconcileEnv", () => {
+  const env = {
+    JOB_QUEUE_URL: "https://sqs/jobs.fifo",
+    DATABASE_SECRET_ARN: "arn:db",
+    DATABASE_NAME: "lgtmoose",
+    GITHUB_APP_SECRET_ARN: "arn:app",
+    ALLOWED_ORGS: " acme, beta ,",
+  };
+
+  it("reads the reconciler's variables, in shadow mode unless told otherwise", () => {
+    expect(readReconcileEnv(env)).toEqual({
+      jobQueueUrl: "https://sqs/jobs.fifo",
+      databaseSecretArn: "arn:db",
+      databaseName: "lgtmoose",
+      githubAppSecretArn: "arn:app",
+      allowedOrgs: ["acme", "beta"],
+      shadow: true,
+      lookbackHours: 24,
+    });
+    expect(
+      readReconcileEnv({ ...env, LGTMOOSE_SHADOW: "false", RECONCILE_LOOKBACK_HOURS: "6" }),
+    ).toMatchObject({ shadow: false, lookbackHours: 6 });
+    expect(() => readReconcileEnv({ ...env, RECONCILE_LOOKBACK_HOURS: "1.5" })).toThrow(
+      "RECONCILE_LOOKBACK_HOURS",
+    );
+  });
+
+  it("names missing variables, and an allowed-orgs list with no org in it", () => {
+    expect(readReconcileEnv({ ...env, JOB_QUEUE_URL: "" })).toEqual({
+      missing: ["JOB_QUEUE_URL"],
+    });
+    expect(readReconcileEnv({ ...env, ALLOWED_ORGS: " , " })).toEqual({
+      missing: ["ALLOWED_ORGS"],
     });
   });
 });
