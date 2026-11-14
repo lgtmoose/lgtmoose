@@ -7,9 +7,8 @@ import { vertexHost } from "./models.js";
  * `extraEgressHosts`), on port 443. Exact names only: the proxy has no wildcards.
  *
  * `{region}` is the deploy region. `{vertex}` is the Vertex AI host for the provider's
- * `vertex.region` (`vertexHost`); a per-model override (`VERTEX_REGION_*`) needs its host in
- * `extraEgressHosts`. Bedrock also needs its control-plane host: Claude Code lists the account's
- * inference profiles there to resolve model IDs
+ * `vertex.region` (`vertexHost`). Bedrock also needs its control-plane host: Claude Code lists the
+ * account's inference profiles there to resolve model IDs
  * (https://code.claude.com/docs/en/amazon-bedrock#cross-region-inference-profile-prefixes).
  */
 const PROVIDER_HOSTS: Record<

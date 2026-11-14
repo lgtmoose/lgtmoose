@@ -73,9 +73,6 @@ const PASSED = [
   "ANTHROPIC_VERTEX_PROJECT_ID",
 ];
 
-/** Per-model Vertex regions, such as VERTEX_REGION_CLAUDE_HAIKU_4_5. */
-const PASSED_PREFIX = "VERTEX_REGION_";
-
 export function harnessEnv(
   task: Readonly<Record<string, string | undefined>>,
   credential: Record<string, string>,
@@ -83,7 +80,7 @@ export function harnessEnv(
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(task)) {
     if (value === undefined) continue;
-    if (PASSED.includes(name) || name.startsWith(PASSED_PREFIX)) env[name] = value;
+    if (PASSED.includes(name)) env[name] = value;
   }
   return { ...env, ...credential };
 }

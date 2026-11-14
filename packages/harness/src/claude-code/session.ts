@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isolatedEnv, networkEnv } from "../env.js";
 import type { ClaudeAuthEnv } from "./auth.js";
@@ -71,4 +71,15 @@ export function hardeningEnv(home: string, scrub: boolean): Record<string, strin
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1",
   };
+}
+
+/**
+ * Deletes a run's home, Vertex key included. Retries while a CLI that was just stopped is
+ * still writing its session, and never throws: a cleanup error mustn't replace the run's answer
+ * or the limit the fallback chain needs. Sandbox tasks are discarded after their batch anyway.
+ */
+export async function removeRunHome(home: string): Promise<void> {
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(
+    () => undefined,
+  );
 }

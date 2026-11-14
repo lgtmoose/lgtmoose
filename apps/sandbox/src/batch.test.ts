@@ -229,7 +229,6 @@ describe("harnessEnv", () => {
           ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
           CLOUD_ML_REGION: "global",
           ANTHROPIC_VERTEX_PROJECT_ID: "acme",
-          VERTEX_REGION_CLAUDE_HAIKU_4_5: "us-east5",
           GOOGLE_APPLICATION_CREDENTIALS: "/elsewhere.json",
         },
         {},
@@ -238,7 +237,6 @@ describe("harnessEnv", () => {
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       CLOUD_ML_REGION: "global",
       ANTHROPIC_VERTEX_PROJECT_ID: "acme",
-      VERTEX_REGION_CLAUDE_HAIKU_4_5: "us-east5",
     });
   });
 });

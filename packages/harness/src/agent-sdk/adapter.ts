@@ -1,12 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  type HookCallbackMatcher,
-  type Options,
-  type SDKMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+// Types only, so nothing loads the SDK until a run imports it.
+import type { HookCallbackMatcher, Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { saveAttemptTranscript } from "../attempt.js";
 import {
   HarnessError,
@@ -24,7 +21,7 @@ import {
   isAllowedGitCommand,
   TOOLS,
 } from "../claude-code/policy.js";
-import { prepareClaudeSession } from "../claude-code/session.js";
+import { prepareClaudeSession, removeRunHome } from "../claude-code/session.js";
 import {
   MAX_AUTH_RETRIES,
   asResult,
@@ -171,8 +168,7 @@ export class AgentSdkHarness implements Harness {
       // `system` goes in the system prompt, not the user turn.
       return await withRepair(attempt, options.prompt + promptSuffix, secrets, keys);
     } finally {
-      // An aborted CLI may still be writing its session as it exits: retry a busy directory.
-      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      await removeRunHome(home);
     }
   }
 }

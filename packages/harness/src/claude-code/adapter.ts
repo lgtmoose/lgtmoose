@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,7 +14,7 @@ import { runProcess } from "../process.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, TOOLS } from "./policy.js";
-import { prepareClaudeSession } from "./session.js";
+import { prepareClaudeSession, removeRunHome } from "./session.js";
 import {
   MAX_AUTH_RETRIES,
   checkAnswer,
@@ -127,7 +127,7 @@ export class ClaudeCodeHarness implements Harness {
 
       return await withRepair(attempt, fullPrompt(options) + schema.promptSuffix, secrets, keys);
     } finally {
-      await rm(home, { recursive: true, force: true });
+      await removeRunHome(home);
     }
   }
 }
