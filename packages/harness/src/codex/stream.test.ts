@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyFailure, parseCodexEvents } from "./stream.js";
+import { classifyFailure } from "../limits.js";
+import { parseCodexEvents } from "./stream.js";
 
 const jsonl = (...events: unknown[]) => events.map((event) => JSON.stringify(event)).join("\n");
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { HarnessUsage } from "../harness.js";
+import { parseAnswer } from "../answer.js";
 
 /** The last line of `--output-format stream-json`. Only the fields used here. */
 const resultEvent = z.looseObject({
@@ -76,38 +77,13 @@ export function usageOf(result: ResultEvent): HarnessUsage {
   return usage;
 }
 
-/** Adds two attempts' usage. A field stays unset only if neither attempt reported it. */
-export function addUsage(a: HarnessUsage | undefined, b: HarnessUsage): HarnessUsage {
-  if (!a) return b;
-  const sum: HarnessUsage = {};
-  for (const key of [
-    "inputTokens",
-    "outputTokens",
-    "cacheReadTokens",
-    "cacheWriteTokens",
-    "costUsd",
-  ] as const) {
-    const x = a[key];
-    const y = b[key];
-    if (x !== undefined || y !== undefined) sum[key] = (x ?? 0) + (y ?? 0);
-  }
-  return sum;
-}
-
 /**
  * The model's answer as JSON: `structured_output` when `--json-schema` was used, otherwise the
- * result text, with a Markdown code fence around it allowed.
+ * result text (see `parseAnswer`).
  */
 export function outputOf(
   result: ResultEvent,
 ): { ok: true; value: unknown } | { ok: false; error: string } {
   if (result.structured_output !== undefined) return { ok: true, value: result.structured_output };
-  const text = result.result?.trim() ?? "";
-  if (!text) return { ok: false, error: "The answer was empty." };
-  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/.exec(text);
-  try {
-    return { ok: true, value: JSON.parse(fenced?.[1] ?? text) as unknown };
-  } catch (error) {
-    return { ok: false, error: `The answer was not valid JSON: ${(error as Error).message}` };
-  }
+  return parseAnswer(result.result);
 }

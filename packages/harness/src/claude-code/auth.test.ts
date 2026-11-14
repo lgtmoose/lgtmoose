@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HarnessError } from "../harness.js";
-import { claudeAuthEnv, networkEnv } from "./auth.js";
+import { networkEnv } from "../env.js";
+import { claudeAuthEnv } from "./auth.js";
 
 describe("claudeAuthEnv", () => {
   it("uses an OAuth token from claude setup-token", () => {

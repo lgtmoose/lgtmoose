@@ -32,10 +32,13 @@ const PROVIDER_HOSTS: Record<
     "access-token": ["chatgpt.com", "auth.openai.com"],
     "api-key": ["api.openai.com"],
   },
-  // Not yet checked against the cursor-agent CLI (NIC-822): confirm when that adapter lands.
+  // Cursor's network configuration docs (https://cursor.com/docs/enterprise/network-configuration)
+  // name api2.cursor.sh for most API traffic and api5.cursor.sh for agent requests. Its Tab
+  // (api3, api4, gcpp) and codebase-search (repo42) hosts aren't used by a headless review.
+  // Not yet seen in real cursor-agent traffic: confirm with the AWS smoke test (NIC-853).
   "cursor-agent": {
-    "api-key": ["api2.cursor.sh"],
-    "service-account": ["api2.cursor.sh"],
+    "api-key": ["api2.cursor.sh", "api5.cursor.sh"],
+    "service-account": ["api2.cursor.sh", "api5.cursor.sh"],
   },
 };
 

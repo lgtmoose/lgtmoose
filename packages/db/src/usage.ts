@@ -13,7 +13,8 @@ export interface ProviderUsageAttempt {
   providerId: string;
   tier: string;
   model: string | undefined;
-  outcome: "ok" | "rate_limit" | "plan_limit" | "auth" | "cooling_down" | "failed";
+  outcome:
+    "ok" | "rate_limit" | "plan_limit" | "auth" | "input_too_large" | "cooling_down" | "failed";
   usage?: {
     inputTokens?: number;
     outputTokens?: number;

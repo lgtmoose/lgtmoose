@@ -20,6 +20,7 @@
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock": "^3.1169.0",
     "@aws-sdk/client-cloudformation": "^3.1167.0",
     "@aws-sdk/client-rds": "^3.1167.0",
     "@aws-sdk/client-secrets-manager": "^3.1167.0",

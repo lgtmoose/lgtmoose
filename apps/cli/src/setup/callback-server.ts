@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import type { AppManifest } from "./manifest.js";
 import { MANIFEST_CODE } from "./github.js";
+import { CLI } from "../paths.js";
 
 export const CALLBACK_PATH = "/callback";
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -195,7 +196,7 @@ export async function startCallbackServer<T>(
     finished = true;
     settle?.reject(
       new Error(
-        `Gave up waiting for GitHub after ${describeWait(timeoutMs)}. Run \`pnpm lgtmoose setup\` again.`,
+        `Gave up waiting for GitHub after ${describeWait(timeoutMs)}. Run \`${CLI} setup\` again.`,
       ),
     );
   }, timeoutMs);

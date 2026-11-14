@@ -1,4 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { HeadTail } from "./headtail.js";
+import { StreamRedactor } from "./redact.js";
 
 export interface RunProcessOptions {
   command: string;
@@ -16,10 +18,16 @@ export interface RunProcessOptions {
   maxOutputBytes: number;
   /** Called for each complete stdout line. Returning "kill" stops the run early. */
   onLine?: (line: string) => "kill" | undefined;
+  /**
+   * Values redacted from stderr as it streams in, before any of it is kept, so a cut through the
+   * middle of a secret can't leave part of it in the result.
+   */
+  secrets?: readonly string[];
 }
 
 export interface ProcessResult {
   stdout: string;
+  /** Redacted (`RunProcessOptions.secrets`), and only its start and end when long (`HeadTail`). */
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -28,8 +36,6 @@ export interface ProcessResult {
   /** Set when the process couldn't be started. */
   spawnError?: Error;
 }
-
-const MAX_STDERR = 64 * 1024;
 
 /**
  * Sends a signal to the child's whole process group. The child is started detached, so it leads
@@ -61,17 +67,36 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let pending = "";
-    let stderr = "";
+    const stderr = new HeadTail();
+    const redactor = new StreamRedactor(options.secrets ?? []);
+    const stderrText = (): string => {
+      stderr.add(redactor.end());
+      return stderr.text();
+    };
     let stopped: ProcessResult["stopped"];
     let spawnError: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
 
-    const child = spawn(options.command, options.args, {
-      cwd: options.cwd,
-      env: options.env,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(options.command, options.args, {
+        cwd: options.cwd,
+        env: options.env,
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      // spawn throws at once for arguments it can't pass (a NUL in one, say): report it like a
+      // process that couldn't start, never as an exception the caller didn't expect.
+      resolve({
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        signal: null,
+        spawnError: error instanceof Error ? error : new Error(String(error)),
+      });
+      return;
+    }
 
     const stop = (reason: NonNullable<ProcessResult["stopped"]>): void => {
       if (stopped || child.pid === undefined) return;
@@ -98,16 +123,22 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
         if (options.onLine(line) === "kill") stop("requested");
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderr.length < MAX_STDERR) stderr += chunk.toString("utf8").slice(0, MAX_STDERR);
-    });
+    // Decoded as a stream, so a character split across chunks stays whole.
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => stderr.add(redactor.push(chunk)));
     // The child may exit before reading its input.
     child.stdin.on("error", () => {});
     child.on("error", (error) => {
       spawnError = error;
       // Without a pid it never started, and "close" may not follow.
       if (child.pid === undefined) {
-        finish({ stdout: "", stderr, exitCode: null, signal: null, spawnError: error });
+        finish({
+          stdout: "",
+          stderr: stderrText(),
+          exitCode: null,
+          signal: null,
+          spawnError: error,
+        });
       }
     });
     child.on("exit", () => {
@@ -117,7 +148,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     child.on("close", (exitCode, signal) => {
       const result: ProcessResult = {
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr,
+        stderr: stderrText(),
         exitCode,
         signal,
       };

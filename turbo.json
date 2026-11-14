@@ -51,7 +51,12 @@
     "synth": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/lgtmoose.config.ts"],
-      "env": ["LGTMOOSE_CONFIG", "CDK_DEFAULT_ACCOUNT", "CDK_DEFAULT_REGION"],
+      "env": [
+        "LGTMOOSE_CONFIG",
+        "CDK_DEFAULT_ACCOUNT",
+        "CDK_DEFAULT_REGION",
+        "LGTMOOSE_ALLOW_UNVERIFIED_CURSOR"
+      ],
       "outputs": ["cdk.out/**"]
     }
   }

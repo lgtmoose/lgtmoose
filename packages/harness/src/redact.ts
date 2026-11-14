@@ -55,6 +55,39 @@ function collect(value: unknown, keys: string[], values: string[]): void {
   }
 }
 
+/**
+ * Redacts a text that arrives in chunks, so nothing unredacted is ever kept: `push` returns what
+ * is safe to keep so far, holding back an end that could be the start of a secret (in any of
+ * the forms `redact` replaces) until the next chunk shows whether it is one.
+ */
+export class StreamRedactor {
+  private readonly secrets: readonly string[];
+  /** The longest form of any secret, less one: the most a partial secret can be. */
+  private readonly hold: number;
+  private carry = "";
+
+  constructor(secrets: readonly string[]) {
+    this.secrets = usable(secrets);
+    const longest = Math.max(0, ...this.secrets.flatMap(encodings).map((form) => form.length));
+    this.hold = Math.max(0, longest - 1);
+  }
+
+  push(chunk: string): string {
+    if (this.secrets.length === 0) return chunk;
+    const text = redact(this.carry + chunk, this.secrets);
+    const keep = Math.min(this.hold, text.length);
+    this.carry = text.slice(text.length - keep);
+    return text.slice(0, text.length - keep);
+  }
+
+  /** The held-back end, once the stream is over. */
+  end(): string {
+    const rest = redact(this.carry, this.secrets);
+    this.carry = "";
+    return rest;
+  }
+}
+
 const MIN_SECRET_LENGTH = 8;
 
 function usable(secrets: readonly string[]): string[] {

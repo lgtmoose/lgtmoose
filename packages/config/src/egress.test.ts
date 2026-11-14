@@ -42,6 +42,14 @@ describe("egressAllowlist", () => {
     ]);
   });
 
+  it("allows Cursor's API and agent hosts for a cursor-agent provider", () => {
+    const config = parseDeployConfig({
+      ...base,
+      providers: [{ id: "c", harness: "cursor-agent", auth: "service-account" }],
+    });
+    expect(egressAllowlist(config)).toEqual(["api2.cursor.sh", "api5.cursor.sh"]);
+  });
+
   it("never includes GitHub", () => {
     const config = parseDeployConfig({
       ...base,
