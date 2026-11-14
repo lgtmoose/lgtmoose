@@ -88,6 +88,30 @@ describe("awsBedrockAccess", () => {
     });
   });
 
+  it("reports only the region when a model isn't offered here, and waits on a pending agreement", async () => {
+    const client: BedrockSender = {
+      send: (command) => {
+        if (command instanceof ListFoundationModelsCommand) {
+          return Promise.resolve({
+            modelSummaries: [{ modelId: "anthropic.away" }, { modelId: "anthropic.pending" }],
+          });
+        }
+        return Promise.resolve(
+          (command.input as { modelId?: string }).modelId === "anthropic.away"
+            ? {
+                regionAvailability: "NOT_AVAILABLE",
+                entitlementAvailability: "NOT_AVAILABLE",
+                agreementAvailability: { status: "NOT_AVAILABLE" },
+              }
+            : { ...AVAILABLE, agreementAvailability: { status: "PENDING" } },
+        );
+      },
+    };
+    const [away, pending] = await awsBedrockAccess(client, "eu-west-2").anthropicModels();
+    expect(away?.problems).toEqual([{ text: "not offered in this region", fix: "region" }]);
+    expect(pending?.problems).toEqual([{ text: "agreement pending", fix: "wait" }]);
+  });
+
   it("treats one model Bedrock won't describe as that model's problem", async () => {
     const client: BedrockSender = {
       send: (command) => {

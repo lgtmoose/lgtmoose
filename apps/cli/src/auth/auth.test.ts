@@ -465,8 +465,8 @@ describe("auth", () => {
       `us.${OPUS}: isn't an inference profile eu-west-2 can call; use global.${OPUS}`,
     );
     // Both are pinned the wrong way, not missing access: only the pinning advice.
-    expect(result.stderr).toContain("  - Fix the id in models.standard.");
-    expect(result.stderr).toContain("  - Fix the id in models.deep.");
+    expect(result.stderr).toContain("  - Fix the id in bedrock.models.standard.");
+    expect(result.stderr).toContain("  - Fix the id in bedrock.models.deep.");
     expect(result.stderr).not.toContain("Request model access");
   });
 
@@ -505,7 +505,7 @@ describe("auth", () => {
   });
 
   const ACCESS_FIX =
-    "  - Request model access (and accept its agreement) in the Bedrock console for eu-west-2.";
+    "  - Request model access (and accept its agreement) in the Bedrock console for eu-west-2, then run this again.";
   const REGION_FIX = "  - Pick another region, or a model that has an inference profile here.";
   const fixesOf = (text: string) => {
     const block = text.split("To fix:\n")[1] ?? "";
@@ -550,6 +550,36 @@ describe("auth", () => {
       profiles: [],
     }).go(["bedrock"]);
     expect(fixesOf(mixed.stderr)).toEqual([ACCESS_FIX, REGION_FIX]);
+  });
+
+  it("bedrock: no route here is the only fix, ahead of a missing access", async () => {
+    // Opus lacks access, but can only be called through a profile and there is none here.
+    const result = await harness({
+      models: [
+        model(HAIKU),
+        model(SONNET),
+        model(OPUS, { usable: false, inferenceTypes: ["INFERENCE_PROFILE"] }),
+      ],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(result.stderr).toContain(`  blocked  ${OPUS}: no way to call it here`);
+    expect(result.stderr).not.toContain("model access not granted");
+    expect(fixesOf(result.stderr)).toEqual([REGION_FIX]);
+  });
+
+  it("bedrock: a pending agreement says to wait, and the notes come before the fixes", async () => {
+    const result = await harness({
+      models: [
+        model(HAIKU),
+        model(SONNET),
+        model(OPUS, { usable: false, problems: [{ text: "agreement pending", fix: "wait" }] }),
+      ],
+    }).go(["bedrock"]);
+    expect(fixesOf(result.stderr)).toEqual([
+      "  - Wait a few minutes for the model agreement to go through, then run this again.",
+    ]);
+    const text = result.stderr;
+    expect(text.indexOf("needs no stored secret")).toBeLessThan(text.indexOf("To fix:"));
   });
 
   it("bedrock: a model Bedrock couldn't check gets the recheck fix, not access", async () => {

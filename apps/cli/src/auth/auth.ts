@@ -496,7 +496,7 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   let anyChecked = false;
   let anyBlocked = false;
   for (const { provider, tier, model } of tiers) {
-    const verdict = tierVerdict(model, tier, facts);
+    const verdict = tierVerdict(model, provider.id, tier, facts);
     if (verdict.state !== "not checked") anyChecked = true;
     if (verdict.state === "blocked") {
       anyBlocked = true;
@@ -523,7 +523,6 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
         ? `Bedrock offers no Anthropic models in ${region}.`
         : "This account can't use any Anthropic model here.",
     );
-    if (current.length === 0) problems.push({ text: "no models", fix: { kind: "region" } });
     for (const model of current) problems.push(...reachProblems(model, facts));
   }
   if (profiles === undefined) {
@@ -542,15 +541,17 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   const tierBlock = tierLines.length > 0 ? ["", "Configured tiers:", ...tierLines] : [];
   // Each problem printed above has one fix; print each fix once.
   const fixes = [...new Set(problems.map((problem) => fixText(problem.fix, region)))];
+  if (nothingUsable && current.length === 0) fixes.push(fixText({ kind: "region" }, region));
+  // After the diagnosis notes, so what's wrong comes before what to do.
   const fixBlock = fixes.length > 0 ? ["", "To fix:", ...fixes.map((fix) => `  - ${fix}`)] : [];
   return {
     text: [
       "Anthropic models (ids to pin):",
       ...lines,
       ...tierBlock,
-      ...fixBlock,
       "",
       ...notes,
+      ...fixBlock,
       "",
     ].join("\n"),
     ok,
@@ -649,14 +650,20 @@ type Fix =
   | { kind: "access" }
   | { kind: "region" }
   | { kind: "recheck" }
+  | { kind: "wait" }
   | { kind: "profiles" }
-  | { kind: "id"; tier: Tier };
+  | { kind: "id"; provider: string; tier: Tier };
 
 /** The sentence a fix prints. Equal sentences are printed once. */
 function fixText(fix: Fix, region: string): string {
   switch (fix.kind) {
     case "access":
-      return `Request model access (and accept its agreement) in the Bedrock console for ${region}.`;
+      return (
+        `Request model access (and accept its agreement) in the Bedrock console for ${region}, ` +
+        "then run this again."
+      );
+    case "wait":
+      return "Wait a few minutes for the model agreement to go through, then run this again.";
     case "region":
       return "Pick another region, or a model that has an inference profile here.";
     case "recheck":
@@ -664,7 +671,7 @@ function fixText(fix: Fix, region: string): string {
     case "profiles":
       return "Grant bedrock:ListInferenceProfiles to check inference profile ids.";
     default:
-      return `Fix the id in models.${fix.tier}.`;
+      return `Fix the id in ${fix.provider}.models.${fix.tier}.`;
   }
 }
 
@@ -674,33 +681,35 @@ function modelProblems(model: ModelAccess): Problem[] {
 }
 
 const NO_ROUTE = "no way to call it here (no on-demand use, no inference profile in this region)";
+const PROFILE_ONLY: Problem = {
+  text: `callable only through an inference profile (${NEEDS_PROFILE_LIST})`,
+  fix: { kind: "profiles" },
+};
 
-/** The problems that stop a model being called here at all, or none when it can be. */
+/**
+ * What stops a model being called here, most decisive first: not offered in this region, or
+ * no way to call it here, is the only fix that matters, so access or agreement problems are
+ * left out then. Otherwise Bedrock's own problems; for a usable model, whether its route is
+ * known. Empty when it can be called.
+ */
 function reachProblems(model: ModelAccess, facts: BedrockFacts): Problem[] {
-  if (!model.usable) return modelProblems(model);
+  const notHere = modelProblems(model).filter((problem) => problem.fix.kind === "region");
+  if (notHere.length > 0) return notHere;
   const ids = facts.reach.get(model.modelId);
-  if (ids === undefined) {
-    return [
-      {
-        text: `callable only through an inference profile (${NEEDS_PROFILE_LIST})`,
-        fix: { kind: "profiles" },
-      },
-    ];
-  }
-  return ids.length === 0 ? [{ text: NO_ROUTE, fix: { kind: "region" } }] : [];
+  if (ids?.length === 0) return [{ text: NO_ROUTE, fix: { kind: "region" } }];
+  if (!model.usable) return modelProblems(model);
+  return ids === undefined ? [PROFILE_ONLY] : [];
 }
 
 /** One line of the model list: whether it's usable here, and the ids to pin if so. */
 function modelLine(model: ModelAccess, facts: BedrockFacts): string {
-  const ids = facts.reach.get(model.modelId);
-  if (model.usable && ids === undefined) {
-    return `  unknown  ${model.modelId}: callable only through an inference profile (${NEEDS_PROFILE_LIST})`;
-  }
   const problems = reachProblems(model, facts);
-  if (problems.length > 0) {
-    return `  blocked  ${model.modelId}: ${problems.map((p) => p.text).join(", ")}`;
+  if (problems.length === 0) {
+    return `  ok       ${(facts.reach.get(model.modelId) ?? []).join(" or ")}`;
   }
-  return `  ok       ${(ids ?? []).join(" or ")}`;
+  // Callable, just through a route this identity can't list: not known to be blocked.
+  const label = problems.every((p) => p === PROFILE_ONLY) ? "unknown" : "blocked";
+  return `  ${label}  ${model.modelId}: ${problems.map((p) => p.text).join(", ")}`;
 }
 
 type Verdict =
@@ -732,16 +741,21 @@ interface BedrockFacts {
 }
 
 /** Whether a tier's model can run on Bedrock here. "not checked" is reported, never failed. */
-function tierVerdict(model: ParsedModel, tier: Tier, facts: BedrockFacts): Verdict {
+function tierVerdict(
+  model: ParsedModel,
+  provider: string,
+  tier: Tier,
+  facts: BedrockFacts,
+): Verdict {
   switch (model.kind) {
     case "unchecked":
       return { state: "not checked", detail: model.why };
     case "invalid":
-      return blocked("", [{ text: model.why, fix: { kind: "id", tier } }]);
+      return blocked("", [{ text: model.why, fix: { kind: "id", provider, tier } }]);
     case "alias":
       return familyVerdict(model.families, tier, facts);
     default:
-      return idVerdict(model.id, model.prefix, tier, facts);
+      return idVerdict(model.id, model.prefix, { kind: "id", provider, tier }, facts);
   }
 }
 
@@ -792,28 +806,27 @@ function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFa
 function idVerdict(
   id: string,
   prefix: string | undefined,
-  tier: Tier,
+  /** The fix for an id pinned the wrong way: this tier's entry in its provider's models. */
+  idFix: Fix,
   facts: BedrockFacts,
 ): Verdict {
   const access = facts.models.find((candidate) => candidate.modelId === id);
   if (access === undefined) {
     return blocked(id, [{ text: `isn't offered in ${facts.region}`, fix: { kind: "region" } }]);
   }
-  if (!access.usable) return blocked(id, modelProblems(access));
+  if (!access.usable) return blocked(id, reachProblems(access, facts));
   const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
   const ids = facts.reach.get(access.modelId);
   /** Pinned in a way this region can't call: name the ids that work, or say there are none. */
   const wrongPin = (subject: string, text: string): Verdict => {
     if (ids === undefined) {
       return blocked(subject, [
-        { text, fix: { kind: "id", tier } },
+        { text, fix: idFix },
         { text: NEEDS_PROFILE_LIST, fix: { kind: "profiles" } },
       ]);
     }
     if (ids.length === 0) return blocked(subject, [{ text: NO_ROUTE, fix: { kind: "region" } }]);
-    return blocked(subject, [
-      { text: `${text}; use ${ids.join(" or ")}`, fix: { kind: "id", tier } },
-    ]);
+    return blocked(subject, [{ text: `${text}; use ${ids.join(" or ")}`, fix: idFix }]);
   };
   if (prefix === undefined) {
     if (!supports(access, "ON_DEMAND")) {

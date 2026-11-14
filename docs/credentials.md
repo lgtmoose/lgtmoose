@@ -30,7 +30,7 @@ Before storing a plan credential, auth shows a warning about vendor terms and as
 
 The list of models shows the ids to pin for each one: the bare id when it can be called on demand, otherwise the inference profiles Bedrock lists for it in the region. A model with neither can't be called here, so it's listed as blocked. Without `bedrock:ListInferenceProfiles`, profile ids are reported as not checked, while on-demand ids are still checked.
 
-Each blocked tier prints Bedrock's own problems, such as "model access not granted" or "not offered in this region". Under "To fix", each problem's one fix is listed once: request model access, pick another region, fix the id in `models.<tier>`, or grant `bedrock:ListInferenceProfiles`.
+Each blocked tier prints Bedrock's own problems, such as "model access not granted" or "not offered in this region". When a model isn't offered in the region, or has no way to be called there, that is the only problem shown, since access wouldn't help. After the notes, "To fix" lists each problem's one fix once: request model access, wait for a pending agreement, pick another region, fix the id in `<provider>.models.<tier>`, or grant `bedrock:ListInferenceProfiles`.
 
 Access is checked for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note. An account-wide error, such as access denied or throttling, fails the command.
 

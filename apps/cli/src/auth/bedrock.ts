@@ -35,12 +35,12 @@ export interface ModelAccess {
 
 /**
  * One reason a model can't be used, with the one thing that fixes it: `access` (model access
- * or its agreement, in the Bedrock console), `region` (Bedrock doesn't offer it here) or
- * `recheck` (Bedrock couldn't describe it).
+ * or its agreement, in the Bedrock console), `region` (Bedrock doesn't offer it here),
+ * `wait` (an agreement is still going through) or `recheck` (Bedrock couldn't describe it).
  */
 export interface BedrockProblem {
   text: string;
-  fix: "access" | "region" | "recheck";
+  fix: "access" | "region" | "recheck" | "wait";
 }
 
 /** The Bedrock calls `auth bedrock` makes. Tests swap in a fake. */
@@ -162,18 +162,21 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
           continue;
         }
         const problems: BedrockProblem[] = [];
+        // Not offered here is the whole story: access or an agreement wouldn't change it.
         if (availability.regionAvailability !== "AVAILABLE") {
           problems.push({ text: "not offered in this region", fix: "region" });
-        }
-        if (availability.entitlementAvailability !== "AVAILABLE") {
-          problems.push({ text: "model access not granted", fix: "access" });
-        }
-        const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
-        if (agreement !== "AVAILABLE") {
-          problems.push({
-            text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
-            fix: "access",
-          });
+        } else {
+          if (availability.entitlementAvailability !== "AVAILABLE") {
+            problems.push({ text: "model access not granted", fix: "access" });
+          }
+          const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
+          if (agreement !== "AVAILABLE") {
+            problems.push({
+              text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
+              // A pending agreement is on its way; anything else needs accepting.
+              fix: agreement === "PENDING" ? "wait" : "access",
+            });
+          }
         }
         results.push({
           ...entry,
