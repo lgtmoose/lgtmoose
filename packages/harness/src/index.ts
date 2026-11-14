@@ -64,6 +64,6 @@ export {
   type CursorHarnessOptions,
 } from "./cursor/adapter.js";
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
-export { CURSOR_PERMISSIONS } from "./cursor/policy.js";
+export { CURSOR_PERMISSIONS, CURSOR_PROJECT_HOOK_FILES } from "./cursor/policy.js";
 export { classifyCursorFailure } from "./cursor/result.js";
 export { CLAUDE_CODE_VERSION, CODEX_VERSION, CURSOR_AGENT_VERSION } from "./version.js";

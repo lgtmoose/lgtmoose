@@ -19,6 +19,8 @@ export interface FakeCursorCall {
   cwd: string;
   /** `$HOME/.cursor/cli-config.json` as the fake found it. */
   cliConfig?: string;
+  /** The entries of the checkout's `.cursor` directory, if it has one. */
+  projectCursorDir?: string[];
 }
 
 /**
@@ -51,6 +53,7 @@ fs.appendFileSync(
     env: process.env,
     cwd: process.cwd(),
     cliConfig: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : undefined,
+    projectCursorDir: fs.existsSync(".cursor") ? fs.readdirSync(".cursor").sort() : undefined,
   }) + "\\n",
 );
 const r = responses[Math.min(n, responses.length - 1)];

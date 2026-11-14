@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -19,7 +19,7 @@ import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { cursorAuth } from "./auth.js";
-import { cursorCliConfig } from "./policy.js";
+import { CURSOR_PROJECT_HOOK_FILES, cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
   cursorUsage,
@@ -70,7 +70,8 @@ export interface CursorArgsOptions {
  * The command line (flags from https://cursor.com/docs/cli/reference/parameters): print mode
  * with one JSON result, ask mode (read-only), the workspace trusted without a prompt, and the
  * sandbox on. Never `--force` (it applies changes and runs commands without asking) and never
- * `--approve-mcps`, so MCP servers in the checkout's `.cursor/mcp.json` don't start. The prompt
+ * `--approve-mcps`, so MCP servers in the checkout's `.cursor/mcp.json` don't start. Trusting
+ * the workspace would load its hooks, so the run sets them aside first. The prompt
  * comes last, after `--`, so a prompt starting with `-` isn't read as a flag.
  */
 export function cursorArgs(options: CursorArgsOptions): string[] {
@@ -115,7 +116,9 @@ export class CursorHarness implements Harness {
     const firstPrompt = options.prompt + schemaSuffix(options.schema);
     checkPromptSize(firstPrompt, MAX_CURSOR_PROMPT_BYTES, keys);
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
+    const setAside: { from: string; to: string }[] = [];
     try {
+      await setAsideHookFiles(options.cwd, setAside);
       await mkdir(join(home, ".cursor"));
       await mkdir(join(home, "tmp"));
       await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig());
@@ -188,9 +191,47 @@ export class CursorHarness implements Harness {
         { transcriptKeys: keys },
       );
     } finally {
-      await rm(home, { recursive: true, force: true });
+      try {
+        await restoreHookFiles(setAside);
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
     }
   }
+}
+
+/**
+ * Renames the checkout's hook configs (`CURSOR_PROJECT_HOOK_FILES`) out of the CLI's way for the
+ * run, recording each in `moved` so they can be put back. Fails the run if one can't be moved.
+ * The prompt still holds their diff. Not safe for two runs at once on one checkout, which the
+ * sandbox never does: each task reviews one batch in its own checkout.
+ */
+async function setAsideHookFiles(
+  cwd: string,
+  moved: { from: string; to: string }[],
+): Promise<void> {
+  for (const file of CURSOR_PROJECT_HOOK_FILES) {
+    const from = join(cwd, file);
+    const exists = await lstat(from).then(
+      () => true,
+      () => false,
+    );
+    if (!exists) continue;
+    const to = `${from}.lgtmoose-${randomUUID()}`;
+    try {
+      await rename(from, to);
+    } catch (error) {
+      throw new HarnessError("process", `Could not set aside ${file} in the checkout.`, {
+        cause: error,
+      });
+    }
+    moved.push({ from, to });
+  }
+}
+
+/** Puts back what `setAsideHookFiles` moved. */
+async function restoreHookFiles(moved: readonly { from: string; to: string }[]): Promise<void> {
+  for (const { from, to } of moved) await rename(to, from);
 }
 
 /** Refuses a prompt longer than `limit` bytes, which the kernel may not pass as one argument. */
@@ -229,10 +270,12 @@ function failIfUnusable(
     result.subtype === "success" &&
     result.is_error !== true;
   if (ok) return;
+  // Both: a warning on stderr mustn't hide a limit the error result names.
   const detail =
-    proc.stderr.trim() ||
-    (result?.is_error === true ? result.result : undefined)?.trim() ||
-    "no output";
+    [result?.is_error === true ? result.result : undefined, proc.stderr]
+      .map((text) => text?.trim())
+      .filter(Boolean)
+      .join("\n") || "no output";
   const limit = classifyCursorFailure(detail);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;

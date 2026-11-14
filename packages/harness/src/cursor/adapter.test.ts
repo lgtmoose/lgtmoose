@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -159,6 +159,31 @@ describe("CursorHarness", () => {
     );
   });
 
+  it("sets the checkout's hook configs aside for the run and puts them back", async () => {
+    await mkdir(join(cwd, ".cursor"));
+    await mkdir(join(cwd, ".claude"));
+    await writeFile(join(cwd, ".cursor", "hooks.json"), '{"hooks":{}}');
+    await writeFile(join(cwd, ".cursor", "cli.json"), "{}");
+    await writeFile(join(cwd, ".claude", "settings.json"), "{}");
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
+    await run(harness);
+    const [call] = await fake!.calls();
+    expect(call?.projectCursorDir).toHaveLength(2);
+    expect(call?.projectCursorDir).toContain("cli.json");
+    expect(call?.projectCursorDir).not.toContain("hooks.json");
+    expect(await readFile(join(cwd, ".cursor", "hooks.json"), "utf8")).toBe('{"hooks":{}}');
+    expect((await readdir(join(cwd, ".cursor"))).sort()).toEqual(["cli.json", "hooks.json"]);
+    expect(await readdir(join(cwd, ".claude"))).toEqual(["settings.json"]);
+  });
+
+  it("puts the hook configs back after a failed run too", async () => {
+    await mkdir(join(cwd, ".cursor"));
+    await writeFile(join(cwd, ".cursor", "hooks.json"), "{}");
+    const harness = await harnessFor([{ stderr: "boom", exitCode: 1 }]);
+    await failure(run(harness));
+    expect(await readdir(join(cwd, ".cursor"))).toEqual(["hooks.json"]);
+  });
+
   it("describes the schema in the prompt, the last argument", async () => {
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
     await run(harness);
@@ -239,6 +264,19 @@ describe("CursorHarness", () => {
     const error = await failure(run(harness));
     expect(error.kind).toBe(kind);
     if (kind === "rate_limit") expect(error.retryAfterSeconds).toBe(30);
+  });
+
+  it("classifies an error result's text even with a warning on stderr", async () => {
+    const stdout = `${JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "You've hit your usage limit",
+    })}\n`;
+    const harness = await harnessFor([
+      { stdout, stderr: "warning: update available", exitCode: 1 },
+    ]);
+    expect((await failure(run(harness))).kind).toBe("plan_limit");
   });
 
   it("treats an error result as a failure", async () => {

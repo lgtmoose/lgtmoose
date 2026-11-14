@@ -16,6 +16,19 @@ export const CURSOR_PERMISSIONS = {
   deny: ["Write(**)", "Shell(*)", "WebFetch(*)", "Mcp(*:*)"],
 } as const;
 
+/**
+ * Hook configs in the checkout. Hooks are commands the CLI itself runs (not tools the deny rules
+ * cover), and project hooks load in a trusted workspace, which `--trust` makes the checkout. A
+ * PR could add one to run anything, with the key in its environment. Cursor's own file, and
+ * Claude Code's settings, whose hooks Cursor can load too
+ * (https://cursor.com/docs/agent/hooks).
+ */
+export const CURSOR_PROJECT_HOOK_FILES = [
+  ".cursor/hooks.json",
+  ".claude/settings.json",
+  ".claude/settings.local.json",
+] as const;
+
 /** The run's `cli-config.json`. */
 export function cursorCliConfig(): string {
   return `${JSON.stringify(
