@@ -451,7 +451,11 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   // Every baseline commit in use, with what it gives (undefined when it's gone), each diffed
   // only for the paths reviewed there.
   const pathsAt = new Map<string, string[]>();
-  for (const [path, sha] of reviewedAt) pathsAt.set(sha, [...(pathsAt.get(sha) ?? []), path]);
+  for (const [path, sha] of reviewedAt) {
+    const paths = pathsAt.get(sha);
+    if (paths === undefined) pathsAt.set(sha, [path]);
+    else paths.push(path);
+  }
   const baselines = new Map<string, Baseline | undefined>();
   const shas = [...pathsAt.keys()];
   for (let i = 0; i < shas.length; i += BASELINES_AT_ONCE) {
