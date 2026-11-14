@@ -101,6 +101,11 @@
       "minimum": 1,
       "maximum": 64
     },
+    "shadow": {
+      "default": true,
+      "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",
+      "type": "boolean"
+    },
     "extraEgressHosts": {
       "default": [],
       "description": "Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only.",

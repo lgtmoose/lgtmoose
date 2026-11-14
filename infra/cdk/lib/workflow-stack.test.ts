@@ -168,3 +168,204 @@ describe("WorkflowStack", () => {
     expect(arns).toContain('\\"bedrock\\":\\"');
   });
 });
+
+interface State {
+  Type: string;
+  Resource?: string;
+  Next?: string;
+  End?: boolean;
+  TimeoutSeconds?: number;
+  ResultPath?: string | null;
+  MaxConcurrency?: number;
+  ItemsPath?: string;
+  Parameters?: Record<string, unknown>;
+  Retry?: { ErrorEquals: string[]; MaxAttempts?: number; BackoffRate?: number }[];
+  Catch?: { ErrorEquals: string[]; Next: string }[];
+  ItemProcessor?: { StartAt: string; States: Record<string, State> };
+  Choices?: { Variable: string; BooleanEquals?: boolean; Next: string }[];
+  Default?: string;
+}
+
+/** The state machine's definition, with deploy-time references replaced by "REF". */
+function definition(): { StartAt: string; States: Record<string, State>; TimeoutSeconds: number } {
+  const [machine] = Object.values(resources).filter(
+    (r) => r.Type === "AWS::StepFunctions::StateMachine",
+  );
+  const body = machine?.Properties.DefinitionString as { "Fn::Join": [string, unknown[]] };
+  const text = body["Fn::Join"][1]
+    .map((part) => (typeof part === "string" ? part : "REF"))
+    .join("");
+  return JSON.parse(text) as ReturnType<typeof definition>;
+}
+
+function overrides(state: State | undefined): Record<string, unknown> {
+  const containers =
+    (
+      state?.Parameters?.Overrides as
+        | {
+            ContainerOverrides: {
+              Environment: { Name: string; Value?: string; "Value.$"?: string }[];
+            }[];
+          }
+        | undefined
+    )?.ContainerOverrides ?? [];
+  return Object.fromEntries(
+    (containers[0]?.Environment ?? []).map((e) => [e.Name, e.Value ?? `$:${e["Value.$"]}`]),
+  );
+}
+
+describe("review state machine", () => {
+  it("prepares, maps the batches, then posts", () => {
+    const { StartAt, States } = definition();
+    expect(StartAt).toBe("Prepare");
+    expect(States.Prepare?.Resource).toContain("ecs:runTask.waitForTaskToken");
+    expect(States.Prepare?.Next).toBe("Superseded?");
+    expect(States["Superseded?"]).toMatchObject({
+      Choices: [{ Variable: "$.prepared.superseded", BooleanEquals: true, Next: "Superseded" }],
+      Default: "Batches",
+    });
+    expect(States.Batches).toMatchObject({ Type: "Map", ItemsPath: "$.prepared.batches" });
+    expect(States.Batches?.Next).toBe("Post");
+    expect(States.Post).toMatchObject({ End: true });
+    expect(States.Post?.Resource).toContain("ecs:runTask.sync");
+
+    const items = States.Batches?.ItemProcessor;
+    expect(items?.StartAt).toBe("Presign");
+    expect(items?.States.Presign?.Next).toBe("Review");
+    expect(items?.States.Review?.Resource).toContain("ecs:runTask.sync");
+  });
+
+  it("caps the map at the configured concurrency", () => {
+    expect(definition().States.Batches?.MaxConcurrency).toBe(4);
+  });
+
+  it("passes each step its command and the execution, and the job to prepare", () => {
+    const { States } = definition();
+    expect(overrides(States.Prepare)).toEqual({
+      LGTMOOSE_EXECUTION_ARN: "$:$$.Execution.Id",
+      LGTMOOSE_COMMAND: "prepare",
+      LGTMOOSE_JOB: "$:States.JsonToString($$.Execution.Input)",
+      LGTMOOSE_TASK_TOKEN: "$:$$.Task.Token",
+    });
+    expect(overrides(States.Post)).toMatchObject({
+      LGTMOOSE_COMMAND: "post",
+      LGTMOOSE_RUN_ID: "$:$.prepared.runId",
+    });
+    expect(overrides(States.MarkFailed)).toMatchObject({
+      LGTMOOSE_COMMAND: "fail",
+      LGTMOOSE_ERROR: "$:$.error.Error",
+    });
+    expect(overrides(States.Batches?.ItemProcessor?.States.Review)).toEqual({
+      LGTMOOSE_BATCH_URLS: "$:$.presigned.urls",
+    });
+  });
+
+  it("starts sandbox tasks in the sandbox subnets, with the reviewer's task and no public IP", () => {
+    const review = definition().States.Batches?.ItemProcessor?.States.Review;
+    const network = (
+      review?.Parameters?.NetworkConfiguration as
+        | {
+            AwsvpcConfiguration: {
+              AssignPublicIp?: string;
+              Subnets: unknown[];
+              SecurityGroups: unknown[];
+            };
+          }
+        | undefined
+    )?.AwsvpcConfiguration ?? { AssignPublicIp: undefined, Subnets: [], SecurityGroups: [] };
+    // CDK leaves AssignPublicIp out for `assignPublicIp: false`; RunTask defaults it to DISABLED.
+    expect(network.AssignPublicIp ?? "DISABLED").toBe("DISABLED");
+    expect(network.Subnets.length).toBeGreaterThan(0);
+    // Every task the machine starts: no public addresses anywhere.
+    const all = [
+      ...Object.values(definition().States),
+      ...Object.values(definition().States.Batches?.ItemProcessor?.States ?? {}),
+    ].filter((s) => s.Resource?.includes("ecs:runTask"));
+    expect(all).toHaveLength(4);
+    for (const state of all) {
+      expect(JSON.stringify(state.Parameters?.NetworkConfiguration)).not.toContain("ENABLED");
+    }
+    // The first provider reviews by default: its family, not the Bedrock one.
+    expect(review?.Parameters?.TaskDefinition).toBe(taskDefinition("claude").Family);
+    expect(taskDefinition("claude").Family).not.toBe(taskDefinition("bedrock").Family);
+  });
+
+  it("times out and retries with backoff; post retries only tasks that never started", () => {
+    const { States, TimeoutSeconds } = definition();
+    expect(TimeoutSeconds).toBe(4 * 3600);
+    const review = States.Batches?.ItemProcessor?.States.Review;
+    for (const state of [States.Prepare, States.Post, review, States.MarkFailed]) {
+      expect(state?.TimeoutSeconds).toBeGreaterThan(0);
+      expect(state?.Retry?.[0]?.BackoffRate).toBe(2);
+    }
+    expect(review?.TimeoutSeconds).toBe(30 * 60);
+    expect(States.Post?.Retry?.flatMap((r) => r.ErrorEquals)).not.toContain("States.ALL");
+    expect(States.Post?.Retry?.flatMap((r) => r.ErrorEquals)).not.toContain("States.TaskFailed");
+  });
+
+  it("marks the run failed and posts nothing when a step fails", () => {
+    const { States } = definition();
+    for (const name of ["Prepare", "Batches", "Post"]) {
+      expect(States[name]?.Catch).toEqual([
+        expect.objectContaining({ ErrorEquals: ["States.ALL"], Next: "MarkFailed" }),
+      ]);
+    }
+    expect(States.MarkFailed?.Next).toBe("ReviewFailed");
+    expect(States.ReviewFailed?.Type).toBe("Fail");
+    // A batch that fails for good leaves no output; the review is incomplete, not failed.
+    const items = States.Batches?.ItemProcessor?.States ?? {};
+    expect(items.Review?.Catch?.[0]?.Next).toBe("BatchFailed");
+    expect(items.Presign?.Catch?.[0]?.Next).toBe("BatchFailed");
+  });
+
+  it("logs without execution data, which holds task tokens and presigned URLs", () => {
+    template.hasResourceProperties("AWS::StepFunctions::StateMachine", {
+      LoggingConfiguration: Match.objectLike({ IncludeExecutionData: false }),
+    });
+  });
+
+  it("scopes PassRole to the workflow's own task roles", () => {
+    const machine = Object.values(resources).find(
+      (r) => r.Type === "AWS::StepFunctions::StateMachine",
+    );
+    const role = getAttId(machine?.Properties.RoleArn);
+    const passRole = statements(role).filter((s) => actions([s]).includes("iam:PassRole"));
+    expect(passRole.length).toBeGreaterThan(0);
+    for (const statement of passRole) {
+      expect(JSON.stringify(statement.Resource)).not.toContain('"*"');
+      expect(JSON.stringify(statement.Resource)).toContain("TaskRole");
+    }
+  });
+
+  it("lets the presign function reach only run objects, and the control task answer tokens", () => {
+    const fn = Object.entries(resources).find(
+      ([, r]) =>
+        r.Type === "AWS::Lambda::Function" &&
+        JSON.stringify(r.Properties.Environment).includes("LGTMOOSE_URL_TTL_SECONDS"),
+    );
+    const granted = statements(getAttId(fn?.[1].Properties.Role));
+    const s3 = granted.filter((s) => actions([s]).some((a) => a.startsWith("s3:")));
+    expect(s3.length).toBeGreaterThan(0);
+    for (const statement of s3) {
+      for (const resource of [statement.Resource].flat()) {
+        expect(JSON.stringify(resource)).toContain("/runs/*");
+      }
+    }
+    const control = statements(getAttId(taskDefinition("control").TaskRoleArn));
+    expect(actions(control)).toEqual(
+      expect.arrayContaining(["states:SendTaskSuccess", "states:SendTaskFailure"]),
+    );
+  });
+
+  it("gives the control task the reviewer's model and shadow mode", () => {
+    const [container] = taskDefinition("control").ContainerDefinitions as {
+      Environment: { Name: string; Value: unknown }[];
+    }[];
+    const env = Object.fromEntries((container?.Environment ?? []).map((e) => [e.Name, e.Value]));
+    expect(env).toMatchObject({
+      LGTMOOSE_REVIEWER_MODEL: "sonnet",
+      LGTMOOSE_SHADOW: "true",
+      LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
+    });
+  });
+});

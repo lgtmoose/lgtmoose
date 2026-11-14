@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@lgtmoose/config": "workspace:*",
+    "@lgtmoose/control": "workspace:*",
     "@lgtmoose/db": "workspace:*",
     "@lgtmoose/egress-proxy": "workspace:*",
     "@lgtmoose/gateway": "workspace:*",

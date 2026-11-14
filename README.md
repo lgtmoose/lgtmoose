@@ -41,6 +41,16 @@ git pull && pnpm install && pnpm lgtmoose deploy
 
 One AWS account and region holds one install for now, because the secret and stack names are fixed. Put a second install, such as staging, in another account or region.
 
+### How a review runs
+
+Each review job is one execution of the review state machine (`StateMachineArn` in the Workflow stack's outputs):
+
+1. **Prepare** (control task): records the run, clones and plans the PR, and uploads the checkout and each batch's input to `runs/<run id>/` in the artifact bucket. A run for a head that's no longer the PR's head stops here as superseded.
+2. **Batches** (sandbox tasks, `maxConcurrency` at once): each runs the reviewer on one batch. Sandbox tasks have no S3 access of their own; a small Lambda hands each one presigned URLs for its own batch.
+3. **Post** (control task): reads the batches' outputs and posts one review, the check run, the summary comment and the status label. A batch without a valid output makes the review incomplete, so it can't approve.
+
+A step that fails for good marks the run failed and posts nothing. With `shadow: true` in `lgtmoose.config.ts` (the default for now), post records what it would post to `shadow/` in the bucket and the log instead.
+
 ## Repository layout
 
 ```

@@ -1,5 +1,12 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
-import { CDK_CONTEXT, STACK_NAMES, egressAllowlist, type DeployConfig } from "@lgtmoose/config";
+import {
+  CDK_CONTEXT,
+  STACK_NAMES,
+  egressAllowlist,
+  resolveRoles,
+  type DeployConfig,
+  type ProviderConfig,
+} from "@lgtmoose/config";
 import { ApiStack } from "./api-stack.js";
 import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
@@ -67,10 +74,15 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowedHosts: egressAllowlist(config),
   });
 
+  const reviewer = resolveRoles(config).reviewer;
   const workflow = new WorkflowStack(app, STACK_NAMES.workflow, {
     env,
     profile: config.profile,
     providers: config.providers,
+    reviewerProviderId: reviewer.id,
+    reviewerModel: reviewerModel(reviewer),
+    maxConcurrency: config.maxConcurrency,
+    shadow: config.shadow,
     vpc: network.vpc,
     controlSubnets: { subnetGroupName: "app" },
     controlSecurityGroup: network.controlSecurityGroup,
@@ -88,4 +100,12 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
   workflow.addDependency(proxy);
 
   return { app, meta, network, data, api, proxy, workflow };
+}
+
+/**
+ * The reviewer's model: the provider's standard tier, else Claude Code's Sonnet alias (its CLI
+ * needs a model name) or, for other harnesses, their own default.
+ */
+export function reviewerModel(provider: ProviderConfig): string {
+  return provider.models?.standard ?? (provider.harness === "claude-code" ? "sonnet" : "");
 }

@@ -21,10 +21,9 @@ import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
 import type { Profile } from "./network-stack.js";
+import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-
-/** The S3 prefix sandbox tasks may read and write. Everything else in the bucket is control's. */
 
 /** Where tasks may write: the root filesystem is read-only. */
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
@@ -51,6 +50,14 @@ function noProxy(region: string): string {
 export interface WorkflowStackProps extends StackProps {
   profile: Profile;
   providers: DeployConfig["providers"];
+  /** The provider that reviews the batches; it must be one of `providers`. */
+  reviewerProviderId: string;
+  /** The reviewer's model; empty for the harness's default. */
+  reviewerModel: string;
+  /** Sandbox tasks per review at once. */
+  maxConcurrency: number;
+  /** Record reviews instead of posting them to GitHub. */
+  shadow: boolean;
   vpc: IVpc;
   /** Where control tasks run: the app subnets, with egress. */
   controlSubnets: SubnetSelection;
@@ -73,14 +80,14 @@ export interface WorkflowStackProps extends StackProps {
 }
 
 /**
- * The review workflow's compute: an ECS cluster, the control task and one sandbox task per model
- * provider. The Step Functions workflow that runs them comes with NIC-811.
+ * The review workflow: an ECS cluster, the control task, one sandbox task per model provider, and
+ * the Step Functions state machine that runs them (`ReviewWorkflow`).
  *
  * - The control task holds the GitHub App credentials and the database, and never runs a model.
  * - A sandbox task holds one provider's credential and no GitHub token. Its role has no S3
  *   access at all: one role is shared by every run, so it couldn't be limited to a run's own
- *   files. The workflow (NIC-811) passes each task presigned URLs for its batch input and its
- *   output instead. It can call Bedrock when the provider uses it. One task definition per
+ *   files. The workflow passes each task presigned URLs for its batch input and its output
+ *   instead. It can call Bedrock when the provider uses it. One task definition per
  *   provider means a task can only ever see its own credential.
  *
  * Both run as a non-root user with a read-only root filesystem, all Linux capabilities dropped,
@@ -93,6 +100,7 @@ export class WorkflowStack extends Stack {
   readonly controlTaskDefinition: FargateTaskDefinition;
   /** Provider id → its sandbox task definition. */
   readonly sandboxTaskDefinitions: ReadonlyMap<string, FargateTaskDefinition>;
+  readonly reviewWorkflow: ReviewWorkflow;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -110,7 +118,7 @@ export class WorkflowStack extends Stack {
       // Clones of large repositories.
       ephemeralStorageGiB: 50,
     });
-    this.container(this.controlTaskDefinition, "control", {
+    const controlContainer = this.container(this.controlTaskDefinition, "control", {
       image: controlImage,
       retention,
       environment: {
@@ -118,6 +126,9 @@ export class WorkflowStack extends Stack {
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
+        LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),
+        LGTMOOSE_SHADOW: String(props.shadow),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
@@ -126,6 +137,7 @@ export class WorkflowStack extends Stack {
     props.artifactBucket.grantReadWrite(controlRole);
 
     const sandboxes = new Map<string, FargateTaskDefinition>();
+    const sandboxContainers = new Map<string, ContainerDefinition>();
     for (const provider of props.providers) {
       const definition = this.taskDefinition(`Sandbox-${provider.id}`, {
         cpu: 2048,
@@ -133,7 +145,7 @@ export class WorkflowStack extends Stack {
         ephemeralStorageGiB: 30,
       });
       const secret = props.providerSecrets.get(provider.id);
-      this.container(definition, "sandbox", {
+      const sandboxContainer = this.container(definition, "sandbox", {
         image: sandboxImage,
         retention,
         environment: {
@@ -152,8 +164,27 @@ export class WorkflowStack extends Stack {
       });
       if (provider.auth === "bedrock") this.grantBedrock(definition);
       sandboxes.set(provider.id, definition);
+      sandboxContainers.set(provider.id, sandboxContainer);
     }
     this.sandboxTaskDefinitions = sandboxes;
+
+    const reviewerTask = sandboxes.get(props.reviewerProviderId);
+    const reviewerContainer = sandboxContainers.get(props.reviewerProviderId);
+    if (reviewerTask === undefined || reviewerContainer === undefined) {
+      throw new Error(`No sandbox task for the reviewer provider ${props.reviewerProviderId}.`);
+    }
+    this.reviewWorkflow = new ReviewWorkflow(this, "Review", {
+      cluster: this.cluster,
+      retention,
+      artifactBucket: props.artifactBucket,
+      control: { taskDefinition: this.controlTaskDefinition, container: controlContainer },
+      controlSubnets: props.controlSubnets,
+      controlSecurityGroup: props.controlSecurityGroup,
+      sandbox: { taskDefinition: reviewerTask, container: reviewerContainer },
+      sandboxSubnets: props.sandboxSubnets,
+      sandboxSecurityGroup: props.sandboxSecurityGroup,
+      maxConcurrency: props.maxConcurrency,
+    });
 
     const subnetIds = (selection: SubnetSelection) =>
       Fn.join(",", props.vpc.selectSubnets(selection).subnetIds);
@@ -169,6 +200,9 @@ export class WorkflowStack extends Stack {
     new CfnOutput(this, out.sandboxSubnetIds, { value: subnetIds(props.sandboxSubnets) });
     new CfnOutput(this, out.sandboxSecurityGroupId, {
       value: props.sandboxSecurityGroup.securityGroupId,
+    });
+    new CfnOutput(this, out.stateMachineArn, {
+      value: this.reviewWorkflow.stateMachine.stateMachineArn,
     });
     new CfnOutput(this, out.sandboxTaskDefinitionArns, {
       value: this.toJsonString(

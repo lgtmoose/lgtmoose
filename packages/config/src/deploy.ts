@@ -74,6 +74,17 @@ export const deployConfigSchema = z
     roles: z.partialRecord(z.enum(ROLES), z.string()).default({}),
     maxConcurrency: z.number().int().min(1).max(64).default(4),
     /**
+     * Shadow mode: the review workflow records what it would post (the review, check run,
+     * summary comment and labels) to the artifact bucket and the log instead of posting it to
+     * GitHub. On by default until reviews have been checked on real PRs (M1).
+     */
+    shadow: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",
+      ),
+    /**
      * Hosts sandbox tasks may reach through the egress proxy on top of the enabled providers'
      * model APIs (see `egressAllowlist`), such as a regional Vertex AI endpoint or a model
      * gateway. Exact hostnames only; everything else, GitHub included, is refused.

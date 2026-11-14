@@ -1,22 +1,8 @@
-import { createSign } from "node:crypto";
 import { z } from "zod";
 import { GitHubRequestError, githubRequest } from "../github-request.js";
 
-/**
- * A GitHub App JWT (RS256), the credential for the /app endpoints. GitHub accepts at most ten
- * minutes; `iat` is backdated a minute to allow for clock drift.
- */
-export function appJwt(appId: number, privateKey: string, now: Date = new Date()): string {
-  const seconds = Math.floor(now.getTime() / 1000);
-  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const unsigned = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
-    iat: seconds - 60,
-    exp: seconds + 9 * 60,
-    iss: String(appId),
-  })}`;
-  const signature = createSign("RSA-SHA256").update(unsigned).sign(privateKey, "base64url");
-  return `${unsigned}.${signature}`;
-}
+/** A GitHub App JWT, the credential for the /app endpoints. Shared with the control task. */
+export { appJwt } from "@lgtmoose/poster";
 
 export interface AppInfo {
   id: number;

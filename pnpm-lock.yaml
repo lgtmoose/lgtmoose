@@ -77,6 +77,9 @@ importers:
       '@lgtmoose/pipeline':
         specifier: workspace:*
         version: link:../../packages/pipeline
+      '@lgtmoose/poster':
+        specifier: workspace:*
+        version: link:../../packages/poster
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -89,7 +92,59 @@ importers:
         version: 7.0.2
 
   apps/control:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.1167.0
+        version: 3.1169.0
+      '@aws-sdk/client-secrets-manager':
+        specifier: ^3.1167.0
+        version: 3.1167.0
+      '@aws-sdk/client-sfn':
+        specifier: ^3.1167.0
+        version: 3.1169.0
+      '@aws-sdk/s3-request-presigner':
+        specifier: ^3.1167.0
+        version: 3.1169.0
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@lgtmoose/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@lgtmoose/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@lgtmoose/git':
+        specifier: workspace:*
+        version: link:../../packages/git
+      '@lgtmoose/pipeline':
+        specifier: workspace:*
+        version: link:../../packages/pipeline
+      '@lgtmoose/poster':
+        specifier: workspace:*
+        version: link:../../packages/poster
+      '@lgtmoose/summary':
+        specifier: workspace:*
+        version: link:../../packages/summary
+      drizzle-orm:
+        specifier: ^0.45.4
+        version: 0.45.4(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(pg@8.23.1)
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.16
+        version: 0.5.16
+      '@electric-sql/pglite-pgvector':
+        specifier: ^0.0.17
+        version: 0.0.17(@electric-sql/pglite@0.5.16)
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -138,6 +193,13 @@ importers:
         version: 7.0.2
 
   apps/sandbox:
+    dependencies:
+      '@lgtmoose/harness':
+        specifier: workspace:*
+        version: link:../../packages/harness
+      '@lgtmoose/pipeline':
+        specifier: workspace:*
+        version: link:../../packages/pipeline
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -148,6 +210,9 @@ importers:
       '@lgtmoose/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@lgtmoose/control':
+        specifier: workspace:*
+        version: link:../../apps/control
       '@lgtmoose/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -295,6 +360,9 @@ importers:
       '@lgtmoose/summary':
         specifier: workspace:*
         version: link:../summary
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -330,6 +398,9 @@ importers:
       '@lgtmoose/summary':
         specifier: workspace:*
         version: link:../summary
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -405,6 +476,10 @@ packages:
     resolution: {integrity: sha512-ZfGw/VW2OwDMLl5z9lG7YF2u1VsvhyDqtvHh3Fwe5LEzSC6wXFhHru8wE5cBungRQ5vuH39yhyV3LFZgSmUvkQ==}
     engines: {node: '>=20.0.0'}
 
+  '@aws-sdk/client-sfn@3.1169.0':
+    resolution: {integrity: sha512-ZGAUrsI1s2+UsUpyGCKe5aSdRrHPXIIjqm3XHFIwE2sU5ZmsbWVOpm55WNX26ppyv6KraNV8qAsIinIGI9UZVg==}
+    engines: {node: '>=20.0.0'}
+
   '@aws-sdk/client-sqs@3.1167.0':
     resolution: {integrity: sha512-v/65Uq48mP3Yy+AZrBeTBFCAZsPMlc3JipgTtjomNRXZn6N/OgP2ChX2E8JGyVodVuXLGnTCS/pbCRAlP/sFEA==}
     engines: {node: '>=20.0.0'}
@@ -463,6 +538,10 @@ packages:
 
   '@aws-sdk/nested-clients@3.998.3':
     resolution: {integrity: sha512-acHTTzMB13CU6dU4sxABYExMI3PQM2zStWH2MiUwJp/7QKTrLg2f7mbzSXoegW2kYOk2tdqQYagsZrWB8Xv7eA==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/s3-request-presigner@3.1169.0':
+    resolution: {integrity: sha512-ydc+uJnL8s1rMyPgEWjjiV6C/UFqrQhsAHOhEW5GerQtB0zpgpENupEY3AeeXunWxdQakdDLrNJetimZ0wbhRw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/signature-v4-multi-region@3.996.52':
@@ -2511,6 +2590,17 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
+  '@aws-sdk/client-sfn@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
   '@aws-sdk/client-sqs@3.1167.0':
     dependencies:
       '@aws-sdk/core': 3.981.0
@@ -2663,6 +2753,15 @@ snapshots:
       '@smithy/core': 3.40.0
       '@smithy/fetch-http-handler': 5.8.1
       '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@aws-sdk/s3-request-presigner@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/signature-v4-multi-region': 3.996.52
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
