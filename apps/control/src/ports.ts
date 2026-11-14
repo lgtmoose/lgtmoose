@@ -68,10 +68,10 @@ export interface RunStore {
    * Whether a run of the same PR created after this one has succeeded. Its summary comment and
    * label are then the PR's, and an older run mustn't write over them.
    */
-  newerRunPosted(runId: string): Promise<boolean>;
+  newerRunPosted(runId: string, options?: { sameHead?: boolean }): Promise<boolean>;
   /**
-   * Marks the run succeeded without posting: another run's review already covered its head.
-   * The PR's record is left to the run that posted.
+   * Marks the run covered: it posted nothing, since another run's review already covered its
+   * head. The PR's record is left to the run that posted.
    */
   coverRun(
     runId: string,

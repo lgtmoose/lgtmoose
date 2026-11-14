@@ -190,6 +190,8 @@ export interface PostOptions {
 
 const claimSchema = z.object({
   attempt: z.string(),
+  /** The run the attempt is for: the head's claim can be held by another run. */
+  runId: z.string().optional(),
   taskArn: z.string().optional(),
   claimedAt: z.number().optional(),
 });
@@ -227,10 +229,12 @@ async function holdClaim(
   deps: ControlDeps,
   options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
   claimKey: string,
+  runId: string,
   what = "this run's post",
 ): Promise<{ etag: string; tookOver: boolean }> {
   const mine = JSON.stringify({
     attempt: options.attempt.id,
+    runId,
     ...(options.attempt.taskArn === undefined
       ? { claimedAt: Date.now() }
       : { taskArn: options.attempt.taskArn }),
@@ -246,12 +250,14 @@ async function holdClaim(
   }
   const holder = claimSchema.safeParse(parseJson(current.text));
   const holderTask = holder.success ? holder.data.taskArn : undefined;
-  // A holder off ECS can't be checked. Off ECS too (a local or dev run), there are no
-  // parallel retries, so it's an earlier run of this one that ended: take it over. On ECS, a
-  // claim from off ECS is someone else's run of the same post: leave it be until it expires.
-  if (holder.success && holderTask === undefined && options.attempt.taskArn !== undefined) {
-    const age = Date.now() - (holder.data.claimedAt ?? 0);
-    if (age < OFF_ECS_CLAIM_TTL_MS) {
+  // A holder off ECS can't be checked. An earlier attempt of this same run, when this one is
+  // off ECS too (a local or dev run, with no parallel retries), has ended: take it over at
+  // once. Anyone else waits until the claim expires; one with no time on it never does.
+  if (holder.success && holderTask === undefined) {
+    const sameRunOffEcs = options.attempt.taskArn === undefined && holder.data.runId === runId;
+    const claimedAt = holder.data.claimedAt;
+    const expired = claimedAt !== undefined && Date.now() - claimedAt >= OFF_ECS_CLAIM_TTL_MS;
+    if (!sameRunOffEcs && !expired) {
       throw new Error(`Another attempt, off ECS, holds the claim on ${what}.`);
     }
   }
@@ -352,7 +358,7 @@ export async function post(
   // Every write below is the claim holder's alone: an earlier attempt still running makes
   // this one fail its step until it has stopped. Progress is read once the claim is held, so
   // its version is the one this attempt saves over.
-  const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim);
+  const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim, runId);
   const saved = await deps.store.getTagged(keys.posted);
   const progress = readProgress(saved?.text);
   // Each save is conditional on the version this attempt last wrote (or read), so two
@@ -424,12 +430,23 @@ export async function post(
       target.number,
       pr.headSha,
     ).reviewClaim;
-    const head = await holdClaim(deps, { attempt, taskStatus }, headClaim, "this head's review");
+    const head = await holdClaim(
+      deps,
+      { attempt, taskStatus },
+      headClaim,
+      runId,
+      "this head's review",
+    );
     let coveredBy: string | undefined;
     try {
       const reviews = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-      coveredBy = headCovered(reviews, report.complete)?.marker;
-      if (coveredBy === undefined) await poster.submitReview(pull, pr.headSha, payload);
+      const own = reviews.some((review) =>
+        review.marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`),
+      );
+      // This run's own review (an earlier attempt posted it) is this run's: nothing to cover.
+      coveredBy = own ? undefined : headCovered(reviews, report.complete)?.marker;
+      if (own) deps.log("this run's review is already up", { runId });
+      else if (coveredBy === undefined) await poster.submitReview(pull, pr.headSha, payload);
       else deps.log("the head already has our review; not posting another", { runId, coveredBy });
     } catch (error) {
       // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
@@ -478,7 +495,8 @@ export async function post(
     if (
       decision.conclusion !== undefined &&
       !progress.checkRun &&
-      !(await deps.runs.newerRunPosted(runId))
+      // The check run is the head's: only a newer run at this head makes it moot.
+      !(await deps.runs.newerRunPosted(runId, { sameHead: true }))
     ) {
       await poster.completeCheckRun(pull, {
         headSha: pr.headSha,
@@ -528,7 +546,12 @@ export async function post(
     // a later run edits that comment and doesn't review the head again. Then fail the step,
     // whose retry finishes the rest.
     if (progress.review) {
-      await record().catch((recordError: unknown) => {
+      // Covered, it records as covered, never over the PR's record.
+      const finish =
+        progress.coveredBy === undefined
+          ? record()
+          : deps.runs.coverRun(runId, { filesDone: report.plan.reviewed, costUsd: costOf(report) });
+      await finish.catch((recordError: unknown) => {
         deps.log("recording a partly posted run failed", {
           runId,
           error: recordError instanceof Error ? recordError.message : String(recordError),

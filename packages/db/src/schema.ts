@@ -59,6 +59,9 @@ export const runStatus = pgEnum("run_status", [
   "succeeded",
   "failed",
   "superseded",
+  // Posted nothing: another run's review already covered its head. Its head counts as
+  // reviewed, but it never counts as a newer run that posted.
+  "covered",
 ]);
 export const reviewDepth = pgEnum("review_depth", ["full", "move", "mechanical", "skipped"]);
 export const learningKind = pgEnum("learning_kind", [

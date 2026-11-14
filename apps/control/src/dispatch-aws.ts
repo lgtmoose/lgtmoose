@@ -149,7 +149,8 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
             eq(pullRequests.repo, repo),
             eq(pullRequests.number, number),
             eq(reviewRuns.headSha, headSha),
-            eq(reviewRuns.status, "succeeded"),
+            // Covered: another run's review is on the head.
+            inArray(reviewRuns.status, ["succeeded", "covered"]),
           ),
         )
         .limit(1);

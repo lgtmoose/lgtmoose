@@ -179,8 +179,10 @@ type Db = PgDatabase<PgQueryResultHKT>;
 /** Whether a run of the PR created after `run` has succeeded: posted its review. */
 async function newerRunPosted(
   db: Pick<Db, "select">,
-  run: { pullRequestId: string; createdAt: Date },
+  run: { pullRequestId: string; createdAt: Date; headSha: string },
+  sameHead = false,
 ): Promise<boolean> {
+  // `succeeded` only: a covered run posted nothing, so it never stands in for the run that did.
   const [newer] = await db
     .select({ id: reviewRuns.id })
     .from(reviewRuns)
@@ -189,6 +191,7 @@ async function newerRunPosted(
         eq(reviewRuns.pullRequestId, run.pullRequestId),
         eq(reviewRuns.status, "succeeded"),
         gt(reviewRuns.createdAt, run.createdAt),
+        ...(sameHead ? [eq(reviewRuns.headSha, run.headSha)] : []),
       ),
     )
     .limit(1);
@@ -284,7 +287,11 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
-          .returning({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt });
+          .returning({
+            pullRequestId: reviewRuns.pullRequestId,
+            createdAt: reviewRuns.createdAt,
+            headSha: reviewRuns.headSha,
+          });
         if (run === undefined) throw new Error(`No review run ${runId}.`);
         // Two runs of a PR finishing at once take turns here, so the newer-run check below
         // sees the other's committed status (each statement reads afresh under READ COMMITTED).
@@ -311,20 +318,24 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       await db
         .update(reviewRuns)
         .set({
-          status: "succeeded",
+          status: "covered",
           filesDone: result.filesDone,
           costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
           finishedAt: now(),
         })
         .where(eq(reviewRuns.id, runId));
     },
-    async newerRunPosted(runId) {
+    async newerRunPosted(runId, options = {}) {
       const [run] = await db
-        .select({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt })
+        .select({
+          pullRequestId: reviewRuns.pullRequestId,
+          createdAt: reviewRuns.createdAt,
+          headSha: reviewRuns.headSha,
+        })
         .from(reviewRuns)
         .where(eq(reviewRuns.id, runId));
       if (run === undefined) throw new Error(`No review run ${runId}.`);
-      return newerRunPosted(db, run);
+      return newerRunPosted(db, run, options.sameHead);
     },
     async failRun(executionArn, error) {
       // A run that already finished (or was superseded) keeps its status.

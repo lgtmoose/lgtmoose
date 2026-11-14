@@ -28,7 +28,7 @@ async function run(
   number: number,
   executionArn: string,
   headSha: string,
-  status: "running" | "succeeded",
+  status: "running" | "succeeded" | "covered",
 ) {
   const [pull] = await db
     .insert(pullRequests)
@@ -76,5 +76,10 @@ describe("drizzleDispatchStore", () => {
     expect(await store.reviewed("Acme/Shop", 6, "h2")).toBe(true);
     expect(await store.reviewed("Acme/Shop", 5, "h1")).toBe(false);
     expect(await store.reviewed("Acme/Shop", 6, "other")).toBe(false);
+  });
+
+  it("counts a covered run's head as reviewed: another run's review is on it", async () => {
+    await run(20, "arn:c1", "h20", "covered");
+    expect(await store.reviewed("Acme/Shop", 20, "h20")).toBe(true);
   });
 });

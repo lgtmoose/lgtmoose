@@ -143,7 +143,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
     },
     async coverRun(runId) {
       const run = runs.get(runId);
-      if (run) Object.assign(run, { status: "succeeded", covered: true });
+      if (run) Object.assign(run, { status: "covered", covered: true });
     },
     async startRun(input) {
       const run: Run = {
@@ -576,7 +576,7 @@ describe("post", () => {
     // No review, check run, summary or label from a decision that was never posted.
     expect(calls).toEqual([]);
     // Succeeded, without touching the PR's record (that's the posting run's).
-    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "succeeded", covered: true });
+    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered", covered: true });
     expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
     // A retry of it carries on covered, still writing nothing.
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
@@ -717,6 +717,80 @@ describe("post", () => {
     });
     expect(reviews(calls)).toHaveLength(1);
     expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_A });
+  });
+
+  it("records a covered run as covered even when that fails the first time", async () => {
+    const { h, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    const coverRun = h.runs.coverRun.bind(h.runs);
+    let tries = 0;
+    h.runs.coverRun = async (runId, result) => {
+      tries += 1;
+      if (tries === 1) throw new Error("database blip");
+      return coverRun(runId, result);
+    };
+    await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("blip");
+    // Never recorded as posted over the PR's record.
+    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered" });
+    expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
+  });
+
+  it("takes its own run's review, found under the head's claim, as its own", async () => {
+    const { h, calls, taskStatus } = await ready();
+    // An earlier attempt of this run posted and died before saving; no takeover is involved
+    // (its claim was released), so it's the head's check that finds it.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toEqual([]);
+    expect(calls).toContain("completeCheckRun");
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
+  it("writes its check run unless a newer run at the same head has posted", async () => {
+    const { h, calls, taskStatus } = await ready();
+    // A newer run posted at another head: the summary and label are its, the check run ours.
+    h.runs.newerRunPosted = async (_runId, options) => options?.sameHead !== true;
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+  });
+
+  it("lets another run's off-ECS head claim expire before taking it over", async () => {
+    const { h, calls } = await ready();
+    const headClaim = headKeys("acme/shop", 7, headSha).reviewClaim;
+    const laptop = { attempt: { id: "mine", taskArn: undefined } };
+    // Fresh, from another run: even an off-ECS attempt waits.
+    await h.deps.store.createText(
+      headClaim,
+      JSON.stringify({ attempt: "other", runId: RUN_2, claimedAt: Date.now() }),
+    );
+    await expect(post(h.deps, RUN_ID, laptop)).rejects.toThrow("off ECS");
+    expect(reviews(calls)).toEqual([]);
+    // Expired: taken over.
+    const stale = Date.now() - OFF_ECS_CLAIM_TTL_MS - 1;
+    const read = await h.deps.store.getTagged(headClaim);
+    await h.deps.store.replaceText(
+      headClaim,
+      JSON.stringify({ attempt: "other", runId: RUN_2, claimedAt: stale }),
+      read?.etag ?? "",
+    );
+    expect(
+      await post(h.deps, RUN_ID, { attempt: { id: "mine-2", taskArn: undefined } }),
+    ).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
+  it("treats an off-ECS claim without a time as fresh", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop", runId: RUN_ID }));
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("off ECS");
+    expect(calls).toEqual([]);
   });
 
   it("leaves an off-ECS holder's claim alone when on ECS", async () => {

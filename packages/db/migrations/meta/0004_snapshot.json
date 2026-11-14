@@ -1,5 +1,5 @@
 {
-  "id": "682dd57a-f216-4b77-b2b6-2a5517fb5415",
+  "id": "bfd97a8d-7581-4d81-ab1d-123305eeb8de",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1229,7 +1229,7 @@
     "public.run_status": {
       "name": "run_status",
       "schema": "public",
-      "values": ["queued", "running", "succeeded", "failed", "superseded"]
+      "values": ["queued", "running", "succeeded", "failed", "superseded", "covered"]
     },
     "public.severity": {
       "name": "severity",

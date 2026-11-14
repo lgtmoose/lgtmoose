@@ -1,3 +1,4 @@
+ALTER TYPE "public"."run_status" ADD VALUE 'covered';--> statement-breakpoint
 CREATE TABLE "dispatched_executions" (
 	"execution_arn" text PRIMARY KEY NOT NULL,
 	"repo" text NOT NULL,

@@ -22,13 +22,13 @@ afterAll(async () => {
   await client.close();
 });
 
-function start(executionArn: string, number = 1) {
+function start(executionArn: string, number = 1, headSha = "a".repeat(40)) {
   return store.startRun({
     installationId: 5,
     repo: "acme/shop",
     number,
     author: "dev",
-    headSha: "a".repeat(40),
+    headSha,
     baseSha: "b".repeat(40),
     executionArn,
   });
@@ -117,15 +117,35 @@ describe("drizzleRunStore", () => {
     expect(await prRow(newer.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
   });
 
-  it("marks a covered run succeeded without touching its PR", async () => {
+  it("marks a covered run covered, without touching its PR", async () => {
     const run = await start("arn:exec:15", 15);
     await store.coverRun(run.runId, { filesDone: 2, costUsd: 0.5 });
-    expect(await runRow(run.runId)).toMatchObject({ status: "succeeded", filesDone: 2 });
+    expect(await runRow(run.runId)).toMatchObject({ status: "covered", filesDone: 2 });
     expect(await prRow(run.pullRequestId)).toMatchObject({
       lastReviewedSha: null,
       statusLabel: null,
       summaryCommentId: null,
     });
+  });
+
+  it("lets the covering run finish when a newer run was covered by its review", async () => {
+    // The older run posted its review, then failed on its check run; a newer run at the same
+    // head found the review and was covered. The older run's retry must still finish.
+    const older = await start("arn:exec:16", 16);
+    const newer = await start("arn:exec:17", 16);
+    await store.coverRun(newer.runId, { filesDone: 1, costUsd: undefined });
+    expect(await store.newerRunPosted(older.runId)).toBe(false);
+    await store.succeedRun(older.runId, posted("a".repeat(40), 8));
+    expect(await prRow(older.pullRequestId)).toMatchObject({ summaryCommentId: 8 });
+  });
+
+  it("asks about newer runs at the same head only, when told to", async () => {
+    const older = await start("arn:exec:18", 18, "a".repeat(40));
+    const newer = await start("arn:exec:19", 18, "c".repeat(40));
+    await store.succeedRun(newer.runId, posted("c".repeat(40), 9));
+    // The summary and label are the PR's: the newer run's. The check run is the head's.
+    expect(await store.newerRunPosted(older.runId)).toBe(true);
+    expect(await store.newerRunPosted(older.runId, { sameHead: true })).toBe(false);
   });
 
   it("supersedes only a queued or running run", async () => {
