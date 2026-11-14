@@ -72,7 +72,11 @@ const ruleSchema = z
     category: z.string().regex(/^[a-z][a-z0-9_]*$/, "categories are lowercase snake_case"),
     severity: z.enum(SEVERITIES),
     rule: visibleText.max(1000),
-    example: z.string().trim().min(1).max(1500),
+    // Blank lines around the example are dropped, but not its first line's indentation.
+    example: z
+      .string()
+      .transform((text) => text.replace(/^(?:[ \t]*(?:\r\n?|\n))+/, "").trimEnd())
+      .pipe(z.string().min(1).max(1500)),
   })
   .strict();
 
@@ -218,8 +222,9 @@ function parsePackFile(text: string, name: string, source: RulePackSource): Pars
     // Aliases are capped so a small file can't expand into a huge one.
     data = parseYaml(parts.front, { maxAliasCount: 20 });
   } catch (error) {
-    const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
-    throw new RulePackError(`Rule pack ${name}: its front matter isn't valid YAML (${reason}).`);
+    throw new RulePackError(
+      `Rule pack ${name}: its front matter isn't valid YAML (${reasonOf(error)}).`,
+    );
   }
   const parsed = packSchema.safeParse(data);
   if (!parsed.success) {
@@ -270,6 +275,7 @@ export function parseRulePack(text: string, name: string, source: RulePackSource
 function softRules(
   rules: readonly PackRule[],
   floors: ReadonlyMap<string, number>,
+  shown: readonly string[],
 ): { rule: PackRule; reason: string }[] {
   return rules.flatMap((rule) => {
     const floor = floors.get(rule.category);
@@ -277,7 +283,7 @@ function softRules(
       return [
         {
           rule,
-          reason: `rule ${rule.id} is in ${rule.category}, which isn't a category of the packs in use (${[...floors.keys()].sort().join(", ")})`,
+          reason: `rule ${rule.id} is in ${rule.category}, which isn't a category of the packs in use (such as ${shown.join(", ")})`,
         },
       ];
     }
@@ -451,7 +457,8 @@ async function readBatch(
 }
 
 /**
- * Reads the repo packs `wanted` names (paths, or `rules/*.md`) at `sha`, within the limits.
+ * Reads the repo packs `wanted` names (paths, or `rules/*.md`) at `sha`, within the limits, and
+ * hands each to `accept`, which returns whether the pack is used (and so takes a slot).
  * Only files named like a pack are fetched; the listing has no sizes, which would make a
  * partial clone fetch every blob in the folder. A file over the per-file limit is left out
  * whole and doesn't count towards the total.
@@ -463,14 +470,14 @@ async function readRepoPacks(
   problems: string[],
   warnings: string[],
   accept: (path: string, text: string) => boolean,
-): Promise<{ path: string; text: string }[]> {
+): Promise<void> {
   let listing: string;
   try {
     listing = await repo.git(["ls-tree", "-z", sha, "--", "rules/"]);
   } catch (error) {
     warnings.push(`Listing rules/ at the base commit failed: ${reasonOf(error)}`);
     problems.push("Repo rule packs couldn't be read from the base branch, so they were left out.");
-    return [];
+    return;
   }
   const all = wanted.has("rules/*.md");
   const entries: { path: string; blob: string }[] = [];
@@ -492,7 +499,7 @@ async function readRepoPacks(
   }
   entries.sort((a, b) => byCodeUnit(a.path, b.path));
   if (all && globbed === 0) {
-    problems.push("./rules/*.md matched no files: the base branch has no .md files in rules/.");
+    problems.push("./rules/*.md matched no rule packs: the base branch has none in rules/.");
   }
   for (const path of wanted) {
     if (path !== "rules/*.md" && !entries.some((entry) => entry.path === path)) {
@@ -501,20 +508,20 @@ async function readRepoPacks(
   }
 
   const { maxBytes, maxFiles, maxTotalBytes } = REPO_RULE_PACK_LIMITS;
-  const chosen: { path: string; text: string }[] = [];
+  let chosen = 0;
   let total = 0;
   let next = 0;
   // At most two reads: first as many files as can be used, so a folder of valid packs is one
   // read; then, if some were rejected, twice as many as the slots left (within the read cap).
   for (let round = 0; round < 2; round += 1) {
-    if (next >= entries.length || chosen.length >= maxFiles || next >= MAX_REPO_PACK_READS) break;
-    const size = round === 0 ? maxFiles : 2 * (maxFiles - chosen.length);
+    if (next >= entries.length || chosen >= maxFiles || next >= MAX_REPO_PACK_READS) break;
+    const size = round === 0 ? maxFiles : 2 * (maxFiles - chosen);
     const batch = entries.slice(next, Math.min(next + size, MAX_REPO_PACK_READS));
     next += batch.length;
     const blobs = await readBatch(repo, batch, warnings);
     for (const entry of batch) {
       const content = blobs.get(entry.blob);
-      if (chosen.length >= maxFiles) {
+      if (chosen >= maxFiles) {
         problems.push(
           `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`,
         );
@@ -532,7 +539,7 @@ async function readRepoPacks(
         // Only a pack that's used takes a slot, so broken files can't crowd out valid ones.
         const text = content.toString("utf8");
         if (accept(entry.path, text)) {
-          chosen.push({ path: entry.path, text });
+          chosen += 1;
           total += content.length;
         }
       }
@@ -540,12 +547,11 @@ async function readRepoPacks(
   }
   for (const entry of entries.slice(next)) {
     problems.push(
-      chosen.length >= maxFiles
+      chosen >= maxFiles
         ? `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`
         : `./${entry.path} was left out: only the first ${next} pack files in rules/ were read.`,
     );
   }
-  return chosen;
 }
 
 /**
@@ -613,6 +619,10 @@ export async function selectRulePacks(
       return { packs, problems, warnings };
     }
     const floors = severityFloors(packs);
+    // Categories named to the repo, leaving out those only private packs use.
+    const shown = [
+      ...severityFloors(packs.filter((loaded) => loaded.source === "builtin")).keys(),
+    ].sort();
     const accept = (path: string, text: string): boolean => {
       const name = `./${path}`;
       let parsed: ParsedPack;
@@ -623,7 +633,7 @@ export async function selectRulePacks(
         problems.push(...error.issues);
         return false;
       }
-      const soft = softRules(parsed.rules, floors);
+      const soft = softRules(parsed.rules, floors, shown);
       problems.push(...soft.map((entry) => `${name}: ${entry.reason}, so that rule was left out.`));
       const rules = parsed.rules.filter((rule) => !soft.some((entry) => entry.rule === rule));
       if (rules.length === 0) return false;

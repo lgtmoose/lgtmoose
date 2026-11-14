@@ -115,7 +115,7 @@ function input(overrides: Partial<SummaryInput> = {}): SummaryInput {
       ],
     },
     conventionFilesOmitted: ["docs/agents/extra.md"],
-    rulePackProblems: ['Unknown rule pack "typscript". Available rule packs: generic, security.'],
+    rulePackProblems: ['Unknown rule pack "typscript". The built-in packs are: generic, security.'],
     findingsOverLimit: 2,
     ...overrides,
   };
@@ -179,7 +179,7 @@ describe("renderSummary", () => {
     const text = renderSummary(full as SummaryInput);
     expect(text).not.toContain("Ticket coverage");
     expect(text).not.toContain("Convention files");
-    expect(text).not.toContain("Rule packs left out");
+    expect(text).not.toContain("Rule pack problems");
     expect(text).not.toContain("past the per-batch limit");
     expect(text).not.toContain("Walkthrough");
   });

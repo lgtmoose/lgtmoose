@@ -85,7 +85,7 @@ Return only a JSON object that matches this JSON Schema, with no other text:
 
 # Rule packs
 
-Review criteria. Each rule names its category, which is the rule_category to report, and its default severity. Use a different severity only when the severity definitions above clearly call for it.
+Review criteria. Each rule names its category, which is the rule_category of a finding under it, and its default severity, which such a finding starts from.
 
 ## Rule pack: generic
 

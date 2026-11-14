@@ -12,7 +12,7 @@ rulepacks: [typescript, react, ./rules/billing.md]
 
 `generic` and `security` are always on, whether or not the list names them. LGTMoose reads `.lgtmoose.yaml` from the PR's base branch, never from the PR itself, so a PR can't change the rules it's reviewed against.
 
-An entry that can't be used, such as an unknown id, a bad file or a file that's too big, is left out, and the review goes on without it. Each review's summary comment lists what was left out and why, under **Rule packs left out**, so the repo's owners can fix their config. It never names private packs, and problems with the deployment's own packs, such as a private pack that reuses a built-in id, go only to the logs. If `generic` or `security` itself can't be loaded, the review stops rather than run without them.
+An entry that can't be used, such as an unknown id, a bad file or a file that's too big, is left out, and the review goes on without it. Each review's summary comment lists what was left out and why, under **Rule pack problems**, so the repo's owners can fix their config. It never names private packs, and problems with the deployment's own packs, such as a private pack that reuses a built-in id, go only to the logs. If `generic` or `security` itself can't be loaded, the review stops rather than run without them.
 
 ## Built-in packs
 

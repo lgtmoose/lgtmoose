@@ -195,6 +195,19 @@ describe("parseRulePack", () => {
     expect(parsed.text).toContain("می\u200Cخواهم 👩\u200D💻");
   });
 
+  it("keeps an example's first-line indentation, and rejects a blank example", () => {
+    const indented = RULE.replace(
+      "example: |\n      broken();",
+      "example: |2\n        if (x) {\n          y();\n        }",
+    );
+    const parsed = parseRulePack(pack(`id: x\ntitle: X\nrules:\n${indented}`), "x", "builtin");
+    expect(parsed.rules[0]?.example).toBe("  if (x) {\n    y();\n  }");
+    const blank = RULE.replace("example: |\n      broken();", 'example: " \\n\\n "');
+    expect(() => parseRulePack(pack(`id: x\ntitle: X\nrules:\n${blank}`), "x", "builtin")).toThrow(
+      /example/,
+    );
+  });
+
   it("rejects a title or rule that is only invisible characters", () => {
     expect(() =>
       parseRulePack(pack(`id: x\ntitle: "\\u200B"\nrules:\n${RULE}`), "x", "builtin"),
@@ -564,6 +577,23 @@ describe("selectRulePacks", () => {
     ]);
   });
 
+  it("doesn't name categories only a private pack uses to the repo", async () => {
+    await writeFile(
+      new URL("hipaa.md", fixtures.private),
+      pack(`id: hipaa\ntitle: H\nrules:\n${RULE.replace("correctness", "hipaa_phi")}`),
+    );
+    const base = await commit({
+      "rules/x.md": repoPack("X", RULE.replace("correctness", "style")),
+    });
+    const selected = await selectRulePacks(["hipaa", "./rules/x.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(selected.problems).toEqual([expect.stringMatching(/a-rule is in style/)]);
+    expect(selected.problems.join("\n")).not.toContain("hipaa");
+  });
+
   it("says when ./rules/*.md matches nothing in the base branch", async () => {
     const base = await commit({ "rules/nested/a.md": repoPack("A"), "rules/readme.md": "x" });
     const selected = await selectRulePacks(["./rules/*.md"], {
@@ -572,7 +602,7 @@ describe("selectRulePacks", () => {
       dirs: fixtures,
     });
     expect(selected.problems).toEqual([
-      "./rules/*.md matched no files: the base branch has no .md files in rules/.",
+      "./rules/*.md matched no rule packs: the base branch has none in rules/.",
     ]);
   });
 
@@ -708,7 +738,7 @@ describe("selectRulePacks", () => {
         /soft-correctness is nit, but a repo rule in correctness can't be softer than should_fix/,
       ),
       expect.stringMatching(
-        /new-category is in style, which isn't a category of the packs in use \(authz, correctness, money, secrets, tenant_scoping\)/,
+        /new-category is in style, which isn't a category of the packs in use \(such as authz, correctness, money, secrets, tenant_scoping\)/,
       ),
     ]);
   });

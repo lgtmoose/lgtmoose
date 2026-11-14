@@ -279,7 +279,7 @@ function renderStatus(input: SummaryInput): string {
   const packProblems = input.rulePackProblems ?? [];
   if (packProblems.length > 0) {
     lines.push(
-      `- **Rule packs left out** (check \`rulepacks\` in \`.lgtmoose.yaml\`): ${count(packProblems.length, "problem")}`,
+      `- **Rule pack problems** (check \`rulepacks\` in \`.lgtmoose.yaml\` and the files in \`rules/\`): ${count(packProblems.length, "problem")}`,
       ...bullets(packProblems),
     );
   }
