@@ -36,6 +36,8 @@ const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
  * minutes), as Lambda wants for a queue source, so a slow batch isn't delivered twice.
  */
 export const DISPATCH_TIMEOUT = Duration.seconds(45);
+/** Dispatcher instances at once. Jobs are small; more PRs at once only wait a little. */
+export const DISPATCH_CONCURRENCY = 5;
 
 /** Where tasks may write: the root filesystem is read-only. */
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
@@ -269,6 +271,8 @@ export class WorkflowStack extends Stack {
         batchSize: 10,
         // A failed job and the ones after it are retried; the rest of the batch isn't.
         reportBatchItemFailures: true,
+        // Each instance holds a database connection; the lean database has few to spare.
+        maxConcurrency: DISPATCH_CONCURRENCY,
       }),
     );
     return fn;

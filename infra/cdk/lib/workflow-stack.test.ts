@@ -418,6 +418,7 @@ describe("dispatcher", () => {
       FunctionName: { Ref: id },
       BatchSize: 10,
       FunctionResponseTypes: ["ReportBatchItemFailures"],
+      ScalingConfig: { MaximumConcurrency: 5 },
     });
   });
 

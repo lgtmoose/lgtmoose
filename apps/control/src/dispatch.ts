@@ -163,7 +163,7 @@ async function review(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResul
   // A push for a head that already has an execution is a duplicate. So is a late redelivery
   // of an old push, and superseding then would stop the review of the PR's real head.
   if (job.kind === "pr_updated") return { action: "duplicate", name };
-  return retry(deps, job.headSha, job, input, name);
+  return retry(deps, { ...job, headSha: job.headSha }, input, name);
 }
 
 /**
@@ -174,8 +174,7 @@ async function review(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResul
  */
 async function retry(
   deps: DispatchDeps,
-  headSha: string,
-  job: ReviewJob,
+  job: ReviewJob & { headSha: string },
   input: WorkflowInput,
   name: string,
 ): Promise<DispatchResult> {
@@ -183,7 +182,7 @@ async function retry(
   if (status === undefined || status === "RUNNING" || status === "SUCCEEDED") {
     return { action: "duplicate", name };
   }
-  const retryName = executionName(job.repo, job.prNumber, headSha, job.deliveryId);
+  const retryName = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
   const { started, executionArn } = await deps.executions.start(retryName, input);
   return started ? { action: "retried", executionArn } : { action: "duplicate", name: retryName };
 }
