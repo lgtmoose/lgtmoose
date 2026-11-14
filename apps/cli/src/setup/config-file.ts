@@ -28,7 +28,7 @@ export function configFor(settings: ConfigSettings): DeployConfigInput {
 export function renderConfigFile(settings: ConfigSettings): string {
   const config = configFor(settings);
   parseDeployConfig(config);
-  return `// Written by \`lgtmoose setup\`. Edit freely: \`lgtmoose deploy\` validates it.
+  return `// Written by \`${CLI} setup\`. Edit freely: \`${CLI} deploy\` validates it.
 import { defineConfig } from "@lgtmoose/config";
 
 export default defineConfig({

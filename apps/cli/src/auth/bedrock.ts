@@ -16,8 +16,8 @@ export interface ModelAccess {
    * task role included.
    */
   usable: boolean;
-  /** Why it isn't usable. Empty when usable. */
-  problems: string[];
+  /** Why it isn't usable, as Bedrock says it. Empty when usable. */
+  problems: BedrockProblem[];
   /**
    * How it can be called: `ON_DEMAND` by its own id, `INFERENCE_PROFILE` through a
    * cross-region profile id such as `us.<id>`. Empty when Bedrock doesn't say.
@@ -31,6 +31,16 @@ export interface ModelAccess {
    * unusable. Undefined when the check couldn't run.
    */
   callerAuthorized?: boolean;
+}
+
+/**
+ * One reason a model can't be used, with the one thing that fixes it: `access` (model access
+ * or its agreement, in the Bedrock console), `region` (Bedrock doesn't offer it here) or
+ * `recheck` (Bedrock couldn't describe it).
+ */
+export interface BedrockProblem {
+  text: string;
+  fix: "access" | "region" | "recheck";
 }
 
 /** The Bedrock calls `auth bedrock` makes. Tests swap in a fake. */
@@ -144,19 +154,26 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
             );
           }
           const reason = awsReason(error);
-          results.push({ ...entry, usable: false, problems: [`couldn't check (${reason})`] });
+          results.push({
+            ...entry,
+            usable: false,
+            problems: [{ text: `couldn't check (${reason})`, fix: "recheck" }],
+          });
           continue;
         }
-        const problems: string[] = [];
+        const problems: BedrockProblem[] = [];
         if (availability.regionAvailability !== "AVAILABLE") {
-          problems.push("not offered in this region");
+          problems.push({ text: "not offered in this region", fix: "region" });
         }
         if (availability.entitlementAvailability !== "AVAILABLE") {
-          problems.push("model access not granted");
+          problems.push({ text: "model access not granted", fix: "access" });
         }
         const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
         if (agreement !== "AVAILABLE") {
-          problems.push(`agreement ${agreement.toLowerCase().replaceAll("_", " ")}`);
+          problems.push({
+            text: `agreement ${agreement.toLowerCase().replaceAll("_", " ")}`,
+            fix: "access",
+          });
         }
         results.push({
           ...entry,

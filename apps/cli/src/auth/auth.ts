@@ -243,7 +243,7 @@ function checkFlags(method: string, flags: Flags): void {
   const extra = flags.positionals.slice(method === "remove" ? 2 : 1);
   if (extra.length > 0) throw new UsageError(`Unexpected argument "${extra[0]}".`);
   if (method === "remove" && flags.positionals[1] === undefined) {
-    throw new UsageError("auth remove needs the provider id: lgtmoose auth remove <id>.");
+    throw new UsageError(`auth remove needs the provider id: ${CLI} auth remove <id>.`);
   }
   for (const id of [flags.id, method === "remove" ? flags.positionals[1] : undefined]) {
     if (id !== undefined && !PROVIDER_ID_PATTERN.test(id)) {
@@ -492,14 +492,18 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     .map((model) => modelLine(model, facts));
 
   const tierLines: string[] = [];
-  const causes = new Set<BlockCause>();
+  const problems: Problem[] = [];
   let anyChecked = false;
+  let anyBlocked = false;
   for (const { provider, tier, model } of tiers) {
     const verdict = tierVerdict(model, tier, facts);
     if (verdict.state !== "not checked") anyChecked = true;
-    if (verdict.cause !== undefined) causes.add(verdict.cause);
+    if (verdict.state === "blocked") {
+      anyBlocked = true;
+      problems.push(...verdict.problems);
+    }
     tierLines.push(
-      `  ${verdict.state.padEnd(11)}  ${provider.id} ${tier} (${model.configured}): ${verdict.detail}`,
+      `  ${verdict.state.padEnd(11)}  ${provider.id} ${tier} (${model.configured}): ${verdictDetail(verdict)}`,
     );
   }
 
@@ -510,24 +514,23 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
         '"claude-code", auth: "bedrock" } to providers to use it.',
     );
   }
-  const blocked = causes.size > 0;
-  if (blocked) {
-    const fixes = causeNotes(causes, region);
-    notes.push(
-      ...fixes,
-      `${fixes.length > 0 ? "Or set" : "Set"} that tier in the provider's models to an id listed as ok.`,
-    );
-  }
   // The tiers decide. With none to check, the best this can say is whether anything is usable.
-  const ok = !blocked && (anyChecked || callable.length > 0 || maybe.length > 0);
+  const nothingUsable = !anyChecked && callable.length === 0 && maybe.length === 0;
+  const ok = !anyBlocked && !nothingUsable;
+  if (nothingUsable) {
+    notes.push(
+      current.length === 0
+        ? `Bedrock offers no Anthropic models in ${region}.`
+        : "This account can't use any Anthropic model here.",
+    );
+    if (current.length === 0) problems.push({ text: "no models", fix: { kind: "region" } });
+    for (const model of current) problems.push(...reachProblems(model, facts));
+  }
   if (profiles === undefined) {
     notes.push(
       "Couldn't list inference profiles (this AWS identity lacks bedrock:ListInferenceProfiles), " +
         "so profile ids weren't checked. On-demand ids were.",
     );
-  }
-  if (!anyChecked && callable.length === 0 && maybe.length === 0) {
-    notes.unshift(...noModelNotes(current, facts));
   }
   if (models.some((model) => model.usable && model.callerAuthorized === false)) {
     notes.push(
@@ -537,8 +540,19 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   }
   notes.push("Bedrock needs no stored secret: sandbox tasks sign in with their IAM role.");
   const tierBlock = tierLines.length > 0 ? ["", "Configured tiers:", ...tierLines] : [];
+  // Each problem printed above has one fix; print each fix once.
+  const fixes = [...new Set(problems.map((problem) => fixText(problem.fix, region)))];
+  const fixBlock = fixes.length > 0 ? ["", "To fix:", ...fixes.map((fix) => `  - ${fix}`)] : [];
   return {
-    text: ["Anthropic models (ids to pin):", ...lines, ...tierBlock, "", ...notes, ""].join("\n"),
+    text: [
+      "Anthropic models (ids to pin):",
+      ...lines,
+      ...tierBlock,
+      ...fixBlock,
+      "",
+      ...notes,
+      "",
+    ].join("\n"),
     ok,
   };
 }
@@ -623,62 +637,89 @@ function reachOf(
 }
 
 /**
- * What would make a model that can't be used here usable: model access, when there's a way
- * to call it once access is granted (or that's unknown); otherwise only another region.
+ * One concrete reason a tier or model can't run here, as printed, and its one fix. The fix
+ * comes straight from the problem, never from guessing at the reason.
  */
-type BlockCause = "access" | "region" | "config";
+interface Problem {
+  text: string;
+  fix: Fix;
+}
 
-function blockCause(model: ModelAccess, facts: BedrockFacts): BlockCause {
+type Fix =
+  | { kind: "access" }
+  | { kind: "region" }
+  | { kind: "recheck" }
+  | { kind: "profiles" }
+  | { kind: "id"; tier: Tier };
+
+/** The sentence a fix prints. Equal sentences are printed once. */
+function fixText(fix: Fix, region: string): string {
+  switch (fix.kind) {
+    case "access":
+      return `Request model access (and accept its agreement) in the Bedrock console for ${region}.`;
+    case "region":
+      return "Pick another region, or a model that has an inference profile here.";
+    case "recheck":
+      return "Run this again; if a model still can't be checked, pin a different one.";
+    case "profiles":
+      return "Grant bedrock:ListInferenceProfiles to check inference profile ids.";
+    default:
+      return `Fix the id in models.${fix.tier}.`;
+  }
+}
+
+/** Bedrock's own problems with a model, as tier or list problems. */
+function modelProblems(model: ModelAccess): Problem[] {
+  return model.problems.map((problem) => ({ text: problem.text, fix: { kind: problem.fix } }));
+}
+
+const NO_ROUTE = "no way to call it here (no on-demand use, no inference profile in this region)";
+
+/** The problems that stop a model being called here at all, or none when it can be. */
+function reachProblems(model: ModelAccess, facts: BedrockFacts): Problem[] {
+  if (!model.usable) return modelProblems(model);
   const ids = facts.reach.get(model.modelId);
-  if (!model.usable && (ids === undefined || ids.length > 0)) return "access";
-  return "region";
-}
-
-/** The notes for what blocked tiers or models need, one per cause. */
-function causeNotes(causes: ReadonlySet<BlockCause>, region: string): string[] {
-  const notes: string[] = [];
-  if (causes.has("access")) {
-    notes.push(`Request model access in the Bedrock console (${region}), then run this again.`);
+  if (ids === undefined) {
+    return [
+      {
+        text: `callable only through an inference profile (${NEEDS_PROFILE_LIST})`,
+        fix: { kind: "profiles" },
+      },
+    ];
   }
-  if (causes.has("region")) {
-    notes.push(
-      "Access is granted, but this region has no on-demand or inference-profile way to call " +
-        "these models; pick another region.",
-    );
-  }
-  return notes;
-}
-
-/** Why no model can be used here, when none can. */
-function noModelNotes(current: readonly ModelAccess[], facts: BedrockFacts): string[] {
-  if (current.length === 0) {
-    return [`Bedrock offers no Anthropic models in ${facts.region}. Pick another region.`];
-  }
-  return [
-    "This account can't use any Anthropic model here.",
-    ...causeNotes(new Set(current.map((model) => blockCause(model, facts))), facts.region),
-  ];
+  return ids.length === 0 ? [{ text: NO_ROUTE, fix: { kind: "region" } }] : [];
 }
 
 /** One line of the model list: whether it's usable here, and the ids to pin if so. */
 function modelLine(model: ModelAccess, facts: BedrockFacts): string {
-  if (!model.usable) return `  blocked  ${model.modelId}: ${model.problems.join(", ")}`;
   const ids = facts.reach.get(model.modelId);
-  if (ids === undefined) {
+  if (model.usable && ids === undefined) {
     return `  unknown  ${model.modelId}: callable only through an inference profile (${NEEDS_PROFILE_LIST})`;
   }
-  if (ids.length === 0) {
-    return `  blocked  ${model.modelId}: no way to call it here (no on-demand use, no inference profile in this region)`;
+  const problems = reachProblems(model, facts);
+  if (problems.length > 0) {
+    return `  blocked  ${model.modelId}: ${problems.map((p) => p.text).join(", ")}`;
   }
-  return `  ok       ${ids.join(" or ")}`;
+  return `  ok       ${(ids ?? []).join(" or ")}`;
 }
 
-type TierState = "ok" | "blocked" | "not checked";
-interface Verdict {
-  state: TierState;
-  detail: string;
-  /** For a blocked tier: what it needs. */
-  cause?: BlockCause;
+type Verdict =
+  | { state: "ok"; detail: string }
+  | { state: "not checked"; detail: string }
+  /** A blocked tier always says what's wrong, which is also how its fixes are found. */
+  | { state: "blocked"; subject: string; problems: readonly [Problem, ...Problem[]] };
+
+function blocked(subject: string, problems: readonly Problem[]): Verdict {
+  const [first, ...rest] = problems;
+  if (first === undefined) throw new Error(`blocked without a problem: ${subject}`);
+  return { state: "blocked", subject, problems: [first, ...rest] };
+}
+
+/** What a verdict prints after the tier's name. */
+function verdictDetail(verdict: Verdict): string {
+  if (verdict.state !== "blocked") return verdict.detail;
+  const problems = verdict.problems.map((p) => p.text).join(", ");
+  return verdict.subject === "" ? problems : `${verdict.subject}: ${problems}`;
 }
 
 interface BedrockFacts {
@@ -696,40 +737,45 @@ function tierVerdict(model: ParsedModel, tier: Tier, facts: BedrockFacts): Verdi
     case "unchecked":
       return { state: "not checked", detail: model.why };
     case "invalid":
-      return { state: "blocked", detail: model.why, cause: "config" };
+      return blocked("", [{ text: model.why, fix: { kind: "id", tier } }]);
     case "alias":
       return familyVerdict(model.families, tier, facts);
     default:
-      return idVerdict(model.id, model.prefix, facts);
+      return idVerdict(model.id, model.prefix, tier, facts);
   }
 }
 
 /**
  * Aliases can't be checked from here: Claude Code picks the model at runtime, perhaps not one
  * this would pick. So the verdict is informational, except that a family with no callable
- * model at all is certain to fail.
+ * model at all is certain to fail; then each member's own problems say why.
  */
 function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFacts): Verdict {
   const hints: string[] = [];
   for (const family of families) {
     const pattern = new RegExp(`^anthropic\\.claude-(?:[\\d-]+-)?${family}(?:-|$)`);
+    const members = facts.models.filter((m) => !m.legacy && pattern.test(m.modelId));
     const ids: string[] = [];
     let unknown = 0;
-    for (const model of facts.models) {
-      if (model.legacy || !model.usable || !pattern.test(model.modelId)) continue;
+    for (const model of members) {
+      if (!model.usable) continue;
       const pins = facts.reach.get(model.modelId);
       if (pins === undefined) unknown += 1;
       else ids.push(...pins);
     }
     if (ids.length === 0 && unknown === 0) {
-      const members = facts.models.filter((m) => !m.legacy && pattern.test(m.modelId));
-      // Access helps if any of the family could be called once granted; else only a region.
-      const cause = members.some((m) => blockCause(m, facts) === "access") ? "access" : "region";
-      return {
-        state: "blocked",
-        detail: `no usable ${family} model in ${facts.region}`,
-        cause,
-      };
+      const subject = `no usable ${family} model in ${facts.region}`;
+      if (members.length === 0) {
+        return blocked(subject, [
+          { text: `Bedrock offers no ${family} model here`, fix: { kind: "region" } },
+        ]);
+      }
+      return blocked(
+        subject,
+        members.flatMap((model) =>
+          reachProblems(model, facts).map((p) => ({ ...p, text: `${model.modelId} ${p.text}` })),
+        ),
+      );
     }
     const more = unknown > 0 ? ` (and ${unknown} more: ${NEEDS_PROFILE_LIST})` : "";
     hints.push(`usable ${family} ids here: ${ids.join(", ") || "none listed"}${more}`);
@@ -743,36 +789,35 @@ function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFa
 }
 
 /** A concrete id passes only if this region can call it exactly as written. */
-function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts): Verdict {
+function idVerdict(
+  id: string,
+  prefix: string | undefined,
+  tier: Tier,
+  facts: BedrockFacts,
+): Verdict {
   const access = facts.models.find((candidate) => candidate.modelId === id);
   if (access === undefined) {
-    return { state: "blocked", detail: `${id} isn't offered in ${facts.region}`, cause: "region" };
+    return blocked(id, [{ text: `isn't offered in ${facts.region}`, fix: { kind: "region" } }]);
   }
-  if (!access.usable) {
-    return {
-      state: "blocked",
-      detail: `${id} is ${access.problems.join(", ")}`,
-      cause: blockCause(access, facts),
-    };
-  }
-  // Usable, but pinned in a way this region can't call: another id works, or only a region.
-  const pinCause: BlockCause =
-    (facts.reach.get(access.modelId)?.length ?? 1) > 0 ? "config" : "region";
+  if (!access.usable) return blocked(id, modelProblems(access));
   const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
-  const instead = () => {
-    const ids = facts.reach.get(access.modelId);
-    if (ids === undefined) return `use one of its inference profiles (${NEEDS_PROFILE_LIST})`;
-    return ids.length > 0
-      ? `use ${ids.join(" or ")}`
-      : `${facts.region} has no inference profile for it`;
+  const ids = facts.reach.get(access.modelId);
+  /** Pinned in a way this region can't call: name the ids that work, or say there are none. */
+  const wrongPin = (subject: string, text: string): Verdict => {
+    if (ids === undefined) {
+      return blocked(subject, [
+        { text, fix: { kind: "id", tier } },
+        { text: NEEDS_PROFILE_LIST, fix: { kind: "profiles" } },
+      ]);
+    }
+    if (ids.length === 0) return blocked(subject, [{ text: NO_ROUTE, fix: { kind: "region" } }]);
+    return blocked(subject, [
+      { text: `${text}; use ${ids.join(" or ")}`, fix: { kind: "id", tier } },
+    ]);
   };
   if (prefix === undefined) {
     if (!supports(access, "ON_DEMAND")) {
-      return {
-        state: "blocked",
-        detail: `${id} can only be called through an inference profile: ${instead()}`,
-        cause: pinCause,
-      };
+      return wrongPin(id, "can only be called through an inference profile");
     }
     return { state: "ok", detail: `${id}${legacy}` };
   }
@@ -781,11 +826,7 @@ function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts):
     return { state: "not checked", detail: `${profileId}${legacy}: ${NEEDS_PROFILE_LIST}` };
   }
   if (!facts.profiles.some((profile) => profile.id === profileId && profile.modelId === id)) {
-    return {
-      state: "blocked",
-      detail: `${profileId} isn't an inference profile ${facts.region} can call: ${instead()}`,
-      cause: pinCause,
-    };
+    return wrongPin(profileId, `isn't an inference profile ${facts.region} can call`);
   }
   return { state: "ok", detail: `${profileId}${legacy}` };
 }
