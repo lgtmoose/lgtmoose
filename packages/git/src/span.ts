@@ -11,13 +11,16 @@ export function fileLines(text: string): string[] {
 }
 
 /**
- * A finding's lines, to find them again where its commit is gone: the cited lines (start to
- * line), normalised, without blank lines, widened with neighbouring non-blank lines while
- * they're too short to say much (fewer than `MIN_TOKENS` tokens, such as a lone `}`), and which
- * of them is the finding's own line.
+ * A finding's lines, to find them again where its commit is gone: its own lines (start to
+ * line), normalised, without blank lines, with neighbouring non-blank lines around them while
+ * its own are too short to say much (fewer than `MIN_TOKENS` tokens, such as a lone `}`). The
+ * finding is found by its own lines; the neighbours only choose between several such places.
  */
 export interface LineSpan {
   lines: string[];
+  /** Indexes in `lines` of the finding's own first and last lines. */
+  from: number;
+  to: number;
   /** Index in `lines` of the finding's line. */
   at: number;
 }
@@ -27,7 +30,8 @@ const MIN_TOKENS = 4;
 const MAX_WIDEN = 2;
 const TOKEN = /[\p{L}\p{N}_$]+|[^\s\p{L}\p{N}_$]/gu;
 
-const tokens = (text: string) => text.match(TOKEN)?.length ?? 0;
+const tokens = (texts: readonly string[]) =>
+  texts.reduce((sum, text) => sum + (text.match(TOKEN)?.length ?? 0), 0);
 
 /**
  * The span of `line` (from `start`) in a file's `lines` (`[0]` is line 1). Undefined when the
@@ -40,8 +44,8 @@ export function lineSpan(
 ): LineSpan | undefined {
   const text = (n: number) => normaliseLine(lines[n - 1] ?? "");
   if (line < 1 || line > lines.length || text(line) === "") return undefined;
-  let from = Math.max(1, Math.min(start, line));
-  let to = Math.max(start, line);
+  const first = Math.max(1, Math.min(start, line));
+  const last = Math.max(start, line);
   const nonBlank = (a: number, b: number) => {
     const out: number[] = [];
     for (let n = a; n <= b; n++) if (text(n) !== "") out.push(n);
@@ -53,23 +57,32 @@ export function lineSpan(
     }
     return n;
   };
+  const own = nonBlank(first, last);
+  let from = first;
+  let to = last;
   for (
     let widen = 0;
-    widen < MAX_WIDEN &&
-    nonBlank(from, to).reduce((sum, n) => sum + tokens(text(n)), 0) < MIN_TOKENS;
+    widen < MAX_WIDEN && tokens(nonBlank(from, to).map(text)) < MIN_TOKENS;
     widen++
   ) {
     from = step(from, -1);
     to = step(to, 1);
   }
   const kept = nonBlank(from, to);
-  return { lines: kept.map(text), at: kept.indexOf(line) };
+  return {
+    lines: kept.map(text),
+    from: kept.indexOf(own[0] ?? line),
+    to: kept.indexOf(own.at(-1) ?? line),
+    at: kept.indexOf(line),
+  };
 }
 
 /**
- * Where `span` is in a file's `lines`: its lines as consecutive non-blank lines there, giving
- * the line its finding is on, of those `allowed` takes. The nearest to `near`; on a tie, the
- * earlier. Undefined: not there. Every place in the file is tried, however far.
+ * Where `span`'s finding is in a file's `lines`: a place where its own lines are consecutive
+ * non-blank lines, giving a line `allowed` takes. One such place: there. Several: those whose
+ * neighbours match too, the nearest to `near` (the earlier on a tie); if none's neighbours
+ * match, the nearest, unless its own lines are too short to tell places apart (a lone `}`),
+ * when it's not guessed. Undefined: not found. Every place in the file is tried, however far.
  */
 export function findSpan(
   lines: readonly string[],
@@ -85,21 +98,30 @@ export function findSpan(
     at.push(i + 1);
     texts.push(text);
   }
-  let best: number | undefined;
-  for (let i = 0; i + span.lines.length <= texts.length; i++) {
-    if (!span.lines.every((text, k) => texts[i + k] === text)) continue;
-    const line = at[i + span.at];
+  const own = span.lines.slice(span.from, span.to + 1);
+  const found: { line: number; whole: boolean }[] = [];
+  for (let i = 0; i + own.length <= texts.length; i++) {
+    if (!own.every((text, k) => texts[i + k] === text)) continue;
+    const line = at[i + span.at - span.from];
     if (line === undefined || !allowed(line)) continue;
-    const distance = Math.abs(line - near);
-    const bestDistance = best === undefined ? Infinity : Math.abs(best - near);
-    if (
-      distance < bestDistance ||
-      (distance === bestDistance && best !== undefined && line < best)
-    ) {
-      best = line;
-    }
+    const start = i - span.from;
+    const whole =
+      start >= 0 &&
+      start + span.lines.length <= texts.length &&
+      span.lines.every((text, k) => texts[start + k] === text);
+    found.push({ line, whole });
   }
-  return best;
+  if (found.length <= 1) return found[0]?.line;
+  const whole = found.filter((candidate) => candidate.whole);
+  if (whole.length === 0 && tokens(own) < MIN_TOKENS) return undefined;
+  const choices = whole.length > 0 ? whole : found;
+  return choices.reduce((best, candidate) => {
+    const distance = Math.abs(candidate.line - near);
+    const bestDistance = Math.abs(best.line - near);
+    return distance < bestDistance || (distance === bestDistance && candidate.line < best.line)
+      ? candidate
+      : best;
+  }).line;
 }
 
 /** A span as stored (`findings.line_text`). */
@@ -107,27 +129,24 @@ export function encodeSpan(span: LineSpan): string {
   return JSON.stringify(span);
 }
 
+const isIndex = (value: unknown, length: number): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value < length;
+
 /** A stored span, or undefined when it isn't one. */
 export function decodeSpan(text: string | undefined): LineSpan | undefined {
   if (text === undefined) return undefined;
   try {
     const value = JSON.parse(text) as unknown;
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "lines" in value &&
-      "at" in value &&
-      Array.isArray(value.lines) &&
-      value.lines.every((line) => typeof line === "string") &&
-      typeof value.at === "number" &&
-      Number.isInteger(value.at) &&
-      value.at >= 0 &&
-      value.at < value.lines.length
-    ) {
-      return { lines: value.lines as string[], at: value.at };
+    if (typeof value !== "object" || value === null) return undefined;
+    const { lines, from, to, at } = value as Record<string, unknown>;
+    if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string")) {
+      return undefined;
     }
+    const n = lines.length;
+    if (!isIndex(from, n) || !isIndex(to, n) || !isIndex(at, n)) return undefined;
+    if (from > at || at > to) return undefined;
+    return { lines: lines as string[], from, to, at };
   } catch {
-    // Not a span.
+    return undefined;
   }
-  return undefined;
 }

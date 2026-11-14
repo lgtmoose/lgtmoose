@@ -1508,12 +1508,9 @@ describe("later runs", { timeout: 30_000 }, () => {
 
   it("keeps an old-side finding whose commit is gone after a base edit next to its line", async () => {
     const h = harness();
-    // The line above the loop's end changes; the span the finding was recorded with (the loop's
-    // end, the return and the function's end) doesn't.
-    await droppedReturnThenForcePushed(
-      h,
-      redoneOnBase(TOTAL.replace("sum += items[i].price;", "sum += items[i].price; // add")),
-    );
+    // The line right above the return (the loop's end) changes: the return is still the only
+    // line the PR deletes that reads `return sum;`.
+    await droppedReturnThenForcePushed(h, redoneOnBase(TOTAL.replace("  }\n", "  } // loop\n")));
 
     const again = await review(h, 2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
