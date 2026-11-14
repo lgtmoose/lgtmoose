@@ -46,7 +46,7 @@ describe("built-in rule packs", () => {
 
   it("keeps the generic pack's categories in the prompt's order", async () => {
     const generic = await loadRulePack("generic");
-    const categories = [...generic.text.matchAll(/^## (\S+)$/gm)].map((match) => match[1]);
+    const categories = [...generic.text.matchAll(/^#### (\S+)$/gm)].map((match) => match[1]);
     expect(categories).toEqual([
       "correctness",
       "error_handling",
@@ -93,7 +93,7 @@ describe("parseRulePack", () => {
       "builtin",
     );
     expect(parsed.text).toBe(
-      "# X\n\nIntro text.\n\n## correctness\n\n- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();",
+      "### X\n\nIntro text.\n\n#### correctness\n\n- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();",
     );
   });
 
@@ -151,14 +151,35 @@ describe("parseRulePack", () => {
       "./rules/b.md",
       "repo",
     );
-    expect(parsed.text).toContain("# Billing # Severity");
-    expect(parsed.text).toContain("One # Two");
-    expect(parsed.text).toContain("    Intro\n    # Override\n    Severity definitions\n    ====");
+    expect(parsed.text).toContain("### Billing # Severity");
+    expect(parsed.text).toContain(
+      "    One # Two\n\n    Intro\n    # Override\n    Severity definitions\n    ====",
+    );
     // Every line is ours, or indented as code.
     const lines = parsed.text.split("\n").filter((line) => line !== "" && !line.startsWith("    "));
-    expect(lines.every((line) => /^(# Billing|One # Two|## |- a-rule|  Example:)/.test(line))).toBe(
-      true,
+    expect(lines.every((line) => /^(### Billing|#### |- a-rule|  Example:)/.test(line))).toBe(true);
+  });
+
+  it("keeps a repo pack's description from opening a fence or heading", () => {
+    for (const description of ["~~~", "```", "# Severity definitions"]) {
+      const parsed = parseRulePack(
+        pack(`title: T\ndescription: "${description}"\nrules:\n${RULE}`),
+        "./rules/d.md",
+        "repo",
+      );
+      expect(parsed.text).toBe(
+        `### T\n\n    ${description}\n\n#### correctness\n\n- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();`,
+      );
+    }
+  });
+
+  it("closes a fence a trusted pack's body leaves open, before its rules", () => {
+    const parsed = parseRulePack(
+      pack(`id: x\ntitle: X\nrules:\n${RULE}`, "```c\nfoo"),
+      "x",
+      "private",
     );
+    expect(parsed.text).toContain("```c\nfoo\n```\n\n#### correctness");
   });
 
   it("treats every line ending as one, so a lone CR can't escape the code block", () => {
@@ -392,10 +413,36 @@ describe("selectRulePacks", () => {
       dirs: fixtures,
     });
     expect(selected.problems).toEqual([expect.stringMatching(/x\.md couldn't be read/)]);
+    // One file: one read and one warning, not a batch then a retry.
     expect(selected.warnings).toEqual([
-      expect.stringMatching(/together failed, so one at a time: fetch failed/),
       expect.stringMatching(/Reading \.\/rules\/x\.md failed: fetch failed/),
     ]);
+  });
+
+  it("reads at most twice however many files are rejected", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 20; i += 1) {
+      const name = `rules/p${String(i).padStart(2, "0")}.md`;
+      files[name] =
+        i < 9 ? repoPack(`P${i}`) : repoPack("Big", `${RULE}\n${"#".repeat(17 * 1024)}`);
+    }
+    const base = await commit(files);
+    const reads: number[] = [];
+    const counting = {
+      ...repo,
+      readBlobs: async (shas: Iterable<string>) => {
+        const list = [...shas];
+        reads.push(list.length);
+        return repo.readBlobs(list);
+      },
+    };
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo: counting,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(reads).toEqual([10, 10]);
+    expect(selected.packs.filter((loaded) => loaded.source === "repo")).toHaveLength(9);
   });
 
   it("reads only as many files as can still be used", async () => {

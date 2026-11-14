@@ -96,32 +96,7 @@ Return only a JSON object that matches this JSON Schema, with no other text:
 ${OUTPUT_SCHEMA}
 \`\`\``;
 
-/** Moves markdown headings down two levels, so a pack's own headings nest under ours. */
-export function demoteHeadings(text: string): string {
-  // Fences as CommonMark reads them: up to three spaces of indent, and closed only by the same
-  // character at least as many times, so an indented or nested fence doesn't flip the state.
-  let fence: { char: string; length: number } | undefined;
-  return text
-    .split("\n")
-    .map((line) => {
-      const marker = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})(.*)$/.exec(line);
-      if (marker !== null) {
-        const run = marker[1] ?? "";
-        const char = run.charAt(0);
-        if (fence === undefined) {
-          fence = { char, length: run.length };
-          return line;
-        }
-        if (char === fence.char && run.length >= fence.length && (marker[2] ?? "").trim() === "") {
-          fence = undefined;
-          return line;
-        }
-      }
-      // ATX headings may be indented up to three spaces, with a space or tab after the hashes.
-      return fence === undefined ? line.replace(/^( {0,3})(#{1,4})(?=[ \t]|$)/, "$1##$2") : line;
-    })
-    .join("\n");
-}
+export { demoteHeadings } from "./markdown.js";
 
 const RULE_PACKS_INTRO =
   "Review criteria. Each rule names its category, which is the rule_category to report, and its default severity. Use a different severity only when the severity definitions above clearly call for it.";
@@ -133,16 +108,13 @@ export function renderRulePacks(packs: readonly RulePack[]): string {
   if (packs.length === 0) return "# Rule packs\n\nNo rule packs are selected.";
   const trusted = packs.filter((pack) => pack.source !== "repo");
   const repo = packs.filter((pack) => pack.source === "repo");
-  const sections = trusted.map(
-    (pack) => `## Rule pack: ${pack.id}\n\n${demoteHeadings(pack.text)}`,
-  );
+  // Packs render their own headings at the levels below these (see `renderPack`).
+  const sections = trusted.map((pack) => `## Rule pack: ${pack.id}\n\n${pack.text}`);
   if (repo.length > 0) {
     sections.push(
       "## Repository rule packs",
       REPO_PACKS_INTRO,
-      ...repo.map((pack) =>
-        wrapUntrusted("repo_rule_pack", demoteHeadings(pack.text), { path: pack.id }),
-      ),
+      ...repo.map((pack) => wrapUntrusted("repo_rule_pack", pack.text, { path: pack.id })),
     );
   }
   return ["# Rule packs", RULE_PACKS_INTRO, ...sections].join("\n\n");

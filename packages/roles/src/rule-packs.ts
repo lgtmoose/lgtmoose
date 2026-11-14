@@ -3,6 +3,7 @@ import { PROTECTED_CATEGORIES, SEVERITIES, severityRank } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { closeOpenFence, demoteHeadings } from "./markdown.js";
 
 /**
  * Rule packs are markdown files with YAML front matter: the pack's id, title and rules, each
@@ -120,10 +121,12 @@ function oneLine(text: string): string {
 }
 
 /**
- * Renders a pack for the prompt: rules grouped by category, in the order they first appear.
- * The title, description and rules are kept on one line, and examples are indented as code.
- * A repo pack's body is indented as code too: for a trusted pack it's guidance in markdown,
- * but repo text mustn't add any structure (headings of any kind, lists, quotes) of its own.
+ * Renders a pack for the prompt, at its final levels: the title under `### `, each category
+ * under `#### `, so the pack nests under the prompt's `## Rule pack` sections. Rules are grouped
+ * by category in the order they first appear, kept on one line, with examples indented as code.
+ * A trusted pack's body is markdown: its headings are demoted and a fence it leaves open is
+ * closed, so neither touches the headings that follow. Repo text adds no structure at all: its
+ * description and body are indented as code.
  */
 function renderPack(
   title: string,
@@ -140,18 +143,21 @@ function renderPack(
   }
   const sections = [...byCategory].map(([category, group]) =>
     [
-      `## ${category}`,
+      `#### ${category}`,
       ...group.map(
         (rule) =>
           `- ${rule.id} (default severity: ${rule.severity}): ${oneLine(rule.rule)}\n  Example:\n\n${indent(rule.example, "      ")}`,
       ),
     ].join("\n\n"),
   );
-  const intro = description === undefined ? undefined : oneLine(description);
+  const intro = description === undefined ? "" : oneLine(description);
+  const text = body.split(LINE_BREAK).join("\n");
   const guidance =
-    source === "repo" && body !== "" ? indent(body, "    ") : body.split(LINE_BREAK).join("\n");
-  return [`# ${oneLine(title)}`, intro, guidance, ...sections]
-    .filter((part): part is string => part !== undefined && part !== "")
+    source === "repo"
+      ? indent([intro, text].filter((part) => part !== "").join("\n\n"), "    ")
+      : [intro, closeOpenFence(demoteHeadings(text))].filter((part) => part !== "").join("\n\n");
+  return [`### ${oneLine(title)}`, guidance, ...sections]
+    .filter((part) => part !== "")
     .join("\n\n");
 }
 
@@ -389,6 +395,10 @@ async function readBatch(
   try {
     return await repo.readBlobs(batch.map((entry) => entry.blob));
   } catch (error) {
+    if (batch.length === 1) {
+      warnings.push(`Reading ./${batch[0]?.path ?? ""} failed: ${reasonOf(error)}`);
+      return new Map();
+    }
     warnings.push(`Reading repo rule packs together failed, so one at a time: ${reasonOf(error)}`);
   }
   const blobs = new Map<string, Buffer>();
@@ -444,16 +454,19 @@ async function readRepoPacks(
   let total = 0;
   let next = 0;
   while (next < entries.length && chosen.length < maxFiles && next < MAX_REPO_PACK_READS) {
-    // Only as many as can still be used, so a folder of valid packs is read in one batch.
-    const batch = entries.slice(
-      next,
-      Math.min(next + maxFiles - chosen.length, MAX_REPO_PACK_READS),
-    );
+    // First as many as can be used, so a folder of valid packs is one read; then, if some were
+    // left out, the rest up to the cap in one more. At most two reads, whatever is rejected.
+    const size = next === 0 ? maxFiles : MAX_REPO_PACK_READS - next;
+    const batch = entries.slice(next, Math.min(next + size, MAX_REPO_PACK_READS));
     next += batch.length;
     const blobs = await readBatch(repo, batch, warnings);
     for (const entry of batch) {
       const content = blobs.get(entry.blob);
-      if (content === undefined) {
+      if (chosen.length >= maxFiles) {
+        problems.push(
+          `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`,
+        );
+      } else if (content === undefined) {
         problems.push(`./${entry.path} couldn't be read, so it was left out.`);
       } else if (content.length > maxBytes) {
         problems.push(
