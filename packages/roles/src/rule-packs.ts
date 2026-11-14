@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { PROTECTED_CATEGORIES, SEVERITIES, severityRank } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
-import { parse as parseYaml } from "yaml";
+import { parseDocument } from "yaml";
 import { z } from "zod";
 import { byCodeUnit, REGULAR_FILE } from "./conventions.js";
 
@@ -212,15 +212,27 @@ interface ParsedPack {
   rules: PackRule[];
 }
 
-function parsePackFile(text: string, name: string, source: RulePackSource): ParsedPack {
+function parsePackFile(
+  text: string,
+  name: string,
+  source: RulePackSource,
+  warnings?: string[],
+): ParsedPack {
   const parts = splitFrontMatter(text);
   if (parts === undefined) {
     throw new RulePackError(`Rule pack ${name} has no front matter (a --- block at the top).`);
   }
   let data: unknown;
   try {
+    // Nothing is printed: errors are thrown and warnings go to the caller's log.
+    const doc = parseDocument(parts.front, { logLevel: "error" });
+    const [first] = doc.errors;
+    if (first !== undefined) throw first;
+    for (const warning of doc.warnings) {
+      warnings?.push(`Rule pack ${name}: ${reasonOf(warning)}`);
+    }
     // Aliases are capped so a small file can't expand into a huge one.
-    data = parseYaml(parts.front, { maxAliasCount: 20 });
+    data = doc.toJS({ maxAliasCount: 20 });
   } catch (error) {
     throw new RulePackError(
       `Rule pack ${name}: its front matter isn't valid YAML (${reasonOf(error)}).`,
@@ -263,8 +275,13 @@ function toPack(parsed: ParsedPack, id: string, source: RulePackSource): RulePac
  * its id; for built-in and private packs, the id its front matter must have. A repo pack's
  * rules are checked against the trusted packs by `selectRulePacks`, which has them.
  */
-export function parseRulePack(text: string, name: string, source: RulePackSource): RulePack {
-  return toPack(parsePackFile(text, name, source), name, source);
+export function parseRulePack(
+  text: string,
+  name: string,
+  source: RulePackSource,
+  warnings?: string[],
+): RulePack {
+  return toPack(parsePackFile(text, name, source, warnings), name, source);
 }
 
 /**
@@ -355,7 +372,7 @@ function available(index: PackIndex): string[] {
   return [...new Set([...index.builtin, ...index.private])].sort();
 }
 
-async function loadIndexed(id: string, index: PackIndex): Promise<RulePack> {
+async function loadIndexed(id: string, index: PackIndex, warnings?: string[]): Promise<RulePack> {
   // A built-in id wins over a private one.
   const source = (["builtin", "private"] as const).find(
     (where) => RULE_PACK_ID.test(id) && index[where].includes(id),
@@ -367,7 +384,7 @@ async function loadIndexed(id: string, index: PackIndex): Promise<RulePack> {
     } catch (error) {
       throw new RulePackError(`Rule pack ${id} couldn't be read: ${reasonOf(error)}`);
     }
-    return parseRulePack(text, id, source);
+    return parseRulePack(text, id, source, warnings);
   }
   // Only the built-in ids are listed: the deployment's private pack names stay private.
   throw new UnknownRulePackError(
@@ -598,7 +615,7 @@ export async function selectRulePacks(
   // Loaded together; problems are reported in the list's order, not the order loads finish.
   const loaded = await Promise.all(
     named.map((id) =>
-      loadIndexed(id, index).catch((error: unknown) => {
+      loadIndexed(id, index, warnings).catch((error: unknown) => {
         if (error instanceof RulePackError) return error;
         throw error;
       }),
@@ -625,35 +642,43 @@ export async function selectRulePacks(
       problems.push("Repo rule packs need the repository; they were left out.");
       return { packs, problems, warnings };
     }
-    const floors = severityFloors(packs);
-    const trustedIds = new Set(packs.flatMap((loaded) => loaded.rules.map((rule) => rule.id)));
-    // Categories named to the repo, leaving out those only private packs use.
-    const shown = [
-      ...severityFloors(packs.filter((loaded) => loaded.source === "builtin")).keys(),
-    ].sort();
+    // Floors come from the built-in packs in use, so a category only a private pack uses gets
+    // the same answer as one no pack uses, and the repo can't learn it exists.
+    const floors = severityFloors(packs.filter((loaded) => loaded.source === "builtin"));
+    const shown = [...floors.keys()].sort();
+    // Repo rule ids can't match any built-in rule (selected or not), a selected private rule,
+    // or a rule in another repo pack.
+    const unselected = await Promise.all(
+      index.builtin
+        .filter((id) => !packs.some((loaded) => loaded.id === id))
+        .map((id) => loadIndexed(id, index).catch(() => undefined)),
+    );
+    const takenIds = new Set(
+      [...packs, ...unselected.filter((loaded) => loaded !== undefined)].flatMap((loaded) =>
+        loaded.rules.map((rule) => rule.id),
+      ),
+    );
     const accept = (path: string, text: string): boolean => {
       const name = `./${path}`;
       let parsed: ParsedPack;
       try {
-        parsed = parsePackFile(text, name, "repo");
+        parsed = parsePackFile(text, name, "repo", warnings);
       } catch (error) {
         if (!(error instanceof RulePackError)) throw error;
         problems.push(...error.issues);
         return false;
       }
-      // A repo rule can't reuse a trusted rule's id, so it can't pose as a softer version of it.
+      // A repo rule can't reuse another rule's id, so it can't pose as a softer version of it.
       const soft = [
         ...parsed.rules
-          .filter((rule) => trustedIds.has(rule.id))
-          .map((rule) => ({
-            rule,
-            reason: `rule ${rule.id} has the id of a built-in or private rule`,
-          })),
+          .filter((rule) => takenIds.has(rule.id))
+          .map((rule) => ({ rule, reason: `rule ${rule.id} has the id of another pack's rule` })),
         ...softRules(parsed.rules, floors, shown),
       ];
       problems.push(...soft.map((entry) => `${name}: ${entry.reason}, so that rule was left out.`));
       const rules = parsed.rules.filter((rule) => !soft.some((entry) => entry.rule === rule));
       if (rules.length === 0) return false;
+      for (const rule of rules) takenIds.add(rule.id);
       packs.push(toPack({ ...parsed, rules }, name, "repo"));
       return true;
     };

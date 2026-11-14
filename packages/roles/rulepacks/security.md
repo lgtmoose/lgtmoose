@@ -54,9 +54,9 @@ rules:
   - id: sensitive-logging
     category: security
     severity: should_fix
-    rule: Personal or payment data written to logs or analytics, such as email addresses, card numbers or request bodies with credentials.
+    rule: Personal or payment data written to logs or analytics, such as email addresses, phone numbers, card numbers or whole request bodies. Credentials, passwords and tokens in logs are generic's leaked-secret instead (secrets, blocking).
     example: |
-      logger.info("signup", req.body); // body has the password
+      logger.info("checkout", { email: user.email, card: body.cardNumber });
   - id: unsafe-file-upload
     category: security
     severity: blocking
@@ -77,4 +77,4 @@ rules:
       router.post("/otp/verify", verifyOtp); // /login uses rateLimit()
 ---
 
-Use these together with the generic pack. Prefer the more specific rule when both fit.
+Use these together with the generic pack. Prefer the more specific rule when both fit, except that a credential, password or token in a log, error, URL or response is always leaked-secret (secrets, blocking).

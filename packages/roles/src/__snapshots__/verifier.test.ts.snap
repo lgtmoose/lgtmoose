@@ -214,7 +214,7 @@ For the wiring rules, read the files around the change to check that new code is
 
       const STRIPE_KEY = "sk_live_…";
 
-- leaked-secret (default severity: blocking): A secret written to logs, error messages, URLs or responses.
+- leaked-secret (default severity: blocking): A secret, such as a credential, password, API key or token, written to logs, error messages, URLs or responses, including inside a logged request body.
   Example:
 
       log.info("connecting", { url, password });

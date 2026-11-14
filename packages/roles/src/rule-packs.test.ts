@@ -351,7 +351,14 @@ describe("selectRulePacks", () => {
   }
 
   const REPO_RULE = RULE.replace("a-rule", "repo-rule");
-  const repoPack = (title: string, rule = REPO_RULE) => pack(`title: ${title}\nrules:\n${rule}`);
+  // By default each pack's rule id comes from its title, as repo rule ids must be unique.
+  const repoPack = (
+    title: string,
+    rule = REPO_RULE.replace(
+      "repo-rule",
+      `rule-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    ),
+  ) => pack(`title: ${title}\nrules:\n${rule}`);
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "lgtmoose-rule-packs-"));
@@ -646,8 +653,45 @@ describe("selectRulePacks", () => {
     const x = selected.packs.find((loaded) => loaded.id === "./rules/x.md");
     expect(x?.rules.map((rule) => rule.id)).toEqual(["other-rule"]);
     expect(selected.problems).toEqual([
-      "./rules/x.md: rule a-rule has the id of a built-in or private rule, so that rule was left out.",
+      "./rules/x.md: rule a-rule has the id of another pack's rule, so that rule was left out.",
     ]);
+  });
+
+  it("drops a repo rule reusing an unselected built-in rule's id, or another repo rule's", async () => {
+    await writeFile(
+      new URL("extra.md", fixtures.builtin),
+      pack(`id: extra\ntitle: Extra\nrules:\n${RULE.replace("a-rule", "extra-rule")}`),
+    );
+    const base = await commit({
+      "rules/a.md": repoPack("A", `${REPO_RULE}\n${RULE.replace("a-rule", "extra-rule")}`),
+      "rules/b.md": repoPack("B", `${REPO_RULE}\n${RULE.replace("a-rule", "b-rule")}`),
+    });
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    const repoRules = selected.packs
+      .filter((loaded) => loaded.source === "repo")
+      .map((loaded) => [loaded.id, loaded.rules.map((rule) => rule.id)]);
+    expect(repoRules).toEqual([
+      ["./rules/a.md", ["repo-rule"]],
+      ["./rules/b.md", ["b-rule"]],
+    ]);
+    expect(selected.problems).toEqual([
+      "./rules/a.md: rule extra-rule has the id of another pack's rule, so that rule was left out.",
+      "./rules/b.md: rule repo-rule has the id of another pack's rule, so that rule was left out.",
+    ]);
+  });
+
+  it("logs YAML warnings instead of printing them", async () => {
+    await writeFile(
+      new URL("tagged.md", fixtures.private),
+      pack(`id: tagged\ntitle: !custom Tagged\nrules:\n${RULE}`),
+    );
+    const selected = await selectRulePacks(["tagged"], { dirs: fixtures });
+    expect(selected.packs.at(-1)?.title).toBe("Tagged");
+    expect(selected.warnings).toEqual([expect.stringMatching(/Rule pack tagged: Unresolved tag/)]);
   });
 
   it("doesn't name categories only a private pack uses to the repo", async () => {
@@ -656,15 +700,23 @@ describe("selectRulePacks", () => {
       pack(`id: hipaa\ntitle: H\nrules:\n${RULE.replace("correctness", "hipaa_phi")}`),
     );
     const base = await commit({
-      "rules/x.md": repoPack("X", REPO_RULE.replace("correctness", "style")),
+      "rules/x.md": repoPack(
+        "X",
+        `${REPO_RULE.replace("correctness", "style")}\n${RULE.replace("a-rule", "phi-rule").replace("correctness", "hipaa_phi")}`,
+      ),
     });
     const selected = await selectRulePacks(["hipaa", "./rules/x.md"], {
       repo,
       baseSha: base,
       dirs: fixtures,
     });
-    expect(selected.problems).toEqual([expect.stringMatching(/repo-rule is in style/)]);
-    expect(selected.problems.join("\n")).not.toContain("hipaa");
+    // A category only the private pack uses gets the same answer as one no pack uses.
+    const reason = (id: string, category: string) =>
+      `./rules/x.md: rule ${id} is in ${category}, which isn't a category of the packs in use (such as authz, correctness, money, secrets, tenant_scoping), so that rule was left out.`;
+    expect(selected.problems).toEqual([
+      reason("repo-rule", "style"),
+      reason("phi-rule", "hipaa_phi"),
+    ]);
   });
 
   it("says when ./rules/*.md matches nothing in the base branch", async () => {
@@ -744,12 +796,13 @@ describe("selectRulePacks", () => {
   });
 
   it("doesn't count a skipped oversized pack against the total", async () => {
-    const filler = `${REPO_RULE}\n${"#".repeat(15 * 1024)}`;
+    const filler = (id: string) =>
+      `${REPO_RULE.replace("repo-rule", id)}\n${"#".repeat(15 * 1024)}`;
     const base = await commit({
       "rules/a-big.md": repoPack("Big", `${REPO_RULE}\n${"#".repeat(20 * 1024)}`),
-      "rules/b.md": repoPack("B", filler),
-      "rules/c.md": repoPack("C", filler),
-      "rules/d.md": repoPack("D", filler),
+      "rules/b.md": repoPack("B", filler("b-rule")),
+      "rules/c.md": repoPack("C", filler("c-rule")),
+      "rules/d.md": repoPack("D", filler("d-rule")),
     });
     const selected = await selectRulePacks(["./rules/*.md"], {
       repo,

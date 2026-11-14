@@ -132,7 +132,7 @@ rules:
   - id: leaked-secret
     category: secrets
     severity: blocking
-    rule: A secret written to logs, error messages, URLs or responses.
+    rule: A secret, such as a credential, password, API key or token, written to logs, error messages, URLs or responses, including inside a logged request body.
     example: |
       log.info("connecting", { url, password });
   - id: missing-test
