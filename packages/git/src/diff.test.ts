@@ -468,7 +468,7 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.kind).toBe("full");
     expect(diff.files.map((file) => file.path).toSorted()).toEqual(["a.ts", "b.ts"]);
     expect(diff.files[0]?.changedSinceLastReview).toBeUndefined();
-    expect(diff.fallbackReason).toContain("b.ts is reviewed in full");
+    expect(diff.fallbackReason).toContain("couldn't compare incrementally");
   });
 
   it("reviews a file renamed since its last review in full, with its old name", async () => {
@@ -583,7 +583,7 @@ describe("reviewDiff: incremental review", () => {
     expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
   });
 
-  it("leaves rewordings out of what a renamed file stopped adding", async () => {
+  it("lists a line reworded under a rename as one it no longer adds", async () => {
     const base = await setUp({ "a.ts": lines(10) });
     await fixture.write({
       "a.ts": lines(10).replace("line 5\n", "line 5\nlog('old wording here');\n"),
@@ -600,7 +600,8 @@ describe("reviewDiff: incremental review", () => {
       reviewedAt: new Map([["a.ts", reviewed]]),
     });
     expect(diff.files[0]?.path).toBe("b.ts");
-    expect(diff.files[0]?.removedSinceLastReview ?? []).toEqual([]);
+    // The old wording is listed; the new one shows as an added line.
+    expect(diff.files[0]?.removedSinceLastReview).toEqual(["log('old wording here');"]);
   });
 
   it("compares a reverted rename's dropped lines with the planned file at its name", async () => {
@@ -625,7 +626,7 @@ describe("reviewDiff: incremental review", () => {
     expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
   });
 
-  it("gives no fallback reason when a gone commit leaves only a move", async () => {
+  it("says the review couldn't compare when every earlier commit is gone, for a move too", async () => {
     const base = await setUp({ "a.ts": lines(10) });
     await fixture.move("a.ts", "b.ts");
     const head = await fixture.commit("move only");
@@ -636,8 +637,8 @@ describe("reviewDiff: incremental review", () => {
     });
     expect(diff.files).toMatchObject([{ path: "b.ts", moved: true }]);
     expect(diff.kind).toBe("full");
-    // Nothing is read in full because of the gone commit: no reason to give.
-    expect(diff.fallbackReason).toBeUndefined();
+    // No earlier review could be compared: the reason says so, without claiming a full read.
+    expect(diff.fallbackReason).toContain("couldn't compare incrementally");
   });
 
   it("never takes a dropped guard for a rewording of a line elsewhere", async () => {
@@ -697,6 +698,48 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.unchanged).toEqual(["debug.ts"]);
   });
 
+  it("lists a dropped camelCase guard though a similar line stays", async () => {
+    const base = await setUp({ "a.ts": lines(10) });
+    await fixture.write({
+      "a.ts": lines(10).replace(
+        "line 5\n",
+        "line 5\nif (!user.hasPermission('billing')) return;\n",
+      ),
+    });
+    const reviewed = await fixture.commit("add a guard");
+    await fixture.write({
+      "a.ts": lines(10).replace("line 5\n", "line 5\nif (!user) return;\n"),
+    });
+    const head = await fixture.commit("weaken it");
+
+    const [file] = (
+      await reviewDiff(await clone(head, [base, reviewed]), {
+        baseSha: base,
+        reviewedAt: new Map([["a.ts", reviewed]]),
+      })
+    ).files;
+    expect(file?.removedSinceLastReview).toEqual(["if (!user.hasPermission('billing')) return;"]);
+  });
+
+  it("counts copies: a line added twice and now once is listed once", async () => {
+    const base = await setUp({ "a.ts": lines(20) });
+    const twice = lines(20)
+      .replace("line 5\n", "line 5\nassert(ok);\n")
+      .replace("line 15\n", "line 15\nassert(ok);\n");
+    await fixture.write({ "a.ts": twice });
+    const reviewed = await fixture.commit("two asserts");
+    await fixture.write({ "a.ts": lines(20).replace("line 5\n", "line 5\nassert(ok);\n") });
+    const head = await fixture.commit("drop one");
+
+    const [file] = (
+      await reviewDiff(await clone(head, [base, reviewed]), {
+        baseSha: base,
+        reviewedAt: new Map([["a.ts", reviewed]]),
+      })
+    ).files;
+    expect(file?.removedSinceLastReview).toEqual(["assert(ok);"]);
+  });
+
   it("has nothing to review when a pure rename is undone", async () => {
     const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
     await fixture.move("a.ts", "b.ts");
@@ -747,7 +790,7 @@ describe("reviewDiff: incremental review", () => {
       ["new.ts", ["old.ts"]],
     ]);
     expect(diff.unchanged).toEqual([]);
-    expect(diff.fallbackReason).toContain("new.ts is reviewed in full");
+    expect(diff.fallbackReason).toContain("couldn't compare incrementally");
   });
 
   it("lists a reverted rename once, and never both plans and covers a path", async () => {
@@ -785,8 +828,8 @@ describe("reviewDiff: incremental review", () => {
     });
     // Re-recorded at this head, so the gone commit isn't asked for again.
     expect(diff.unchanged).toEqual(["b.ts"]);
-    // Nothing is read in full because of it: no reason to give.
-    expect(diff.fallbackReason).toBeUndefined();
+    // No earlier review could be compared: the reason says so.
+    expect(diff.fallbackReason).toContain("couldn't compare incrementally");
     expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
   });
 
@@ -805,7 +848,7 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.files.flatMap((f) => f.removedSinceLastReview ?? [])).toEqual([]);
   });
 
-  it("leaves blank lines, braces and rewordings out of the removed lines", async () => {
+  it("leaves blank lines and braces out of the removed lines, but not rewordings", async () => {
     const base = await setUp({ "a.ts": lines(30) });
     const draft = lines(30)
       .replace("line 5\n", "line 5\nfunction f() {\n  log('old wording');\n\n}\n")
@@ -825,7 +868,11 @@ describe("reviewDiff: incremental review", () => {
         reviewedAt: await reviewedAllAt(reviewed),
       })
     ).files;
-    expect(file?.removedSinceLastReview).toEqual(["assertOwner(user);"]);
+    // Blank lines and braces say nothing; a reworded line is listed with the dropped one.
+    expect(file?.removedSinceLastReview?.toSorted()).toEqual([
+      "  log('old wording');",
+      "assertOwner(user);",
+    ]);
   });
 
   it("still reports a check swapped for an unrelated line in the same spot", async () => {

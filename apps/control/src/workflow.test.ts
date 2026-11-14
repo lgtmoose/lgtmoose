@@ -496,7 +496,8 @@ describe("post", () => {
   });
 });
 
-describe("later runs", () => {
+// Each test makes several real clones and pushes: give them room on a loaded machine.
+describe("later runs", { timeout: 30_000 }, () => {
   const OTHER = "export const rate = 2;\n";
   const exec = (n: number) => `${EXECUTION}-${n}`;
 
