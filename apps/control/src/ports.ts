@@ -48,6 +48,12 @@ export interface RunStore {
   failRun(executionArn: string, error: string): Promise<void>;
   /** Marks a run superseded: a newer head was pushed before it started. */
   supersedeRun(runId: string): Promise<void>;
+  /**
+   * Marks the queued or running runs of these executions superseded: they were stopped from
+   * outside (StopExecution), which skips the workflow's fail step. Finished runs keep their
+   * status, and an execution without a run yet is skipped.
+   */
+  supersedeExecutions(executionArns: readonly string[]): Promise<void>;
 }
 
 /** Step Functions task tokens, for the prepare step (`waitForTaskToken`). */

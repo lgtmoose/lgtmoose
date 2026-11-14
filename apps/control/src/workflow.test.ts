@@ -154,6 +154,13 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
       const run = runs.get(runId);
       if (run) run.status = "superseded";
     },
+    async supersedeExecutions(executionArns) {
+      for (const run of runs.values()) {
+        if (executionArns.includes(run.executionArn) && run.status === "running") {
+          run.status = "superseded";
+        }
+      }
+    },
   };
 }
 
@@ -347,6 +354,32 @@ describe("runCommand", () => {
       { runId: RUN_ID, superseded: false, batches: [{ index: 0 }] },
     ]);
     expect(h.tokens.failed).toEqual([]);
+  });
+
+  it("marks the run superseded when its execution was stopped during prepare", async () => {
+    const h = harness();
+    const dead = Object.assign(new Error("Task Timed Out"), { name: "TaskTimedOut" });
+    h.deps.tokens.succeed = async () => {
+      throw dead;
+    };
+    await runCommand(
+      h.deps,
+      { command: "prepare", executionArn: EXECUTION, job: JSON.stringify(JOB), taskToken: "t" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+
+    // Any other error is the task's to fail with.
+    h.deps.tokens.succeed = async () => {
+      throw new Error("throttled");
+    };
+    await expect(
+      runCommand(
+        h.deps,
+        { command: "prepare", executionArn: EXECUTION, job: JSON.stringify(JOB), taskToken: "t" },
+        { ...SETTINGS, shadow: true },
+      ),
+    ).rejects.toThrow("throttled");
   });
 
   it("fails prepare's task token instead of throwing", async () => {

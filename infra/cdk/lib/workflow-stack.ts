@@ -1,5 +1,6 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CfnOutput, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import type { ISecurityGroup, IVpc, SubnetSelection } from "aws-cdk-lib/aws-ec2";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import {
@@ -15,15 +16,26 @@ import {
   type ContainerDefinition,
 } from "aws-cdk-lib/aws-ecs";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
+import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
 import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
+import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
 import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
+
+/**
+ * The dispatcher's limit per batch. It's well under the job queue's visibility timeout (five
+ * minutes), as Lambda wants for a queue source, so a slow batch isn't delivered twice.
+ */
+export const DISPATCH_TIMEOUT = Duration.seconds(45);
 
 /** Where tasks may write: the root filesystem is read-only. */
 const WRITABLE_MOUNTS = { work: "/work", tmp: "/tmp" } as const;
@@ -77,11 +89,14 @@ export interface WorkflowStackProps extends StackProps {
   githubAppSecret: ISecret;
   /** Provider id → its credential secret, for providers that have one (not Bedrock). */
   providerSecrets: ReadonlyMap<string, ISecret>;
+  /** The gateway's FIFO job queue, which the dispatcher consumes. */
+  jobQueue: IQueue;
 }
 
 /**
- * The review workflow: an ECS cluster, the control task, one sandbox task per model provider, and
- * the Step Functions state machine that runs them (`ReviewWorkflow`).
+ * The review workflow: an ECS cluster, the control task, one sandbox task per model provider,
+ * the Step Functions state machine that runs them (`ReviewWorkflow`), and the dispatcher Lambda
+ * that starts and supersedes its executions from the job queue.
  *
  * - The control task holds the GitHub App credentials and the database, and never runs a model.
  * - A sandbox task holds one provider's credential and no GitHub token. Its role has no S3
@@ -101,6 +116,7 @@ export class WorkflowStack extends Stack {
   /** Provider id → its sandbox task definition. */
   readonly sandboxTaskDefinitions: ReadonlyMap<string, FargateTaskDefinition>;
   readonly reviewWorkflow: ReviewWorkflow;
+  readonly dispatchFunction: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -186,6 +202,8 @@ export class WorkflowStack extends Stack {
       maxConcurrency: props.maxConcurrency,
     });
 
+    this.dispatchFunction = this.dispatcher(props, retention);
+
     const subnetIds = (selection: SubnetSelection) =>
       Fn.join(",", props.vpc.selectSubnets(selection).subnetIds);
     const out = STACK_OUTPUTS.workflow;
@@ -211,6 +229,49 @@ export class WorkflowStack extends Stack {
         ),
       ),
     });
+  }
+
+  /**
+   * The dispatcher: jobs from the queue become executions (`dispatch` in @lgtmoose/control). It
+   * runs in the app subnets with the control security group to mark stopped runs in the
+   * database; it holds no GitHub or model credential. A job that keeps failing goes to the
+   * queue's dead-letter queue, whose alarm is in the API stack.
+   */
+  private dispatcher(props: WorkflowStackProps, retention: RetentionDays): NodejsFunction {
+    const stateMachine = this.reviewWorkflow.stateMachine;
+    const fn = lgtmooseFunction(this, "DispatchFunction", {
+      entry: DISPATCH_HANDLER,
+      description: "Starts and supersedes review workflow executions from the job queue.",
+      memorySize: 256,
+      timeout: DISPATCH_TIMEOUT,
+      vpc: props.vpc,
+      vpcSubnets: props.controlSubnets,
+      securityGroups: [props.controlSecurityGroup],
+      environment: {
+        STATE_MACHINE_ARN: stateMachine.stateMachineArn,
+        DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
+        DATABASE_NAME: props.databaseName,
+        // Lets Node verify the RDS server certificate.
+        NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
+      },
+      bundling: { externalModules: ["pg-native"] },
+      logGroup: new LogGroup(this, "DispatchLogs", {
+        retention,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    props.databaseSecret.grantRead(fn);
+    stateMachine.grantStartExecution(fn);
+    stateMachine.grant(fn, "states:ListExecutions");
+    stateMachine.grantExecution(fn, "states:StopExecution");
+    fn.addEventSource(
+      new SqsEventSource(props.jobQueue, {
+        batchSize: 10,
+        // A failed job and the ones after it are retried; the rest of the batch isn't.
+        reportBatchItemFailures: true,
+      }),
+    );
+    return fn;
   }
 
   private taskDefinition(

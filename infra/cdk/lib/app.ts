@@ -94,6 +94,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     databaseName: DATABASE_NAME,
     githubAppSecret: data.githubAppSecret,
     providerSecrets: data.providerSecrets,
+    jobQueue: api.jobQueue,
   });
   workflow.addDependency(data);
   // Sandbox tasks can only reach model APIs once the proxy runs.

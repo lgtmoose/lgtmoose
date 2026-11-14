@@ -22,6 +22,8 @@ import {
   StateMachine,
   Succeed,
   Timeout,
+  Wait,
+  WaitTime,
   type IChainable,
 } from "aws-cdk-lib/aws-stepfunctions";
 import {
@@ -76,8 +78,11 @@ export interface ReviewWorkflowProps {
 }
 
 /**
- * The review workflow, one execution per review job (the execution input is the `ReviewJob`):
+ * The review workflow, one execution per review job. The dispatcher starts it with the
+ * `ReviewJob` and `debounceSeconds` as input (`WorkflowInput` in @lgtmoose/control):
  *
+ * 0. Debounce: wait `debounceSeconds` (a minute for a push, none for an opened PR). A newer push
+ *    in that time stops the execution here, before anything is cloned.
  * 1. Prepare (control task, waits for its task token): records the run, clones and plans the
  *    PR, uploads the checkout and each batch's input, and returns the batches.
  * 2. Superseded? A newer push has its own execution: stop here.
@@ -297,14 +302,21 @@ export class ReviewWorkflow extends Construct {
     /** M4: cross-file and verify go here, between the batches and post. */
     const afterBatches: IChainable = post;
 
-    const definition = prepare.next(
-      new Choice(this, "Superseded?")
-        .when(
-          Condition.booleanEquals("$.prepared.superseded", true),
-          new Succeed(this, "Superseded", { comment: "A newer push has its own review." }),
-        )
-        .otherwise(batches.next(afterBatches)),
-    );
+    const debounce = new Wait(this, "Debounce", {
+      comment: "A newer push in the meantime stops this execution before it clones.",
+      time: WaitTime.secondsPath("$.debounceSeconds"),
+    });
+
+    const definition = debounce
+      .next(prepare)
+      .next(
+        new Choice(this, "Superseded?")
+          .when(
+            Condition.booleanEquals("$.prepared.superseded", true),
+            new Succeed(this, "Superseded", { comment: "A newer push has its own review." }),
+          )
+          .otherwise(batches.next(afterBatches)),
+      );
 
     const logs = new LogGroup(this, "Logs", {
       retention: props.retention,

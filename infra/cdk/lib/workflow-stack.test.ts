@@ -178,6 +178,7 @@ interface State {
   ResultPath?: string | null;
   MaxConcurrency?: number;
   ItemsPath?: string;
+  SecondsPath?: string;
   Parameters?: Record<string, unknown>;
   Retry?: { ErrorEquals: string[]; MaxAttempts?: number; BackoffRate?: number }[];
   Catch?: { ErrorEquals: string[]; Next: string }[];
@@ -221,9 +222,14 @@ function overrides(state: State | undefined): Record<string, unknown> {
 }
 
 describe("review state machine", () => {
-  it("prepares, maps the batches, then posts", () => {
+  it("debounces, prepares, maps the batches, then posts", () => {
     const { StartAt, States } = definition();
-    expect(StartAt).toBe("Prepare");
+    expect(StartAt).toBe("Debounce");
+    expect(States.Debounce).toMatchObject({
+      Type: "Wait",
+      SecondsPath: "$.debounceSeconds",
+      Next: "Prepare",
+    });
     expect(States.Prepare?.Resource).toContain("ecs:runTask.waitForTaskToken");
     expect(States.Prepare?.Next).toBe("Superseded?");
     expect(States["Superseded?"]).toMatchObject({
@@ -392,5 +398,52 @@ describe("review state machine", () => {
       LGTMOOSE_SHADOW: "true",
       LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
     });
+  });
+});
+
+describe("dispatcher", () => {
+  function dispatcher() {
+    const entry = Object.entries(resources).find(
+      ([, r]) =>
+        r.Type === "AWS::Lambda::Function" &&
+        JSON.stringify(r.Properties.Environment).includes("STATE_MACHINE_ARN"),
+    );
+    if (entry === undefined) throw new Error("no dispatcher function");
+    return entry;
+  }
+
+  it("consumes the job queue in batches with partial failures", () => {
+    const [id] = dispatcher();
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      FunctionName: { Ref: id },
+      BatchSize: 10,
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+    });
+  });
+
+  it("runs in the VPC with the control security group, inside the queue's visibility", () => {
+    const [, fn] = dispatcher();
+    expect(fn.Properties.VpcConfig).toBeDefined();
+    expect(fn.Properties.Timeout).toBeLessThanOrEqual(50);
+  });
+
+  it("may start, list and stop review executions and read only the database secret", () => {
+    const [, fn] = dispatcher();
+    const granted = statements(getAttId(fn.Properties.Role));
+    expect(actions(granted)).toEqual(
+      expect.arrayContaining([
+        "states:StartExecution",
+        "states:ListExecutions",
+        "states:StopExecution",
+        "secretsmanager:GetSecretValue",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+      ]),
+    );
+    const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(secrets).toHaveLength(1);
+    expect(actions(granted).some((a) => a.startsWith("s3:"))).toBe(false);
+    const stop = granted.find((s) => actions([s]).includes("states:StopExecution"));
+    expect(JSON.stringify(stop?.Resource)).toContain(":execution:");
   });
 });
