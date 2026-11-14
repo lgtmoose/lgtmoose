@@ -102,6 +102,11 @@ export interface ReviewReport {
   kind: "full" | "incremental";
   /** This run's new findings (`inline` and `body`), each with its fingerprint, to record. */
   posted: { finding: Finding; fingerprint: string }[];
+  /**
+   * Fingerprints of earlier open findings on files this run read again that weren't raised
+   * again: the reviewer looked and didn't find them, so they're resolved.
+   */
+  resolved: string[];
   /** File versions this run reviewed, to record so a later run can skip them. */
   reviewedFiles: ReviewedFile[];
 }
@@ -578,12 +583,18 @@ export async function finishReview(
   const body: Finding[] = [];
   const misplaced: Finding[] = [];
   let overLimit = 0;
+  // Files whose findings weren't all kept: not recorded as reviewed, so they're read again
+  // next time rather than the cut findings being lost.
+  const unsettled = new Set<string>();
   const place = (findings: readonly Finding[], batch: Batch) => {
     const placed = placeFindings(findings, batch);
     inline.push(...placed.inline);
     body.push(...placed.outsideDiff);
     misplaced.push(...placed.dropped);
     overLimit += placed.overLimit;
+    // Past the per-batch limit, the dropped ones could be on any of its files.
+    if (placed.overLimit > 0) for (const planned of batch.files) unsettled.add(planned.file.path);
+    for (const finding of placed.dropped) unsettled.add(finding.path);
   };
   // Carried findings are placed on the PR's diff now, which may differ from the earlier run's.
   const done = new Set(prepared.done.map((entry) => entry.path));
@@ -639,8 +650,22 @@ export async function finishReview(
     }),
   );
   const deduped = dedupeFindings(candidates, known);
-  // Findings an earlier run recorded and that are still open count once, as the earlier ones.
-  const earlier = options.earlier ?? [];
+  // Findings earlier runs recorded that are still open. On a file read again this run (in a
+  // batch that kept all its findings), one stands only if it was raised again: the same
+  // fingerprint, or a finding on the same line. Otherwise the reviewer looked and didn't find
+  // it: it's resolved. On files not read again, they stand as they are.
+  const reread = rereadFiles(prepared, batches, unsettled);
+  const raisedPrints = new Set(candidates.map(({ parts }) => fingerprint(parts)));
+  const raisedLines = new Set(
+    [...inline, ...body].map((finding) => `${finding.path}\0${finding.side}\0${finding.line}`),
+  );
+  const stillRaised = (entry: EarlierFinding) =>
+    !reread.has(entry.finding.path) ||
+    raisedPrints.has(entry.fingerprint) ||
+    raisedLines.has(`${entry.finding.path}\0${entry.finding.side}\0${entry.finding.line}`);
+  const earlier = (options.earlier ?? []).filter(stillRaised);
+  const resolved = (options.earlier ?? []).filter((entry) => !stillRaised(entry));
+  // The ones still open count once, as the earlier ones.
   const earlierPrints = new Set(earlier.map((entry) => entry.fingerprint));
   const repeated = deduped.kept.filter((entry) => earlierPrints.has(entry.fingerprint));
   const posted = deduped.kept.filter((entry) => !earlierPrints.has(entry.fingerprint));
@@ -713,15 +738,46 @@ export async function finishReview(
     summary,
     kind: prepared.kind,
     posted,
-    reviewedFiles: reviewedFiles(prepared, batches),
+    resolved: resolved.map((entry) => entry.fingerprint),
+    reviewedFiles: reviewedFiles(prepared, batches, unsettled),
   };
+}
+
+/**
+ * Files this run read again: in a batch that produced a result and kept all its findings, read
+ * at more than move depth, and not done already (done files weren't in the prompt).
+ */
+function rereadFiles(
+  prepared: PreparedReview,
+  batches: readonly BatchReport[],
+  unsettled: ReadonlySet<string>,
+): Set<string> {
+  const finished = new Set(
+    batches
+      .filter((batch) => batch.error === undefined && batch.done !== true && batch.skipped !== true)
+      .map((batch) => batch.index),
+  );
+  const done = new Set(prepared.done.map((entry) => entry.path));
+  return new Set(
+    prepared.plan.batches.flatMap((batch) =>
+      finished.has(batch.index)
+        ? batch.files.flatMap(({ file, depth }) =>
+            depth === "move" || done.has(file.path) || unsettled.has(file.path) ? [] : [file.path],
+          )
+        : [],
+    ),
+  );
 }
 
 /**
  * The file versions this run reviewed, to record: the files of batches that produced a result,
  * were done already, or only moved files. Deleted files have no blob at head and aren't listed.
  */
-function reviewedFiles(prepared: PreparedReview, batches: readonly BatchReport[]): ReviewedFile[] {
+function reviewedFiles(
+  prepared: PreparedReview,
+  batches: readonly BatchReport[],
+  unsettled: ReadonlySet<string>,
+): ReviewedFile[] {
   const finished = new Set(
     batches.filter((batch) => batch.error === undefined).map((batch) => batch.index),
   );
@@ -729,7 +785,12 @@ function reviewedFiles(prepared: PreparedReview, batches: readonly BatchReport[]
   const doneDepth = new Map(prepared.done.map((entry) => [entry.path, entry.depth]));
   // Files whose PR change hasn't moved since they were reviewed are covered at this head too,
   // whatever happened to the batches.
-  return [...prepared.unchanged, ...reviewedBatchFiles(prepared, finished, doneDepth)];
+  return [
+    ...prepared.unchanged,
+    ...reviewedBatchFiles(prepared, finished, doneDepth).filter(
+      (file) => !unsettled.has(file.path),
+    ),
+  ];
 }
 
 function reviewedBatchFiles(

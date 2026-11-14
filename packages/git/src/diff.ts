@@ -442,23 +442,26 @@ function withRemoved(file: FileDiff, removed: readonly string[]): FileDiff {
 const BASELINES_AT_ONCE = 4;
 
 /**
- * What the PR's change to a file is, for telling whether it's the one reviewed: its added and
- * deleted lines in order, with whitespace normalised, plus the blobs when there are no lines to
- * compare (binary files, submodules, pure moves). Base-branch changes elsewhere in the file
- * don't change it; a line the PR now adds or deletes, or a base line it deletes that changed,
- * does.
+ * What the PR's change to a file is, for telling whether it's the one reviewed: its hunks,
+ * each with its added, deleted and context lines, exact text, in order, plus the blobs when
+ * there are no lines to compare (binary files, submodules, pure moves). Only absolute line
+ * numbers are left out, since a base merge shifts them. Anything else counts, however small: a
+ * re-indented line (it can change what Python or YAML means), a line moved to another hunk, a
+ * change in the context around the PR's lines. Then the file is reviewed again.
  */
 function prChange(file: FileDiff | undefined): string {
   if (file === undefined) return "";
-  const lines = file.hunks.flatMap((hunk) =>
-    hunk.lines.flatMap((line) =>
-      line.kind === "context" ? [] : [`${line.kind === "add" ? "+" : "-"}${normalised(line.text)}`],
-    ),
+  const mark = { add: "+", del: "-", context: " " } as const;
+  const hunks = file.hunks.map((hunk) =>
+    hunk.lines.map((line) => `${mark[line.kind]}${line.text}`).join("\n"),
   );
-  const blobs = lines.length === 0 || file.binary || file.submodule;
-  return [file.status, ...(blobs ? [file.oldBlob ?? "", file.newBlob ?? ""] : []), ...lines].join(
-    "\n",
-  );
+  const blobs = hunks.length === 0 || file.binary || file.submodule;
+  return JSON.stringify([
+    file.status,
+    file.oldPath ?? "",
+    ...(blobs ? [file.oldBlob ?? "", file.newBlob ?? ""] : []),
+    hunks,
+  ]);
 }
 
 /** Copies of each line the PR deletes from the base, by normalised text. */

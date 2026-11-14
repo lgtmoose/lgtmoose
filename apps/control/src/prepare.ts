@@ -164,7 +164,17 @@ async function resumableBatches(deps: ControlDeps, earlierId: string): Promise<R
   const text = await deps.store.getText(runKeys(earlierId).prepared);
   // A run stopped before its prepare step finished has nothing to pick up.
   if (text === undefined) return [];
-  const { review } = readManifest(text);
+  let review: PreparedReview;
+  try {
+    ({ review } = readManifest(text));
+  } catch (error) {
+    // One unreadable earlier manifest mustn't stop every later run: its work is reviewed again.
+    deps.log("skipped an unreadable earlier manifest", {
+      runId: earlierId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
   const byPath = new Map(review.files.map((file) => [file.path, file]));
   const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
   const alreadyDone = new Set(review.done.map((entry) => entry.path));

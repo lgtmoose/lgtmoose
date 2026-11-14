@@ -425,6 +425,30 @@ describe("prepareReview and finishReview with earlier runs", () => {
     }
   });
 
+  it("doesn't record files whose findings were cut, so they're reviewed again", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    // 60 findings: 10 past the per-batch limit, which could be on any of the batch's files.
+    const many = Array.from({ length: 60 }, (_, i) => finding({ title: `Problem ${i}` }));
+    const cut = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: many, transcriptKeys: [] }],
+      headSha,
+    );
+    expect(cut.overLimit).toBe(10);
+    expect(cut.reviewedFiles).toEqual([]);
+
+    // Within the limit, every file is recorded.
+    const kept = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: [finding()], transcriptKeys: [] }],
+      headSha,
+    );
+    expect(kept.reviewedFiles.map((file) => file.path).toSorted()).toEqual(ALL.toSorted());
+  });
+
   it("places each resumed batch's findings under its own per-batch limit", async () => {
     const { repo, blobs, baseBlobs, prepare } = await setUp();
     const total = {
@@ -663,10 +687,54 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(again.dropped).toEqual([{ finding: finding(), reason: "duplicate" }]);
     expect(again.decision.counts.blocking).toBe(1);
 
+    expect(again.resolved).toEqual([]);
+  });
+
+  it("resolves an earlier finding when its file is read again and it isn't raised again", async () => {
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
+    const prepared = await prepare({});
+    const outcome = { index: 0, findings: [finding()], transcriptKeys: [] };
+    const [posted] = (await finishReview(repo, prepared, [outcome], headSha)).posted;
+    if (posted === undefined) throw new Error("expected a posted finding");
+
+    // Read again, not raised again: the reviewer looked and didn't find it.
     const clean = await finishReview(repo, prepared, [{ ...outcome, findings: [] }], headSha, {
       earlier: [posted],
     });
-    expect(clean.decision.event).toBe("REQUEST_CHANGES");
-    expect(clean.summary).toContain("Loop skips the last item");
+    expect(clean.resolved).toEqual([posted.fingerprint]);
+    expect(clean.decision.event).toBe("APPROVE");
+
+    // Raised again on the same line in other words: it stands.
+    const reworded = finding({ title: "Off by one in the loop bound" });
+    const again = await finishReview(
+      repo,
+      prepared,
+      [{ ...outcome, findings: [reworded] }],
+      headSha,
+      {
+        earlier: [posted],
+      },
+    );
+    expect(again.resolved).toEqual([]);
+    expect(again.decision.event).toBe("REQUEST_CHANGES");
+
+    // Not read again (already done at this version): it stands as it was.
+    const done = await prepare({
+      reviewed: [
+        {
+          path: "src/total.ts",
+          blobSha: blobs.get("src/total.ts") ?? "",
+          baseBlobSha: baseBlobs.get("src/total.ts"),
+          depth: FULL,
+          reviewedAt: GONE,
+        },
+      ],
+    });
+    const untouched = await finishReview(repo, done, [{ ...outcome, findings: [] }], headSha, {
+      earlier: [posted],
+    });
+    expect(untouched.resolved).toEqual([]);
+    expect(untouched.decision.event).toBe("REQUEST_CHANGES");
+    expect(untouched.summary).toContain("Loop skips the last item");
   });
 });

@@ -407,14 +407,15 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
+    markFixed: (ids, sha) => moveStatus(ids, "open", "fixed", "fixed", sha),
   };
 
   /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
   async function moveStatus(
     ids: readonly string[],
     from: "open" | "outdated",
-    to: "open" | "outdated",
-    event: "outdated" | "raised",
+    to: "open" | "outdated" | "fixed",
+    event: "outdated" | "raised" | "fixed",
     sha: string,
   ): Promise<void> {
     if (ids.length === 0) return;

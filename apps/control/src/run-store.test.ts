@@ -272,5 +272,14 @@ describe("drizzleFindingStore", () => {
       "raised",
       "raised",
     ]);
+
+    // Fixed when read again and not raised again; raising it later reopens it.
+    await findingStore.markFixed([first?.id ?? ""], sha("6"));
+    expect(await open()).toEqual([]);
+    expect(await findingStore.trackedFindings(run.pullRequestId)).toEqual([]);
+    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("7"), [
+      { finding: finding("First"), fingerprint: "fp1:a" },
+    ]);
+    expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("7") }]);
   });
 });

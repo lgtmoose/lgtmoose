@@ -233,7 +233,8 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-type StoredFinding = FindingRecord;
+/** A stored finding: tracked while open or outdated, and kept once fixed. */
+type StoredFinding = Omit<FindingRecord, "status"> & { status: FindingRecord["status"] | "fixed" };
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
 function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
@@ -241,7 +242,9 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
   return {
     rows,
     async trackedFindings() {
-      return rows.map((row) => ({ ...row }));
+      return rows.flatMap((row) =>
+        row.status === "fixed" ? [] : [{ ...row, status: row.status }],
+      );
     },
     async saveFindings(_pr, _run, headSha, posted) {
       for (const { finding, fingerprint } of posted) {
@@ -267,6 +270,10 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     async markOutdated(ids) {
       for (const row of rows)
         if (ids.includes(row.id) && row.status === "open") row.status = "outdated";
+    },
+    async markFixed(ids) {
+      for (const row of rows)
+        if (ids.includes(row.id) && row.status === "open") row.status = "fixed";
     },
     async reopen(ids) {
       for (const row of rows)
@@ -577,7 +584,8 @@ describe("later runs", { timeout: 30_000 }, () => {
       "touch other line",
     );
     // Line 3 (the loop) is untouched: still open.
-    expect((await review(h, 2)).posted).toMatchObject({
+    // Read again: the reviewer raises it again, so it stands.
+    expect((await review(h, 2, [finding()])).posted).toMatchObject({
       event: "REQUEST_CHANGES",
       reviewed: false,
     });
@@ -591,6 +599,23 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
     expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
     expect(reviews(h)).toBe(2);
+  });
+
+  it("resolves a finding the reviewer doesn't raise again when it reads the file again", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    // Another line of the file changes, so it's read again; the loop line is untouched.
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 0;"),
+      },
+      "touch another line",
+    );
+
+    const { posted } = await review(h, 2);
+
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
   });
 
   it("reopens a finding raised again where its line moved to", async () => {
@@ -641,6 +666,20 @@ describe("later runs", { timeout: 30_000 }, () => {
         .toSorted(),
     ).toEqual(["src/other.ts", "src/total.ts"]);
     expect(old).not.toBe(headSha);
+  });
+
+  it("skips an unreadable earlier manifest instead of failing the run", async () => {
+    const h = harness();
+    await addOther();
+    const stopped = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    await h.deps.runs.supersedeRun(stopped.runId);
+    h.objects.set(runKeys(stopped.runId).prepared, JSON.stringify({ version: 9 }));
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "newer push");
+
+    const { prepared } = await review(h, 2);
+
+    expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
+    expect(h.logs).toContain("skipped an unreadable earlier manifest");
   });
 
   it("picks up a stopped run's finished batch: skips its unchanged files and posts its findings", async () => {
@@ -811,7 +850,8 @@ describe("later runs", { timeout: 30_000 }, () => {
       "fix",
     );
 
-    const { posted } = await review(h, 2);
+    // The reviewer raises the should-fix one again; the loop finding is gone with its line.
+    const { posted } = await review(h, 2, [shouldFix]);
 
     // Same "changes" label, but REQUEST_CHANGES became COMMENT: the old review must not stand.
     expect(posted).toMatchObject({ event: "COMMENT", findings: 0, reviewed: true });
@@ -842,9 +882,10 @@ describe("later runs", { timeout: 30_000 }, () => {
     );
     await review(h, 3);
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
-    // Deleted again: it reopens.
+
     headSha = await commit({ "src/total.ts": without }, "drop the return again");
-    await review(h, 4);
+    // Deleted again: it reopens, and the reviewer, reading the file again, raises it again.
+    await review(h, 4, [left]);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
@@ -958,7 +999,8 @@ describe("later runs", { timeout: 30_000 }, () => {
     await git(work, "push", "--quiet", "--force", "--all", "origin");
     headSha = await git(work, "rev-parse", "HEAD");
 
-    await review(h, 2);
+    // If the reviewer reads the file again, it raises the finding again where the line is now.
+    await review(h, 2, [{ ...left, line: 8 }]);
 
     // Still deleted, two lines further down the base.
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);

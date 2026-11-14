@@ -73,6 +73,11 @@ export interface FindingStore {
   markOutdated(ids: readonly string[], sha: string): Promise<void>;
   /** Reopens outdated findings at `sha`: the lines they're on exist again. */
   reopen(ids: readonly string[], sha: string): Promise<void>;
+  /**
+   * Marks open findings fixed at `sha`: their file was reviewed again and they weren't raised
+   * again. Raising one later reopens it (see `saveFindings`).
+   */
+  markFixed(ids: readonly string[], sha: string): Promise<void>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

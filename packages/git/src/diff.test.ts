@@ -805,6 +805,39 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.fallbackReason).toContain("couldn't compare");
   });
 
+  it("reviews a re-indented line again: in Python that changes what it means", async () => {
+    const code = (body: string) => `def handler(user):\n    if user.ok:\n${body}    return 1\n`;
+    const base = await setUp({ "app.py": code("") });
+    await fixture.write({ "app.py": code("        audit(user)\n") });
+    const reviewed = await fixture.commit("audit inside the if");
+    // Now runs for everyone: only the indentation changed.
+    await fixture.write({ "app.py": code("    audit(user)\n") });
+    const head = await fixture.commit("dedent it");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["app.py", reviewed]]),
+    });
+    expect(diff.files.map((file) => file.path)).toEqual(["app.py"]);
+    expect(diff.unchanged).toEqual([]);
+  });
+
+  it("reviews a call moved to another function again", async () => {
+    const code = (a: string, b: string) =>
+      `function open() {\n${a}  return read();\n}\n\n${lines(8)}\nfunction close() {\n${b}  return done();\n}\n`;
+    const base = await setUp({ "a.ts": code("", "") });
+    await fixture.write({ "a.ts": code("  auth(user);\n", "") });
+    const reviewed = await fixture.commit("auth in open");
+    await fixture.write({ "a.ts": code("", "  auth(user);\n") });
+    const head = await fixture.commit("move it to close");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([["a.ts", reviewed]]),
+    });
+    expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
+  });
+
   it("has nothing to review when a pure rename is undone", async () => {
     const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
     await fixture.move("a.ts", "b.ts");

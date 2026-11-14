@@ -336,6 +336,12 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   // Outdated first: a finding raised again at its new place (same fingerprint) is reopened.
   await deps.findings.markOutdated(outdated, pr.headSha);
   await deps.findings.reopen(reopened, pr.headSha);
+  // Read again this run and not raised again: resolved.
+  const resolved = new Set(report.resolved);
+  await deps.findings.markFixed(
+    records.filter((record) => resolved.has(record.fingerprint)).map((record) => record.id),
+    pr.headSha,
+  );
   await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
   await deps.runs.recordFiles(runId, report.reviewedFiles);
   // A failed batch's files have no record at this head, so the next run reviews them however
@@ -355,6 +361,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     reviewed: !quiet,
     outdated: outdated.length,
     reopened: reopened.length,
+    resolved: report.resolved.length,
   });
   return {
     runId,
