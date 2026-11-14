@@ -10,14 +10,21 @@ import {
   type DeployConfig,
   type Harness,
   type ProviderConfig,
+  type Tier,
 } from "@lgtmoose/config";
 import { loadDeployConfig } from "../paths.js";
 import { isPromptCancel } from "../setup/prompter.js";
 import type { SetupFiles } from "../setup/setup.js";
-import { CONTEXT_VARIANT, type BedrockAccess, type ModelAccess } from "./bedrock.js";
+import {
+  CONTEXT_VARIANT,
+  type BedrockAccess,
+  type InferenceProfile,
+  type ModelAccess,
+} from "./bedrock.js";
 import { codexLogin, LoginInterrupted } from "./codex-login.js";
 import { RECOVERY_DAYS, type CredentialStore } from "./credential-store.js";
 import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
+import { errorMessage } from "../errors.js";
 
 /** The prompts auth asks. Matches @inquirer/prompts, so tests can script the answers. */
 export interface AuthPrompter {
@@ -72,7 +79,8 @@ Methods:
   claude                    Run \`claude setup-token\`, then paste the token it prints
   codex                     Run \`codex login\` (ChatGPT sign-in) and upload its auth.json
   cursor                    Paste a Cursor user or service-account API key
-  bedrock                   Check this account can call Anthropic models on Bedrock. Stores nothing
+  bedrock                   Check the Bedrock models each tier pins can be called here. Aliases such
+                            as sonnet are only hinted at; pin model ids to check them. Stores nothing
   api-key --provider <p>    Paste an API key: anthropic or openai
   list                      Show every provider credential, and which providers lack one
   remove <id>               Delete provider <id>'s credential (recoverable for 7 days)
@@ -194,7 +202,7 @@ function parseFlags(argv: readonly string[]): Flags {
       positionals,
     };
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    throw new UsageError(errorMessage(error));
   }
 }
 
@@ -462,14 +470,16 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   const legacyToCheck = new Set(
     tiers.flatMap(({ model }) => (model.kind === "id" ? [model.id] : [])),
   );
-  const models = await deps.bedrock(region).anthropicModels({ legacyToCheck });
+  const bedrock = deps.bedrock(region);
+  const models = await bedrock.anthropicModels({ legacyToCheck });
+  const profiles = await bedrock.inferenceProfiles();
   const current = models.filter((model) => !model.legacy);
   const usable = current.filter((model) => model.usable);
   const lines = current
     .toSorted((a, b) => a.modelId.localeCompare(b.modelId))
     .map((model) =>
       model.usable
-        ? `  ok       ${pinnableId(model, region)}`
+        ? `  ok       ${pinText(model, profiles)}`
         : `  blocked  ${model.modelId}: ${model.problems.join(", ")}`,
     );
 
@@ -477,7 +487,7 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   let blocked = false;
   let anyChecked = false;
   for (const { provider, tier, model } of tiers) {
-    const verdict = tierVerdict(model, models, region);
+    const verdict = tierVerdict(model, tier, { models, profiles, region });
     if (verdict.state !== "not checked") anyChecked = true;
     if (verdict.state === "blocked") blocked = true;
     tierLines.push(
@@ -521,9 +531,6 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     ok,
   };
 }
-
-/** Cross-region inference profile prefixes Bedrock uses. */
-const PROFILE_PREFIXES = new Set(["us", "us-gov", "eu", "apac", "jp", "au", "ca", "global"]);
 
 /**
  * The families Claude Code's aliases follow. Claude Code (or an ANTHROPIC_DEFAULT_*_MODEL
@@ -576,28 +583,22 @@ function parseModel(configured: string): ParsedModel {
   return { configured, kind: "id", id: id.replace(CONTEXT_VARIANT, ""), prefix: match?.[1] };
 }
 
-/**
- * The cross-region profile prefixes a region may call. Undefined for regions this doesn't
- * know, where the prefix isn't checked. `global.` works from anywhere.
- */
-function profilePrefixes(region: string): readonly string[] | undefined {
-  if (region.startsWith("us-gov-")) return ["us-gov"];
-  if (region.startsWith("us-")) return ["us"];
-  if (region.startsWith("eu-")) return ["eu"];
-  if (region === "ap-northeast-1" || region === "ap-northeast-3") return ["apac", "jp"];
-  if (region === "ap-southeast-2" || region === "ap-southeast-4") return ["apac", "au"];
-  if (region.startsWith("ap-")) return ["apac"];
-  return undefined;
-}
-
 /** Bedrock doesn't always say how a model is called; then assume it can be. */
 const supports = (model: ModelAccess, type: string) =>
   model.inferenceTypes.length === 0 || model.inferenceTypes.includes(type);
 
-/** The id to put in `models` for this region: bare when callable on demand, else a profile. */
-function pinnableId(model: ModelAccess, region: string): string {
-  if (supports(model, "ON_DEMAND")) return model.modelId;
-  return `${profilePrefixes(region)?.[0] ?? "global"}.${model.modelId}`;
+/**
+ * The ids this region can call a model by: its own id when it's callable on demand, else the
+ * system-defined inference profiles Bedrock lists for it here.
+ */
+function pinnableIds(model: ModelAccess, profiles: readonly InferenceProfile[]): string[] {
+  if (supports(model, "ON_DEMAND")) return [model.modelId];
+  return profiles.filter((profile) => profile.modelId === model.modelId).map((p) => p.id);
+}
+
+function pinText(model: ModelAccess, profiles: readonly InferenceProfile[]): string {
+  const ids = pinnableIds(model, profiles);
+  return ids.length > 0 ? ids.join(" or ") : `${model.modelId} (no inference profile here)`;
 }
 
 type TierState = "ok" | "blocked" | "not checked";
@@ -606,90 +607,88 @@ interface Verdict {
   detail: string;
 }
 
+interface BedrockFacts {
+  models: readonly ModelAccess[];
+  profiles: readonly InferenceProfile[];
+  region: string;
+}
+
 /** Whether a tier's model can run on Bedrock here. "not checked" is reported, never failed. */
-function tierVerdict(model: ParsedModel, models: readonly ModelAccess[], region: string): Verdict {
+function tierVerdict(model: ParsedModel, tier: Tier, facts: BedrockFacts): Verdict {
   switch (model.kind) {
     case "unchecked":
       return { state: "not checked", detail: model.why };
     case "invalid":
       return { state: "blocked", detail: model.why };
     case "alias":
-      return familyVerdict(model.families, models, region);
+      return familyVerdict(model.families, tier, facts);
     default:
-      return idVerdict(model.id, model.prefix, models, region);
+      return idVerdict(model.id, model.prefix, facts);
   }
 }
 
 /**
- * An alias passes when each family it uses has a usable, current model here. Which one it
- * resolves to is decided at runtime, so this doesn't guess.
+ * Aliases can't be checked from here: Claude Code picks the model at runtime, perhaps not one
+ * this would pick. So the verdict is informational, except that a family with no usable
+ * model at all is certain to fail.
  */
-function familyVerdict(
-  families: readonly string[],
-  models: readonly ModelAccess[],
-  region: string,
-): Verdict {
-  const found: string[] = [];
+function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFacts): Verdict {
+  const hints: string[] = [];
   for (const family of families) {
     const pattern = new RegExp(`^anthropic\\.claude-(?:[\\d-]+-)?${family}(?:-|$)`);
-    const candidates = models.filter(
-      (model) => !model.legacy && model.usable && pattern.test(model.modelId),
+    const usable = facts.models.filter(
+      (model) =>
+        !model.legacy &&
+        model.usable &&
+        pattern.test(model.modelId) &&
+        pinnableIds(model, facts.profiles).length > 0,
     );
-    if (candidates.length === 0) {
-      return { state: "blocked", detail: `no usable ${family} model in ${region}` };
+    if (usable.length === 0) {
+      return { state: "blocked", detail: `no usable ${family} model in ${facts.region}` };
     }
-    found.push(...candidates.map((model) => pinnableId(model, region)));
+    hints.push(`usable ${family} models here: ${usable.map((m) => m.modelId).join(", ")}`);
   }
   return {
-    state: "ok",
-    detail: `family has a usable model (alias resolves at runtime): ${found.join(", ")}`,
+    state: "not checked",
+    detail:
+      `Claude Code picks the ${families.join(" and ")} model at runtime. Pin a model id in ` +
+      `models.${tier} to have it checked (${hints.join("; ")})`,
   };
 }
 
-/** A concrete id passes only if it can be called exactly as written, from this region. */
-function idVerdict(
-  id: string,
-  prefix: string | undefined,
-  models: readonly ModelAccess[],
-  region: string,
-): Verdict {
-  const access = models.find((candidate) => candidate.modelId === id);
-  if (access === undefined) return { state: "blocked", detail: `${id} isn't offered in ${region}` };
+/** A concrete id passes only if this region can call it exactly as written. */
+function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts): Verdict {
+  const access = facts.models.find((candidate) => candidate.modelId === id);
+  if (access === undefined) {
+    return { state: "blocked", detail: `${id} isn't offered in ${facts.region}` };
+  }
   if (!access.usable) {
     return { state: "blocked", detail: `${id} is ${access.problems.join(", ")}` };
   }
   const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
+  const instead = () => {
+    const ids = pinnableIds(access, facts.profiles);
+    return ids.length > 0
+      ? `use ${ids.join(" or ")}`
+      : `${facts.region} has no inference profile for it`;
+  };
   if (prefix === undefined) {
     if (!supports(access, "ON_DEMAND")) {
       return {
         state: "blocked",
-        detail: `${id} can only be called through an inference profile: use ${pinnableId(access, region)}`,
+        detail: `${id} can only be called through an inference profile: ${instead()}`,
       };
     }
     return { state: "ok", detail: `${id}${legacy}` };
   }
-  if (!PROFILE_PREFIXES.has(prefix)) {
-    return { state: "blocked", detail: `${prefix}. isn't a Bedrock inference profile prefix` };
+  const profileId = `${prefix}.${id}`;
+  if (!facts.profiles.some((profile) => profile.id === profileId && profile.modelId === id)) {
+    return {
+      state: "blocked",
+      detail: `${profileId} isn't an inference profile ${facts.region} can call: ${instead()}`,
+    };
   }
-  if (!supports(access, "INFERENCE_PROFILE")) {
-    return { state: "blocked", detail: `${id} has no cross-region inference profile` };
-  }
-  if (prefix !== "global") {
-    const allowed = profilePrefixes(region);
-    if (allowed === undefined) {
-      return {
-        state: "not checked",
-        detail: `${id} is usable, but this can't tell if ${region} may call ${prefix}. profiles`,
-      };
-    }
-    if (!allowed.includes(prefix)) {
-      return {
-        state: "blocked",
-        detail: `${region} can't call ${prefix}. profiles; use ${allowed.join(". or ")}. or global.`,
-      };
-    }
-  }
-  return { state: "ok", detail: `${prefix}.${id}${legacy}` };
+  return { state: "ok", detail: `${profileId}${legacy}` };
 }
 
 async function authList(deps: AuthDeps): Promise<string> {
@@ -826,7 +825,7 @@ export async function runAuth(
     if (error instanceof UsageError) {
       return { exitCode: 1, stdout: "", stderr: `${error.message}\n\n${AUTH_HELP}` };
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return { exitCode: 1, stdout: "", stderr: `auth ${method} failed: ${message}\n` };
   }
 }

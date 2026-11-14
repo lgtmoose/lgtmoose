@@ -2,8 +2,8 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { errorText } from "../aws-errors.js";
-import type { InteractiveRunner, SignalTrap } from "./process.js";
+import { errorText } from "../errors.js";
+import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
 
 export interface CodexLoginOptions {
   run: InteractiveRunner;
@@ -92,13 +92,11 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
   if ("error" in outcome) {
     const { error } = outcome;
     if (leftover === undefined) throw error;
-    // Keep the error itself, so callers' instanceof checks (CommandNotFound) still work, and
-    // add the note to what it says.
-    if (error instanceof Error) {
-      error.message = `${errorText(error)}.${leftover}`;
-      throw error;
-    }
-    throw new CodexLoginError(`${errorText(error)}.${leftover}`, { cause: error });
+    // A new error with the note, keeping the type callers check for (CommandNotFound gets its
+    // install hint), and the original as the cause.
+    const message = `${errorText(error)}.${leftover}`;
+    if (error instanceof CommandNotFound) throw new CommandNotFound(message, { cause: error });
+    throw new CodexLoginError(message, { cause: error });
   }
   if (leftover !== undefined) throw new CodexLoginError(`Nothing stored.${leftover}`);
   return outcome.authJson;

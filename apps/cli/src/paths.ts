@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseDeployConfig, type DeployConfig } from "@lgtmoose/config";
 import type { SetupFiles } from "./setup/setup.js";
+import { errorMessage } from "./errors.js";
 
 // apps/cli/{src,dist}/ → repo root, the same place infra/cdk/lib/load-config.ts looks.
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -38,7 +39,7 @@ export async function loadDeployConfig(
   try {
     module = await files.loadConfig(path);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`Couldn't load ${path}: ${message}`, { cause: error });
   }
   return parseDeployConfig(module, path);

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { SECRET_NAMES } from "@lgtmoose/config";
 import { z } from "zod";
+import { errorMessage } from "../errors.js";
 
 /**
  * Thrown by `SetupSecretStore.read` for a secret that's scheduled for deletion: it can't be
@@ -127,8 +128,18 @@ export async function readAppCredentials(store: SetupSecretStore): Promise<AppCr
 export async function readWebhookSecret(
   store: SetupSecretStore,
   existing: ExistingApp,
-): Promise<{ secret: string; problem?: undefined } | { secret?: undefined; problem: string }> {
-  const webhook = await store.read(SECRET_NAMES.githubWebhook);
+): Promise<WebhookCheck> {
+  return checkWebhookSecret(await store.read(SECRET_NAMES.githubWebhook), existing);
+}
+
+type WebhookCheck =
+  { secret: string; problem?: undefined } | { secret?: undefined; problem: string };
+
+/** `readWebhookSecret` for a value already read. */
+export function checkWebhookSecret(
+  webhook: string | undefined,
+  existing: ExistingApp,
+): WebhookCheck {
   if (webhook === undefined) {
     return {
       problem: `${SECRET_NAMES.githubWebhook} is missing, so the gateway can't verify webhooks.`,
@@ -160,8 +171,12 @@ export async function storeAppSecrets(
   store: SetupSecretStore,
   app: GitHubAppSecret,
   webhookSecret: string,
+  /** The webhook secret as the caller already read it, to restore on failure. Read if left out. */
+  current?: { previousWebhook: string | undefined },
 ): Promise<StoredSecrets> {
-  const previousWebhook = await store.read(SECRET_NAMES.githubWebhook);
+  const previousWebhook = current
+    ? current.previousWebhook
+    : await store.read(SECRET_NAMES.githubWebhook);
   const webhookDescription = (slug: string) =>
     `Webhook secret for GitHub App ${slug}. Read by the lgtmoose gateway.`;
   const webhook = await store.write(
@@ -181,7 +196,7 @@ export async function storeAppSecrets(
     );
     return { app: stored, webhook };
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorMessage(error);
     // First install: no App secret exists, so a re-run starts over and nothing needs undoing.
     if (previousWebhook === undefined) {
       throw new Error(`Couldn't store ${SECRET_NAMES.githubApp}: ${reason}`, { cause: error });

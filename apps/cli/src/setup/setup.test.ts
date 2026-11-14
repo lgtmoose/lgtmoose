@@ -35,9 +35,10 @@ const SECRET_VALUES = [
 
 function memoryStore(initial: Record<string, string> = {}, scheduled: string[] = []) {
   const secrets = new Map(Object.entries(initial));
+  const reads: string[] = [];
   const store: SetupSecretStore = {
     read: (name) =>
-      scheduled.includes(name)
+      reads.push(name) && scheduled.includes(name)
         ? Promise.reject(new SecretScheduledForDeletion(name, "eu-west-1"))
         : Promise.resolve(secrets.get(name)),
     write: (name, value) => {
@@ -46,7 +47,7 @@ function memoryStore(initial: Record<string, string> = {}, scheduled: string[] =
       return Promise.resolve(existed ? "updated" : "created");
     },
   };
-  return { secrets, store };
+  return { secrets, store, reads };
 }
 
 /** Plays the person's browser and GitHub: load our page, then follow the redirect back. */
@@ -69,6 +70,7 @@ interface Harness {
   convertManifest: ReturnType<typeof vi.fn<(code: string) => Promise<CreatedApp>>>;
   openBrowser: ReturnType<typeof vi.fn<(url: string) => Promise<boolean>>>;
   regions: string[];
+  reads: string[];
 }
 
 function harness(
@@ -84,7 +86,7 @@ function harness(
     tamperState?: boolean;
   } = {},
 ): Harness {
-  const { secrets, store } = memoryStore(options.secrets, options.scheduled);
+  const { secrets, store, reads } = memoryStore(options.secrets, options.scheduled);
   const files = new Map(Object.entries(options.files ?? {}));
   const chunks: string[] = [];
   const regions: string[] = [];
@@ -131,6 +133,7 @@ function harness(
     convertManifest,
     openBrowser,
     regions,
+    reads,
   };
 }
 
@@ -335,6 +338,8 @@ describe("runSetup: re-run", () => {
     expect(h.secrets.get(SECRET_NAMES.githubWebhook)).toBe("FAKE-WEBHOOK-SECRET");
     expect(result.all).toContain("(updated)");
     expect(result.all).toContain('The old App "lgtmoose-old" still exists');
+    // Read once, before the App was created, and reused for the restore-on-failure value.
+    expect(h.reads.filter((name) => name === SECRET_NAMES.githubWebhook)).toHaveLength(1);
   });
 
   it("won't keep an App whose webhook secret is missing", async () => {

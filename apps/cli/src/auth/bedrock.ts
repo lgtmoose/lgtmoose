@@ -2,8 +2,9 @@ import {
   BedrockClient,
   GetFoundationModelAvailabilityCommand,
   ListFoundationModelsCommand,
+  ListInferenceProfilesCommand,
 } from "@aws-sdk/client-bedrock";
-import { awsError, awsMessage, errorName } from "../aws-errors.js";
+import { awsError, awsReason, errorName } from "../aws-errors.js";
 
 /** Whether this account can call one Bedrock model in the region. */
 export interface ModelAccess {
@@ -39,9 +40,22 @@ export interface BedrockAccess {
    * each. Legacy models are left out, except those in `legacyToCheck` (ones a tier pins).
    */
   anthropicModels(options?: { legacyToCheck?: ReadonlySet<string> }): Promise<ModelAccess[]>;
+  /** The system-defined inference profiles this region can call, for Anthropic models. */
+  inferenceProfiles(): Promise<InferenceProfile[]>;
 }
 
-type Command = ListFoundationModelsCommand | GetFoundationModelAvailabilityCommand;
+/** A cross-region inference profile, such as `us.anthropic.…`, and the model it runs. */
+export interface InferenceProfile {
+  /** The id to call it by, and to pin in `models`. */
+  id: string;
+  /** The foundation model it runs, such as `anthropic.…`. */
+  modelId: string;
+}
+
+type Command =
+  | ListFoundationModelsCommand
+  | GetFoundationModelAvailabilityCommand
+  | ListInferenceProfilesCommand;
 
 /** The subset of BedrockClient we use, so tests can fake `send`. */
 export interface BedrockSender {
@@ -59,6 +73,14 @@ export interface BedrockSender {
     authorizationStatus?: string | undefined;
     entitlementAvailability?: string | undefined;
     regionAvailability?: string | undefined;
+    inferenceProfileSummaries?:
+      | {
+          inferenceProfileId?: string | undefined;
+          status?: string | undefined;
+          models?: { modelArn?: string | undefined }[] | undefined;
+        }[]
+      | undefined;
+    nextToken?: string | undefined;
   }>;
 }
 
@@ -118,7 +140,7 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
               error,
             );
           }
-          const reason = awsMessage(error).replace(/\.$/, "");
+          const reason = awsReason(error);
           results.push({ ...entry, usable: false, problems: [`couldn't check (${reason})`] });
           continue;
         }
@@ -141,6 +163,32 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         });
       }
       return results;
+    },
+
+    async inferenceProfiles() {
+      const profiles: InferenceProfile[] = [];
+      let nextToken: string | undefined;
+      do {
+        let page;
+        try {
+          page = await client.send(
+            new ListInferenceProfilesCommand({ typeEquals: "SYSTEM_DEFINED", nextToken }),
+          );
+        } catch (error) {
+          throw awsError("Bedrock", region, "ListInferenceProfiles", error);
+        }
+        for (const profile of page.inferenceProfileSummaries ?? []) {
+          const id = profile.inferenceProfileId;
+          if (id === undefined || profile.status !== "ACTIVE") continue;
+          // Every region the profile routes to lists the same model; take it from the ARN.
+          const modelId = profile.models
+            ?.map((model) => /foundation-model\/(.+)$/.exec(model.modelArn ?? "")?.[1])
+            .find((found) => found !== undefined);
+          if (modelId?.startsWith("anthropic.")) profiles.push({ id, modelId });
+        }
+        nextToken = page.nextToken;
+      } while (nextToken !== undefined);
+      return profiles;
     },
   };
 }

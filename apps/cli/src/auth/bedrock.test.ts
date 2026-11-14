@@ -1,6 +1,7 @@
 import {
   GetFoundationModelAvailabilityCommand,
   ListFoundationModelsCommand,
+  type ListInferenceProfilesCommand,
 } from "@aws-sdk/client-bedrock";
 import { describe, expect, it } from "vitest";
 import { awsBedrockAccess, type BedrockSender } from "./bedrock.js";
@@ -36,7 +37,7 @@ describe("awsBedrockAccess", () => {
           });
         }
         return Promise.resolve(
-          command.input.modelId === "anthropic.ok"
+          (command.input as { modelId?: string }).modelId === "anthropic.ok"
             ? { ...AVAILABLE, authorizationStatus: "NOT_AUTHORIZED" }
             : {
                 regionAvailability: "AVAILABLE",
@@ -92,7 +93,7 @@ describe("awsBedrockAccess", () => {
             modelSummaries: [{ modelId: "anthropic.weird" }, { modelId: "anthropic.ok" }],
           });
         }
-        return command.input.modelId === "anthropic.weird"
+        return (command.input as { modelId?: string }).modelId === "anthropic.weird"
           ? Promise.reject(
               Object.assign(new Error("bad model id."), { name: "ValidationException" }),
             )
@@ -142,6 +143,60 @@ describe("awsBedrockAccess", () => {
     await expect(awsBedrockAccess(expired, "us-east-1").anthropicModels()).rejects.toThrow(
       "aws sso login",
     );
+  });
+
+  it("lists the active system-defined Anthropic inference profiles across pages", async () => {
+    const sent: ListInferenceProfilesCommand[] = [];
+    const arn = (id: string, region = "us-east-1") =>
+      `arn:aws:bedrock:${region}::foundation-model/${id}`;
+    const pages = [
+      {
+        inferenceProfileSummaries: [
+          {
+            inferenceProfileId: "eu.anthropic.a",
+            status: "ACTIVE",
+            models: [
+              { modelArn: arn("anthropic.a", "eu-west-1") },
+              { modelArn: arn("anthropic.a") },
+            ],
+          },
+          {
+            inferenceProfileId: "eu.meta.x",
+            status: "ACTIVE",
+            models: [{ modelArn: arn("meta.x") }],
+          },
+        ],
+        nextToken: "p2",
+      },
+      {
+        inferenceProfileSummaries: [
+          {
+            inferenceProfileId: "global.anthropic.b",
+            status: "ACTIVE",
+            models: [{ modelArn: arn("anthropic.b") }],
+          },
+          {
+            inferenceProfileId: "eu.anthropic.c",
+            status: "INACTIVE",
+            models: [{ modelArn: arn("anthropic.c") }],
+          },
+        ],
+      },
+    ];
+    const client: BedrockSender = {
+      send: (command) => {
+        sent.push(command as ListInferenceProfilesCommand);
+        return Promise.resolve(pages.shift() ?? {});
+      },
+    };
+    expect(await awsBedrockAccess(client, "eu-west-2").inferenceProfiles()).toEqual([
+      { id: "eu.anthropic.a", modelId: "anthropic.a" },
+      { id: "global.anthropic.b", modelId: "anthropic.b" },
+    ]);
+    expect(sent.map((c) => c.input)).toEqual([
+      { typeEquals: "SYSTEM_DEFINED", nextToken: undefined },
+      { typeEquals: "SYSTEM_DEFINED", nextToken: "p2" },
+    ]);
   });
 
   it("wraps a failed listing with the region", async () => {

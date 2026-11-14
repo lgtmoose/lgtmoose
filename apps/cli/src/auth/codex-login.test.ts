@@ -139,8 +139,8 @@ describe("codexLogin", () => {
   });
 
   it("keeps the real error's type when the removal also fails", async () => {
-    const run: InteractiveRunner = () =>
-      Promise.reject(new CommandNotFound("codex isn't installed, or isn't on your PATH."));
+    const original = new CommandNotFound("codex isn't installed, or isn't on your PATH.");
+    const run: InteractiveRunner = () => Promise.reject(original);
     const removeDir = () => Promise.reject(new Error("EACCES"));
     const error = await codexLogin({
       run,
@@ -152,6 +152,9 @@ describe("codexLogin", () => {
     expect(error).toBeInstanceOf(CommandNotFound);
     expect(String(error)).toContain("codex isn't installed");
     expect(String(error)).toContain("EACCES");
+    // A new error with the original as its cause; the original is left as it was.
+    expect((error as Error).cause).toBe(original);
+    expect(original.message).toBe("codex isn't installed, or isn't on your PATH.");
   });
 
   it("a Ctrl+C wins over an error reading auth.json", async () => {

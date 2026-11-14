@@ -1,3 +1,4 @@
+import { errorText } from "./errors.js";
 export function errorName(error: unknown): string | undefined {
   return error instanceof Error ? error.name : undefined;
 }
@@ -33,11 +34,6 @@ export function awsError(service: string, region: string, what: string, error: u
   return new Error(`AWS ${service} (${region}) failed on ${what}: ${awsMessage(error)}`, {
     cause: error,
   });
-}
-
-/** Any thrown value's message, without a trailing full stop, for putting inside a sentence. */
-export function errorText(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
 }
 
 /** An AWS SDK error's message as one sentence, with the sign-in hint when it applies. */

@@ -125,20 +125,106 @@ export interface CredentialSender {
 /** How long a removed credential can be restored. `auth remove` uses it too. */
 export const RECOVERY_DAYS = 7;
 
-export function awsCredentialStore(client: CredentialSender, region: string): CredentialStore {
+/** Waits before each DescribeSecret that checks whether a failed update landed. */
+const LANDED_CHECK_WAITS_MS = [0, 300, 1000];
+
+/**
+ * Errors where AWS refused the request outright, so it can't have been applied. Anything
+ * else (timeouts, throttling, server errors, dropped connections) might have been.
+ */
+const DEFINITE_CLIENT_ERRORS = new Set([
+  "AccessDeniedException",
+  "InvalidParameterException",
+  "InvalidRequestException",
+  "ValidationException",
+  "LimitExceededException",
+  "ResourceNotFoundException",
+  "MalformedPolicyDocumentException",
+  "EncryptionFailure",
+]);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The recovery window that puts a re-deleted secret back on its old purge date. When
+ * DescribeSecret's DeletedDate is in the future it's the purge date, so the remaining days are
+ * used, clamped to Secrets Manager's 7 to 30. When it's past or missing, the window the earlier
+ * remove chose can't be known, so this falls back to the default and says so.
+ */
+export function rescheduleDays(
+  scheduled: Date | undefined,
+  now: Date,
+): { days: number; note: string } {
+  if (scheduled === undefined || scheduled.getTime() <= now.getTime()) {
+    return {
+      days: RECOVERY_DAYS,
+      note: ": the earlier remove's window isn't known, so its date may have moved",
+    };
+  }
+  const remaining = Math.ceil((scheduled.getTime() - now.getTime()) / DAY_MS);
+  const days = Math.min(30, Math.max(7, remaining));
+  return {
+    days,
+    note:
+      days === remaining
+        ? ", the same date as before"
+        : `: ${remaining} days were left, but Secrets Manager needs 7 to 30`,
+  };
+}
+
+/** Said whenever a restore stands with the old value in it. */
+function oldValueLive(providerId: string, certainty: "does" | "may" = "does"): string {
+  return (
+    `The earlier removal is cancelled: the secret is restored and ${certainty} hold the OLD ` +
+    "credential, which sandbox tasks will use. Run pnpm lgtmoose auth again for it, or " +
+    `pnpm lgtmoose auth remove ${providerId}.`
+  );
+}
+
+export interface CredentialStoreOptions {
+  /** Waits between checks. Tests pass one that returns at once. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+}
+
+export function awsCredentialStore(
+  client: CredentialSender,
+  region: string,
+  options: CredentialStoreOptions = {},
+): CredentialStore {
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? (() => new Date());
   const context = (name: string, error: unknown) =>
     awsError("Secrets Manager", region, name, error);
 
   /**
    * After UpdateSecret failed: did the version it asked for become current anyway? A timeout
-   * or a dropped connection can fail a call AWS still applied. Undefined when it can't tell.
+   * or a dropped connection can fail a call AWS still applied, and DescribeSecret can lag, so
+   * it asks a few times. True when the version is current; false only when an answer listed
+   * the versions without it; undefined when no answer came.
    */
   async function versionLanded(name: string, token: string): Promise<boolean | undefined> {
+    let absent = false;
+    for (const [attempt, wait] of LANDED_CHECK_WAITS_MS.entries()) {
+      if (attempt > 0) await sleep(wait);
+      try {
+        const { VersionIdsToStages } = await client.send(
+          new DescribeSecretCommand({ SecretId: name }),
+        );
+        if (VersionIdsToStages?.[token]?.includes("AWSCURRENT")) return true;
+        if (VersionIdsToStages !== undefined) absent = true;
+      } catch {
+        // No answer this time; try again.
+      }
+    }
+    return absent ? false : undefined;
+  }
+
+  /** When the secret was set to be deleted, read before restoring it. Undefined if unknown. */
+  async function deletionDate(name: string): Promise<Date | undefined> {
     try {
-      const { VersionIdsToStages } = await client.send(
-        new DescribeSecretCommand({ SecretId: name }),
-      );
-      return VersionIdsToStages?.[token]?.includes("AWSCURRENT") ?? false;
+      return (await client.send(new DescribeSecretCommand({ SecretId: name }))).DeletedDate;
     } catch {
       return undefined;
     }
@@ -146,27 +232,28 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
 
   /**
    * The restore worked but the new value definitely didn't, so the OLD credential is live
-   * again. Schedules the deletion again. The earlier remove's window isn't known, so it
-   * uses the default one and says so, and gives the reason if even that fails.
+   * again. Schedules the deletion again, keeping its date where that can be known.
    */
-  async function undoRestore(name: string, error: unknown): Promise<Error> {
+  async function undoRestore(
+    name: string,
+    providerId: string,
+    error: unknown,
+    scheduled: Date | undefined,
+  ): Promise<Error> {
     const reason = awsMessage(error);
+    const { days, note } = rescheduleDays(scheduled, now());
     try {
-      await client.send(
-        new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: RECOVERY_DAYS }),
-      );
+      await client.send(new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: days }));
     } catch (deleteError) {
       return new Error(
         `Restored ${name} (${region}) but couldn't store the new value: ${reason} Scheduling ` +
-          `its deletion again failed too (${awsReason(deleteError)}). It holds the OLD ` +
-          "credential again, and sandbox tasks will use it. Run this again, or remove it.",
+          `its deletion again failed too (${awsReason(deleteError)}). ${oldValueLive(providerId)}`,
         { cause: error },
       );
     }
     return new Error(
       `Couldn't store the new value in ${name} (${region}): ${reason} It was restored first, ` +
-        `so it's scheduled for deletion again, in ${RECOVERY_DAYS} days: the earlier remove's ` +
-        "window isn't known, so its date may have moved.",
+        `so it's scheduled for deletion again, in ${days} days${note}.`,
       { cause: error },
     );
   }
@@ -192,7 +279,10 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
         }
         outcome = scheduled ? "restored" : "updated";
       }
+      let scheduledDate: Date | undefined;
       if (outcome === "restored") {
+        // Read first, so an undo can put the deletion back where it was.
+        scheduledDate = await deletionDate(name);
         try {
           await client.send(new RestoreSecretCommand({ SecretId: name }));
         } catch (error) {
@@ -214,17 +304,21 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
         );
       } catch (error) {
         const landed = await versionLanded(name, token);
-        if (landed === false) {
-          throw outcome === "restored" ? await undoRestore(name, error) : context(name, error);
+        // Undo only when AWS refused outright and the version is confirmed absent; a timeout
+        // or a lagging answer could mean the new value is in, and undoing would delete it.
+        if (landed === false && DEFINITE_CLIENT_ERRORS.has(errorName(error) ?? "")) {
+          throw outcome === "restored"
+            ? await undoRestore(name, label.providerId, error, scheduledDate)
+            : context(name, error);
         }
-        if (landed === undefined) {
+        if (landed !== true) {
           const holds =
             outcome === "restored"
-              ? "It was restored first, so it holds either the new value or the OLD one."
-              : "It holds either the new value or the previous one.";
+              ? oldValueLive(label.providerId, "may")
+              : "It holds either the new value or the previous one. Run this again to be sure.";
           throw new Error(
             `Couldn't tell whether the new value was stored in ${name} (${region}): ` +
-              `${awsMessage(error)} ${holds} Run this again to be sure.`,
+              `${awsMessage(error)} ${holds}`,
             { cause: error },
           );
         }

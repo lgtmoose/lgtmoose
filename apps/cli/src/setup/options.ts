@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { Profile } from "./config-file.js";
 import { MAX_APP_NAME_LENGTH, defaultAppName, type Owner, type OwnerKind } from "./manifest.js";
 import type { Prompter } from "./prompter.js";
+import { errorMessage } from "../errors.js";
 
 /** A mistake in what the person typed. Shown as-is, with exit code 1. */
 export class UsageError extends Error {
@@ -98,7 +99,7 @@ export function parseSetupFlags(argv: readonly string[]): SetupFlags {
       },
     });
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    throw new UsageError(errorMessage(error));
   }
   const { values } = parsed;
 

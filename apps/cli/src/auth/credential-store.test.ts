@@ -1,6 +1,6 @@
 import {
   CreateSecretCommand,
-  type DeleteSecretCommand,
+  DeleteSecretCommand,
   DescribeSecretCommand,
   type ListSecretsCommand,
   RestoreSecretCommand,
@@ -12,6 +12,7 @@ import {
   awsCredentialStore,
   credentialDescription,
   credentialTags,
+  rescheduleDays,
   type CredentialSender,
 } from "./credential-store.js";
 
@@ -80,20 +81,27 @@ describe("awsCredentialStore", () => {
     });
   });
 
+  const NOW = new Date("2026-11-14T00:00:00Z");
+  const quick = { sleep: () => Promise.resolve(), now: () => NOW };
+  const scheduled = () => {
+    throw awsErr("InvalidRequestException", "already scheduled for deletion.");
+  };
+  const denied = () => {
+    throw awsErr("AccessDeniedException", "not allowed to update");
+  };
+  const timeout = () => {
+    throw awsErr("TimeoutError", "socket hang up");
+  };
+  const absent = () => ({ VersionIdsToStages: { "old-version": ["AWSCURRENT"] } });
+
   it("restores a secret scheduled for deletion before storing the new value", async () => {
-    const { client, sent } = fake([
-      () => {
-        throw awsErr(
-          "InvalidRequestException",
-          "You can't create this secret because a secret with this name is already scheduled for deletion.",
-        );
-      },
-    ]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+    const { client, sent } = fake([scheduled]);
+    expect(await awsCredentialStore(client, "eu-west-2", quick).put(LABEL, "VALUE")).toEqual({
       outcome: "restored",
     });
     expect(sent.map((c) => (c as object).constructor)).toEqual([
       CreateSecretCommand,
+      DescribeSecretCommand,
       RestoreSecretCommand,
       UpdateSecretCommand,
       TagResourceCommand,
@@ -110,93 +118,152 @@ describe("awsCredentialStore", () => {
         throw awsErr("AccessDeniedException", "not allowed to tag");
       },
     ]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+    expect(await awsCredentialStore(client, "eu-west-2", quick).put(LABEL, "VALUE")).toEqual({
       outcome: "updated",
       tagError: "not allowed to tag",
     });
   });
 
-  it("puts the deletion back when a restored secret can't take the new value", async () => {
-    const scheduled = () => {
-      throw awsErr("InvalidRequestException", "already scheduled for deletion.");
-    };
-    const updateFails = () => {
-      throw awsErr("AccessDeniedException", "not allowed to update");
-    };
-    // Create, Restore, Update (fails), Describe (the new version isn't there), Delete.
-    const notLanded = () => ({ VersionIdsToStages: { "old-version": ["AWSCURRENT"] } });
-    const { client, sent } = fake([scheduled, () => ({}), updateFails, notLanded, () => ({})]);
-    const error = await awsCredentialStore(client, "eu-west-2")
+  it("puts the deletion back on its old date when AWS refused the new value", async () => {
+    // DeletedDate in the future is the purge date: 10 days left.
+    const purge = new Date("2026-11-24T00:00:00Z");
+    const { client, sent } = fake([
+      scheduled,
+      () => ({ DeletedDate: purge }),
+      () => ({}),
+      denied,
+      absent,
+      absent,
+      absent,
+      () => ({}),
+    ]);
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
       .put(LABEL, "VALUE-SECRET")
       .catch((e: unknown) => e);
     expect(String(error)).toContain("not allowed to update");
-    expect(String(error)).toContain("scheduled for deletion again, in 7 days");
-    expect(String(error)).toContain("the earlier remove's window isn't known");
+    expect(String(error)).toContain("scheduled for deletion again, in 10 days, the same date");
     expect(String(error)).not.toContain("VALUE-SECRET");
-    expect((sent[4] as DeleteSecretCommand).input).toEqual({
+    expect((sent[7] as DeleteSecretCommand).input).toEqual({
       SecretId: "lgtmoose/provider/codex",
-      RecoveryWindowInDays: 7,
+      RecoveryWindowInDays: 10,
     });
   });
 
-  it("says the OLD credential is live when it can't put the deletion back either", async () => {
-    const scheduled = () => {
-      throw awsErr("InvalidRequestException", "already scheduled for deletion.");
-    };
-    const fails = () => {
-      throw awsErr("AccessDeniedException", "no");
-    };
-    const notLanded = () => ({ VersionIdsToStages: {} });
+  it("clamps the old date to Secrets Manager's range, and says when it can't know it", () => {
+    const day = 24 * 60 * 60 * 1000;
+    expect(rescheduleDays(new Date(NOW.getTime() + 2 * day), NOW)).toEqual({
+      days: 7,
+      note: ": 2 days were left, but Secrets Manager needs 7 to 30",
+    });
+    expect(rescheduleDays(new Date(NOW.getTime() + 40 * day), NOW).days).toBe(30);
+    // A past DeletedDate is when the earlier remove ran: its window can't be known.
+    expect(rescheduleDays(new Date(NOW.getTime() - day), NOW)).toEqual({
+      days: 7,
+      note: ": the earlier remove's window isn't known, so its date may have moved",
+    });
+    expect(rescheduleDays(undefined, NOW).days).toBe(7);
+  });
+
+  it("says the removal is cancelled and the OLD credential is live when rescheduling fails", async () => {
     const deleteFails = () => {
       throw awsErr("AccessDeniedException", "may not delete");
     };
-    const { client } = fake([scheduled, () => ({}), fails, notLanded, deleteFails]);
-    const error = await awsCredentialStore(client, "eu-west-2")
+    const { client } = fake([
+      scheduled,
+      () => ({}),
+      () => ({}),
+      denied,
+      absent,
+      absent,
+      absent,
+      deleteFails,
+    ]);
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
       .put(LABEL, "VALUE")
       .catch((e: unknown) => e);
-    expect(String(error)).toContain("It holds the OLD credential again");
     expect(String(error)).toContain("(may not delete)");
+    expect(String(error)).toContain("The earlier removal is cancelled");
+    expect(String(error)).toContain("does hold the OLD credential");
+    expect(String(error)).toContain("pnpm lgtmoose auth remove codex");
   });
 
-  it("treats a failed update that landed anyway as stored, and never undoes it", async () => {
-    const scheduled = () => {
-      throw awsErr("InvalidRequestException", "already scheduled for deletion.");
-    };
+  it("never undoes after an error AWS may have applied, even if the version looks absent", async () => {
+    const { client, sent } = fake([
+      scheduled,
+      () => ({}),
+      () => ({}),
+      timeout,
+      absent,
+      absent,
+      absent,
+    ]);
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
+      .put(LABEL, "VALUE")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("Couldn't tell whether the new value was stored");
+    expect(String(error)).toContain("The earlier removal is cancelled");
+    expect(String(error)).toContain("may hold the OLD credential");
+    expect(sent.some((c) => c instanceof DeleteSecretCommand)).toBe(false);
+  });
+
+  it("doesn't count a missing version list as a miss", async () => {
+    const { client, sent } = fake([
+      scheduled,
+      () => ({}),
+      () => ({}),
+      denied,
+      () => ({}),
+      () => ({}),
+      () => ({}),
+    ]);
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
+      .put(LABEL, "VALUE")
+      .catch((e: unknown) => e);
+    expect(String(error)).toContain("Couldn't tell");
+    expect(sent.some((c) => c instanceof DeleteSecretCommand)).toBe(false);
+  });
+
+  it("keeps checking, and treats a failed update that landed late as stored", async () => {
     let token = "";
     const timesOut = (command: unknown) => {
       token = (command as UpdateSecretCommand).input.ClientRequestToken ?? "";
       throw awsErr("TimeoutError", "socket hang up");
     };
+    const waits: number[] = [];
     const landed = () => ({ VersionIdsToStages: { [token]: ["AWSCURRENT"] } });
-    const { client, sent } = fake([scheduled, () => ({}), timesOut, landed, () => ({})]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
-      outcome: "restored",
+    const { client, sent } = fake([scheduled, () => ({}), () => ({}), timesOut, absent, landed]);
+    const store = awsCredentialStore(client, "eu-west-2", {
+      now: () => NOW,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
     });
-    expect(sent.map((c) => (c as object).constructor)).toEqual([
-      CreateSecretCommand,
-      RestoreSecretCommand,
+    expect(await store.put(LABEL, "VALUE")).toEqual({ outcome: "restored" });
+    expect(waits).toEqual([300]);
+    expect(sent.map((c) => (c as object).constructor).slice(3)).toEqual([
       UpdateSecretCommand,
+      DescribeSecretCommand,
       DescribeSecretCommand,
       TagResourceCommand,
     ]);
   });
 
-  it("says it can't tell when neither the update nor the check answers", async () => {
-    const fails = () => {
-      throw awsErr("TimeoutError", "socket hang up");
-    };
+  it("says it can't tell when neither the update nor the checks answer", async () => {
     const { client, sent } = fake([
       () => {
         throw awsErr("ResourceExistsException");
       },
-      fails,
-      fails,
+      timeout,
+      timeout,
+      timeout,
+      timeout,
     ]);
-    const error = await awsCredentialStore(client, "eu-west-2")
+    const error = await awsCredentialStore(client, "eu-west-2", quick)
       .put(LABEL, "VALUE")
       .catch((e: unknown) => e);
-    expect(String(error)).toContain("Couldn't tell whether the new value was stored");
-    expect(sent).toHaveLength(3);
+    expect(String(error)).toContain("It holds either the new value or the previous one");
+    expect(sent).toHaveLength(5);
   });
 
   it("wraps other errors without the value", async () => {

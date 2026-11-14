@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTH_HELP, PLAN_CREDENTIAL_WARNING, runAuth, type AuthDeps } from "./auth.js";
-import type { ModelAccess } from "./bedrock.js";
+import type { InferenceProfile, ModelAccess } from "./bedrock.js";
 import type {
   CredentialLabel,
   CredentialStore,
@@ -48,6 +48,7 @@ function harness(
     run?: InteractiveRunner;
     stored?: StoredCredential[];
     models?: ModelAccess[];
+    profiles?: InferenceProfile[];
     remove?: RemoveResult;
     put?: PutResult;
   } = {},
@@ -99,6 +100,7 @@ function harness(
         legacyAsked.push([...(asked?.legacyToCheck ?? [])]);
         return Promise.resolve(options.models ?? []);
       },
+      inferenceProfiles: () => Promise.resolve(options.profiles ?? []),
     }),
     run,
     trapSignals: () => () => {},
@@ -350,7 +352,9 @@ describe("auth", () => {
     providers: [{ id: "bedrock", harness: "claude-code", auth: "bedrock", models }],
   });
 
-  it("bedrock: an alias passes when its family has a usable model, without guessing which", async () => {
+  const profile = (id: string) => ({ id, modelId: id.replace(/^[a-z-]+\./, "") });
+
+  it("bedrock: aliases are hints, not checks, and the list shows the ids to pin", async () => {
     const h = harness({
       models: [
         model(HAIKU),
@@ -358,22 +362,24 @@ describe("auth", () => {
         model(OPUS),
         model("anthropic.claude-instant-v1", { usable: false }),
       ],
+      profiles: [profile(`eu.${SONNET}`), profile(`global.${SONNET}`)],
     });
     const result = await h.go(["bedrock"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(
       "  blocked  anthropic.claude-instant-v1: model access not granted",
     );
-    // The list gives the id to pin: a profile id for a model with no on-demand calls.
-    expect(result.stdout).toContain(`  ok       eu.${SONNET}`);
+    // Real profile ids from Bedrock, for a model with no on-demand calls.
+    expect(result.stdout).toContain(`  ok       eu.${SONNET} or global.${SONNET}`);
     expect(result.stdout).toContain(
-      `ok           bedrock standard (sonnet): family has a usable model (alias resolves at runtime): eu.${SONNET}`,
+      `not checked  bedrock standard (sonnet): Claude Code picks the sonnet model at runtime. ` +
+        `Pin a model id in models.standard to have it checked (usable sonnet models here: ${SONNET})`,
     );
     expect(result.stdout).toContain("needs no stored secret");
     expect(h.puts).toEqual([]);
   });
 
-  it("bedrock: fails a default alias whose family has no usable model", async () => {
+  it("bedrock: fails an alias whose family has no usable model at all", async () => {
     const result = await harness({
       models: [model(HAIKU), model(SONNET), model(OPUS, { usable: false })],
     }).go(["bedrock"]);
@@ -383,6 +389,15 @@ describe("auth", () => {
     );
   });
 
+  it("bedrock: a family whose model has no way to be called here counts as none", async () => {
+    const result = await harness({
+      models: [model(HAIKU), model(SONNET), model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] })],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout + result.stderr).toContain(`${OPUS} (no inference profile here)`);
+  });
+
   it("bedrock: handles Claude Code modifiers, opusplan and default", async () => {
     const config = pinned({ fast: "haiku[1m]", standard: "default", deep: "opusplan" });
     const ok = await harness({ config, models: [model(HAIKU), model(SONNET), model(OPUS)] }).go([
@@ -390,7 +405,7 @@ describe("auth", () => {
     ]);
     expect(ok.exitCode).toBe(0);
     expect(ok.stdout).toContain("not checked  bedrock standard (default)");
-    expect(ok.stdout).toMatch(/ok {11}bedrock deep \(opusplan\): family .*opus.*sonnet/);
+    expect(ok.stdout).toContain("(opusplan): Claude Code picks the opus and sonnet model");
     // opusplan also needs Sonnet.
     const noSonnet = await harness({ config, models: [model(HAIKU), model(OPUS)] }).go(["bedrock"]);
     expect(noSonnet.stderr).toContain("(opusplan): no usable sonnet model");
@@ -406,7 +421,7 @@ describe("auth", () => {
     expect(result.stderr).toContain("(claude-sonnet-4-5-20250929): not a Bedrock model id");
   });
 
-  it("bedrock: a bare id must be callable on demand; a profile must suit the region", async () => {
+  it("bedrock: a bare id must be callable on demand; a profile id must be one Bedrock lists", async () => {
     const config = pinned({
       fast: `eu.${HAIKU}`,
       standard: SONNET,
@@ -417,20 +432,36 @@ describe("auth", () => {
       model(SONNET, { inferenceTypes: ["INFERENCE_PROFILE"] }),
       model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] }),
     ];
-    const result = await harness({ config, models }).go(["bedrock"]);
+    const profiles = [profile(`eu.${HAIKU}`), profile(`eu.${SONNET}`), profile(`global.${OPUS}`)];
+    const result = await harness({ config, models, profiles }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/ok {11}bedrock fast .*: eu\.anthropic\.claude-3-5-haiku/);
     expect(result.stderr).toContain(
       `${SONNET} can only be called through an inference profile: use eu.${SONNET}`,
     );
-    expect(result.stderr).toContain("eu-west-2 can't call us. profiles; use eu. or global.");
+    expect(result.stderr).toContain(
+      `us.${OPUS} isn't an inference profile eu-west-2 can call: use global.${OPUS}`,
+    );
     expect(result.stderr).toContain("set that tier in the provider's models to an id listed as ok");
+  });
+
+  it("bedrock: a global. id is checked against the list too", async () => {
+    const config = pinned({ fast: `global.${HAIKU}`, standard: SONNET, deep: OPUS });
+    const result = await harness({
+      config,
+      models: [model(HAIKU), model(SONNET), model(OPUS)],
+      profiles: [],
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      `global.${HAIKU} isn't an inference profile eu-west-2 can call`,
+    );
   });
 
   it("bedrock: a pinned usable legacy model passes, and is the only legacy model checked", async () => {
     const LEGACY = "anthropic.claude-3-opus-20240229-v1:0";
     const config = pinned({
-      fast: `global.${HAIKU}:200k`,
+      fast: `eu.${HAIKU}:200k`,
       standard: "arn:aws:bedrock:eu-west-2:123456789012:application-inference-profile/x",
       deep: LEGACY,
     });
@@ -441,7 +472,7 @@ describe("auth", () => {
     const result = await h.go(["bedrock"]);
     // Only pinned ids are asked for among legacy models.
     expect(h.legacyAsked).toEqual([[HAIKU, LEGACY]]);
-    expect(result.stderr).toContain(`fast (global.${HAIKU}:200k): ${HAIKU} is model access`);
+    expect(result.stderr).toContain(`fast (eu.${HAIKU}:200k): ${HAIKU} is model access`);
     const pinnedLegacyOnly = pinned({ deep: LEGACY, fast: "arn:aws:x", standard: "arn:aws:y" });
     // The only current model isn't usable: the pinned tier still decides.
     const legacy = await harness({
