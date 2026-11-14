@@ -74,7 +74,8 @@ const PLAN_CREDENTIAL_ADVICE: Record<PlanCredentialKind, string> = {
 account available to anyone else; Team and Enterprise fall under its commercial terms.
 Neither says a bot may review other people's pull requests on one person's seat. Anthropic
 documents API keys for automation. On a Max, Ultra or Team plan, a key from the plan's linked
-Console organization draws on the plan's monthly API credits first. To use one, set this
+Console organization draws on the plan's monthly API credits first (requests stop when
+they run out, unless that organization has purchased credits). To use one, set this
 provider's auth to "api-key" in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider anthropic
 Bedrock (auth "bedrock", then ${CLI} deploy) needs no key at all.`,
