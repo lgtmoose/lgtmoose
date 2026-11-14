@@ -2,7 +2,10 @@ import { statusLabels } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import {
   changedPaths,
+  decodeSpan,
   diffCommits,
+  fileLines,
+  findSpan,
   pathsOf,
   pool,
   rawDiff,
@@ -24,7 +27,7 @@ import {
 import { annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { readOutcome } from "./outcomes.js";
-import { normaliseLine, type ControlDeps, type FindingRecord, type RunRecord } from "./ports.js";
+import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest } from "./prepare.js";
 
 /** What the post step did, for the log and the state machine. */
@@ -330,10 +333,10 @@ const FOLLOW_AT_ONCE = 4;
  * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
  * when it was raised (its merge base with today's) to today's merge base, and stands while the
  * PR still deletes that line. When the commit a finding was raised at is gone (force-pushed
- * away), its lines can't be followed: one `keepInPlace` picks is looked for by its recorded line
- * text, near its recorded line (`findLine`), among the lines the PR deletes from its base file
- * (old side) or its file's lines at head (new side), while the PR still changes that file. Found,
- * it stands there; not found, it doesn't. The others don't stand. Only open ones go `outdated`
+ * away), its lines can't be followed: one `keepInPlace` picks is looked for by its recorded lines
+ * anywhere in its file, nearest its recorded line first (`findLine`): in its base file on a line
+ * the PR deletes (old side), or in its file at head (new side), while the PR still changes that
+ * file. Found, it stands there; not found, it doesn't. The others don't stand. Only open ones go `outdated`
  * and only outdated ones are `reopened`; a record with no status (a closed one) just stands or
  * not.
  */
@@ -346,6 +349,7 @@ async function standing(
   keepInPlace: (record: TrackedRecord) => boolean,
   history: History,
   { atHead, changedBase }: PrPaths,
+  prDiff: RawDiff,
 ): Promise<{ open: (EarlierFinding & { id: string })[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
   // A base-side file's name at head (a deleted one keeps its own).
@@ -423,11 +427,14 @@ async function standing(
     ...[...leftPlaces.values()].flatMap((place) => (place === undefined ? [] : [place.path])),
     ...keptLeft.values(),
   ].flatMap((path) => [path, fromBase.get(path) ?? path]);
-  const patchPaths = [...leftPaths, ...keptRight.values()];
   const patches =
-    patchPaths.length === 0
+    leftPaths.length === 0
       ? []
-      : await diffCommits(repo, mergeBase, headSha, { paths: [...new Set(patchPaths)] });
+      : await diffCommits(repo, mergeBase, headSha, {
+          paths: [...new Set(leftPaths)],
+          raw: prDiff,
+        });
+  // The lines the PR deletes, by base file.
   const deletedLines = new Map(
     patches.map((file) => [
       file.oldPath ?? file.path,
@@ -451,51 +458,42 @@ async function standing(
     );
   }
   // Kept in place, its commit gone: its line can't be followed, and edits since may have moved
-  // it, so it's looked for by its text near where it was. An old-side one among the lines the PR
-  // still deletes from its base file; a new-side one among its file's lines at head.
-  if (keptLeft.size > 0) {
-    const deletedText = new Map(
-      patches.map((file) => [
-        file.oldPath ?? file.path,
-        new Map(
-          file.hunks.flatMap((hunk) =>
-            hunk.lines.flatMap((line) =>
-              line.kind === "del" && line.oldLine !== undefined
-                ? [[line.oldLine, normaliseLine(line.text)] as const]
-                : [],
-            ),
-          ),
-        ),
-      ]),
-    );
-    for (const [record, base] of keptLeft) {
-      const lines = deletedText.get(base);
-      const line = findLine(record, (n) => lines?.get(n));
-      at.set(record, line === undefined ? undefined : { path: fromBase.get(base) ?? base, line });
+  // it, so it's looked for by its recorded lines anywhere in the file, nearest first: an
+  // old-side one in its base file, on a line the PR still deletes; a new-side one in its file
+  // at head. One blob read for all, one split per file; the blobs come from the PR's file list.
+  if (keptLeft.size + keptRight.size > 0) {
+    const baseBlob = new Map<string, string>();
+    const headBlob = new Map<string, string>();
+    for (const entry of prDiff.entries) {
+      if (entry.status !== "added" && entry.oldBlob !== undefined) {
+        baseBlob.set(entry.oldPath, entry.oldBlob);
+      }
+      if (entry.status !== "deleted" && entry.newBlob !== undefined) {
+        headBlob.set(entry.newPath, entry.newBlob);
+      }
     }
-  }
-  if (keptRight.size > 0) {
-    const blobOf = new Map(patches.map((file) => [file.path, file.newBlob]));
-    const blobs = await repo.readBlobs([
-      ...new Set([...keptRight.values()].flatMap((head) => blobOf.get(head) ?? [])),
-    ]);
-    // One split per file.
-    const linesOf = new Map<string, string[]>();
-    const headLines = (head: string) => {
-      let lines = linesOf.get(head);
+    const wanted = [
+      ...[...keptLeft.values()].flatMap((base) => baseBlob.get(base) ?? []),
+      ...[...keptRight.values()].flatMap((head) => headBlob.get(head) ?? []),
+    ];
+    const blobs = await repo.readBlobs([...new Set(wanted)]);
+    const split = new Map<string, string[]>();
+    const linesOf = (blob: string | undefined) => {
+      if (blob === undefined) return [];
+      let lines = split.get(blob);
       if (lines === undefined) {
-        const blob = blobOf.get(head);
-        lines = (blob === undefined ? "" : (blobs.get(blob)?.toString("utf8") ?? "")).split("\n");
-        linesOf.set(head, lines);
+        lines = fileLines(blobs.get(blob)?.toString("utf8") ?? "");
+        split.set(blob, lines);
       }
       return lines;
     };
+    for (const [record, base] of keptLeft) {
+      const deleted = deletedLines.get(base);
+      const line = findLine(record, linesOf(baseBlob.get(base)), (n) => deleted?.has(n) === true);
+      at.set(record, line === undefined ? undefined : { path: fromBase.get(base) ?? base, line });
+    }
     for (const [record, head] of keptRight) {
-      const lines = headLines(head);
-      const line = findLine(record, (n) => {
-        const text = lines[n - 1];
-        return text === undefined ? undefined : normaliseLine(text);
-      });
+      const line = findLine(record, linesOf(headBlob.get(head)), () => true);
       at.set(record, line === undefined ? undefined : { path: head, line });
     }
   }
@@ -518,70 +516,27 @@ async function standing(
       continue;
     }
     if (record.status === "outdated") reopened.push(record.id);
-    // Followed to its place now, or found by its line text near its recorded one (its commit is
-    // gone, its file still in the PR): either way, that's where it is.
+    // Followed to its place now, or found by its recorded lines (its commit is gone, its file
+    // still in the PR): either way, that's where it is.
     open.push({ ...recordToEarlier(record, place), id: record.id });
   }
   return { open, outdated, reopened };
 }
 
 /**
- * Each finding's line text on its side (the base version for an old-side one, head's for a
- * new-side one), normalised: one blob read for all of them, one split per blob.
- */
-async function lineTextsOf(
-  repo: Repo,
-  files: readonly { path: string; oldBlob: string | undefined; newBlob: string | undefined }[],
-  findings: readonly Finding[],
-): Promise<Map<Finding, string>> {
-  const byPath = new Map(files.map((file) => [file.path, file]));
-  const blobOf = (finding: Finding) => {
-    const file = byPath.get(finding.path);
-    return finding.side === "LEFT" ? file?.oldBlob : file?.newBlob;
-  };
-  const shas = [...new Set(findings.flatMap((finding) => blobOf(finding) ?? []))];
-  if (shas.length === 0) return new Map();
-  const blobs = await repo.readBlobs(shas);
-  const split = new Map<string, string[]>();
-  const texts = new Map<Finding, string>();
-  for (const finding of findings) {
-    const sha = blobOf(finding);
-    if (sha === undefined) continue;
-    let lines = split.get(sha);
-    if (lines === undefined) {
-      lines = (blobs.get(sha)?.toString("utf8") ?? "").split("\n");
-      split.set(sha, lines);
-    }
-    const text = lines[finding.line - 1];
-    if (text !== undefined) texts.set(finding, normaliseLine(text));
-  }
-  return texts;
-}
-
-/** How far from its recorded line a finding whose commit is gone is looked for, either way. */
-const LINE_WINDOW = 50;
-
-/**
- * Where a finding whose commit is gone is now: the nearest line to its recorded one, within
- * `LINE_WINDOW`, whose text (`textAt`, normalised; undefined where there's no candidate line) is
- * the finding's recorded line text. Undefined: not found. A row recorded without its line text
- * stands at its recorded line if that's a candidate.
+ * Where a finding whose commit is gone is now in its file's `lines`: where its recorded lines are
+ * (`findSpan`), on a line `allowed` takes, nearest its recorded line. Undefined: not found. A row
+ * recorded without its lines (before migration 0003: tests only) stands at its recorded line if
+ * `allowed` takes it.
  */
 function findLine(
   record: TrackedRecord,
-  textAt: (line: number) => string | undefined,
+  lines: readonly string[],
+  allowed: (line: number) => boolean,
 ): number | undefined {
-  if (record.lineText === undefined) {
-    return textAt(record.line) === undefined ? undefined : record.line;
-  }
-  for (let distance = 0; distance <= LINE_WINDOW; distance++) {
-    for (const line of distance === 0
-      ? [record.line]
-      : [record.line - distance, record.line + distance]) {
-      if (line >= 1 && textAt(line) === record.lineText) return line;
-    }
-  }
-  return undefined;
+  if (record.lineText === undefined) return allowed(record.line) ? record.line : undefined;
+  const span = decodeSpan(record.lineText);
+  return span === undefined ? undefined : findSpan(lines, span, record.line, allowed);
 }
 
 function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
@@ -659,7 +614,6 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
-  let lineTexts = new Map<Finding, string>();
   let outdated: string[];
   let reopened: string[];
   try {
@@ -683,11 +637,12 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     );
     if (records.length + closedRecords.length > 0) {
       // Which files the PR changes: names only, no patches or contents.
-      const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
+      const prDiff = await rawDiff(repo, prepared.mergeBase, pr.headSha);
+      const changes = pathsOf(prDiff);
       // Open ones are always followed; outdated and closed ones only while the PR still changes
       // their file (a new-side one's at head, an old-side one's base file). When its commit is
-      // gone, an open or closed one is looked for by its recorded line text near its recorded
-      // line, and stands only where that's found; closed ones are never marked outdated or
+      // gone, an open or closed one is looked for by its recorded lines, nearest its recorded
+      // line, and stands only where they're found; closed ones are never marked outdated or
       // reopened.
       const followAll = (record: TrackedRecord) => record.status === "open";
       const candidates: TrackedRecord[] = [...records, ...closedRecords];
@@ -723,6 +678,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
         (record) => record.status === "open" || closedIds.has(record.id),
         history,
         paths,
+        prDiff,
       );
       const followed = new Map(
         all.open.filter((entry) => closedIds.has(entry.id)).map((entry) => [entry.id, entry]),
@@ -747,12 +703,6 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
         severity: record.severity,
       })),
     });
-    // Each new finding's line text, to find it again should its commit go.
-    lineTexts = await lineTextsOf(
-      repo,
-      prepared.files,
-      report.posted.map((entry) => entry.finding),
-    );
   } finally {
     await work.remove();
   }
@@ -825,12 +775,10 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       const id = commentIds.get(entry.finding);
       const file = prepared.files.find((candidate) => candidate.path === entry.finding.path);
       const basePath = file === undefined ? undefined : (file.oldPath ?? file.path);
-      const lineText = lineTexts.get(entry.finding);
       return {
         ...entry,
         ...(id === undefined ? {} : { githubCommentId: id }),
         ...(basePath === undefined ? {} : { basePath }),
-        ...(lineText === undefined ? {} : { lineText }),
       };
     }),
   );

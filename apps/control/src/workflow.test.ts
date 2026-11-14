@@ -1508,7 +1508,12 @@ describe("later runs", { timeout: 30_000 }, () => {
 
   it("keeps an old-side finding whose commit is gone after a base edit next to its line", async () => {
     const h = harness();
-    await droppedReturnThenForcePushed(h, redoneOnBase(TOTAL.replace("  }\n", "  } // loop\n")));
+    // The line above the loop's end changes; the span the finding was recorded with (the loop's
+    // end, the return and the function's end) doesn't.
+    await droppedReturnThenForcePushed(
+      h,
+      redoneOnBase(TOTAL.replace("sum += items[i].price;", "sum += items[i].price; // add")),
+    );
 
     const again = await review(h, 2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
@@ -1533,6 +1538,34 @@ describe("later runs", { timeout: 30_000 }, () => {
     const again = await review(h, 2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
     expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("finds an old-side finding whose commit is gone however far a rebase moved its line", async () => {
+    const h = harness();
+    const header = Array.from({ length: 80 }, (_, i) => `// note ${i}`).join("\n");
+    await droppedReturnThenForcePushed(h, redoneOnBase(`${header}\n${TOTAL}`));
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("doesn't take a lone closing brace for a finding on one whose code around it is gone", async () => {
+    const h = harness();
+    // On the loop's `}`.
+    await review(h, 1, [finding({ line: 5, title: "Loop body skips discounts", evidence: "}" })]);
+    // Redone: the loop body is written another way; a `}` is still on line 5.
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("sum += items[i].price;", "sum += discounted(items[i]);") },
+      "redone",
+    );
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE" });
   });
 
   it("outdates a new-side finding whose commit is gone once its line holds other code", async () => {

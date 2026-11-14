@@ -308,7 +308,7 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["blocking", 503]]);
   });
 
-  it("keeps a finding's base-side name and line text, unless new ones are given", async () => {
+  it("keeps a finding's base-side name unless a new one is given, and takes its new lines", async () => {
     const run = await start("arn:exec:findings:5", 44);
     const save = (basePath?: string, lineText?: string) =>
       findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
@@ -326,8 +326,9 @@ describe("drizzleFindingStore", () => {
       ]);
     await save("src/total.ts", "return sum;");
     expect(await stored()).toEqual([["src/total.ts", "return sum;"]]);
+    // Raised again on lines it couldn't record: its old lines go with its old place.
     await save();
-    expect(await stored()).toEqual([["src/total.ts", "return sum;"]]);
+    expect(await stored()).toEqual([["src/total.ts", undefined]]);
     await save("src/sum.ts", "return total;");
     expect(await stored()).toEqual([["src/sum.ts", "return total;"]]);
   });

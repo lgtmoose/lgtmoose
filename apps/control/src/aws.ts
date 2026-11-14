@@ -430,7 +430,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
-                lineText: sql`coalesce(excluded.line_text, ${findings.lineText})`,
+                // With the line it's raised on now, whatever it was before.
+                lineText: sql`excluded.line_text`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
                 side: sql`excluded.side`,

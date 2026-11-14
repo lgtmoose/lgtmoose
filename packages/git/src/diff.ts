@@ -2,6 +2,7 @@ import type { Repo } from "./clone.js";
 import { importLines, languageOf } from "./imports.js";
 import { parsePatch, type FilePatch, type Hunk } from "./patch.js";
 import { pool } from "./pool.js";
+import { normaliseLine } from "./span.js";
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed" | "type-changed";
 
@@ -358,7 +359,7 @@ const TRIVIAL = /^[\s{}()[\];,.]*$/;
 export const REMOVED_LINES_SHOWN = 200;
 
 /** A line's text for comparing: re-indenting or re-spacing it doesn't change what it says. */
-const normalised = (text: string) => text.trim().replace(/\s+/g, " ");
+const normalised = normaliseLine;
 
 /** Copies of each added line, by normalised text, with the first original text seen. */
 function addedCopies(file: FileDiff | undefined): Map<string, { text: string; n: number }> {
