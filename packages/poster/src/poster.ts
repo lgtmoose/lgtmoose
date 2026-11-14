@@ -1,6 +1,7 @@
 import type { LabelClient } from "@lgtmoose/summary";
 import { CHECK_NAME, annotationPages, checkOutput, type CheckRunInput } from "./check-run.js";
 import { GitHubError, repoPath, type GitHubClient, type PullRef } from "./github.js";
+import { GITHUB_BODY_LIMIT } from "./format.js";
 import { reviewMarkerComment, withCommentsInBody, type ReviewPayload } from "./review.js";
 
 /** What posting a review did. */
@@ -179,7 +180,11 @@ export class GitHubPoster implements Poster {
     commentId?: number,
     marker?: string,
   ): Promise<SummaryCommentResult> {
-    if (marker !== undefined) body = `${body}\n\n${reviewMarkerComment(marker)}`;
+    if (marker !== undefined) {
+      // The marker must survive GitHub's limit: a body already at it gives up its last bytes.
+      const tail = `\n\n${reviewMarkerComment(marker)}`;
+      body = `${body.slice(0, GITHUB_BODY_LIMIT - tail.length)}${tail}`;
+    }
     if (commentId === undefined && marker !== undefined) {
       // No stored ID (a first review, or an attempt that didn't get to store it): find the
       // comment by its marker, so a retry edits the one an earlier attempt made.

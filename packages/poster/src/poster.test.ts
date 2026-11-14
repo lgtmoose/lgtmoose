@@ -210,6 +210,14 @@ describe("GitHubPoster", () => {
     });
   });
 
+  it("keeps the summary comment's marker within GitHub's limit", async () => {
+    const { poster: p, calls } = poster([{ status: 200, body: { id: 1 } }]);
+    await p.upsertSummaryComment(PULL, "x".repeat(65_536), 1, "lgtmoose-summary");
+    const body = (calls[0]?.body as { body: string } | undefined)?.body ?? "";
+    expect(body.length).toBe(65_536);
+    expect(body.endsWith("<!-- lgtmoose-summary -->")).toBe(true);
+  });
+
   it("edits the summary comment in place, or creates it when it's gone", async () => {
     const { poster: p, calls } = poster([
       { status: 200, body: {} },
