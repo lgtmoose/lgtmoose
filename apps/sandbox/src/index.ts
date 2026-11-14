@@ -1,5 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { ClaudeCodeHarness, CodexHarness, type Harness } from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
@@ -43,7 +47,8 @@ async function main(): Promise<void> {
   await runSandboxBatch(
     {
       fetch,
-      writeFile: (path, body) => writeFile(path, body),
+      writeFile: (path, body) =>
+        pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
       harness: (transcripts): Harness =>
         env.harness === "codex"

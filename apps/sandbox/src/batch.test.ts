@@ -34,6 +34,7 @@ function setup(options: Setup = {}) {
   const puts = new Map<string, string>();
   const runs: HarnessRunOptions<unknown>[] = [];
   const extracted: string[] = [];
+  const downloaded: Uint8Array[] = [];
   const objects: Record<string, unknown> = {
     "/runs/urls.json": {
       checkout: `${BASE}/checkout.tar.gz?X-Amz-Signature=s`,
@@ -79,7 +80,9 @@ function setup(options: Setup = {}) {
   const logs: string[] = [];
   const deps: SandboxDeps = {
     fetch: fakeFetch,
-    writeFile: async () => {},
+    writeFile: async (_path, body) => {
+      downloaded.push(new Uint8Array(await new Response(body).arrayBuffer()));
+    },
     extract: async (_archive, dir) => {
       extracted.push(dir);
     },
@@ -87,7 +90,7 @@ function setup(options: Setup = {}) {
     workDir: "/work",
     log: (message, fields) => logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   };
-  return { deps, puts, runs, extracted, logs };
+  return { deps, puts, runs, extracted, downloaded, logs };
 }
 
 describe("runSandboxBatch", () => {
@@ -95,6 +98,7 @@ describe("runSandboxBatch", () => {
     const s = setup();
     const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
 
+    expect(s.downloaded).toEqual([new Uint8Array([1, 2, 3])]);
     expect(s.extracted).toEqual(["/work/checkout"]);
     expect(s.runs[0]).toMatchObject({
       cwd: "/work/checkout",

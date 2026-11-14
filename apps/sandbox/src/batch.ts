@@ -12,8 +12,8 @@ import {
 
 export interface SandboxDeps {
   fetch: typeof fetch;
-  /** Writes `body` to a local file. */
-  writeFile(path: string, body: Uint8Array): Promise<void>;
+  /** Streams `body` to a local file: a checkout can be larger than the task's memory. */
+  writeFile(path: string, body: ReadableStream<Uint8Array>): Promise<void>;
   /** Extracts a gzip tarball into `dir`, which it creates. */
   extract(archive: string, dir: string): Promise<void>;
   /** The harness for this task's provider, saving transcripts to `transcripts`. */
@@ -74,10 +74,9 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
 
   const archive = join(deps.workDir, "checkout.tar.gz");
   const checkout = join(deps.workDir, "checkout");
-  await deps.writeFile(
-    archive,
-    new Uint8Array(await (await get(deps, urls.checkout)).arrayBuffer()),
-  );
+  const download = await get(deps, urls.checkout);
+  if (download.body === null) throw new Error("The checkout download has no body.");
+  await deps.writeFile(archive, download.body);
   await deps.extract(archive, checkout);
 
   const outcome = await runBatch(
