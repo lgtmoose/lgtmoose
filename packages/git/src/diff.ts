@@ -296,40 +296,72 @@ function addedLines(file: FileDiff): Set<number> {
   );
 }
 
-/** The added lines' text, counted, so a line the PR stopped adding can be found. */
-function addedTexts(file: FileDiff | undefined): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const line of file?.hunks.flatMap((h) => h.lines) ?? []) {
-    if (line.kind === "add") counts.set(line.text, (counts.get(line.text) ?? 0) + 1);
-  }
-  return counts;
-}
-
 /** Lines that say nothing on their own: blank, or only brackets and punctuation. */
 const TRIVIAL = /^[\s{}()[\];,.]*$/;
+
+/** Most removed lines listed for one file; the rest are counted ("…and N more"). */
+export const REMOVED_LINES_SHOWN = 200;
+
+/** A line's text for comparing: re-indenting or re-spacing it doesn't change what it says. */
+const normalised = (text: string) => text.trim().replace(/\s+/g, " ");
+
+/** Copies of each added line, by normalised text, with the first original text seen. */
+function addedCopies(file: FileDiff | undefined): Map<string, { text: string; n: number }> {
+  const copies = new Map<string, { text: string; n: number }>();
+  for (const line of file?.hunks.flatMap((h) => h.lines) ?? []) {
+    if (line.kind !== "add") continue;
+    const key = normalised(line.text);
+    const known = copies.get(key);
+    if (known === undefined) copies.set(key, { text: line.text, n: 1 });
+    else known.n += 1;
+  }
+  return copies;
+}
+
+/** One earlier PR change of a file under one of its names, and the review commit it's from. */
+export interface EarlierChange {
+  change: FileDiff | undefined;
+  /** The commit the name was reviewed at: two names are the same file only at the same one. */
+  reviewedAt: string;
+}
 
 /**
  * The lines a file's PR change added at earlier reviews (`before`, one change per name the file
  * had then) that its PR change now (`current`, undefined when the PR no longer changes it) no
  * longer adds: what a reader should look at, such as a removed check. Counted: every copy it
- * added then and doesn't now is listed. A line added under two names (the same copy, seen from
- * both) counts once, as the most copies under any one name. A reworded line is listed too; the
- * new wording shows as an added line. Only lines with nothing to read (blank, or brackets and
- * punctuation alone) are left out.
+ * added then and doesn't now is listed, with its original text. Lines are compared with their
+ * whitespace normalised, so re-indenting one isn't a removal. Separate files the names were at
+ * review time add up; two names are one file only when, at the same review commit, one is
+ * recorded as the other's rename. A reworded line is listed too; the new wording shows as an
+ * added line. Only lines with nothing to read (blank, or brackets and punctuation alone) are
+ * left out.
  */
 export function noLongerAdded(
-  before: readonly (FileDiff | undefined)[],
+  before: readonly EarlierChange[],
   current: FileDiff | undefined,
 ): string[] {
-  const then = new Map<string, number>();
-  for (const change of before) {
-    for (const [text, n] of addedTexts(change)) then.set(text, Math.max(then.get(text) ?? 0, n));
+  const changes = new Set<FileDiff>();
+  for (const { change } of before) if (change !== undefined) changes.add(change);
+  // A change is the same file as another from the same review commit that it was renamed to.
+  const renamedTo = new Set(
+    before.flatMap(({ change, reviewedAt }) =>
+      change?.oldPath === undefined ? [] : [`${reviewedAt}\0${change.oldPath}`],
+    ),
+  );
+  const then = new Map<string, { text: string; n: number }>();
+  for (const { change, reviewedAt } of before) {
+    if (change === undefined || !changes.delete(change)) continue;
+    if (renamedTo.has(`${reviewedAt}\0${change.path}`)) continue;
+    for (const [key, { text, n }] of addedCopies(change)) {
+      const known = then.get(key);
+      then.set(key, { text: known?.text ?? text, n: (known?.n ?? 0) + n });
+    }
   }
-  const now = addedTexts(current);
+  const now = addedCopies(current);
   const removed: string[] = [];
-  for (const [text, count] of then) {
+  for (const [key, { text, n }] of then) {
     if (TRIVIAL.test(text)) continue;
-    for (let i = now.get(text) ?? 0; i < count; i++) removed.push(text);
+    for (let i = now.get(key)?.n ?? 0; i < n; i++) removed.push(text);
   }
   return removed;
 }
@@ -392,7 +424,7 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
   }
   // The PR's diff of the file back then.
   const before = base.previous.get(file.path);
-  const removed = noLongerAdded([before], file);
+  const removed = noLongerAdded([{ change: before, reviewedAt: "" }], file);
   const prLines = addedLines(file);
   const newLines = changed
     ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
@@ -488,7 +520,7 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   };
   const gone = new Set<string>();
   /** Each file's PR change at its earlier reviews, one per name, for what it no longer adds. */
-  const beforesOf = new Map<string, (FileDiff | undefined)[]>();
+  const beforesOf = new Map<string, EarlierChange[]>();
   for (const file of files) {
     const base = baseOf(file.path);
     // Names involved: ones it was renamed from since a review, and the PR's own rename's
@@ -509,7 +541,10 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       if (anyGone) gone.add(file.path);
       // Still list what it stopped adding since then, across all its earlier names at once.
       const names = [file.path, ...new Set(otherNames)];
-      const befores = names.map((name) => baseOf(name)?.previous.get(name));
+      const befores = names.map((name) => ({
+        change: baseOf(name)?.previous.get(name),
+        reviewedAt: reviewedAt.get(name) ?? "",
+      }));
       beforesOf.set(file.path, befores);
       plan(withRemoved(file, noLongerAdded(befores, file)), otherNames);
       continue;
@@ -520,7 +555,9 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       plan(file);
       continue;
     }
-    beforesOf.set(file.path, [base.previous.get(file.path)]);
+    beforesOf.set(file.path, [
+      { change: base.previous.get(file.path), reviewedAt: reviewedAt.get(file.path) ?? "" },
+    ]);
     const moved = sinceBaseline(file, base);
     if (moved === undefined) cover(file.path);
     else plan(moved);
@@ -544,13 +581,15 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       const silent =
         current === undefined && (before.status === "added" || before.status === "deleted");
       if (current === undefined) {
-        const dropped = silent ? [] : noLongerAdded([before], undefined);
+        const dropped = silent
+          ? []
+          : noLongerAdded([{ change: before, reviewedAt: sha }], undefined);
         if (dropped.length > 0) noLongerChanged.push({ path: before.path, lines: dropped });
         cover(before.path);
         continue;
       }
       // Worked out once for the file across every name it had, not added up per name.
-      const befores = [...(beforesOf.get(current.path) ?? []), before];
+      const befores = [...(beforesOf.get(current.path) ?? []), { change: before, reviewedAt: sha }];
       beforesOf.set(current.path, befores);
       const earlier = planned.get(current.path) ?? current;
       plan(withRemoved(earlier, noLongerAdded(befores, current)), [

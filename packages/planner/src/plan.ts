@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
-import { readingDepth, type FileDiff, type ReadingDepth } from "@lgtmoose/git";
+import { REMOVED_LINES_SHOWN, readingDepth, type FileDiff, type ReadingDepth } from "@lgtmoose/git";
 import {
   DEFAULT_SKIP,
   TEST_GLOBS,
@@ -156,8 +156,9 @@ const byPath = (a: string, b: string) => {
  * the PR no longer changes at all (no hunks) still lists lines removed since the last review.
  */
 export function changedLines(file: FileDiff): number {
-  if (file.hunks.length === 0) return file.removedSinceLastReview?.length ?? 0;
-  let count = 0;
+  // Lines removed since the last review are in the prompt too, up to the shown limit.
+  const removed = file.removedSinceLastReview?.length ?? 0;
+  let count = Math.min(removed, REMOVED_LINES_SHOWN) + (removed > REMOVED_LINES_SHOWN ? 1 : 0);
   for (const hunk of file.hunks) {
     for (const line of hunk.lines) if (line.kind !== "context") count += 1;
   }

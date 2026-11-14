@@ -7,6 +7,8 @@ export {
   diffCommits,
   noLongerAdded,
   readingDepth,
+  REMOVED_LINES_SHOWN,
+  type EarlierChange,
   reviewDiff,
   type ReadingDepth,
   type DiffOptions,

@@ -65,6 +65,15 @@ describe("renderBatchFile", () => {
     `);
   });
 
+  it("lists at most 200 lines a file stopped adding, and counts the rest", () => {
+    const removed = Array.from({ length: 205 }, (_, i) => `check${i}();`);
+    const file = fileDiff(TOTAL_PATCH, { removedSinceLastReview: removed });
+    const text = renderBatchFile({ file, depth: "full" });
+    expect(text).toContain("check199();");
+    expect(text).not.toContain("check200();");
+    expect(text).toContain("…and 5 more.");
+  });
+
   it("doesn't show binary files or submodules", () => {
     const binary = fileDiff("", { path: "logo.png", binary: true });
     const submodule = fileDiff("", { path: "vendor/lib", submodule: true });

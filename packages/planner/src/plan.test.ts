@@ -75,6 +75,17 @@ describe("changedLines", () => {
     expect(changedLines(diff("a.ts", { hunks: [] }))).toBe(0);
   });
 
+  it("counts the lines removed since the last review, up to the listed limit", () => {
+    const removed = (n: number) => Array.from({ length: n }, (_, i) => `check${i}();`);
+    expect(
+      changedLines(diff("a.ts", { hunks: [hunk(3)], removedSinceLastReview: removed(4) })),
+    ).toBe(7);
+    // 200 listed, plus the "…and N more" line.
+    expect(
+      changedLines(diff("a.ts", { hunks: [hunk(3)], removedSinceLastReview: removed(250) })),
+    ).toBe(204);
+  });
+
   it("counts the whole PR diff on an incremental review, since the prompt shows it", () => {
     const file = diff("a.ts", {
       hunks: [hunk(300)],

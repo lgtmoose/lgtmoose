@@ -1,4 +1,4 @@
-import type { DiffLine, FileDiff, Hunk } from "@lgtmoose/git";
+import { REMOVED_LINES_SHOWN, type DiffLine, type FileDiff, type Hunk } from "@lgtmoose/git";
 import { wrapUntrusted } from "./untrusted.js";
 
 /**
@@ -96,10 +96,12 @@ export function renderBatchFile(entry: BatchFile): string {
   }
   const removed = file.removedSinceLastReview ?? [];
   if (removed.length > 0) {
+    const shown = removed.slice(0, REMOVED_LINES_SHOWN);
     parts.push(
       "Lines the PR added at the last review but no longer adds:",
-      wrapUntrusted("removed_since_last_review", removed.join("\n"), { path: file.path }),
+      wrapUntrusted("removed_since_last_review", shown.join("\n"), { path: file.path }),
     );
+    if (removed.length > shown.length) parts.push(`…and ${removed.length - shown.length} more.`);
   }
   return parts.join("\n");
 }

@@ -24,6 +24,8 @@ import { RESUME_RUNS, prepare, readManifest, type RunManifest } from "./prepare.
 import { PREPARE_FAILED, runCommand } from "./run.js";
 
 const exec = promisify(execFile);
+/** Hooks that set up real repositories (clones, commits, pushes) can be slow under load. */
+const HOOK_TIMEOUT = 30_000;
 const RUN_ID = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a11";
 const EXECUTION = "arn:aws:states:eu-west-1:123456789012:execution:review:abc";
 const SETTINGS = { model: "sonnet", batchTimeoutMs: 60_000 };
@@ -86,7 +88,7 @@ beforeEach(async () => {
     { "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++") },
     "head",
   );
-});
+}, HOOK_TIMEOUT);
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -532,7 +534,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     await git(work, "rebase", "--quiet", "main");
     await git(work, "push", "--quiet", "--force", "--all", "origin");
     headSha = await git(work, "rev-parse", "HEAD");
-  });
+  }, HOOK_TIMEOUT);
 
   it("reviews only the files changed since the last review", async () => {
     const h = harness();

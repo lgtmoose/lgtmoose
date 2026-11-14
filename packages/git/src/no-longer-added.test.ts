@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { noLongerAdded, type FileDiff } from "./diff.js";
 
-/** A file whose PR change adds these lines. */
-function adding(...texts: string[]): FileDiff {
+/** A file at `path` whose PR change adds these lines. */
+function adding(path: string, texts: string[], oldPath?: string): FileDiff {
   return {
-    path: "a.ts",
-    status: "modified",
+    path,
+    ...(oldPath === undefined ? {} : { oldPath }),
+    status: oldPath === undefined ? "modified" : "renamed",
     oldBlob: "a",
     newBlob: "b",
     submodule: false,
@@ -25,26 +26,51 @@ function adding(...texts: string[]): FileDiff {
   };
 }
 
+const S1 = "1".repeat(40);
+const S2 = "2".repeat(40);
+
 describe("noLongerAdded", () => {
-  it("counts the same copy seen under two names once", () => {
-    // The file had the check under its old name and its new one: one copy, not two.
-    const underOldName = adding("requireAdmin(user);");
-    const underNewName = adding("requireAdmin(user);");
-    expect(noLongerAdded([underOldName, underNewName], adding("other();"))).toEqual([
+  it("adds up names that were separate files when they were reviewed", () => {
+    // a.ts and b.ts each had the check, as separate files; now only one file is left without it.
+    const before = [
+      { change: adding("a.ts", ["requireAdmin(user);"]), reviewedAt: S1 },
+      { change: adding("b.ts", ["requireAdmin(user);"]), reviewedAt: S2 },
+    ];
+    expect(noLongerAdded(before, adding("a.ts", ["other();"]))).toEqual([
+      "requireAdmin(user);",
       "requireAdmin(user);",
     ]);
   });
 
-  it("keeps real duplicates, and lists rewordings", () => {
-    const then = adding("assert(ok);", "assert(ok);", "log('old');", "}");
-    expect(noLongerAdded([then], adding("log('new');"))).toEqual([
-      "assert(ok);",
-      "assert(ok);",
-      "log('old');",
+  it("counts a file once when, at the same commit, one name is the other's rename", () => {
+    const before = [
+      { change: adding("b.ts", ["requireAdmin(user);"], "a.ts"), reviewedAt: S1 },
+      { change: adding("a.ts", ["requireAdmin(user);"]), reviewedAt: S1 },
+    ];
+    expect(noLongerAdded(before, adding("a.ts", ["other();"]))).toEqual(["requireAdmin(user);"]);
+  });
+
+  it("keeps real duplicates, lists rewordings, and leaves out lines with nothing to read", () => {
+    const then = adding("a.ts", ["assert(ok);", "assert(ok);", "log('old');", "}"]);
+    expect(
+      noLongerAdded([{ change: then, reviewedAt: S1 }], adding("a.ts", ["log('new');"])),
+    ).toEqual(["assert(ok);", "assert(ok);", "log('old');"]);
+  });
+
+  it("doesn't take re-indentation or re-spacing for a removal", () => {
+    const then = adding("a.ts", ["  if (ok)   return;"]);
+    const now = adding("a.ts", ["      if (ok) return;"]);
+    expect(noLongerAdded([{ change: then, reviewedAt: S1 }], now)).toEqual([]);
+    // The original text is what's reported.
+    expect(noLongerAdded([{ change: then, reviewedAt: S1 }], undefined)).toEqual([
+      "  if (ok)   return;",
     ]);
   });
 
   it("lists nothing when the file still adds every line", () => {
-    expect(noLongerAdded([adding("a();", "b();")], adding("b();", "a();", "c();"))).toEqual([]);
+    const then = adding("a.ts", ["a();", "b();"]);
+    expect(
+      noLongerAdded([{ change: then, reviewedAt: S1 }], adding("a.ts", ["b();", "a();", "c();"])),
+    ).toEqual([]);
   });
 });
