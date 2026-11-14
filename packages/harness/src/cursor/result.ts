@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { classifyFailure, type LimitFailure } from "../codex/stream.js";
+import { classifyFailure, type LimitFailure } from "../limits.js";
 import type { HarnessUsage } from "../harness.js";
 
 /**

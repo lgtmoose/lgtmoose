@@ -20,7 +20,8 @@ import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { authJsonSecrets, codexAuth } from "./auth.js";
 import { dropOptionalNulls, strictSchema } from "./schema.js";
-import { classifyFailure, parseCodexEvents, type CodexRun } from "./stream.js";
+import { classifyFailure } from "../limits.js";
+import { parseCodexEvents, type CodexRun } from "./stream.js";
 
 export interface CodexHarnessOptions {
   /** Where each attempt's JSONL transcript is saved. */

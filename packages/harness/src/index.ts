@@ -55,7 +55,7 @@ export {
   type CodexHarnessOptions,
 } from "./codex/adapter.js";
 export { authJsonSecrets, codexAuth, type CodexAuth, type CodexAuthMethod } from "./codex/auth.js";
-export { classifyFailure, type LimitFailure } from "./codex/stream.js";
+export { classifyFailure, type LimitFailure } from "./limits.js";
 export {
   CursorHarness,
   cursorArgs,

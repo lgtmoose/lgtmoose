@@ -14,19 +14,7 @@ import { readSandboxEnv } from "./env.js";
 const WORK = "/work";
 const TMP = "/tmp";
 
-/** Extracts the checkout, then removes the PR's symlinks that lead outside it. */
-async function extract(archive: string, dir: string): Promise<void> {
-  await untar(archive, dir);
-  const dropped = await dropEscapingSymlinks(dir);
-  if (dropped.length > 0) {
-    log("removed symlinks that lead outside the checkout", {
-      count: dropped.length,
-      paths: dropped.slice(0, 20),
-    });
-  }
-}
-
-function untar(archive: string, dir: string): Promise<void> {
+function extract(archive: string, dir: string): Promise<void> {
   return new Promise((resolve, reject) => {
     void mkdir(dir, { recursive: true }).then(() => {
       const child = spawn("tar", ["-xzf", archive, "-C", dir, "--no-same-owner"], {
@@ -63,6 +51,7 @@ async function main(): Promise<void> {
       writeFile: (path, body) =>
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
+      dropEscapingSymlinks,
       harness: (transcripts): Harness => {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
         if (env.harness === "codex") return new CodexHarness(options);
