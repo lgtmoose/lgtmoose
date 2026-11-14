@@ -281,14 +281,26 @@ describe("CursorHarness", () => {
     expect((await readdir(join(cwd, "docs"))).sort()).toEqual(["env", "readme"]);
   });
 
-  it("puts a prompt with a NUL in a task file, since no argument can carry one", async () => {
+  it("replaces NULs in a prompt with U+FFFD and sends it as usual", async () => {
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
-    const prompt = "Review this batch.\0 The diff has a NUL.";
-    const result = await run(harness, { prompt });
+    const result = await run(harness, { prompt: "Review this batch.\0 The diff has a NUL." });
     expect(result.output.findings).toHaveLength(1);
     const [call] = await fake!.calls();
+    // Short enough for one argument, so it goes there, with no NUL left.
+    const arg = call?.argv.at(-1) ?? "";
+    expect(arg.startsWith("Review this batch.� The diff has a NUL.")).toBe(true);
+    expect(arg).not.toContain("\0");
+    expect(call?.taskFile).toBeUndefined();
+  });
+
+  it("writes no NUL into a long prompt's task file", async () => {
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
+    const prompt = `\0${"x".repeat(MAX_CURSOR_ARG_PROMPT_BYTES)}`;
+    await run(harness, { prompt });
+    const [call] = await fake!.calls();
     expect(call?.argv.at(-1)).toMatch(/lgtmoose-task-[\w-]+\/prompt-1\.md/);
-    expect(call?.taskFile?.startsWith(prompt)).toBe(true);
+    expect(call?.taskFile?.startsWith("�xxx")).toBe(true);
+    expect(call?.taskFile).not.toContain("\0");
   });
 
   it("puts a prompt too long for one argument in a task file in the workspace", async () => {
