@@ -1436,6 +1436,58 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
   });
 
+  /** The PR deletes src/total.ts's return: an old-side finding on it, then its commit is gone. */
+  async function droppedReturnThenForcePushed(
+    h: ReturnType<typeof harness>,
+    redo: () => Promise<void>,
+  ) {
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("  return sum;\n", "") },
+      "drop return",
+    );
+    await review(h, 1, [droppedReturn]);
+    await redo();
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+  }
+
+  it("outdates an old-side finding whose commit is gone once the PR keeps its line", async () => {
+    const h = harness();
+    await droppedReturnThenForcePushed(h, async () => {
+      // Redone: still changes the file, but no longer deletes the return.
+      await git(work, "reset", "--quiet", "--hard", baseSha);
+      headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "redone, return kept");
+    });
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE" });
+  });
+
+  it("finds an old-side finding whose commit is gone on its moved line after base edits", async () => {
+    const h = harness();
+    await droppedReturnThenForcePushed(h, async () => {
+      // Main adds two lines at the top; the PR is redone on it, still deleting the return,
+      // now two lines further down.
+      await git(work, "checkout", "--quiet", "main");
+      baseSha = await commit({ "src/total.ts": `// header\n// more\n${TOTAL}` }, "main edit");
+      await git(work, "checkout", "--quiet", "feature");
+      await git(work, "reset", "--quiet", "--hard", baseSha);
+      headSha = await commit(
+        { "src/total.ts": `// header\n// more\n${HEAD_TOTAL.replace("  return sum;\n", "")}` },
+        "redone",
+      );
+    });
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    const last = shadowRecords(h.objects, "summary-comment").at(-1)?.body;
+    const summary = typeof last === "string" ? last : "";
+    const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
+    expect(row).toContain("total\\.ts:8");
+  });
+
   it("keeps a resolved old-side finding resolved through a second rename by the PR", async () => {
     let threads: ReviewThread[] = [];
     const h = harness({ commentIds: true, threads: () => threads });
