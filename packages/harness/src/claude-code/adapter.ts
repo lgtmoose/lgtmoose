@@ -10,8 +10,10 @@ import {
   type HarnessRunOptions,
   type HarnessUsage,
 } from "../harness.js";
+import { exitText, saveAttemptTranscript, success } from "../attempt.js";
+import { repairPrompt, truncate } from "../answer.js";
 import { runProcess, type ProcessResult } from "../process.js";
-import { redact, valueContainsSecret, withheldLines } from "../redact.js";
+import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { claudeAuthEnv, networkEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
@@ -49,7 +51,6 @@ export interface ClaudeCodeHarnessOptions {
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** Stop after this many API retries caused by the credential: retrying won't fix it. */
 const MAX_AUTH_RETRIES = 2;
-const MAX_MESSAGE = 2000;
 
 type Attempt<T> =
   | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
@@ -119,7 +120,7 @@ export class ClaudeCodeHarness implements Harness {
           },
         });
         const key = transcriptKey(runId, n);
-        await this.saveTranscript(key, proc, n, secrets, keys);
+        await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
         const result = findResult(proc.stdout);
         failIfUnusable(proc, result, secrets, keys, options.timeoutMs);
         const usage = usageOf(result);
@@ -157,50 +158,6 @@ export class ClaudeCodeHarness implements Harness {
       await rm(home, { recursive: true, force: true });
     }
   }
-
-  private async saveTranscript(
-    key: string,
-    proc: ProcessResult,
-    attempt: number,
-    secrets: readonly string[],
-    keys: string[],
-  ): Promise<void> {
-    const meta = {
-      type: "lgtmoose_harness",
-      attempt,
-      exit_code: proc.exitCode,
-      signal: proc.signal,
-      stopped: proc.stopped ?? null,
-      stderr: proc.stderr,
-    };
-    const body = withheldLines(
-      redact(`${proc.stdout.replace(/\n?$/, "\n")}${JSON.stringify(meta)}\n`, secrets),
-      secrets,
-    );
-    try {
-      await this.options.transcripts.put(key, body);
-    } catch (error) {
-      throw new HarnessError("transcript", `Could not save transcript ${key}.`, {
-        transcriptKeys: keys,
-        cause: error,
-      });
-    }
-    keys.push(key);
-  }
-}
-
-function success<T>(
-  attempt: { output: T; key: string },
-  usage: HarnessUsage,
-  keys: string[],
-): HarnessResult<T> {
-  const out: HarnessResult<T> = {
-    output: attempt.output,
-    transcriptKey: attempt.key,
-    transcriptKeys: [...keys],
-  };
-  if (Object.keys(usage).length > 0) out.usage = usage;
-  return out;
 }
 
 /** Throws the right HarnessError when a process didn't produce a successful result event. */
@@ -231,15 +188,6 @@ function failIfUnusable(
   if (result.is_error || result.subtype !== "success") {
     throw fail("process", `claude reported ${result.subtype}: ${result.result ?? "no detail"}`);
   }
-}
-
-function exitText(proc: ProcessResult): string {
-  if (proc.signal) return `signal ${proc.signal}`;
-  return `code ${proc.exitCode ?? "unknown"}`;
-}
-
-function truncate(text: string): string {
-  return text.length > MAX_MESSAGE ? `${text.slice(0, MAX_MESSAGE)}…` : text;
 }
 
 /** Quotes a path for the shell that runs hook commands. */
@@ -339,15 +287,4 @@ function jsonSchemaFor(schema: z.ZodType): { flag?: string; promptSuffix: string
   return {
     promptSuffix: `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`,
   };
-}
-
-function repairPrompt(problems: string): string {
-  return [
-    "Your answer did not match the required JSON schema.",
-    "",
-    "Problems:",
-    truncate(problems),
-    "",
-    "Reply again with only the corrected JSON. Keep everything that was right. Don't explain.",
-  ].join("\n");
 }

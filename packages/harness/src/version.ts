@@ -10,3 +10,10 @@ export const CLAUDE_CODE_VERSION = "2.1.311";
  * in step.
  */
 export const CODEX_VERSION = "0.166.0";
+
+/**
+ * The Cursor CLI (`agent`) build the sandbox image installs (infra/sandbox/Dockerfile). The
+ * cursor adapter's flags, permissions file and JSON result were checked against its docs. A test
+ * keeps the two in step.
+ */
+export const CURSOR_AGENT_VERSION = "2026.11.10-731fb78";

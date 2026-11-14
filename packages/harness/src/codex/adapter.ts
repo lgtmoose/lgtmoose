@@ -11,9 +11,11 @@ import {
   type HarnessUsage,
   type ModelTier,
 } from "../harness.js";
+import { exitText, saveAttemptTranscript, success } from "../attempt.js";
+import { parseAnswer, repairPrompt, truncate } from "../answer.js";
 import { networkEnv } from "../claude-code/auth.js";
 import { runProcess, type ProcessResult } from "../process.js";
-import { redact, valueContainsSecret, withheldLines } from "../redact.js";
+import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { authJsonSecrets, codexAuth } from "./auth.js";
 import { dropOptionalNulls, strictSchema } from "./schema.js";
@@ -59,7 +61,6 @@ const MAX_AUTH_ERRORS = 2;
  */
 const MAX_BLOCKED_CONNECTS = 4;
 const BLOCKED_CONNECT = /Proxy connection failed|HTTP CONNECT failed/;
-const MAX_MESSAGE = 2000;
 
 type Attempt<T> =
   | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
@@ -244,7 +245,7 @@ export class CodexHarness implements Harness {
         });
         await readAuth();
         const key = transcriptKey(runId, n);
-        await this.saveTranscript(key, proc, n, secrets, keys);
+        await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
         const run = parseCodexEvents(proc.stdout);
         threadId = run.threadId ?? threadId;
         failIfUnusable(proc, run, secrets, keys, options.timeoutMs, stopReason);
@@ -332,50 +333,6 @@ export class CodexHarness implements Harness {
     }
     await this.options.onAuthRefreshed?.(current);
   }
-
-  private async saveTranscript(
-    key: string,
-    proc: ProcessResult,
-    attempt: number,
-    secrets: readonly string[],
-    keys: string[],
-  ): Promise<void> {
-    const meta = {
-      type: "lgtmoose_harness",
-      attempt,
-      exit_code: proc.exitCode,
-      signal: proc.signal,
-      stopped: proc.stopped ?? null,
-      stderr: proc.stderr,
-    };
-    const body = withheldLines(
-      redact(`${proc.stdout.replace(/\n?$/, "\n")}${JSON.stringify(meta)}\n`, secrets),
-      secrets,
-    );
-    try {
-      await this.options.transcripts.put(key, body);
-    } catch (error) {
-      throw new HarnessError("transcript", `Could not save transcript ${key}.`, {
-        transcriptKeys: keys,
-        cause: error,
-      });
-    }
-    keys.push(key);
-  }
-}
-
-function success<T>(
-  attempt: { output: T; key: string },
-  usage: HarnessUsage,
-  keys: string[],
-): HarnessResult<T> {
-  const out: HarnessResult<T> = {
-    output: attempt.output,
-    transcriptKey: attempt.key,
-    transcriptKeys: [...keys],
-  };
-  if (Object.keys(usage).length > 0) out.usage = usage;
-  return out;
 }
 
 /** An `error` or `turn.failed` event saying the credential was refused. */
@@ -425,15 +382,6 @@ function failIfUnusable(
   throw fail("process", `codex exited (${exitText(proc)}) without finishing: ${detail}`);
 }
 
-function exitText(proc: ProcessResult): string {
-  if (proc.signal) return `signal ${proc.signal}`;
-  return `code ${proc.exitCode ?? "unknown"}`;
-}
-
-function truncate(text: string): string {
-  return text.length > MAX_MESSAGE ? `${text.slice(0, MAX_MESSAGE)}…` : text;
-}
-
 /**
  * Variables that keep the CLI and git from reading anything but the checkout: a fresh home and
  * CODEX_HOME, and git without user or system config, pager, prompts or lazy fetches.
@@ -472,31 +420,6 @@ function schemaFor(schema: z.ZodType): { strict?: unknown; json?: unknown; promp
     json,
     promptSuffix: `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`,
   };
-}
-
-/** The final message as JSON, also when it's wrapped in a Markdown code fence. */
-function parseAnswer(
-  answer: string | undefined,
-): { ok: true; value: unknown } | { ok: false; error: string } {
-  if (answer === undefined || answer.trim() === "")
-    return { ok: false, error: "There was no answer." };
-  const fenced = /^\s*```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$/.exec(answer);
-  try {
-    return { ok: true, value: JSON.parse(fenced?.[1] ?? answer) };
-  } catch {
-    return { ok: false, error: "The answer wasn't valid JSON." };
-  }
-}
-
-function repairPrompt(problems: string): string {
-  return [
-    "Your answer did not match the required JSON schema.",
-    "",
-    "Problems:",
-    truncate(problems),
-    "",
-    "Reply again with only the corrected JSON. Keep everything that was right. Don't explain.",
-  ].join("\n");
 }
 
 /** The run's error, marked with why the refreshed credential couldn't be handed back. */

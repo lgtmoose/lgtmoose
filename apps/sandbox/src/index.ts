@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
-import { ClaudeCodeHarness, CodexHarness, type Harness } from "@lgtmoose/harness";
+import { ClaudeCodeHarness, CodexHarness, CursorHarness, type Harness } from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
@@ -50,10 +50,12 @@ async function main(): Promise<void> {
       writeFile: (path, body) =>
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
-      harness: (transcripts): Harness =>
-        env.harness === "codex"
-          ? new CodexHarness({ transcripts, env: harnessVars, tmpRoot: TMP })
-          : new ClaudeCodeHarness({ transcripts, env: harnessVars, tmpRoot: TMP }),
+      harness: (transcripts): Harness => {
+        const options = { transcripts, env: harnessVars, tmpRoot: TMP };
+        if (env.harness === "codex") return new CodexHarness(options);
+        if (env.harness === "cursor-agent") return new CursorHarness(options);
+        return new ClaudeCodeHarness(options);
+      },
       workDir: WORK,
       log,
     },

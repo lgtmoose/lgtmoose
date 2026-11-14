@@ -152,13 +152,17 @@ describe("credentialEnv", () => {
     expect(credentialEnv("codex", "chatgpt-login", "{}")).toEqual({ CODEX_AUTH_JSON: "{}" });
     expect(credentialEnv("codex", "access-token", "a")).toEqual({ CODEX_ACCESS_TOKEN: "a" });
     expect(credentialEnv("codex", "api-key", "k")).toEqual({ CODEX_API_KEY: "k" });
+    expect(credentialEnv("cursor-agent", "api-key", "k")).toEqual({ CURSOR_API_KEY: "k" });
+    expect(credentialEnv("cursor-agent", "service-account", "k")).toEqual({
+      CURSOR_API_KEY: "k",
+    });
   });
 
   it("refuses a missing credential and unsupported providers, without the value", () => {
     expect(() => credentialEnv("claude-code", "api-key", " ")).toThrow("isn't set");
     for (const [harness, auth] of [
       ["claude-code", "vertex"],
-      ["cursor-agent", "api-key"],
+      ["agent-sdk", "api-key"],
     ] as const) {
       const error = (() => {
         try {

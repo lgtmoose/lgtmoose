@@ -1,0 +1,273 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { z } from "zod";
+import { parseAnswer, repairPrompt, truncate } from "../answer.js";
+import { exitText, saveAttemptTranscript, success } from "../attempt.js";
+import { networkEnv } from "../claude-code/auth.js";
+import { addUsage } from "../codex/stream.js";
+import {
+  HarnessError,
+  type Harness,
+  type HarnessResult,
+  type HarnessRunOptions,
+  type HarnessUsage,
+  type ModelTier,
+} from "../harness.js";
+import { runProcess, type ProcessResult } from "../process.js";
+import { redact, valueContainsSecret } from "../redact.js";
+import { transcriptKey, type TranscriptStore } from "../transcript.js";
+import { cursorAuth } from "./auth.js";
+import { cursorCliConfig } from "./policy.js";
+import {
+  classifyCursorFailure,
+  cursorUsage,
+  findCursorResult,
+  type CursorResult,
+} from "./result.js";
+
+export interface CursorHarnessOptions {
+  /** Where each attempt's output is saved. */
+  transcripts: TranscriptStore;
+  /** The `agent` binary. Defaults to `agent` on PATH. */
+  binaryPath?: string;
+  /** Where the key, PATH and proxy settings come from. Defaults to `process.env`. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Models per tier, from the provider's `models` in lgtmoose.config.ts. A run's `model` wins;
+   * without either, the CLI uses the account's default model.
+   */
+  models?: Partial<Record<ModelTier, string>>;
+  /** Time between SIGTERM and SIGKILL on timeout. Defaults to 5 seconds. */
+  killGraceMs?: number;
+  /** Parent of each run's temporary home directory. Defaults to the OS temp directory. */
+  tmpRoot?: string;
+}
+
+/** Stop a run whose output passes this size. */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+/**
+ * The CLI takes the prompt as an argument, not on stdin, and Linux caps one argument at 128 KiB
+ * (MAX_ARG_STRLEN). Leave room for the schema and the repair text.
+ */
+export const MAX_CURSOR_PROMPT_BYTES = 120 * 1024;
+
+export interface CursorArgsOptions {
+  /** Omit for the account's default model. */
+  model?: string;
+  /** Continue this chat (the repair retry) instead of starting one. */
+  resumeSessionId?: string;
+  prompt: string;
+}
+
+/**
+ * The command line (flags from https://cursor.com/docs/cli/reference/parameters): print mode
+ * with one JSON result, ask mode (read-only), the workspace trusted without a prompt, and the
+ * sandbox on. Never `--force` (it applies changes and runs commands without asking) and never
+ * `--approve-mcps`, so MCP servers in the checkout's `.cursor/mcp.json` don't start. The prompt
+ * comes last, after `--`, so a prompt starting with `-` isn't read as a flag.
+ */
+export function cursorArgs(options: CursorArgsOptions): string[] {
+  return [
+    "--print",
+    "--output-format",
+    "json",
+    "--mode",
+    "ask",
+    "--trust",
+    "--sandbox",
+    "enabled",
+    ...(options.model === undefined ? [] : ["--model", options.model]),
+    ...(options.resumeSessionId === undefined ? [] : ["--resume", options.resumeSessionId]),
+    "--",
+    options.prompt,
+  ];
+}
+
+type Attempt<T> =
+  | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
+  | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
+
+/** Runs the Cursor CLI headless (`agent -p`) in read-only ask mode. */
+export class CursorHarness implements Harness {
+  readonly id = "cursor-agent";
+  private readonly options: CursorHarnessOptions;
+
+  constructor(options: CursorHarnessOptions) {
+    this.options = options;
+  }
+
+  async run<T>(options: HarnessRunOptions<T>): Promise<HarnessResult<T>> {
+    const source = this.options.env ?? process.env;
+    const auth = cursorAuth(source);
+    const runId = options.runId ?? randomUUID();
+    const deadline = Date.now() + options.timeoutMs;
+    const tier = options.tier ?? "standard";
+    const model = options.model.trim() || this.options.models?.[tier];
+    const secrets = auth.secrets;
+    const keys: string[] = [];
+    const firstPrompt = options.prompt + schemaSuffix(options.schema);
+    checkPromptSize(firstPrompt, keys);
+    const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
+    try {
+      await mkdir(join(home, ".cursor"));
+      await mkdir(join(home, "tmp"));
+      await writeFile(join(home, ".cursor", "cli-config.json"), cursorCliConfig());
+      const env: Record<string, string> = {
+        PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        ...networkEnv(source),
+        ...auth.env,
+        ...hardeningEnv(home),
+      };
+
+      let sessionId: string | undefined;
+      const attempt = async (n: number, prompt: string): Promise<Attempt<T>> => {
+        const timeoutMs = deadline - Date.now();
+        if (timeoutMs <= 0) {
+          throw new HarnessError("timeout", `Timed out after ${options.timeoutMs} ms.`, {
+            transcriptKeys: keys,
+          });
+        }
+        checkPromptSize(prompt, keys);
+        const proc = await runProcess({
+          command: this.options.binaryPath ?? "agent",
+          args: cursorArgs({
+            ...(model === undefined ? {} : { model }),
+            ...(sessionId === undefined ? {} : { resumeSessionId: sessionId }),
+            prompt,
+          }),
+          cwd: options.cwd,
+          env,
+          input: "",
+          timeoutMs,
+          killGraceMs: this.options.killGraceMs ?? 5000,
+          maxOutputBytes: MAX_OUTPUT_BYTES,
+        });
+        const key = transcriptKey(runId, n);
+        await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
+        const result = findCursorResult(proc.stdout);
+        failIfUnusable(proc, result, secrets, keys, options.timeoutMs);
+        sessionId = result.session_id ?? sessionId;
+        const usage = cursorUsage(result);
+        const parsed = parseAnswer(result.result);
+        if (!parsed.ok) return { kind: "invalid", problems: parsed.error, usage, key };
+        const checked = options.schema.safeParse(parsed.value);
+        if (!checked.success) {
+          return { kind: "invalid", problems: z.prettifyError(checked.error), usage, key };
+        }
+        // A prompt-injected model could try to post the key in a finding.
+        if (valueContainsSecret(checked.data, secrets)) {
+          throw new HarnessError("invalid_output", "The output contained a model credential.", {
+            transcriptKeys: keys,
+          });
+        }
+        return { kind: "ok", output: checked.data, usage, key };
+      };
+
+      const first = await attempt(1, firstPrompt);
+      if (first.kind === "ok") return success(first, first.usage, keys);
+      // Resume the chat so the model sees its answer; without a session id, start over with the
+      // problems appended.
+      const repair = repairPrompt(first.problems);
+      const second = await attempt(
+        2,
+        sessionId === undefined ? `${firstPrompt}\n\n${repair}` : repair,
+      );
+      if (second.kind === "ok") return success(second, addUsage(first.usage, second.usage), keys);
+      throw new HarnessError(
+        "invalid_output",
+        truncate(
+          redact(`The output was invalid after a repair retry: ${second.problems}`, secrets),
+        ),
+        { transcriptKeys: keys },
+      );
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+}
+
+/** Refuses a prompt the kernel wouldn't pass as one argument. */
+function checkPromptSize(prompt: string, keys: readonly string[]): void {
+  const bytes = Buffer.byteLength(prompt);
+  if (bytes <= MAX_CURSOR_PROMPT_BYTES) return;
+  throw new HarnessError(
+    "process",
+    `The prompt is ${bytes} bytes; the Cursor CLI takes at most ${MAX_CURSOR_PROMPT_BYTES}. Use smaller batches.`,
+    { transcriptKeys: keys },
+  );
+}
+
+/** Throws the right HarnessError when a run didn't print a successful result. */
+function failIfUnusable(
+  proc: ProcessResult,
+  result: CursorResult | undefined,
+  secrets: readonly string[],
+  keys: readonly string[],
+  timeoutMs: number,
+): asserts result is CursorResult {
+  const fail = (
+    kind: HarnessError["kind"],
+    message: string,
+    extra: { retryAfterSeconds?: number; resetsAt?: string } = {},
+  ): HarnessError =>
+    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys, ...extra });
+  if (proc.spawnError) throw fail("process", `Could not start agent: ${proc.spawnError.message}`);
+  if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
+  if (proc.stopped === "output_limit") {
+    throw fail("process", "agent wrote more output than allowed.");
+  }
+  const ok =
+    result !== undefined &&
+    proc.exitCode === 0 &&
+    result.subtype === "success" &&
+    result.is_error !== true;
+  if (ok) return;
+  const detail =
+    proc.stderr.trim() ||
+    (result?.is_error === true ? result.result : undefined)?.trim() ||
+    "no output";
+  const limit = classifyCursorFailure(detail);
+  if (limit !== undefined) {
+    const { kind, ...extra } = limit;
+    throw fail(kind, `agent stopped: ${detail}`, extra);
+  }
+  throw fail("process", `agent exited (${exitText(proc)}) without a result: ${detail}`);
+}
+
+/**
+ * Variables that keep the CLI and git from reading anything but the checkout: a fresh home (so
+ * the only global config is the run's own), no colour, and git without user or system config,
+ * pager, prompts or lazy fetches.
+ */
+function hardeningEnv(home: string): Record<string, string> {
+  return {
+    HOME: home,
+    TMPDIR: join(home, "tmp"),
+    NO_COLOR: "1",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_NO_LAZY_FETCH: "1",
+  };
+}
+
+/**
+ * The CLI has no structured-output flag, so the schema is described in the prompt. The answer
+ * is still validated with zod.
+ */
+function schemaSuffix(schema: z.ZodType): string {
+  try {
+    const json: Record<string, unknown> = {
+      ...z.toJSONSchema(schema, { io: "input", target: "draft-7" }),
+    };
+    delete json.$schema;
+    return `\n\nReply with only a JSON value that matches this JSON Schema, with no other text:\n${JSON.stringify(json)}`;
+  } catch {
+    return "\n\nReply with only a JSON value, with no other text.";
+  }
+}

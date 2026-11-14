@@ -56,4 +56,14 @@ export {
 } from "./codex/adapter.js";
 export { authJsonSecrets, codexAuth, type CodexAuth, type CodexAuthMethod } from "./codex/auth.js";
 export { classifyFailure, type LimitFailure } from "./codex/stream.js";
-export { CLAUDE_CODE_VERSION, CODEX_VERSION } from "./version.js";
+export {
+  CursorHarness,
+  cursorArgs,
+  MAX_CURSOR_PROMPT_BYTES,
+  type CursorArgsOptions,
+  type CursorHarnessOptions,
+} from "./cursor/adapter.js";
+export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
+export { CURSOR_PERMISSIONS } from "./cursor/policy.js";
+export { classifyCursorFailure } from "./cursor/result.js";
+export { CLAUDE_CODE_VERSION, CODEX_VERSION, CURSOR_AGENT_VERSION } from "./version.js";
