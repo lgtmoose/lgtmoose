@@ -39,7 +39,8 @@ RUN set -eu; \
     echo "${CURSOR_AGENT_SHA256}  /tmp/agent.tar.gz" | sha256sum -c -; \
   fi; \
   mkdir -p /opt/cursor-agent; \
-  tar -xzf /tmp/agent.tar.gz -C /opt/cursor-agent --strip-components=1; \
+  tar -xzf /tmp/agent.tar.gz -C /opt/cursor-agent --strip-components=1 --no-same-owner; \
+  chmod -R go-w /opt/cursor-agent; \
   test -x /opt/cursor-agent/cursor-agent
 
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54

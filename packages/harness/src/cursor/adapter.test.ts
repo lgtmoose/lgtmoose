@@ -274,6 +274,26 @@ describe("CursorHarness", () => {
     expect(await fake!.calls()).toEqual([]);
   });
 
+  it("repeats a near-limit prompt for a fresh-start repair", async () => {
+    const harness = await harnessFor([
+      // No session id, and enough problems to fill the repair text.
+      {
+        stdout: `${JSON.stringify({
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({ findings: Array.from({ length: 60 }, () => ({ name: 1 })) }),
+        })}\n`,
+      },
+      { stdout: cursorResult(ANSWER) },
+    ]);
+    const prompt = "x".repeat(MAX_CURSOR_PROMPT_BYTES - 1000);
+    const result = await run(harness, { prompt });
+    expect(result.output.findings).toHaveLength(1);
+    const calls = await fake!.calls();
+    expect(calls[1]?.argv).not.toContain("--resume");
+    expect(calls[1]?.argv.at(-1)?.startsWith(prompt)).toBe(true);
+  });
+
   it("kills a hung run at the deadline", async () => {
     const harness = await harnessFor([{ hang: true }]);
     const error = await failure(run(harness, { timeoutMs: 300 }));

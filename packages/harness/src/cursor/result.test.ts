@@ -46,4 +46,15 @@ describe("classifyCursorFailure", () => {
   it("leaves other failures alone", () => {
     expect(classifyCursorFailure("ENOENT: no such file")).toBeUndefined();
   });
+
+  it("prefers a plan limit over a 429 in the same message, keeping the wait", () => {
+    expect(classifyCursorFailure("Spending limit reached (429), try again in 2 hours")).toEqual({
+      kind: "plan_limit",
+      retryAfterSeconds: 7200,
+    });
+  });
+
+  it("doesn't blame the key for a proxy's 403", () => {
+    expect(classifyCursorFailure("CONNECT tunnel failed, response 403 Forbidden")).toBeUndefined();
+  });
 });

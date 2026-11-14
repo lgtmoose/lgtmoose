@@ -57,19 +57,24 @@ export function cursorUsage(result: CursorResult | undefined): HarnessUsage {
 /** A Cursor plan's included usage or spend limit is used up. */
 const PLAN_LIMIT =
   /usage limit|out of (?:fast )?requests|spend(?:ing)? limit|upgrade (?:your plan|to (?:pro|ultra))|included usage/i;
-/** The key was refused, or the CLI has none. */
+/**
+ * The key was refused, or the CLI has none. Not a bare 403 or "forbidden": the egress proxy
+ * refuses a host it doesn't allow with 403 too, and that isn't the key's fault.
+ */
 const AUTH_FAILURE =
-  /\b40[13]\b|unauthori[sz]ed|forbidden|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login/i;
+  /\b401\b|unauthori[sz]ed|invalid api key|api key (?:is )?(?:invalid|revoked|expired)|authentication (?:required|failed)|not (?:authenticated|logged in)|agent login/i;
 
 /**
  * Whether a Cursor failure is a plan limit, a rate limit or a refused key, so the fallback chain
- * can move on. The wording checks shared with Codex ("rate limit", "429", "try again in 20
- * seconds") come first, then Cursor's own. Undefined for any other failure.
+ * can move on. Cursor's plan-limit wording wins, since such messages may mention a 429 too; then
+ * the checks shared with Codex ("rate limit", "429", "try again in 20 seconds"); then Cursor's
+ * auth wording. Undefined for any other failure.
  */
 export function classifyCursorFailure(message: string): LimitFailure | undefined {
   const shared = classifyFailure(message);
+  // Keep any reset time the shared check found.
+  if (PLAN_LIMIT.test(message)) return { ...shared, kind: "plan_limit" };
   if (shared !== undefined) return shared;
-  if (PLAN_LIMIT.test(message)) return { kind: "plan_limit" };
   if (AUTH_FAILURE.test(message)) return { kind: "auth" };
   return undefined;
 }

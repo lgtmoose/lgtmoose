@@ -49,7 +49,12 @@ export interface CursorHarnessOptions {
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /**
  * The CLI takes the prompt as an argument, not on stdin, and Linux caps one argument at 128 KiB
- * (MAX_ARG_STRLEN). Leave room for the schema and the repair text.
+ * (MAX_ARG_STRLEN, counting the closing NUL).
+ */
+const MAX_ARG_BYTES = 128 * 1024 - 1;
+/**
+ * The largest first prompt (the batch and the schema) accepted, leaving room under
+ * `MAX_ARG_BYTES` for the repair text when a fresh-start repair has to repeat it.
  */
 export const MAX_CURSOR_PROMPT_BYTES = 120 * 1024;
 
@@ -108,7 +113,7 @@ export class CursorHarness implements Harness {
     const secrets = auth.secrets;
     const keys: string[] = [];
     const firstPrompt = options.prompt + schemaSuffix(options.schema);
-    checkPromptSize(firstPrompt, keys);
+    checkPromptSize(firstPrompt, MAX_CURSOR_PROMPT_BYTES, keys);
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
     try {
       await mkdir(join(home, ".cursor"));
@@ -129,7 +134,7 @@ export class CursorHarness implements Harness {
             transcriptKeys: keys,
           });
         }
-        checkPromptSize(prompt, keys);
+        checkPromptSize(prompt, MAX_ARG_BYTES, keys);
         const proc = await runProcess({
           command: this.options.binaryPath ?? "agent",
           args: cursorArgs({
@@ -188,13 +193,13 @@ export class CursorHarness implements Harness {
   }
 }
 
-/** Refuses a prompt the kernel wouldn't pass as one argument. */
-function checkPromptSize(prompt: string, keys: readonly string[]): void {
+/** Refuses a prompt longer than `limit` bytes, which the kernel may not pass as one argument. */
+function checkPromptSize(prompt: string, limit: number, keys: readonly string[]): void {
   const bytes = Buffer.byteLength(prompt);
-  if (bytes <= MAX_CURSOR_PROMPT_BYTES) return;
+  if (bytes <= limit) return;
   throw new HarnessError(
     "process",
-    `The prompt is ${bytes} bytes; the Cursor CLI takes at most ${MAX_CURSOR_PROMPT_BYTES}. Use smaller batches.`,
+    `The prompt is ${bytes} bytes; the Cursor CLI takes at most ${limit}. Use smaller batches.`,
     { transcriptKeys: keys },
   );
 }
