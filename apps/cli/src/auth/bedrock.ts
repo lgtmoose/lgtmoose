@@ -9,15 +9,25 @@ import { awsError } from "../aws-errors.js";
 export interface ModelAccess {
   modelId: string;
   name: string;
-  /** True when every check Bedrock reports passes. */
+  /**
+   * True when the account-level checks pass: offered in the region, model access granted and
+   * the agreement accepted. These apply to every identity in the account, the sandbox's
+   * task role included.
+   */
   usable: boolean;
-  /** Why it isn't usable, in Bedrock's terms. Empty when usable. */
+  /** Why it isn't usable. Empty when usable. */
   problems: string[];
+  /**
+   * Whether the identity running this CLI may call the model. It says nothing about the
+   * sandbox task role, which deploy grants its own Bedrock access, so it never makes a model
+   * unusable. Undefined when the check couldn't run.
+   */
+  callerAuthorized?: boolean;
 }
 
 /** The Bedrock calls `auth bedrock` makes. Tests swap in a fake. */
 export interface BedrockAccess {
-  /** Anthropic's active text models in the region, and whether this account may call each. */
+  /** Anthropic's current base text models in the region, and whether this account may use each. */
   anthropicModels(): Promise<ModelAccess[]>;
 }
 
@@ -31,6 +41,7 @@ export interface BedrockSender {
           modelId?: string | undefined;
           modelName?: string | undefined;
           modelLifecycle?: { status?: string | undefined } | undefined;
+          inferenceTypesSupported?: string[] | undefined;
         }[]
       | undefined;
     agreementAvailability?:
@@ -40,6 +51,15 @@ export interface BedrockSender {
     regionAvailability?: string | undefined;
   }>;
 }
+
+/** Context-window variants such as `…-v1:0:200k` share their base model's access. */
+export const CONTEXT_VARIANT = /:\d+k$/;
+
+/**
+ * Ways a model is called without buying provisioned throughput. Newer Claude models are only
+ * offered through inference profiles, so ON_DEMAND alone would miss them.
+ */
+const CALLABLE = new Set(["ON_DEMAND", "INFERENCE_PROFILE"]);
 
 export function awsBedrockAccess(client: BedrockSender, region: string): BedrockAccess {
   return {
@@ -52,27 +72,38 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
       } catch (error) {
         throw awsError("Bedrock", region, "ListFoundationModels", error);
       }
-      const active = (summaries ?? []).filter(
+      const base = (summaries ?? []).filter(
         (model): model is typeof model & { modelId: string } =>
-          model.modelId !== undefined && model.modelLifecycle?.status !== "LEGACY",
+          model.modelId !== undefined &&
+          !CONTEXT_VARIANT.test(model.modelId) &&
+          model.modelLifecycle?.status !== "LEGACY" &&
+          // Bedrock leaves this out for some models; only drop the ones it says are provisioned-only.
+          (model.inferenceTypesSupported === undefined ||
+            model.inferenceTypesSupported.some((type) => CALLABLE.has(type))),
       );
       // One at a time: Bedrock's control plane throttles bursts, and there are only a few dozen.
       const results: ModelAccess[] = [];
-      for (const model of active) {
+      for (const model of base) {
+        const name = model.modelName ?? model.modelId;
         let availability;
         try {
           availability = await client.send(
             new GetFoundationModelAvailabilityCommand({ modelId: model.modelId }),
           );
         } catch (error) {
-          throw awsError("Bedrock", region, model.modelId, error);
+          // One model Bedrock won't describe is that model's problem, not the whole check's.
+          const reason = error instanceof Error ? error.message : String(error);
+          results.push({
+            modelId: model.modelId,
+            name,
+            usable: false,
+            problems: [`couldn't check (${reason.replace(/\.$/, "")})`],
+          });
+          continue;
         }
         const problems: string[] = [];
         if (availability.regionAvailability !== "AVAILABLE") {
           problems.push("not offered in this region");
-        }
-        if (availability.authorizationStatus !== "AUTHORIZED") {
-          problems.push("IAM doesn't allow it");
         }
         if (availability.entitlementAvailability !== "AVAILABLE") {
           problems.push("model access not granted");
@@ -83,9 +114,10 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         }
         results.push({
           modelId: model.modelId,
-          name: model.modelName ?? model.modelId,
+          name,
           usable: problems.length === 0,
           problems,
+          callerAuthorized: availability.authorizationStatus === "AUTHORIZED",
         });
       }
       return results;

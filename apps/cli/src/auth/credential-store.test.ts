@@ -1,6 +1,7 @@
 import {
   CreateSecretCommand,
   type DeleteSecretCommand,
+  DescribeSecretCommand,
   type ListSecretsCommand,
   RestoreSecretCommand,
   TagResourceCommand,
@@ -39,7 +40,9 @@ function fake(responses: ((command: unknown) => unknown)[]) {
 describe("awsCredentialStore", () => {
   it("creates the secret with its description and tags", async () => {
     const { client, sent } = fake([() => ({})]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toBe("created");
+    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+      outcome: "created",
+    });
     const create = sent[0] as CreateSecretCommand;
     expect(create).toBeInstanceOf(CreateSecretCommand);
     expect(create.input).toMatchObject({
@@ -62,7 +65,9 @@ describe("awsCredentialStore", () => {
         throw awsErr("ResourceExistsException");
       },
     ]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toBe("updated");
+    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+      outcome: "updated",
+    });
     expect((sent[1] as UpdateSecretCommand).input).toEqual({
       SecretId: "lgtmoose/provider/codex",
       SecretString: "VALUE",
@@ -83,13 +88,31 @@ describe("awsCredentialStore", () => {
         );
       },
     ]);
-    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toBe("restored");
+    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+      outcome: "restored",
+    });
     expect(sent.map((c) => (c as object).constructor)).toEqual([
       CreateSecretCommand,
       RestoreSecretCommand,
       UpdateSecretCommand,
       TagResourceCommand,
     ]);
+  });
+
+  it("reports a stored value whose tags couldn't be updated as stored, with the reason", async () => {
+    const { client } = fake([
+      () => {
+        throw awsErr("ResourceExistsException");
+      },
+      () => ({}),
+      () => {
+        throw awsErr("AccessDeniedException", "not allowed to tag");
+      },
+    ]);
+    expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toEqual({
+      outcome: "updated",
+      tagError: "not allowed to tag",
+    });
   });
 
   it("wraps other errors without the value", async () => {
@@ -148,22 +171,42 @@ describe("awsCredentialStore", () => {
   });
 
   it("schedules deletion with a recovery window, and says when there's nothing to remove", async () => {
+    const date = new Date("2026-11-21T00:00:00Z");
     const { client, sent } = fake([
-      () => ({}),
+      () => ({ DeletionDate: date }),
       () => {
         throw awsErr("ResourceNotFoundException");
       },
-      () => {
-        throw awsErr("InvalidRequestException", "it was marked for deletion");
-      },
     ]);
     const store = awsCredentialStore(client, "eu-west-2");
-    expect(await store.remove("codex", 7)).toBe("scheduled");
+    expect(await store.remove("codex", 7)).toEqual({ status: "scheduled", deletionDate: date });
     expect((sent[0] as DeleteSecretCommand).input).toEqual({
       SecretId: "lgtmoose/provider/codex",
       RecoveryWindowInDays: 7,
     });
-    expect(await store.remove("codex", 7)).toBe("missing");
-    expect(await store.remove("codex", 7)).toBe("scheduled");
+    expect(await store.remove("codex", 7)).toEqual({ status: "missing" });
+  });
+
+  it("says a secret was already scheduled, with the date an earlier remove set", async () => {
+    const earlier = new Date("2026-11-15T00:00:00Z");
+    const marked = () => {
+      throw awsErr("InvalidRequestException", "it was marked for deletion");
+    };
+    const { client, sent } = fake([
+      marked,
+      () => ({ DeletedDate: earlier }),
+      marked,
+      () => {
+        throw awsErr("AccessDeniedException");
+      },
+    ]);
+    const store = awsCredentialStore(client, "eu-west-2");
+    expect(await store.remove("codex", 7)).toEqual({
+      status: "already-scheduled",
+      deletionDate: earlier,
+    });
+    expect(sent[1]).toBeInstanceOf(DescribeSecretCommand);
+    // The date is a nicety: not being able to read it doesn't fail the remove.
+    expect(await store.remove("codex", 7)).toEqual({ status: "already-scheduled" });
   });
 });

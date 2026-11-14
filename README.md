@@ -28,7 +28,8 @@ pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App'
 - `cloudformation:DescribeStacks`
 - `secretsmanager:GetSecretValue`, `CreateSecret` and `PutSecretValue` on `lgtmoose/*` (setup writes them)
 - `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
-- For `auth`: `secretsmanager:ListSecrets`, plus `TagResource`, `RestoreSecret` and `DeleteSecret` on `lgtmoose/provider/*`; for `auth bedrock`, `bedrock:ListFoundationModels` and `bedrock:GetFoundationModelAvailability`
+- For `auth`: `secretsmanager:CreateSecret`, `UpdateSecret`, `TagResource` (also needed to create a tagged secret), `RestoreSecret`, `DeleteSecret` and `DescribeSecret` on `lgtmoose/provider/*`, and `secretsmanager:ListSecrets`, which can't be limited to a resource
+- For `auth bedrock`: `bedrock:ListFoundationModels` and `bedrock:GetFoundationModelAvailability`
 
 `auth` stores each provider's credential as `lgtmoose/provider/<id>`. See [docs/credentials.md](docs/credentials.md).
 

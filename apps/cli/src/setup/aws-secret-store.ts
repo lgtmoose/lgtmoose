@@ -4,7 +4,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
-import { awsError, errorName } from "../aws-errors.js";
+import { awsError, errorName, isScheduledForDeletion } from "../aws-errors.js";
 import type { SetupSecretStore } from "./secret-store.js";
 
 /** The subset of SecretsManagerClient we use, so tests can fake `send`. */
@@ -25,7 +25,10 @@ export function awsSecretStore(client: SecretsManagerSender, region: string): Se
         const output = await client.send(new GetSecretValueCommand({ SecretId: name }));
         return output.SecretString;
       } catch (error) {
-        if (errorName(error) === "ResourceNotFoundException") return undefined;
+        // `auth remove` schedules deletion; until then reads fail as if it were still there.
+        if (errorName(error) === "ResourceNotFoundException" || isScheduledForDeletion(error)) {
+          return undefined;
+        }
         throw context(name, error);
       }
     },

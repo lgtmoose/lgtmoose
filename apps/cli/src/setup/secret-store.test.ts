@@ -76,6 +76,22 @@ describe("awsSecretStore", () => {
     await expect(fakeAws().store.read("lgtmoose/x")).resolves.toBeUndefined();
   });
 
+  it("reads a secret scheduled for deletion as undefined", async () => {
+    const send = vi.fn<SecretsManagerSender["send"]>(() =>
+      Promise.reject(
+        Object.assign(
+          new Error(
+            "You can't perform this operation on the secret because it was marked for deletion.",
+          ),
+          { name: "InvalidRequestException" },
+        ),
+      ),
+    );
+    await expect(
+      awsSecretStore({ send }, "us-east-1").read("lgtmoose/provider/x"),
+    ).resolves.toBeUndefined();
+  });
+
   it("names the region and secret when AWS fails, without the value", async () => {
     const send = vi.fn<SecretsManagerSender["send"]>(() =>
       Promise.reject(awsError("AccessDeniedException")),

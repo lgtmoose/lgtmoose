@@ -1,7 +1,10 @@
 import { parseArgs } from "node:util";
 import {
-  PLAN_AUTH_METHODS,
+  PROVIDER_ID_PATTERN,
   SECRET_NAMES,
+  TIERS,
+  isPlanCredential,
+  modelFor,
   providerNeedsSecret,
   type AuthMethod,
   type DeployConfig,
@@ -11,7 +14,7 @@ import {
 import { loadDeployConfig } from "../paths.js";
 import { isPromptCancel } from "../setup/prompter.js";
 import type { SetupFiles } from "../setup/setup.js";
-import type { BedrockAccess } from "./bedrock.js";
+import { CONTEXT_VARIANT, type BedrockAccess, type ModelAccess } from "./bedrock.js";
 import { codexLogin, LoginInterrupted } from "./codex-login.js";
 import type { CredentialStore } from "./credential-store.js";
 import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
@@ -201,7 +204,7 @@ function parseFlags(argv: readonly string[]): Flags {
 const METHOD_FLAGS: Record<string, readonly (keyof Flags)[]> = {
   claude: ["id", "paste", "acceptVendorTerms"],
   codex: ["id", "deviceAuth", "accessToken", "acceptVendorTerms"],
-  cursor: ["id"],
+  cursor: ["id", "acceptVendorTerms"],
   bedrock: ["id"],
   "api-key": ["id", "provider"],
   list: [],
@@ -217,9 +220,6 @@ const FLAG_NAMES: Partial<Record<keyof Flags, string>> = {
   acceptVendorTerms: "--accept-vendor-terms",
   yes: "--yes",
 };
-
-/** The same rule as a provider `id` in lgtmoose.config.ts. */
-const PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
 function checkFlags(method: string, flags: Flags): void {
   const allowed = METHOD_FLAGS[method];
@@ -237,7 +237,7 @@ function checkFlags(method: string, flags: Flags): void {
     throw new UsageError("auth remove needs the provider id: lgtmoose auth remove <id>.");
   }
   for (const id of [flags.id, method === "remove" ? flags.positionals[1] : undefined]) {
-    if (id !== undefined && !PROVIDER_ID.test(id)) {
+    if (id !== undefined && !PROVIDER_ID_PATTERN.test(id)) {
       throw new UsageError(`"${id}" isn't a provider id: lowercase letters, digits and hyphens.`);
     }
   }
@@ -308,11 +308,11 @@ function pickProvider(
 
 /** Shows the warning for plan credentials and asks before going on. */
 async function confirmPlanCredential(
-  auth: AuthMethod,
+  provider: ProviderConfig,
   flags: Flags,
   deps: AuthDeps,
 ): Promise<void> {
-  if (!PLAN_AUTH_METHODS.includes(auth)) return;
+  if (!isPlanCredential(provider)) return;
   deps.out(PLAN_CREDENTIAL_WARNING);
   if (flags.acceptVendorTerms) {
     deps.out("Going on: --accept-vendor-terms was given.\n");
@@ -331,17 +331,22 @@ async function store(
   value: string,
   deps: AuthDeps,
 ): Promise<string> {
-  const outcome = await deps
+  const { outcome, tagError } = await deps
     .credentials(config.region)
     .put({ providerId: provider.id, harness: provider.harness, auth: provider.auth }, value);
   const name = SECRET_NAMES.provider(provider.id);
   const verb = { created: "Stored", updated: "Replaced", restored: "Restored and replaced" }[
     outcome
   ];
+  const tagNote =
+    tagError === undefined
+      ? ""
+      : `Warning: the value is stored, but its tags couldn't be updated (${tagError}), so ` +
+        "auth list may describe it wrongly. Run this again to fix them.\n";
   return (
     `${verb} the ${provider.auth} credential for provider "${provider.id}" in ${name} ` +
-    `(${config.region}).\nSandbox tasks started from now on use it. If you just added ` +
-    `"${provider.id}" to lgtmoose.config.ts, run pnpm lgtmoose deploy.\n`
+    `(${config.region}).\n${tagNote}Sandbox tasks started from now on use it. If you just ` +
+    `added "${provider.id}" to lgtmoose.config.ts, run pnpm lgtmoose deploy.\n`
   );
 }
 
@@ -362,7 +367,7 @@ async function authClaude(flags: Flags, deps: AuthDeps): Promise<string> {
     flags.id,
     "auth claude",
   );
-  await confirmPlanCredential(provider.auth, flags, deps);
+  await confirmPlanCredential(provider, flags, deps);
   if (!flags.paste) {
     deps.out(
       "\nRunning claude setup-token. Sign in, then copy the token it prints. " +
@@ -387,7 +392,7 @@ async function authCodex(flags: Flags, deps: AuthDeps): Promise<string> {
   const config = await loadConfig(deps);
   const auth: AuthMethod = flags.accessToken ? "access-token" : "chatgpt-login";
   const provider = pickProvider(config, [{ harness: "codex", auth }], flags.id, "auth codex");
-  await confirmPlanCredential(provider.auth, flags, deps);
+  await confirmPlanCredential(provider, flags, deps);
   if (flags.accessToken) {
     return store(config, provider, await ask(KINDS.codexAccessToken, deps), deps);
   }
@@ -419,6 +424,7 @@ async function authCursor(flags: Flags, deps: AuthDeps): Promise<string> {
     flags.id,
     "auth cursor",
   );
+  await confirmPlanCredential(provider, flags, deps);
   return store(config, provider, await ask(KINDS.cursorKey, deps), deps);
 }
 
@@ -454,6 +460,23 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
         ? `  ok       ${model.modelId}`
         : `  blocked  ${model.modelId}: ${model.problems.join(", ")}`,
     );
+
+  // The models the configured providers will actually ask for, tier by tier.
+  const checked = bedrockProviders.filter((p) => flags.id === undefined || p.id === flags.id);
+  const tierLines: string[] = [];
+  let tiersOk = true;
+  for (const provider of checked) {
+    for (const tier of TIERS) {
+      const model = modelFor(provider, tier);
+      if (model === undefined) continue;
+      const verdict = tierVerdict(model, models);
+      if (verdict.state === "blocked") tiersOk = false;
+      tierLines.push(
+        `  ${verdict.state.padEnd(7)}  ${provider.id} ${tier} (${model}): ${verdict.detail}`,
+      );
+    }
+  }
+
   const notes: string[] = [];
   if (bedrockProviders.length === 0) {
     notes.push(
@@ -461,7 +484,12 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
         '"claude-code", auth: "bedrock" } to providers to use it.',
     );
   }
-  notes.push("Bedrock needs no stored secret: sandbox tasks sign in with their IAM role.");
+  if (!tiersOk) {
+    notes.push(
+      "A configured tier can't run here. Request model access in the Bedrock console " +
+        `(${config.region}), or set that tier in the provider's models to one marked ok.`,
+    );
+  }
   if (usable.length === 0) {
     notes.unshift(
       models.length === 0
@@ -470,10 +498,55 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
             `Bedrock console (${config.region}), then run this again.`,
     );
   }
+  if (models.some((model) => model.usable && model.callerAuthorized === false)) {
+    notes.push(
+      "Your own AWS identity isn't allowed to invoke some of these models. That's about you, " +
+        "not the sandbox: deploy gives the sandbox task role its own Bedrock access.",
+    );
+  }
+  notes.push("Bedrock needs no stored secret: sandbox tasks sign in with their IAM role.");
+  const tierBlock = tierLines.length > 0 ? ["", "Configured tiers:", ...tierLines] : [];
   return {
-    text: [...lines, "", ...notes, ""].join("\n"),
-    ok: usable.length > 0,
+    text: ["Anthropic models:", ...lines, ...tierBlock, "", ...notes, ""].join("\n"),
+    ok: usable.length > 0 && tiersOk,
   };
+}
+
+/** Claude Code and the Agent SDK aliases that pick the newest model of a family. */
+const FAMILY_ALIASES = new Set(["haiku", "sonnet", "opus"]);
+
+/** Cross-region inference profile prefixes: `us.anthropic.…` runs the model `anthropic.…`. */
+const PROFILE_PREFIX = /^(?:us|eu|apac|jp|au|ca|us-gov|global)\./;
+
+/** The YYYYMMDD release date in a Bedrock model id, for finding a family's newest model. */
+const releaseDate = (modelId: string) => /-(\d{8})-/.exec(modelId)?.[1] ?? "";
+
+/**
+ * Whether a tier's model can run on Bedrock here. "unknown" for a model this can't
+ * resolve, such as an inference profile ARN; that's reported but doesn't fail the check.
+ */
+function tierVerdict(
+  model: string,
+  models: readonly ModelAccess[],
+): { state: "ok" | "blocked" | "unknown"; detail: string } {
+  const state = (access: ModelAccess) => (access.usable ? "ok" : "blocked");
+  const why = (access: ModelAccess) =>
+    access.usable ? access.modelId : `${access.modelId} is ${access.problems.join(", ")}`;
+  if (FAMILY_ALIASES.has(model)) {
+    // The alias follows the family's newest model, so that's the one that has to work.
+    const family = new RegExp(`^anthropic\\.claude-(?:[\\d-]+-)?${model}(?:-|$)`);
+    const newest = models
+      .filter((access) => family.test(access.modelId))
+      .toSorted((a, b) => releaseDate(b.modelId).localeCompare(releaseDate(a.modelId)))[0];
+    if (newest === undefined) return { state: "blocked", detail: `no ${model} model offered here` };
+    return { state: state(newest), detail: `newest: ${why(newest)}` };
+  }
+  if (model.startsWith("arn:")) return { state: "unknown", detail: "can't check an ARN" };
+  // A context-window variant (`…:0:200k`) shares its base model's access.
+  const base = model.replace(PROFILE_PREFIX, "").replace(CONTEXT_VARIANT, "");
+  const access = models.find((candidate) => candidate.modelId === base);
+  if (access === undefined) return { state: "blocked", detail: `${base} isn't offered here` };
+  return { state: state(access), detail: why(access) };
 }
 
 async function authList(deps: AuthDeps): Promise<string> {
@@ -536,12 +609,17 @@ async function authRemove(flags: Flags, deps: AuthDeps): Promise<string> {
     });
     if (!go) throw new AuthError("Nothing deleted.");
   }
-  const outcome = await deps.credentials(config.region).remove(id, RECOVERY_DAYS);
-  if (outcome === "missing") throw new AuthError(`${name} doesn't exist in ${config.region}.`);
-  return (
-    `Scheduled ${name} for deletion in ${RECOVERY_DAYS} days. Running auth for "${id}" before ` +
-    "then restores it with the new value.\n"
-  );
+  const { status, deletionDate } = await deps.credentials(config.region).remove(id, RECOVERY_DAYS);
+  if (status === "missing") throw new AuthError(`${name} doesn't exist in ${config.region}.`);
+  let when = status === "scheduled" ? `in ${RECOVERY_DAYS} days` : "on the date set then";
+  if (deletionDate !== undefined) {
+    when = `on ${deletionDate.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  }
+  const head =
+    status === "scheduled"
+      ? `Scheduled ${name} for deletion ${when}.`
+      : `${name} was already scheduled for deletion by an earlier remove; it's deleted ${when}.`;
+  return `${head} Running auth for "${id}" before then restores it with the new value.\n`;
 }
 
 /** `lgtmoose auth`. */

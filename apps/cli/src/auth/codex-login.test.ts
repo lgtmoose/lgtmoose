@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,6 +73,54 @@ describe("codexLogin", () => {
     expect(await readdir(tmpRoot)).toEqual([]);
     // The second-signal path removes the directory synchronously, and is safe after cleanup.
     expect(() => force?.()).not.toThrow();
+  });
+
+  it("a Ctrl+C after codex exits still stops the upload, and still removes the directory", async () => {
+    let fire: (() => void) | undefined;
+    const trap: SignalTrap = (onSignal) => {
+      fire = onSignal;
+      return () => {
+        fire = undefined;
+      };
+    };
+    const run: InteractiveRunner = async (_c, _a, { env }) => {
+      await writeFile(join(env?.CODEX_HOME ?? "", "auth.json"), AUTH_JSON);
+      // codex is done; the Ctrl+C lands after it exits, while auth.json is being read.
+      setImmediate(() => fire?.());
+      return 0;
+    };
+    await expect(
+      codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot }),
+    ).rejects.toThrow(LoginInterrupted);
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
+  it("removes the directory before it stops watching for signals", async () => {
+    const order: string[] = [];
+    const trap: SignalTrap = () => () => order.push(`untrap:${String(dirLeft())}`);
+    let home = "";
+    const dirLeft = () => home !== "" && existsSync(home);
+    const run: InteractiveRunner = async (_c, _a, { env }) => {
+      home = env?.CODEX_HOME ?? "";
+      await writeFile(join(home, "auth.json"), AUTH_JSON);
+      return 0;
+    };
+    await codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot });
+    expect(order).toEqual(["untrap:false"]);
+  });
+
+  it("stops watching for signals even when the removal fails", async () => {
+    const untrapped: string[] = [];
+    const trap: SignalTrap = () => () => untrapped.push("off");
+    const run: InteractiveRunner = async (_c, _a, { env }) => {
+      await writeFile(join(env?.CODEX_HOME ?? "", "auth.json"), AUTH_JSON);
+      return 0;
+    };
+    const removeDir = () => Promise.reject(new Error("EBUSY"));
+    await expect(
+      codexLogin({ run, trapSignals: trap, deviceAuth: false, tmpRoot, removeDir }),
+    ).rejects.toThrow("EBUSY");
+    expect(untrapped).toEqual(["off"]);
   });
 
   it("the forced cleanup removes the directory on its own", async () => {

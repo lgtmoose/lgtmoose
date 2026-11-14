@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTH_HELP, PLAN_CREDENTIAL_WARNING, runAuth, type AuthDeps } from "./auth.js";
 import type { ModelAccess } from "./bedrock.js";
-import type { CredentialLabel, CredentialStore, StoredCredential } from "./credential-store.js";
+import type {
+  CredentialLabel,
+  CredentialStore,
+  PutResult,
+  RemoveResult,
+  StoredCredential,
+} from "./credential-store.js";
 import { CommandNotFound, type InteractiveRunner } from "./process.js";
 
 const CONFIG_PATH = "/repo/lgtmoose.config.ts";
@@ -42,7 +48,8 @@ function harness(
     run?: InteractiveRunner;
     stored?: StoredCredential[];
     models?: ModelAccess[];
-    removeOutcome?: "scheduled" | "missing";
+    remove?: RemoveResult;
+    put?: PutResult;
   } = {},
 ) {
   const puts: { label: CredentialLabel; value: string }[] = [];
@@ -54,12 +61,12 @@ function harness(
   const store: CredentialStore = {
     put: (label, value) => {
       puts.push({ label, value });
-      return Promise.resolve("created");
+      return Promise.resolve(options.put ?? { outcome: "created" });
     },
     list: () => Promise.resolve(options.stored ?? []),
     remove: (providerId, days) => {
       removed.push({ providerId, days });
-      return Promise.resolve(options.removeOutcome ?? "scheduled");
+      return Promise.resolve(options.remove ?? { status: "scheduled" });
     },
   };
   const run = vi.fn<InteractiveRunner>(options.run ?? (() => Promise.resolve(0)));
@@ -212,9 +219,9 @@ describe("auth", () => {
     const h = harness({ config, answers: ["SECRET-ACCESS"] });
     const result = await h.go(["codex", "--access-token"]);
     expect(result.exitCode).toBe(0);
-    // An access token isn't a plan credential, so no warning or question.
-    expect(h.confirms).toEqual([]);
-    expect(h.out.join("")).not.toContain(PLAN_CREDENTIAL_WARNING);
+    // A Codex access token belongs to a ChatGPT plan, so it gets the warning and question.
+    expect(h.confirms).toHaveLength(1);
+    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
     expect(h.puts[0]?.label.auth).toBe("access-token");
   });
 
@@ -226,7 +233,23 @@ describe("auth", () => {
       label: { providerId: "cursor", harness: "cursor-agent", auth: "service-account" },
       value: "SECRET-CURSOR",
     });
+    // A service-account key belongs to the team, so no plan warning.
+    expect(h.confirms).toEqual([]);
     expectNoSecrets(result.all);
+  });
+
+  it("cursor: a user API key bills to a personal plan, so it gets the warning", async () => {
+    const config = {
+      ...baseConfig,
+      providers: [{ id: "cursor", harness: "cursor-agent", auth: "api-key" }],
+    };
+    const declined = harness({ config, confirm: false, answers: ["SECRET-CURSOR"] });
+    expect((await declined.go(["cursor"])).stderr).toContain("Nothing stored");
+    expect(declined.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
+    expect(declined.puts).toEqual([]);
+    const accepted = harness({ config, answers: ["SECRET-CURSOR"] });
+    expect((await accepted.go(["cursor", "--accept-vendor-terms"])).exitCode).toBe(0);
+    expect(accepted.confirms).toEqual([]);
   });
 
   it("api-key: needs --provider, and checks the key's shape", async () => {
@@ -296,30 +319,84 @@ describe("auth", () => {
     expect(result.stderr).toContain("Nothing stored");
   });
 
-  it("bedrock: lists model access and stores nothing", async () => {
-    const h = harness({
-      models: [
-        {
-          modelId: "anthropic.b",
-          name: "B",
-          usable: false,
-          problems: ["model access not granted"],
-        },
-        { modelId: "anthropic.a", name: "A", usable: true, problems: [] },
-      ],
-    });
+  const model = (modelId: string, usable = true, callerAuthorized = true): ModelAccess => ({
+    modelId,
+    name: modelId,
+    usable,
+    problems: usable ? [] : ["model access not granted"],
+    callerAuthorized,
+  });
+  const allTiers = [
+    model("anthropic.claude-3-5-haiku-20241022-v1:0"),
+    model("anthropic.claude-sonnet-4-5-20250929-v1:0"),
+    model("anthropic.claude-opus-4-1-20250805-v1:0"),
+  ];
+
+  it("bedrock: checks each configured tier's model and stores nothing", async () => {
+    const h = harness({ models: [...allTiers, model("anthropic.claude-instant-v1", false)] });
     const result = await h.go(["bedrock"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toMatch(/ok {7}anthropic\.a\n {2}blocked {2}anthropic\.b: model access/);
+    expect(result.stdout).toContain(
+      "  blocked  anthropic.claude-instant-v1: model access not granted",
+    );
+    expect(result.stdout).toContain(
+      "  ok       bedrock standard (sonnet): newest: anthropic.claude-sonnet-4-5-20250929-v1:0",
+    );
     expect(result.stdout).toContain("needs no stored secret");
     expect(h.puts).toEqual([]);
+  });
+
+  it("bedrock: fails when a tier's newest model isn't usable, though another model is", async () => {
+    const models = [
+      ...allTiers,
+      model("anthropic.claude-opus-4-5-20251101-v1:0", false),
+      model("anthropic.claude-3-opus-20240229-v1:0"),
+    ];
+    const result = await harness({ models }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      "blocked  bedrock deep (opus): newest: anthropic.claude-opus-4-5-20251101-v1:0 is model access not granted",
+    );
+    expect(result.stderr).toContain("A configured tier can't run here");
+  });
+
+  it("bedrock: resolves a pinned inference profile or variant to its model, and skips ARNs", async () => {
+    const config = {
+      ...baseConfig,
+      providers: [
+        {
+          id: "bedrock",
+          harness: "claude-code",
+          auth: "bedrock",
+          models: {
+            // A cross-region profile of a context-window variant: checked as its base model.
+            fast: "us.anthropic.claude-3-5-haiku-20241022-v1:0:200k",
+            standard: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/x",
+            deep: "anthropic.claude-opus-9-v1:0",
+          },
+        },
+      ],
+    };
+    const result = await harness({ config, models: allTiers }).go(["bedrock", "--id", "bedrock"]);
+    expect(result.exitCode).toBe(1);
+    const text = result.stderr;
+    expect(text).toMatch(/ok {7}bedrock fast .*: anthropic\.claude-3-5-haiku-20241022-v1:0/);
+    expect(text).toContain("unknown  bedrock standard");
+    expect(text).toContain("anthropic.claude-opus-9-v1:0 isn't offered here");
+  });
+
+  it("bedrock: the caller's own IAM permission is a note, not a failure", async () => {
+    const models = allTiers.map((m) => ({ ...m, callerAuthorized: false }));
+    const result = await harness({ models }).go(["bedrock"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Your own AWS identity isn't allowed");
   });
 
   it("bedrock: fails when no model is usable, and suggests adding a provider", async () => {
     const config = { ...baseConfig, providers: [baseConfig.providers[0]] };
     const result = await harness({
       config,
-      models: [{ modelId: "anthropic.a", name: "A", usable: false, problems: ["x"] }],
+      models: [model("anthropic.a", false)],
     }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Request model access");
@@ -369,11 +446,41 @@ describe("auth", () => {
     expect(result.stdout).toContain("in 7 days");
   });
 
+  it("says when the value is stored but the tags couldn't be updated", async () => {
+    const h = harness({
+      answers: ["SECRET-CURSOR"],
+      put: { outcome: "updated", tagError: "not allowed to tag" },
+    });
+    const result = await h.go(["cursor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Replaced the service-account credential");
+    expect(result.stdout).toContain("tags couldn't be updated (not allowed to tag)");
+  });
+
+  it("remove: gives the real date, and says when an earlier remove already scheduled it", async () => {
+    const date = new Date("2026-11-20T08:30:00Z");
+    const fresh = await harness({ remove: { status: "scheduled", deletionDate: date } }).go([
+      "remove",
+      "old",
+      "-y",
+    ]);
+    expect(fresh.stdout).toContain(
+      "Scheduled lgtmoose/provider/old for deletion on 2026-11-20 08:30 UTC",
+    );
+    const again = await harness({
+      remove: { status: "already-scheduled", deletionDate: date },
+    }).go(["remove", "old", "-y"]);
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("already scheduled for deletion by an earlier remove");
+    expect(again.stdout).toContain("2026-11-20 08:30 UTC");
+    expect(again.stdout).not.toContain("7 days");
+  });
+
   it("remove: --yes skips the question; a missing secret fails; no means nothing deleted", async () => {
     const yes = harness();
     expect((await yes.go(["remove", "old", "--yes"])).exitCode).toBe(0);
     expect(yes.confirms).toEqual([]);
-    const missing = await harness({ removeOutcome: "missing" }).go(["remove", "old", "-y"]);
+    const missing = await harness({ remove: { status: "missing" } }).go(["remove", "old", "-y"]);
     expect(missing.stderr).toContain("doesn't exist");
     const no = harness({ confirm: false });
     expect((await no.go(["remove", "old"])).stderr).toContain("Nothing deleted");

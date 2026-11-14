@@ -12,6 +12,8 @@ export interface CodexLoginOptions {
   /** Where the temporary CODEX_HOME goes. The OS temp dir by default. */
   tmpRoot?: string;
   env?: NodeJS.ProcessEnv;
+  /** Removes the directory. Tests make it fail. */
+  removeDir?: (path: string) => Promise<void>;
 }
 
 export class CodexLoginError extends Error {
@@ -41,6 +43,7 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     () => controller.abort(),
     () => rmSync(home, { recursive: true, force: true }),
   );
+  let authJson: string;
   try {
     await chmod(home, 0o700);
     await writeFile(join(home, "config.toml"), CONFIG_TOML, { mode: 0o600 });
@@ -53,7 +56,6 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     if (code !== 0) {
       throw new CodexLoginError(`codex login exited with code ${code ?? "unknown"}.`);
     }
-    let authJson: string;
     try {
       authJson = await readFile(join(home, "auth.json"), "utf8");
     } catch {
@@ -62,11 +64,19 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
       );
     }
     checkAuthJson(authJson);
-    return authJson;
   } finally {
-    untrap();
-    await rm(home, { recursive: true, force: true });
+    // Remove before untrapping, so a Ctrl+C during the removal can't leave the file behind.
+    // Untrap even if the removal fails, or Ctrl+C would stop working for the rest of the run.
+    try {
+      await (options.removeDir ?? ((path) => rm(path, { recursive: true, force: true })))(home);
+    } finally {
+      untrap();
+    }
   }
+  // A Ctrl+C after codex exited still means stop: nothing gets uploaded. After untrap a
+  // later one has its normal effect, and there's nothing left on disk to clean up.
+  if (controller.signal.aborted) throw new LoginInterrupted("codex login was interrupted.");
+  return authJson;
 }
 
 /** Checks the file is a ChatGPT sign-in. Never puts any of its content in a message. */

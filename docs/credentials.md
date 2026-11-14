@@ -16,7 +16,9 @@
 
 Each command stores the credential for the provider in `lgtmoose.config.ts` that uses its harness and auth method. When more than one provider fits, pick one with `--id <id>`.
 
-Before storing a plan credential (`oauth-token` or `chatgpt-login`), auth shows a warning about vendor terms and asks you to confirm. `--accept-vendor-terms` answers yes. NIC-820 will update the warning with what each vendor's terms allow.
+Before storing a plan credential, auth shows a warning about vendor terms and asks you to confirm. Plan credentials are `oauth-token`, `chatgpt-login`, a Codex `access-token` (it belongs to a ChatGPT plan) and a Cursor user `api-key` (it bills to that user's Cursor plan). A Cursor `service-account` key belongs to the team, so it gets no warning. `--accept-vendor-terms` answers yes. NIC-820 will update the warning with what each vendor's terms allow.
+
+`auth bedrock` checks the model each Bedrock provider uses for each tier: its `models`, or the harness default. An alias such as `sonnet` has to work for the newest model in that family. The command fails if any tier can't run. It checks access for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note.
 
 ## Secret contract
 
