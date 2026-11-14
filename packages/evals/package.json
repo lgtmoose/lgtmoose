@@ -27,6 +27,7 @@
     "eval": "node dist/main.js"
   },
   "dependencies": {
+    "@lgtmoose/config": "workspace:*",
     "@lgtmoose/core": "workspace:*",
     "@lgtmoose/git": "workspace:*",
     "@lgtmoose/harness": "workspace:*",

@@ -41,3 +41,20 @@ export {
   type GateResult,
 } from "./report.js";
 export { runFixture, runFixtures, type RunOptions } from "./run.js";
+export {
+  EVALUATED_ROLES,
+  assignmentFromRoles,
+  assignmentsFromProviders,
+  limitHits,
+  matrixAssignments,
+  matrixRan,
+  matrixResultsSchema,
+  modelsFrom,
+  renderMatrixMarkdown,
+  runMatrix,
+  type Assignment,
+  type MatrixConfiguration,
+  type MatrixOptions,
+  type MatrixResults,
+} from "./matrix.js";
+export { EVAL_PROVIDERS, type EvalProvider, type HarnessSetup } from "./providers.js";
