@@ -2,12 +2,17 @@ import {
   CreateSecretCommand,
   type DeleteSecretCommand,
   type ListSecretsCommand,
-  PutSecretValueCommand,
   RestoreSecretCommand,
   TagResourceCommand,
+  UpdateSecretCommand,
 } from "@aws-sdk/client-secrets-manager";
 import { describe, expect, it } from "vitest";
-import { awsCredentialStore, credentialTags, type CredentialSender } from "./credential-store.js";
+import {
+  awsCredentialStore,
+  credentialDescription,
+  credentialTags,
+  type CredentialSender,
+} from "./credential-store.js";
 
 const LABEL = { providerId: "codex", harness: "codex", auth: "chatgpt-login" } as const;
 
@@ -58,7 +63,11 @@ describe("awsCredentialStore", () => {
       },
     ]);
     expect(await awsCredentialStore(client, "eu-west-2").put(LABEL, "VALUE")).toBe("updated");
-    expect(sent[1]).toBeInstanceOf(PutSecretValueCommand);
+    expect((sent[1] as UpdateSecretCommand).input).toEqual({
+      SecretId: "lgtmoose/provider/codex",
+      SecretString: "VALUE",
+      Description: credentialDescription(LABEL),
+    });
     expect((sent[2] as TagResourceCommand).input).toEqual({
       SecretId: "lgtmoose/provider/codex",
       Tags: credentialTags(LABEL),
@@ -78,7 +87,7 @@ describe("awsCredentialStore", () => {
     expect(sent.map((c) => (c as object).constructor)).toEqual([
       CreateSecretCommand,
       RestoreSecretCommand,
-      PutSecretValueCommand,
+      UpdateSecretCommand,
       TagResourceCommand,
     ]);
   });

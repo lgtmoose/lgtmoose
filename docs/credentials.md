@@ -49,7 +49,7 @@ The credential broker (NIC-825) and the CDK stacks rely on this.
   | `lgtmoose:harness`  | `claude-code`, `codex`, `cursor-agent`, … |
   | `lgtmoose:auth`     | the provider's `auth`, such as `api-key`  |
 
-  Storing again replaces the value with a new version and resets the tags, in case the provider's harness or auth changed.
+  Storing again replaces the value with a new version and resets the tags and description, in case the provider's harness or auth changed.
 
 - **Description:** says which provider and auth method the secret is for. It holds no value.
 

@@ -2,10 +2,10 @@ import {
   CreateSecretCommand,
   DeleteSecretCommand,
   ListSecretsCommand,
-  PutSecretValueCommand,
   RestoreSecretCommand,
   SecretsManagerClient,
   TagResourceCommand,
+  UpdateSecretCommand,
 } from "@aws-sdk/client-secrets-manager";
 import {
   PROVIDER_CREDENTIAL_KIND,
@@ -69,7 +69,7 @@ type Command =
   | CreateSecretCommand
   | DeleteSecretCommand
   | ListSecretsCommand
-  | PutSecretValueCommand
+  | UpdateSecretCommand
   | RestoreSecretCommand
   | TagResourceCommand;
 
@@ -103,8 +103,15 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
     awsError("Secrets Manager", region, name, error);
 
   async function update(name: string, label: CredentialLabel, value: string): Promise<void> {
-    await client.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));
-    // The provider's harness or auth may have changed since the secret was created.
+    // A new version of the value. The provider's harness or auth may have changed since the
+    // secret was created, so the description and tags are rewritten too.
+    await client.send(
+      new UpdateSecretCommand({
+        SecretId: name,
+        SecretString: value,
+        Description: credentialDescription(label),
+      }),
+    );
     await client.send(new TagResourceCommand({ SecretId: name, Tags: credentialTags(label) }));
   }
 
