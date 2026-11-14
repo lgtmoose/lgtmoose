@@ -307,6 +307,17 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           .where(eq(pullRequests.id, run.pullRequestId));
       });
     },
+    async coverRun(runId, result) {
+      await db
+        .update(reviewRuns)
+        .set({
+          status: "succeeded",
+          filesDone: result.filesDone,
+          costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
+          finishedAt: now(),
+        })
+        .where(eq(reviewRuns.id, runId));
+    },
     async newerRunPosted(runId) {
       const [run] = await db
         .select({ pullRequestId: reviewRuns.pullRequestId, createdAt: reviewRuns.createdAt })

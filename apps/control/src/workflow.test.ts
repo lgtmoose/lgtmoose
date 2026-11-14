@@ -13,11 +13,18 @@ import {
   type PullReader,
   type PullRequest,
 } from "@lgtmoose/pipeline";
-import { GitHubError, ShadowPoster, type Poster } from "@lgtmoose/poster";
+import { GitHubError, ShadowPoster, type MarkedReview, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
 import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
-import { SUMMARY_MARKER, headCovered, post, reviewMarker, type PostAttempt } from "./post.js";
+import {
+  OFF_ECS_CLAIM_TTL_MS,
+  SUMMARY_MARKER,
+  headCovered,
+  post,
+  reviewMarker,
+  type PostAttempt,
+} from "./post.js";
 import { prepare, type RunManifest } from "./prepare.js";
 import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
@@ -121,6 +128,7 @@ interface Run extends RunRecord {
   filesTotal?: number;
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
+  covered?: boolean;
 }
 
 function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boolean } } {
@@ -132,6 +140,10 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
     newer,
     async newerRunPosted() {
       return newer.posted;
+    },
+    async coverRun(runId) {
+      const run = runs.get(runId);
+      if (run) Object.assign(run, { status: "succeeded", covered: true });
     },
     async startRun(input) {
       const run: Run = {
@@ -230,7 +242,7 @@ function harness(setup: Setup = {}) {
   };
   const runs = memoryRuns();
   /** Our reviews' markers "on GitHub" by commit, as the tests put them there. */
-  const reviewsOnGitHub = new Map<string, string[]>();
+  const reviewsOnGitHub = new Map<string, MarkedReview[]>();
   /** ECS task statuses by ARN, as the test sets them. */
   const tasks = new Map<string, string>();
   const reader: PullReader = {
@@ -293,8 +305,8 @@ function harness(setup: Setup = {}) {
     heartbeats,
     reviewsOnGitHub,
     /** Puts a review of ours with this marker on the commit. */
-    addReview: (commitId: string, marker: string) => {
-      reviewsOnGitHub.set(commitId, [...(reviewsOnGitHub.get(commitId) ?? []), marker]);
+    addReview: (commitId: string, marker: string, state = "COMMENTED") => {
+      reviewsOnGitHub.set(commitId, [...(reviewsOnGitHub.get(commitId) ?? []), { marker, state }]);
     },
     tasks,
   };
@@ -552,17 +564,25 @@ describe("post", () => {
   }
   const RUN_2 = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a22";
 
-  it("doesn't repost when another run's review is on the head, and records it", async () => {
+  it("posts nothing, PR-level either, when another run's review covers the head", async () => {
     // A stopped run's post finished after the PR was reopened; the reopen's retry is a new run.
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
     h.addReview(headSha, reviewMarker(RUN_ID, true));
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      posted: true,
+      posted: false,
+      coveredBy: reviewMarker(RUN_ID, true),
     });
-    expect(reviews(calls)).toEqual([]);
-    expect(calls).toContain("completeCheckRun");
-    expect(h.runs.runs.get(RUN_2)?.status).toBe("succeeded");
+    // No review, check run, summary or label from a decision that was never posted.
+    expect(calls).toEqual([]);
+    // Succeeded, without touching the PR's record (that's the posting run's).
+    expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "succeeded", covered: true });
+    expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
+    // A retry of it carries on covered, still writing nothing.
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(calls).toEqual([]);
   });
 
   it("lets a retry post when an attempt timed out without posting", async () => {
@@ -578,11 +598,11 @@ describe("post", () => {
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
   });
 
-  it("posts a complete review over an incomplete one, but not over a complete one", async () => {
+  it("posts a complete review over an incomplete COMMENT one", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
     // An earlier run's batches failed: its review is incomplete.
-    h.addReview(headSha, reviewMarker(RUN_ID, false));
+    h.addReview(headSha, reviewMarker(RUN_ID, false), "COMMENTED");
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
       posted: true,
       complete: true,
@@ -592,14 +612,31 @@ describe("post", () => {
     expect(JSON.stringify(review)).toContain(`<!-- ${reviewMarker(RUN_2, true)} -->`);
   });
 
-  it("covers a head by its reviews' completeness", () => {
-    const complete = reviewMarker(RUN_ID, true);
-    const incomplete = reviewMarker(RUN_ID, false);
-    expect(headCovered([], true)).toBe(false);
-    expect(headCovered([complete], true)).toBe(true);
-    expect(headCovered([complete], false)).toBe(true);
-    expect(headCovered([incomplete], true)).toBe(false);
-    expect(headCovered([incomplete], false)).toBe(true);
+  it("doesn't post over an incomplete review that requested changes", async () => {
+    // Its blocking findings are deduped as known in this run, so it could approve past them.
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, false), "CHANGES_REQUESTED");
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: false,
+      coveredBy: reviewMarker(RUN_ID, false),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("covers a head by its reviews' completeness and state", () => {
+    const review = (complete: boolean, state = "COMMENTED") => ({
+      marker: reviewMarker(RUN_ID, complete),
+      state,
+    });
+    expect(headCovered([], true)).toBeUndefined();
+    expect(headCovered([review(true)], true)).toEqual(review(true));
+    expect(headCovered([review(true)], false)).toEqual(review(true));
+    expect(headCovered([review(false)], true)).toBeUndefined();
+    expect(headCovered([review(false)], false)).toEqual(review(false));
+    expect(headCovered([review(false, "CHANGES_REQUESTED")], true)).toEqual(
+      review(false, "CHANGES_REQUESTED"),
+    );
   });
 
   it("takes turns with another run at the same head, through the head's claim", async () => {
@@ -617,7 +654,7 @@ describe("post", () => {
     h.addReview(headSha, reviewMarker(RUN_ID, true));
     h.tasks.set(TASK_A, "STOPPED");
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      posted: true,
+      coveredBy: reviewMarker(RUN_ID, true),
     });
     expect(reviews(calls)).toEqual([]);
     // And this run lets go of the head's claim once it's done there.
@@ -658,17 +695,36 @@ describe("post", () => {
     const first = post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus });
     await expect(first).rejects.toThrow("GitHub 502");
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      posted: true,
+      coveredBy: reviewMarker(RUN_ID, true),
     });
-    expect(h.reviewsOnGitHub.get(headSha)).toEqual([reviewMarker(RUN_ID, true)]);
-    expect(checkRuns).toBe(2);
+    expect(h.reviewsOnGitHub.get(headSha)?.map((review) => review.marker)).toEqual([
+      reviewMarker(RUN_ID, true),
+    ]);
+    // The covered run writes no check run; the first run's retry finishes its own.
+    expect(checkRuns).toBe(1);
     // One review in all: the first run's.
     expect(reviews(calls)).toHaveLength(1);
   });
 
+  it("takes over an off-ECS claim, of either kind, once it has expired", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    const old = Date.now() - OFF_ECS_CLAIM_TTL_MS - 1;
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop", claimedAt: old }));
+    const headClaim = headKeys("acme/shop", 7, headSha).reviewClaim;
+    await h.deps.store.createText(headClaim, JSON.stringify({ attempt: "laptop", claimedAt: old }));
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+    expect(JSON.parse(h.objects.get(claim) ?? "{}")).toMatchObject({ taskArn: TASK_A });
+  });
+
   it("leaves an off-ECS holder's claim alone when on ECS", async () => {
     const { h, calls, claim, taskStatus } = await ready();
-    await h.deps.store.createText(claim, JSON.stringify({ attempt: "laptop" }));
+    await h.deps.store.createText(
+      claim,
+      JSON.stringify({ attempt: "laptop", claimedAt: Date.now() }),
+    );
     await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("off ECS");
     expect(calls).toEqual([]);
   });
@@ -896,14 +952,14 @@ describe("post", () => {
     expect(calls).toEqual([]);
   });
 
-  it("leaves the summary and label to a newer run that already posted", async () => {
+  it("leaves the check run, summary and label to a newer run that already posted", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     const calls = countingPoster(h);
     h.runs.newer.posted = true;
     expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
-    expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+    expect(calls).toEqual(["submitReview"]);
   });
 
   it("leaves the label to a newer run that posts while the summary is written", async () => {
@@ -914,12 +970,12 @@ describe("post", () => {
     let checks = 0;
     h.runs.newerRunPosted = async () => {
       checks += 1;
-      // The newer run finishes posting after this run's summary check.
-      return checks > 1;
+      // The newer run finishes posting after this run's check-run and summary checks.
+      return checks > 2;
     };
     expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
     expect(calls).toEqual(["submitReview", "completeCheckRun", "upsertSummaryComment"]);
-    expect(checks).toBe(2);
+    expect(checks).toBe(3);
   });
 
   it("records what it posted when it's stopped while posting", async () => {

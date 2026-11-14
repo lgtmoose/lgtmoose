@@ -69,6 +69,14 @@ export interface RunStore {
    * label are then the PR's, and an older run mustn't write over them.
    */
   newerRunPosted(runId: string): Promise<boolean>;
+  /**
+   * Marks the run succeeded without posting: another run's review already covered its head.
+   * The PR's record is left to the run that posted.
+   */
+  coverRun(
+    runId: string,
+    result: { filesDone: number; costUsd: number | undefined },
+  ): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
 }

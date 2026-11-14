@@ -117,6 +117,17 @@ describe("drizzleRunStore", () => {
     expect(await prRow(newer.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
   });
 
+  it("marks a covered run succeeded without touching its PR", async () => {
+    const run = await start("arn:exec:15", 15);
+    await store.coverRun(run.runId, { filesDone: 2, costUsd: 0.5 });
+    expect(await runRow(run.runId)).toMatchObject({ status: "succeeded", filesDone: 2 });
+    expect(await prRow(run.pullRequestId)).toMatchObject({
+      lastReviewedSha: null,
+      statusLabel: null,
+      summaryCommentId: null,
+    });
+  });
+
   it("supersedes only a queued or running run", async () => {
     const failed = await start("arn:exec:13", 13);
     await store.failRun("arn:exec:13", "States.TaskFailed");

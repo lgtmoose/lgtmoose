@@ -320,7 +320,7 @@ describe("GitHubPoster", () => {
         user: { login: "other[bot]", type: "Bot" },
       },
       { commit_id: "c2", body: "> <!-- lgtmoose-run:r2 -->", user: { login: "dev", type: "User" } },
-      { commit_id: "c3", body: "x\n\n<!-- lgtmoose-run:r3 -->", user: ours },
+      { commit_id: "c3", state: "COMMENTED", body: "x\n\n<!-- lgtmoose-run:r3 -->", user: ours },
       { commit_id: "c4", body: "no marker", user: ours },
     ];
     const fake = fakeFetch(Array.from({ length: 5 }, () => ({ status: 200, body: reviews })));
@@ -328,7 +328,9 @@ describe("GitHubPoster", () => {
     const p = new GitHubPoster(github, { appSlug: async () => "lgtmoose" });
     expect(await p.markersAt(PULL, "c1", "lgtmoose-run:")).toEqual([]);
     expect(await p.markersAt(PULL, "c2", "lgtmoose-run:")).toEqual([]);
-    expect(await p.markersAt(PULL, "c3", "lgtmoose-run:")).toEqual(["lgtmoose-run:r3"]);
+    expect(await p.markersAt(PULL, "c3", "lgtmoose-run:")).toEqual([
+      { marker: "lgtmoose-run:r3", state: "COMMENTED" },
+    ]);
     expect(await p.markersAt(PULL, "c4", "lgtmoose-run:")).toEqual([]);
     expect(await p.markersAt(PULL, "c9", "lgtmoose-run:")).toEqual([]);
   });

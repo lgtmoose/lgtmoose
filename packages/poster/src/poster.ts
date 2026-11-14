@@ -52,10 +52,10 @@ export interface Poster {
   labels(pull: PullRef): LabelClient;
   /**
    * The markers starting with `markerPrefix` (see `reviewMarkerComment`) in our reviews on
-   * `commitId`, from any run. Always none in shadow mode, where reviews are recorded, not
-   * posted.
+   * `commitId`, from any run, each with its review's state (APPROVED, CHANGES_REQUESTED,
+   * COMMENTED, DISMISSED). Always none in shadow mode, where reviews are recorded, not posted.
    */
-  markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<string[]>;
+  markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<MarkedReview[]>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -128,8 +128,15 @@ export interface GitHubPosterOptions {
   appSlug?: () => Promise<string>;
 }
 
+/** A marker found in one of our reviews, and that review's state. */
+export interface MarkedReview {
+  marker: string;
+  state: string;
+}
+
 /** A review as the reviews endpoint lists it. */
 interface ListedReview {
+  state?: string | null;
   body?: string | null;
   commit_id?: string | null;
   user?: { login?: string; type?: string } | null;
@@ -150,7 +157,7 @@ export class GitHubPoster implements Poster {
     return comment.user?.type === "Bot";
   }
 
-  async markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<string[]> {
+  async markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<MarkedReview[]> {
     // The opening of a marker comment with this prefix (the prefix must be a marker's start).
     const opening = reviewMarkerComment(markerPrefix).replace(/ -->$/, "");
     // The App's bot (or, without its slug, any bot): anyone can quote a marker.
@@ -159,14 +166,16 @@ export class GitHubPoster implements Poster {
     const reviews = await this.github.list<ListedReview>(
       `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
     );
-    const markers: string[] = [];
+    const markers: MarkedReview[] = [];
     for (const review of reviews) {
       if (review.commit_id !== commitId || review.user?.type !== "Bot") continue;
       if (bot !== undefined && review.user.login !== bot) continue;
       const body = review.body ?? "";
       for (let at = body.indexOf(opening); at >= 0; at = body.indexOf(opening, at + 1)) {
         const end = body.indexOf(" -->", at);
-        if (end > at) markers.push(body.slice(at + "<!-- ".length, end));
+        if (end > at) {
+          markers.push({ marker: body.slice(at + "<!-- ".length, end), state: review.state ?? "" });
+        }
       }
     }
     return markers;

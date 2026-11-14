@@ -9,7 +9,13 @@ import {
   type BatchOutcome,
   type ReviewReport,
 } from "@lgtmoose/pipeline";
-import { GitHubError, annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
+import {
+  GitHubError,
+  annotationsFor,
+  buildReview,
+  type MarkedReview,
+  type PullRef,
+} from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import type { ControlDeps } from "./ports.js";
@@ -24,6 +30,11 @@ export interface PostOutput {
    * head moved on or the PR closed. Nothing was posted or recorded then.
    */
   posted: boolean;
+  /**
+   * The marker of another run's review that already covers this head, when this run posted
+   * nothing because of it. Then it wrote nothing to the PR, and left the PR's record alone.
+   */
+  coveredBy?: string;
   event: ReviewEvent;
   complete: boolean;
   findings: number;
@@ -76,6 +87,8 @@ function withoutUndefined<T extends object>(
 
 /** What the post step has posted for a run, so far. */
 interface PostProgress {
+  /** Set when another run's review covered the head, so this run posted nothing. */
+  coveredBy?: string;
   /** The attempt that saved it, and how many saves it has made: no two writers' match. */
   attempt?: string;
   writes?: number;
@@ -87,6 +100,7 @@ interface PostProgress {
 }
 
 const postProgressSchema = z.object({
+  coveredBy: z.string().optional(),
   attempt: z.string().optional(),
   writes: z.number().int().nonnegative().optional(),
   review: z.boolean().optional(),
@@ -134,12 +148,26 @@ export function reviewMarker(runId: string, complete: boolean): string {
   return `${REVIEW_MARKER_PREFIX}${runId}:${complete ? "complete" : "incomplete"}`;
 }
 
-/** Whether our reviews on the head (their markers) make another review from this run moot. */
-export function headCovered(markers: readonly string[], complete: boolean): boolean {
-  const complete_ = markers.some((marker) => marker.endsWith(":complete"));
-  // An incomplete review covers only a run that would be incomplete too. A complete run posts
-  // over it; GitHub counts each reviewer's latest review, so the earlier one stops counting.
-  return complete_ || (!complete && markers.some((marker) => marker.endsWith(":incomplete")));
+/**
+ * Our review on the head that makes another from this run moot, if there is one:
+ * - a complete review;
+ * - an incomplete one that requested changes: until earlier runs' open findings count in a
+ *   later run's decision, a complete run could approve with its blocking findings unanswered
+ *   (prepare dedupes them as already raised);
+ * - an incomplete one, when this run is incomplete too.
+ * A complete run posts over an incomplete COMMENT review. A COMMENT review sets no approval
+ * state on GitHub, so nothing of it lingers for the new review to clear.
+ */
+export function headCovered(
+  reviews: readonly MarkedReview[],
+  complete: boolean,
+): MarkedReview | undefined {
+  const done = reviews.find((review) => review.marker.endsWith(":complete"));
+  if (done !== undefined) return done;
+  const incomplete = reviews.filter((review) => review.marker.endsWith(":incomplete"));
+  return complete
+    ? incomplete.find((review) => review.state === "CHANGES_REQUESTED")
+    : incomplete[0];
 }
 
 /** Who a post attempt is, for the review claim. */
@@ -160,7 +188,17 @@ export interface PostOptions {
   taskStatus?: (taskArn: string) => Promise<string>;
 }
 
-const claimSchema = z.object({ attempt: z.string(), taskArn: z.string().optional() });
+const claimSchema = z.object({
+  attempt: z.string(),
+  taskArn: z.string().optional(),
+  claimedAt: z.number().optional(),
+});
+
+/**
+ * How long a claim held off ECS counts. Its holder can't be checked, so past the post step's
+ * longest run (its 30-minute task timeout) it's taken to have ended.
+ */
+export const OFF_ECS_CLAIM_TTL_MS = 30 * 60_000;
 
 /**
  * A claim's holder is done with it: its containers have stopped (DEPROVISIONING comes after
@@ -193,7 +231,9 @@ async function holdClaim(
 ): Promise<{ etag: string; tookOver: boolean }> {
   const mine = JSON.stringify({
     attempt: options.attempt.id,
-    ...(options.attempt.taskArn === undefined ? {} : { taskArn: options.attempt.taskArn }),
+    ...(options.attempt.taskArn === undefined
+      ? { claimedAt: Date.now() }
+      : { taskArn: options.attempt.taskArn }),
   });
   const created = await deps.store.createText(claimKey, mine);
   if (created !== undefined) return { etag: created, tookOver: false };
@@ -208,9 +248,12 @@ async function holdClaim(
   const holderTask = holder.success ? holder.data.taskArn : undefined;
   // A holder off ECS can't be checked. Off ECS too (a local or dev run), there are no
   // parallel retries, so it's an earlier run of this one that ended: take it over. On ECS, a
-  // claim from off ECS is someone else's run of the same post: leave it be.
+  // claim from off ECS is someone else's run of the same post: leave it be until it expires.
   if (holder.success && holderTask === undefined && options.attempt.taskArn !== undefined) {
-    throw new Error(`Another attempt, off ECS, holds the claim on ${what}.`);
+    const age = Date.now() - (holder.data.claimedAt ?? 0);
+    if (age < OFF_ECS_CLAIM_TTL_MS) {
+      throw new Error(`Another attempt, off ECS, holds the claim on ${what}.`);
+    }
   }
   // An unreadable claim has no holder to wait for.
   if (holderTask !== undefined) {
@@ -334,8 +377,8 @@ export async function post(
   // On a takeover, the earlier holder may have posted and stopped before saving that. Then
   // it's posted, whatever has happened to the PR since: record it, never supersede.
   if (claim.tookOver && !progress.review) {
-    const markers = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-    if (markers.some((marker) => marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`))) {
+    const reviews = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+    if (reviews.some((review) => review.marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`))) {
       progress.review = true;
       await save();
     }
@@ -375,20 +418,19 @@ export async function post(
    * the head's review, and the run records it and carries on. Done holding the head's claim, so
    * two runs at one head can't both find nothing and both submit.
    */
-  const submitOnce = async () => {
+  const submitOnce = async (): Promise<string | undefined> => {
     const headClaim = headKeys(
       `${target.owner}/${target.repo}`,
       target.number,
       pr.headSha,
     ).reviewClaim;
     const head = await holdClaim(deps, { attempt, taskStatus }, headClaim, "this head's review");
+    let coveredBy: string | undefined;
     try {
-      const markers = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-      if (headCovered(markers, report.complete)) {
-        deps.log("the head already has our review; not posting another", { runId, markers });
-      } else {
-        await poster.submitReview(pull, pr.headSha, payload);
-      }
+      const reviews = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+      coveredBy = headCovered(reviews, report.complete)?.marker;
+      if (coveredBy === undefined) await poster.submitReview(pull, pr.headSha, payload);
+      else deps.log("the head already has our review; not posting another", { runId, coveredBy });
     } catch (error) {
       // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
       // timeout, a 5xx) it may be, and the claims stay until this task has stopped, when the
@@ -401,6 +443,7 @@ export async function post(
     }
     // Done at this head: the next run's check finds the review.
     await releaseLogged(headClaim, head.etag);
+    return coveredBy;
   };
   const record = () =>
     deps.runs.succeedRun(runId, {
@@ -413,11 +456,30 @@ export async function post(
     });
   try {
     if (!progress.review) {
-      await submitOnce();
+      const coveredBy = await submitOnce();
       progress.review = true;
+      if (coveredBy !== undefined) progress.coveredBy = coveredBy;
       await save();
     }
-    if (decision.conclusion !== undefined && !progress.checkRun) {
+    if (progress.coveredBy !== undefined) {
+      // Another run's review is the head's: its check run, summary and label are the PR's. This
+      // run's decision, never posted, mustn't contradict them.
+      await deps.runs.coverRun(runId, { filesDone: report.plan.reviewed, costUsd: costOf(report) });
+      deps.log("covered", { runId, coveredBy: progress.coveredBy });
+      return {
+        runId,
+        posted: false,
+        coveredBy: progress.coveredBy,
+        event: decision.event,
+        complete: report.complete,
+        findings: report.inline.length + report.body.length,
+      };
+    }
+    if (
+      decision.conclusion !== undefined &&
+      !progress.checkRun &&
+      !(await deps.runs.newerRunPosted(runId))
+    ) {
       await poster.completeCheckRun(pull, {
         headSha: pr.headSha,
         conclusion: decision.conclusion,
