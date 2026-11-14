@@ -2,7 +2,13 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AUTH_HELP, PLAN_CREDENTIAL_WARNING, runAuth, type AuthDeps } from "./auth.js";
+import {
+  AUTH_HELP,
+  PLAN_CREDENTIAL_HEADER,
+  planCredentialWarning,
+  runAuth,
+  type AuthDeps,
+} from "./auth.js";
 import type { InferenceProfile, ModelAccess } from "./bedrock.js";
 import type {
   CredentialLabel,
@@ -155,11 +161,27 @@ describe("auth", () => {
     expect(getDeps).not.toHaveBeenCalled();
   });
 
+  it("tailors the plan-credential warning to each vendor and points at docs/providers.md", () => {
+    const claude = planCredentialWarning({ harness: "claude-code" });
+    expect(claude).toContain(PLAN_CREDENTIAL_HEADER);
+    expect(claude).toContain("auth api-key --provider anthropic");
+    expect(claude).toContain("monthly API credits");
+    const codex = planCredentialWarning({ harness: "codex" });
+    expect(codex).toContain("auth api-key --provider openai");
+    expect(codex).toContain("Codex access token");
+    const cursor = planCredentialWarning({ harness: "cursor-agent" });
+    expect(cursor).toContain('"service-account"');
+    for (const text of [claude, codex, cursor]) expect(text).toContain("docs/providers.md");
+    // Each vendor's advice names only its own alternatives.
+    expect(claude).not.toContain("Codex");
+    expect(codex).not.toContain("Console organization");
+  });
+
   it("claude: warns, confirms, runs setup-token, then stores the pasted token", async () => {
     const h = harness({ answers: [ANTHROPIC_KEY, "not a token", `  ${OAUTH}\n`] });
     const result = await h.go(["claude"]);
     expect(result.exitCode).toBe(0);
-    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
+    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_HEADER);
     expect(h.confirms).toHaveLength(1);
     expect(h.run).toHaveBeenCalledWith("claude", ["setup-token"], {});
     expect(h.validated.slice(0, 2)).toEqual([
@@ -189,7 +211,7 @@ describe("auth", () => {
     const h = harness({ answers: [OAUTH] });
     const result = await h.go(["claude", "--paste", "--accept-vendor-terms"]);
     expect(result.exitCode).toBe(0);
-    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
+    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_HEADER);
     expect(h.confirms).toEqual([]);
     expect(h.run).not.toHaveBeenCalled();
     expect(h.puts).toHaveLength(1);
@@ -244,7 +266,7 @@ describe("auth", () => {
     expect(result.exitCode).toBe(0);
     // A Codex access token belongs to a ChatGPT plan, so it gets the warning and question.
     expect(h.confirms).toHaveLength(1);
-    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
+    expect(h.out.join("")).toContain(PLAN_CREDENTIAL_HEADER);
     expect(h.puts[0]?.label.auth).toBe("access-token");
   });
 
@@ -274,7 +296,7 @@ describe("auth", () => {
     };
     const declined = harness({ config, confirm: false, answers: ["SECRET-CURSOR"] });
     expect((await declined.go(["cursor"])).stderr).toContain("Nothing stored");
-    expect(declined.out.join("")).toContain(PLAN_CREDENTIAL_WARNING);
+    expect(declined.out.join("")).toContain(PLAN_CREDENTIAL_HEADER);
     expect(declined.puts).toEqual([]);
     const accepted = harness({ config, answers: ["SECRET-CURSOR"] });
     expect((await accepted.go(["cursor", "--accept-vendor-terms"])).exitCode).toBe(0);

@@ -58,16 +58,39 @@ export interface CommandResult {
 }
 
 /**
- * Shown before storing a credential tied to a person's subscription. NIC-820 (the vendor-terms
- * spike) replaces this with its findings and links to the primary sources.
+ * Shown before storing a credential tied to a person's subscription: what the vendor's terms
+ * and docs say, summed up from docs/providers.md, which quotes them and links the sources
+ * (NIC-820). The first line is the same for every vendor.
  */
-export const PLAN_CREDENTIAL_WARNING = `
-Warning: this stores a credential tied to a personal subscription plan.
-LGTMoose will use it to review pull requests for everyone who opens them in the repositories
-the App is installed on. Vendors' terms on automated, shared or team-wide use of personal plans
-differ and change often; some don't allow it. Check the current terms of your plan before you
-go on. An API key, Bedrock or a team service account avoids the question.
-`;
+export const PLAN_CREDENTIAL_HEADER =
+  "Warning: this stores a credential tied to one person's subscription plan.";
+
+const PLAN_CREDENTIAL_ADVICE: Record<string, string> = {
+  "claude-code": `Anthropic's consumer terms forbid making your account available to anyone else, and
+nothing says a bot may review other people's pull requests on one person's plan. An API key is
+the documented way to automate: create one in your Max, Ultra or Team plan's linked Console
+organization and the plan's monthly API credits cover it:
+  ${CLI} auth api-key --provider anthropic
+Bedrock needs no key at all.`,
+  codex: `OpenAI's terms forbid sharing account credentials or making your account available to
+others. OpenAI recommends an API key for automation:
+  ${CLI} auth api-key --provider openai
+On ChatGPT Business or Enterprise, a Codex access token created for the bot is the documented
+alternative.`,
+  "cursor-agent": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't
+be shared. Cursor's service accounts (Enterprise) are made for automation: set the provider's
+auth to "service-account".`,
+};
+
+/** The warning for one plan credential. */
+export function planCredentialWarning(provider: Pick<ProviderConfig, "harness">): string {
+  const advice = PLAN_CREDENTIAL_ADVICE[provider.harness] ?? "";
+  return (
+    `\n${PLAN_CREDENTIAL_HEADER}\nLGTMoose will use it to review everyone's pull requests in ` +
+    `the repositories the App is installed on.\n${advice}${advice === "" ? "" : "\n"}` +
+    "Details and sources: docs/providers.md. Go on only if your plan's terms allow this use.\n\n"
+  );
+}
 
 export const AUTH_HELP = `Usage: lgtmoose auth <method> [options]
 
@@ -322,7 +345,7 @@ async function confirmPlanCredential(
   deps: AuthDeps,
 ): Promise<void> {
   if (!isPlanCredential(provider)) return;
-  deps.out(PLAN_CREDENTIAL_WARNING);
+  deps.out(planCredentialWarning(provider));
   if (flags.acceptVendorTerms) {
     deps.out("Going on: --accept-vendor-terms was given.\n");
     return;
