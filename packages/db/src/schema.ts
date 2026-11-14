@@ -214,6 +214,14 @@ export const findingEvents = pgTable(
       .references(() => findings.id, { onDelete: "cascade" }),
     type: findingEventType("type").notNull(),
     actor: text("actor").notNull(),
+    /** For a person's event: their GitHub login, when it's known (who resolved a thread, say). */
+    actorLogin: text("actor_login"),
+    /**
+     * For a `resolved` event: false when the resolution didn't count, and the finding stayed
+     * open (a blocking or protected finding resolved by the PR's author, or by someone whose
+     * write access isn't checked yet). Null otherwise.
+     */
+    counted: boolean("counted"),
     sha: text("sha"),
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
     createdAt: createdAt(),

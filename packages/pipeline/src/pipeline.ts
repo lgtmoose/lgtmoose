@@ -180,6 +180,12 @@ export interface FinishOptions {
    * them are already dropped, since their comments are among the PR's.
    */
   others?: readonly OtherReviewerFinding[];
+  /**
+   * Our blocking or protected findings whose review thread is resolved, but not by someone it
+   * counts for (the PR's author, or someone without write access): they stay open, and the
+   * summary says why.
+   */
+  heldResolutions?: number;
 }
 
 /**
@@ -855,6 +861,11 @@ export async function finishReview(
     ...(failedBatches > 0 ? [`${count(failedBatches, "batch", "batches")} failed`] : []),
     ...(decision.outcome === "skipped" ? [] : unreviewed),
     ...decision.holds.flatMap((hold) => (hold === "incomplete" ? [] : [HOLD_TEXT[hold]])),
+    ...((options.heldResolutions ?? 0) > 0
+      ? [
+          `${options.heldResolutions === 1 ? "a resolved review thread still counts" : `${options.heldResolutions} resolved review threads still count`}: a blocking or protected finding counts as resolved only when someone other than the PR's author, with write access, resolves it`,
+        ]
+      : []),
   ];
   const summary = renderSummary(
     {

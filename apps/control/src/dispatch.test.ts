@@ -119,17 +119,19 @@ function fakeDeps() {
       async reviewed(_repo, _n, headSha) {
         return reviewedHeads.has(headSha);
       },
-      async followThread(_repo, _n, commentId, resolved) {
+      async followThread(_repo, _n, commentId, resolved, actor) {
+        calls.push(`thread ${commentId} ${resolved ? "resolved" : "unresolved"} by ${actor}`);
         const status = threadFindings.get(commentId);
+        if (resolved && status === "open (blocking)") return { changed: 0, held: 1 };
         if (resolved && (status === "open" || status === "outdated")) {
           threadFindings.set(commentId, "resolved_by_human");
-          return 1;
+          return { changed: 1, held: 0 };
         }
         if (!resolved && status === "resolved_by_human") {
           threadFindings.set(commentId, "open");
-          return 1;
+          return { changed: 1, held: 0 };
         }
-        return 0;
+        return { changed: 0, held: 0 };
       },
     },
     async deadLetter(record, reason) {
@@ -411,16 +413,36 @@ describe("dispatch: review threads", () => {
     const f = fakeDeps();
     f.threadFindings.set(900, "open");
     const resolved = job({ kind: "thread_resolved", commentId: 900, threadNodeId: "PRRT_1" });
-    expect(await dispatch(f.deps, resolved)).toEqual({ action: "resolved", changed: 1 });
+    expect(await dispatch(f.deps, resolved)).toEqual({
+      action: "resolved",
+      changed: 1,
+      held: 0,
+    });
     expect(f.threadFindings.get(900)).toBe("resolved_by_human");
+    expect(f.calls).toContain("thread 900 resolved by dev");
     expect(f.executions.size).toBe(0);
+  });
+
+  it("passes on a resolution the store holds: the finding stays open", async () => {
+    const f = fakeDeps();
+    f.threadFindings.set(902, "open (blocking)");
+    expect(await dispatch(f.deps, job({ kind: "thread_resolved", commentId: 902 }))).toEqual({
+      action: "resolved",
+      changed: 0,
+      held: 1,
+    });
+    expect(f.threadFindings.get(902)).toBe("open (blocking)");
   });
 
   it("follows a person unresolving it again: the person's latest action wins", async () => {
     const f = fakeDeps();
     f.threadFindings.set(900, "resolved_by_human");
     const unresolved = job({ kind: "thread_unresolved", commentId: 900 });
-    expect(await dispatch(f.deps, unresolved)).toEqual({ action: "unresolved", changed: 1 });
+    expect(await dispatch(f.deps, unresolved)).toEqual({
+      action: "unresolved",
+      changed: 1,
+      held: 0,
+    });
     expect(f.threadFindings.get(900)).toBe("open");
   });
 

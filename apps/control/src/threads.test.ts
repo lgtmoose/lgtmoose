@@ -51,6 +51,23 @@ describe("graphQlThreadReader", () => {
     ]);
   });
 
+  it("reads who resolved a resolved thread", async () => {
+    const graphql: GraphQl = async (query) => {
+      expect(query).toContain("resolvedBy { login }");
+      return page([
+        { ...thread(true, "31"), resolvedBy: { login: "lead" } },
+        { ...thread(true, "32"), resolvedBy: null },
+        // An open thread's resolver (left from before it was unresolved) isn't kept.
+        { ...thread(false, "33"), resolvedBy: { login: "lead" } },
+      ]);
+    };
+    expect(await graphQlThreadReader(graphql).reviewThreads(TARGET)).toEqual([
+      { resolved: true, firstCommentId: 31, resolvedBy: "lead" },
+      { resolved: true, firstCommentId: 32 },
+      { resolved: false, firstCommentId: 33 },
+    ]);
+  });
+
   it("uses what came back when some threads fail, and reports the errors", async () => {
     const reported: string[][] = [];
     const reader = graphQlThreadReader(

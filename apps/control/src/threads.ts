@@ -9,6 +9,8 @@ export interface ReviewThread {
    * are past 2^31, too big for `databaseId`); undefined if it was deleted.
    */
   firstCommentId: number | undefined;
+  /** Who resolved it, for a resolved thread; undefined when GitHub doesn't say (a ghost). */
+  resolvedBy?: string;
 }
 
 /** Reads a PR's review threads. GraphQL only: REST doesn't say whether a thread is resolved. */
@@ -24,7 +26,7 @@ const QUERY = `query ($owner: String!, $repo: String!, $number: Int!, $after: St
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { isResolved comments(first: 1) { nodes { fullDatabaseId } } }
+        nodes { isResolved resolvedBy { login } comments(first: 1) { nodes { fullDatabaseId } } }
       }
     }
   }
@@ -43,6 +45,7 @@ const replySchema = z.object({
                   z
                     .object({
                       isResolved: z.boolean(),
+                      resolvedBy: z.object({ login: z.string() }).nullable().optional(),
                       comments: z.object({
                         nodes: z.array(
                           z
@@ -115,9 +118,11 @@ export function graphQlThreadReader(
         if (errors.length > 0) onErrors(errors);
         for (const node of list.nodes) {
           if (node === null) continue;
+          const resolvedBy = node.resolvedBy?.login;
           threads.push({
             resolved: node.isResolved,
             firstCommentId: commentId(node.comments.nodes[0]?.fullDatabaseId),
+            ...(node.isResolved && resolvedBy !== undefined ? { resolvedBy } : {}),
           });
         }
         if (!list.pageInfo.hasNextPage || list.pageInfo.endCursor === null) break;

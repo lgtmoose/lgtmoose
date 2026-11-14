@@ -740,6 +740,14 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(again.escalated).toEqual([]);
   });
 
+  it("says in the summary when a resolved thread still counts", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const report = await finishReview(repo, prepared, [], headSha, { heldResolutions: 1 });
+    expect(report.summary).toContain("a resolved review thread still counts");
+    expect(report.summary).toContain("with write access");
+  });
+
   it("counts another reviewer's finding in the decision without posting it, and notes a miss", async () => {
     const { repo, prepare } = await setUp();
     const prepared = await prepare({});

@@ -1,8 +1,9 @@
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
-import type { PullReader } from "@lgtmoose/pipeline";
+import type { PullReader, PullTarget } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
+import type { Permission } from "./thread-policy.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
@@ -251,6 +252,12 @@ export interface ControlDeps {
     reader: PullReader;
     /** The App's ID: its own comments aren't another reviewer's. Undefined in tests and CLI. */
     appId?: number;
+    /**
+     * A login's permission on the PR's repository (the collaborators API): whether a resolved
+     * thread on a blocking or protected finding counts (`resolutionHeld`). Without one, such a
+     * resolution never counts.
+     */
+    permission?: (target: PullTarget, login: string) => Promise<Permission>;
     /** The PR's review threads, through GraphQL, to follow resolved ones. */
     threads: ReviewThreadReader;
     token: () => Promise<string>;

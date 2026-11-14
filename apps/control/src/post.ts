@@ -37,6 +37,7 @@ import { TASK_MISSING } from "./ecs.js";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest } from "./prepare.js";
+import { resolutionHeld } from "./thread-policy.js";
 
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
@@ -796,9 +797,36 @@ export async function post(
   // Read once: also tells which of other reviewers' threads are resolved. Unread, other
   // reviewers' comments don't count (a resolved one can't be told apart).
   let threads: Awaited<ReturnType<typeof github.threads.reviewThreads>> | undefined;
+  // Our blocking or protected findings whose thread is resolved, but not by someone it counts
+  // for (`resolutionHeld`): they stay open, and the summary says so.
+  let heldResolutions = 0;
   try {
     threads = await github.threads.reviewThreads(target);
-    const synced = await deps.findings.syncThreads(run.pullRequestId, threads, pr.headSha);
+    const before = await deps.findings.trackedFindings(run.pullRequestId);
+    const byComment = new Map(
+      before.flatMap((record) =>
+        record.githubCommentId === undefined ? [] : [[record.githubCommentId, record] as const],
+      ),
+    );
+    const permission = memo(async (login: string) =>
+      github.permission === undefined ? "none" : github.permission(target, login),
+    );
+    const counted: typeof threads = [];
+    for (const thread of threads) {
+      const record =
+        thread.firstCommentId === undefined ? undefined : byComment.get(thread.firstCommentId);
+      const held =
+        thread.resolved && record !== undefined
+          ? await resolutionHeld(record, thread.resolvedBy, pr.author, permission)
+          : undefined;
+      if (held === undefined) {
+        counted.push(thread);
+      } else {
+        heldResolutions += 1;
+        deps.log("review thread resolution held", { runId, findingId: record?.id, reason: held });
+      }
+    }
+    const synced = await deps.findings.syncThreads(run.pullRequestId, counted, pr.headSha);
     if (synced.resolved + synced.unresolved > 0) deps.log("review threads", { runId, ...synced });
   } catch (error) {
     deps.log("review threads unread", {
@@ -920,6 +948,7 @@ export async function post(
         severity: record.severity,
       })),
       others,
+      heldResolutions,
     });
     if (report.others > 0 || report.misses.length > 0) {
       deps.log("other reviewers' findings", {

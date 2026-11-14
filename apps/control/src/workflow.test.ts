@@ -482,6 +482,9 @@ function harness(setup: Setup = {}) {
       return {
         reader,
         threads: { reviewThreads: async () => setup.threads?.() ?? [] },
+        // `lead` is a maintainer; anyone else has read access.
+        permission: async (_target, login) =>
+          login === "lead" ? ("maintain" as const) : ("read" as const),
         token: async () => "",
         poster: (runId) => {
           const shadow = new ShadowPoster({
@@ -1766,6 +1769,42 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(reviews(h)).toBe(2);
   });
 
+  it("doesn't let the PR's author clear a blocking finding by resolving its thread", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    await review(h, 1, [finding()]);
+
+    // The author (`dev`) resolves it: it still counts, and the PR isn't approved.
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "dev" }];
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
+    const byAuthor = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(byAuthor.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+
+    // Someone with read access only: still counts.
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "fan" }];
+    headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated, again");
+    await review(h, 3);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+
+    // A maintainer resolves it: it's out of the decision.
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
+    headSha = await commit({ "src/other.ts": "export const rate = 8;\n" }, "unrelated, once more");
+    const byLead = await review(h, 4);
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+    expect(byLead.posted).toMatchObject({ event: "APPROVE" });
+  });
+
+  it("lets the PR's author resolve a should_fix finding", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    await review(h, 1, [finding({ severity: "should_fix" })]);
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "dev" }];
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
+    await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+  });
+
   it("follows our comment's thread: resolved takes the finding out, unresolved puts it back", async () => {
     let threads: ReviewThread[] = [];
     const h = harness({ commentIds: true, threads: () => threads });
@@ -1774,7 +1813,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open", githubCommentId: 1000 }]);
 
     // A person resolves the thread; the next run approves, with the finding left alone.
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "unrelated");
     const resolved = await review(h, 2);
     expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
@@ -1935,7 +1974,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     const h = harness({ commentIds: true, threads: () => threads });
     await review(h, 1, [finding()]);
     const raisedAt = headSha;
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     // src/total.ts back as the base has it: the PR no longer changes it.
     headSha = await commit({ "src/total.ts": TOTAL }, "revert total");
     await review(h, 2);
@@ -2341,7 +2380,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     let threads: ReviewThread[] = [];
     const h = harness({ commentIds: true, threads: () => threads });
     await review(h, 1, [finding()]);
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     // Main renames the file; the PR is rebased onto it, its change now in src/sum.ts.
     await git(work, "checkout", "--quiet", "main");
     await git(work, "mv", "src/total.ts", "src/sum.ts");
@@ -2368,7 +2407,7 @@ describe("later runs", { timeout: 30_000 }, () => {
       evidence: "1 / 0",
     });
     await review(h, 1, [added]);
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     await git(work, "mv", "src/rates.ts", "src/rate.ts");
     headSha = await commit({}, "rename rates");
 
@@ -2398,7 +2437,7 @@ describe("later runs", { timeout: 30_000 }, () => {
       evidence: "grandTotal(orders) / orders.length",
     });
     await review(h, 1, [average]);
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     // Renamed with a small edit: against the base it's a deletion and an addition, but a rename
     // since the finding's commit.
     await git(work, "mv", "src/total.ts", "src/orders.ts");
@@ -2503,7 +2542,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     const h = harness({ commentIds: true, threads: () => threads });
     const left = await renamedWithDroppedReturn();
     await review(h, 1, [left]);
-    threads = [{ resolved: true, firstCommentId: 1000 }];
+    threads = [{ resolved: true, firstCommentId: 1000, resolvedBy: "lead" }];
     await git(work, "mv", "src/sum.ts", "src/amount.ts");
     headSha = await commit({}, "rename again");
 
