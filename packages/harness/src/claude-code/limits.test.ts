@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeLimitFailure, findResult } from "./stream.js";
+import { claudeLimitFailure, findResult, nextClockTime } from "./stream.js";
 
 const result = (fields: Record<string, unknown>) =>
   findResult(JSON.stringify({ type: "result", subtype: "success", is_error: true, ...fields }))!;
@@ -11,7 +11,7 @@ describe("claudeLimitFailure", () => {
         result({ result: "You've hit your 5-hour limit · resets 3:10pm (UTC)" }),
         "",
       ),
-    ).toEqual({ kind: "plan_limit", resetsAt: "3:10pm (UTC)" });
+    ).toEqual({ kind: "plan_limit", resetsAt: expect.stringMatching(/T15:10:00\.000Z$/) });
     expect(
       claudeLimitFailure(result({ result: "Claude AI usage limit reached|1763125800" }), ""),
     ).toMatchObject({ kind: "plan_limit" });
@@ -41,7 +41,43 @@ describe("claudeLimitFailure", () => {
         }),
         "",
       ),
-    ).toEqual({ kind: "plan_limit", resetsAt: "5pm" });
+    ).toEqual({ kind: "plan_limit", resetsAt: expect.stringMatching(/T17:00:00\.000Z$/) });
+  });
+
+  it("reads the API's low credit balance as a plan limit, and a rate limit as throttling", () => {
+    expect(
+      claudeLimitFailure(
+        result({ result: "Your credit balance is too low to access the Anthropic API." }),
+        "",
+      ),
+    ).toMatchObject({ kind: "plan_limit" });
+    expect(
+      claudeLimitFailure(
+        result({ api_error_status: 429, result: "You've hit your rate limit" }),
+        "",
+      ),
+    ).toMatchObject({ kind: "rate_limit" });
+  });
+
+  it("turns the epoch form into an ISO reset time", () => {
+    expect(
+      claudeLimitFailure(result({ result: "Claude AI usage limit reached|1763125800" }), ""),
+    ).toMatchObject({ kind: "plan_limit", resetsAt: "2025-11-14T13:10:00.000Z" });
+  });
+
+  it("finds the next time a clock time comes round", () => {
+    const now = new Date("2026-11-14T14:00:00Z");
+    expect(nextClockTime("3:10pm (UTC)", now)?.toISOString()).toBe("2026-11-14T15:10:00.000Z");
+    expect(nextClockTime("1pm", now)?.toISOString()).toBe("2026-11-15T13:00:00.000Z");
+    // London is on GMT in November.
+    expect(nextClockTime("15:30 (Europe/London)", now)?.toISOString()).toBe(
+      "2026-11-14T15:30:00.000Z",
+    );
+    expect(nextClockTime("9am (America/New_York)", now)?.toISOString()).toBe(
+      "2026-11-15T14:00:00.000Z",
+    );
+    expect(nextClockTime("Nov 20", now)).toBeUndefined();
+    expect(nextClockTime("3pm (Not/AZone)", now)).toBeUndefined();
   });
 
   it("treats HTTP 429 as throttling unless the message says the plan is used up", () => {

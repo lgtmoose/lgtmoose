@@ -112,12 +112,14 @@ export function outputOf(
 const CLAUDE_PLAN_LIMIT = new RegExp(
   [
     // "You've hit your limit", "… your 5-hour limit", "… your monthly spend limit",
-    // "… your team's shared budget"
-    String.raw`hit your (?:[\w'-]+ ){0,3}(?:limit|budget)`,
+    // "… your team's shared budget". Not a rate or request limit, which is throttling.
+    String.raw`hit your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}(?:limit|budget)`,
     // "You've reached your Fable limit"
-    String.raw`reached your (?:[\w'-]+ ){0,3}limit`,
+    String.raw`reached your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}limit`,
     String.raw`usage limit reached`,
     String.raw`out of (?:usage )?credits`,
+    // The API's prepaid balance: "Your credit balance is too low to access the Anthropic API."
+    String.raw`credit balance is too low`,
   ].join("|"),
   "i",
 );
@@ -135,16 +137,73 @@ export function classifyClaudeFailure(message: string): LimitFailure | undefined
   return classifyFailure(message);
 }
 
-/** The reset Claude Code wrote: a clock time as `resetsAt`, "in 3h 20m" as seconds. */
+/**
+ * The reset Claude Code wrote, in a form the fallback chain reads: "usage limit reached|<epoch
+ * seconds>" and "resets 3:10pm (UTC)" as an ISO `resetsAt`, "resets in 3h 20m" as seconds.
+ */
 function claudeReset(message: string): { resetsAt?: string; retryAfterSeconds?: number } {
+  const epoch = /usage limit reached\|(\d{9,11})\b/i.exec(message)?.[1];
+  if (epoch !== undefined) return { resetsAt: new Date(Number(epoch) * 1000).toISOString() };
   const text = CLAUDE_RESETS.exec(message)?.[1]?.trim();
   if (!text) return {};
-  if (!/^in\b/i.test(text)) return { resetsAt: text };
-  let seconds = 0;
-  for (const [, count, unit] of text.matchAll(DURATION_PART)) {
-    seconds += Number(count) * (UNIT_SECONDS[(unit ?? "s").charAt(0).toLowerCase()] ?? 0);
+  if (/^in\b/i.test(text)) {
+    let seconds = 0;
+    for (const [, count, unit] of text.matchAll(DURATION_PART)) {
+      seconds += Number(count) * (UNIT_SECONDS[(unit ?? "s").charAt(0).toLowerCase()] ?? 0);
+    }
+    return seconds > 0 ? { retryAfterSeconds: seconds } : {};
   }
-  return seconds > 0 ? { retryAfterSeconds: seconds } : {};
+  const at = nextClockTime(text, new Date());
+  return at === undefined ? {} : { resetsAt: at.toISOString() };
+}
+
+/** "3pm", "3:10pm (UTC)", "15:10 (Europe/London)": the next time the clock shows that. */
+const CLOCK_TIME = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([\w/+-]+)\))?$/i;
+
+/**
+ * When a clock time next comes round, in its time zone (UTC when it names none, which is the
+ * sandbox's own zone). Undefined for anything else, such as a date or an unknown zone.
+ */
+export function nextClockTime(text: string, now: Date): Date | undefined {
+  const match = CLOCK_TIME.exec(text);
+  if (!match) return undefined;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const half = match[3]?.toLowerCase();
+  if (half !== undefined) {
+    if (hour < 1 || hour > 12) return undefined;
+    hour = (hour % 12) + (half === "pm" ? 12 : 0);
+  }
+  if (hour > 23 || minute > 59) return undefined;
+  const zone = match[4] ?? "UTC";
+  let offsetMs: number;
+  try {
+    offsetMs = zoneOffsetMs(zone, now);
+  } catch {
+    return undefined;
+  }
+  // Today's date as the zone sees it, at that time, then back to UTC.
+  const local = new Date(now.getTime() + offsetMs);
+  const day = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
+  let at = day + (hour * 60 + minute) * 60_000 - offsetMs;
+  if (at <= now.getTime()) at += 86_400_000;
+  return new Date(at);
+}
+
+/** How far a time zone's wall clock is ahead of UTC at `now`. Throws for an unknown zone. */
+function zoneOffsetMs(zone: string, now: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+  }).formatToParts(now);
+  const part = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const wall = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"));
+  return wall - Math.floor(now.getTime() / 60_000) * 60_000;
 }
 
 /**
@@ -234,12 +293,20 @@ export async function withRepair<T>(
 
 /**
  * Usage of a first attempt plus the repair turn that resumed its session. Tokens are per run,
- * but Claude Code restores the session's cost on resume, so the repair's `total_cost_usd`
- * already includes the first attempt's.
+ * but Claude Code restores the session's saved cost on resume, so the repair's
+ * `total_cost_usd` normally includes the first attempt's already. A repair that cost less
+ * than the first attempt can't include it (the session's cost wasn't saved), so then the two
+ * are added.
  */
 export function resumedUsage(first: HarnessUsage, second: HarnessUsage): HarnessUsage {
   const sum = addUsage(first, second);
-  if (second.costUsd !== undefined) sum.costUsd = Math.max(second.costUsd, first.costUsd ?? 0);
+  if (
+    first.costUsd !== undefined &&
+    second.costUsd !== undefined &&
+    second.costUsd >= first.costUsd
+  ) {
+    sum.costUsd = second.costUsd;
+  }
   return sum;
 }
 

@@ -1,3 +1,5 @@
+import { GOOGLE_CREDENTIALS_JSON } from "@lgtmoose/harness";
+
 /**
  * The variables a harness reads its credential from, for a provider's auth method. The task
  * definition hands every provider's stored credential to the task as
@@ -28,7 +30,7 @@ export function credentialEnv(
     case "claude-code/vertex":
     case "agent-sdk/vertex":
       // The service-account key's JSON; the harness writes it to a private file for the run.
-      return { CLAUDE_CODE_USE_VERTEX: "1", GOOGLE_APPLICATION_CREDENTIALS_JSON: need() };
+      return { CLAUDE_CODE_USE_VERTEX: "1", [GOOGLE_CREDENTIALS_JSON]: need() };
     case "codex/chatgpt-login":
       return { CODEX_AUTH_JSON: need() };
     case "codex/access-token":

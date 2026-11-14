@@ -56,6 +56,8 @@ export interface AgentSdkHarnessOptions {
   env?: Readonly<Record<string, string | undefined>>;
   /** No limit by default; the timeout still applies. */
   maxTurns?: number;
+  /** As `ClaudeCodeHarnessOptions.scrubSubprocessEnv`: strips credentials from Bash commands. */
+  scrubSubprocessEnv?: boolean;
   /** Parent of each run's temporary home directory. Defaults to the OS temp directory. */
   tmpRoot?: string;
   /** Defaults to the SDK's `query`. */
@@ -97,7 +99,14 @@ export class AgentSdkHarness implements Harness {
     const secrets = auth.secrets;
     const query = this.options.query ?? (sdkQuery as AgentQuery);
     try {
-      const session = await prepareClaudeSession(home, source, auth);
+      const session = await prepareClaudeSession(
+        home,
+        source,
+        auth,
+        this.options.scrubSubprocessEnv === undefined
+          ? {}
+          : { scrubSubprocessEnv: this.options.scrubSubprocessEnv },
+      );
       const { json, promptSuffix } = claudeSchemaFor(options.schema);
       const outputFormat =
         json === undefined ? undefined : { type: "json_schema" as const, schema: json };
@@ -257,14 +266,15 @@ async function collect(
       const line = JSON.stringify(message);
       bytes += Buffer.byteLength(line) + 1;
       lines.push(line);
-      const event = asResult(message);
+      const event = message.type === "result" ? asResult(message) : undefined;
       if (event !== undefined && result === undefined) {
         // The result ends the turn. Let the CLI save the session (a repair turn resumes it,
         // cost included) and exit, but don't wait on a slow shutdown.
         grace = setTimeout(() => controller.abort(), RESULT_GRACE_MS);
       }
       result = event ?? result;
-      if (bytes > MAX_OUTPUT_BYTES) {
+      // An answer that's in counts, even if it took the output past the limit.
+      if (bytes > MAX_OUTPUT_BYTES && result === undefined) {
         stopped = "output_limit";
         controller.abort();
         break;

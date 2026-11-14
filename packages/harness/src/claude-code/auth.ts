@@ -34,10 +34,21 @@ function parseServiceAccountKey(text: string): ServiceAccountKey {
   } catch {
     throw new HarnessError("auth", `${GOOGLE_CREDENTIALS_JSON} isn't valid JSON.`);
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new HarnessError("auth", `${GOOGLE_CREDENTIALS_JSON} isn't a JSON object.`);
+  // The same check as `lgtmoose auth vertex`.
+  const key = parsed as Record<string, unknown> | null;
+  if (
+    key === null ||
+    typeof key !== "object" ||
+    key.type !== "service_account" ||
+    typeof key.client_email !== "string" ||
+    typeof key.private_key !== "string"
+  ) {
+    throw new HarnessError(
+      "auth",
+      `${GOOGLE_CREDENTIALS_JSON} isn't a service-account key: it needs type "service_account", client_email and private_key.`,
+    );
   }
-  return parsed as ServiceAccountKey;
+  return key as ServiceAccountKey;
 }
 
 type Source = Readonly<Record<string, string | undefined>>;

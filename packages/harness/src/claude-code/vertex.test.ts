@@ -8,6 +8,7 @@ import { prepareClaudeSession } from "./session.js";
 
 const key = JSON.stringify({
   type: "service_account",
+  client_email: "reviewer@acme-reviews.iam.gserviceaccount.com",
   project_id: "acme-reviews",
   private_key: "-----BEGIN PRIVATE KEY-----\nKEYMATERIAL\n-----END PRIVATE KEY-----\n",
 });
