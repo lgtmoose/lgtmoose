@@ -168,6 +168,11 @@ export interface PreparedReview {
    * read at, so later runs compare with this head.
    */
   unchanged: ReviewedFile[];
+  /**
+   * Files the PR no longer changes at all though it did at an earlier review, with the lines it
+   * added then and no longer does: reported in the summary, nothing to review in them.
+   */
+  noLongerChanged: { path: string; lines: string[] }[];
 }
 
 /**
@@ -407,6 +412,7 @@ export async function prepareReview(
     done: [...done].map(([path, depth]) => ({ path, depth })),
     carried,
     unchanged,
+    noLongerChanged: diff.noLongerChanged,
   };
 }
 
@@ -666,6 +672,7 @@ export async function finishReview(
     findings: open,
     conventionFilesOmitted: prepared.conventionFilesOmitted,
     findingsOverLimit: overLimit,
+    noLongerChanged: prepared.noLongerChanged,
   });
 
   return {

@@ -5,7 +5,10 @@
 export { cloneAtSha, githubCloneUrl, type CloneOptions, type Repo } from "./clone.js";
 export {
   diffCommits,
+  noLongerAdded,
+  readingDepth,
   reviewDiff,
+  type ReadingDepth,
   type DiffOptions,
   type FileDiff,
   type FileStatus,

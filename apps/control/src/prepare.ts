@@ -34,7 +34,7 @@ export interface RunManifest {
 interface LegacyManifest {
   version: 1;
   installationId: number;
-  review: Omit<PreparedReview, "kind" | "done" | "carried" | "unchanged">;
+  review: Omit<PreparedReview, "kind" | "done" | "carried" | "unchanged" | "noLongerChanged">;
 }
 
 /** What the prepare step hands the state machine: the run and the batches to map over. */
@@ -88,6 +88,7 @@ const manifestSchema = z.object({
     done: z.array(z.object({ path: z.string(), depth })),
     carried: z.array(z.array(findingSchema)),
     unchanged: z.array(reviewedFile),
+    noLongerChanged: z.array(z.object({ path: z.string(), lines: z.array(z.string()) })),
     jobs: z.array(
       z.looseObject({
         index: z.number().int().min(0),
@@ -117,9 +118,14 @@ export function readManifest(text: string): RunManifest {
     }
     return manifest as unknown as RunManifest;
   }
-  const incrementalFields = ["kind", "done", "carried", "unreviewed", "unchanged"].filter(
-    (field) => manifest.review !== undefined && field in manifest.review,
-  );
+  const incrementalFields = [
+    "kind",
+    "done",
+    "carried",
+    "unreviewed",
+    "unchanged",
+    "noLongerChanged",
+  ].filter((field) => manifest.review !== undefined && field in manifest.review);
   if (manifest.version !== 1 || manifest.review === undefined || incrementalFields.length > 0) {
     throw new Error(`Unsupported run manifest (version ${JSON.stringify(manifest.version)}).`);
   }
@@ -127,7 +133,14 @@ export function readManifest(text: string): RunManifest {
   return {
     ...legacy,
     version: MANIFEST_VERSION,
-    review: { ...legacy.review, kind: "full", done: [], carried: [], unchanged: [] },
+    review: {
+      ...legacy.review,
+      kind: "full",
+      done: [],
+      carried: [],
+      unchanged: [],
+      noLongerChanged: [],
+    },
   };
 }
 

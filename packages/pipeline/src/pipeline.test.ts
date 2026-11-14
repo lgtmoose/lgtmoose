@@ -323,7 +323,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(report.reviewedFiles.map((file) => file.path).toSorted()).toEqual(ALL.toSorted());
   });
 
-  it("still reviews a file whose change was reverted since the last review", async () => {
+  it("reports what a file reverted since the last review no longer adds", async () => {
     const first = await setUp();
     const lastReviewed = headSha;
     const reviewed = ALL.map((path) => ({
@@ -347,8 +347,14 @@ describe("prepareReview and finishReview with earlier runs", () => {
       { reviewed },
     );
     expect(prepared.kind).toBe("incremental");
-    expect(prepared.done).not.toContain("src/total.ts");
-    expect(prepared.jobs[0]?.prompt).toContain("no longer adds");
+    // The PR leaves src/total.ts as the base has it: nothing to review, but the summary says
+    // which line it no longer adds.
+    expect(prepared.files.map((file) => file.path)).not.toContain("src/total.ts");
+    expect(prepared.noLongerChanged).toEqual([{ path: "src/total.ts", lines: [`  ${LOOP}`] }]);
+    const report = await finishReview(repo, prepared, [], headSha);
+    expect(report.summary).toContain("No longer changed by the PR");
+    // Escaped as Markdown text: it's PR content.
+    expect(report.summary).toContain("i \\< items\\.length \\- 1");
   });
 
   it("carries an unposted run's findings for files whose blob didn't change", async () => {

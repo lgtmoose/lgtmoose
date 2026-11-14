@@ -907,9 +907,14 @@ describe("later runs", () => {
 
     const prompt = promptOf(h, prepared.runId);
     expect(prompt).toContain("src/total.ts");
-    expect(prompt).toContain("src/other.ts");
     expect(prompt).toContain("if (items.length === 0) return 0;");
     expect(prompt).toContain("no longer adds");
+    // src/other.ts is back as the base has it: nothing to review. Its revert needs no batch,
+    // so run 2's summary already reported what it no longer adds.
+    expect(prompt).not.toContain("src/other.ts");
+    const summaries = JSON.stringify(shadowRecords(h.objects, "summary-comment"));
+    expect(summaries).toContain("No longer changed by the PR");
+    expect(summaries).toMatch(/other\\+\.ts/);
   });
 
   it("follows an old-side finding on a renamed file across base edits", async () => {
@@ -1006,7 +1011,9 @@ describe("later runs", () => {
       version: number;
       review: Record<string, unknown>;
     };
-    for (const field of ["kind", "done", "carried", "unchanged"]) delete manifest.review[field];
+    for (const field of ["kind", "done", "carried", "unchanged", "noLongerChanged"]) {
+      delete manifest.review[field];
+    }
     h.objects.set(key, JSON.stringify({ ...manifest, version: 1 }));
     h.objects.set(runKeys(prepared.runId).batchOutput(0), JSON.stringify(output()));
 

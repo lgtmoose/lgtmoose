@@ -347,15 +347,14 @@ describe("reviewDiff: incremental review", () => {
       ).files,
     );
     expect(files["auth.ts"]?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
-    // Fully reverted: no longer in the PR diff, but what it took out is still worth a mention.
-    expect(files["other.ts"]).toMatchObject({ hunks: [], removedSinceLastReview: ["temporary"] });
-    // Its blobs are the ones at head (the base's version), not the reviewed version it dropped.
-    const atHead = await fixture.git(["rev-parse", `${head}:other.ts`]);
-    expect(files["other.ts"]).toMatchObject({
-      status: "modified",
-      oldBlob: atHead,
-      newBlob: atHead,
+    // Fully reverted: nothing left to review in it, but what it took out is reported.
+    expect(files["other.ts"]).toBeUndefined();
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
+    expect(diff.noLongerChanged).toEqual([{ path: "other.ts", lines: ["temporary"] }]);
+    expect(diff.unchanged).toContain("other.ts");
   });
 
   it("has nothing to review in a file the PR added and dropped again", async () => {
@@ -374,7 +373,7 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.unchanged).toEqual(["added.ts"]);
   });
 
-  it("drops the old path of a rename the PR reverted", async () => {
+  it("reports what an undone rename no longer adds, with nothing to review", async () => {
     const base = await setUp({ "old.ts": lines(10) });
     await fixture.move("old.ts", "new.ts");
     await fixture.write({ "new.ts": lines(10).replace("line 3\n", "line 3\ncheck();\n") });
@@ -383,21 +382,14 @@ describe("reviewDiff: incremental review", () => {
     await fixture.write({ "old.ts": lines(10) });
     const head = await fixture.commit("undo it all");
 
-    const files = byPath(
-      (
-        await reviewDiff(await clone(head, [base, reviewed]), {
-          baseSha: base,
-          reviewedAt: await reviewedAllAt(reviewed),
-        })
-      ).files,
-    );
-    // Back at its old path, with what it no longer adds; the reverted rename's path is gone.
-    expect(files["new.ts"]).toBeUndefined();
-    expect(files["old.ts"]).toMatchObject({
-      status: "modified",
-      removedSinceLastReview: ["check();"],
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
-    expect(files["old.ts"]?.oldPath).toBeUndefined();
+    // The file is back as the base has it: nothing to review, no stub entry, but what the
+    // reviewed rename added and the PR no longer does is reported under the reviewed name.
+    expect(diff.files).toEqual([]);
+    expect(diff.noLongerChanged).toEqual([{ path: "new.ts", lines: ["check();"] }]);
   });
 
   it("compares each file with its own last review, so a base merge doesn't bring one back", async () => {
@@ -447,19 +439,16 @@ describe("reviewDiff: incremental review", () => {
     await fixture.write({ "other.ts": lines(5).replace("line 1\n", "one\n") });
     const head = await fixture.commit("later");
 
-    const files = byPath(
-      (
-        await reviewDiff(await clone(head, [base, reviewed, failed]), {
-          baseSha: base,
-          reviewedAt: new Map([
-            ["auth.ts", reviewed],
-            ["other.ts", failed],
-          ]),
-        })
-      ).files,
-    );
-    expect(files["auth.ts"]).toMatchObject({ removedSinceLastReview: ["requireAdmin(user);"] });
-    expect(files["other.ts"]?.changedSinceLastReview).toEqual([1]);
+    const diff = await reviewDiff(await clone(head, [base, reviewed, failed]), {
+      baseSha: base,
+      reviewedAt: new Map([
+        ["auth.ts", reviewed],
+        ["other.ts", failed],
+      ]),
+    });
+    // auth.ts is back as the base has it: its dropped check is reported, not reviewed.
+    expect(diff.noLongerChanged).toEqual([{ path: "auth.ts", lines: ["requireAdmin(user);"] }]);
+    expect(byPath(diff.files)["other.ts"]?.changedSinceLastReview).toEqual([1]);
   });
 
   it("reviews a file never reviewed, and one whose last review is gone, in full", async () => {
@@ -478,7 +467,9 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.kind).toBe("full");
     expect(diff.files.map((file) => file.path).toSorted()).toEqual(["a.ts", "b.ts"]);
     expect(diff.files[0]?.changedSinceLastReview).toBeUndefined();
-    expect(diff.fallbackReason).toContain("b.ts");
+    expect(diff.fallbackReason).toContain(
+      "The commits of every earlier review are no longer in the repository",
+    );
   });
 
   it("reviews a file renamed since its last review in full, with its old name", async () => {
@@ -634,7 +625,7 @@ describe("reviewDiff: incremental review", () => {
     expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
   });
 
-  it("gives no fallback reason for a file a gone commit leaves at move depth", async () => {
+  it("doesn't claim a full read for a move, but says every earlier review is gone", async () => {
     const base = await setUp({ "a.ts": lines(10) });
     await fixture.move("a.ts", "b.ts");
     const head = await fixture.commit("move only");
@@ -644,7 +635,11 @@ describe("reviewDiff: incremental review", () => {
       reviewedAt: new Map([["b.ts", "e".repeat(40)]]),
     });
     expect(diff.files).toMatchObject([{ path: "b.ts", moved: true }]);
-    expect(diff.fallbackReason).toBeUndefined();
+    expect(diff.kind).toBe("full");
+    expect(diff.fallbackReason).toContain(
+      "The commits of every earlier review are no longer in the repository",
+    );
+    expect(diff.fallbackReason).not.toContain("b.ts is reviewed in full");
   });
 
   it("has nothing to review when a pure rename is undone", async () => {
@@ -697,7 +692,9 @@ describe("reviewDiff: incremental review", () => {
       ["new.ts", ["old.ts"]],
     ]);
     expect(diff.unchanged).toEqual([]);
-    expect(diff.fallbackReason).toContain("new.ts is reviewed in full");
+    expect(diff.fallbackReason).toContain(
+      "The commits of every earlier review are no longer in the repository",
+    );
   });
 
   it("lists a reverted rename once, and never both plans and covers a path", async () => {
@@ -718,7 +715,9 @@ describe("reviewDiff: incremental review", () => {
       ]),
     });
     const paths = diff.files.map((file) => file.path);
-    expect(paths.toSorted()).toEqual(["a.ts", "z.ts"]);
+    // a.ts is back as the base has it: reported, not planned as an entry with no diff.
+    expect(paths).toEqual(["z.ts"]);
+    expect(diff.noLongerChanged).toEqual([{ path: "b.ts", lines: ["check();"] }]);
     expect(diff.unchanged.filter((path) => paths.includes(path))).toEqual([]);
   });
 
@@ -733,8 +732,10 @@ describe("reviewDiff: incremental review", () => {
     });
     // Re-recorded at this head, so the gone commit isn't asked for again.
     expect(diff.unchanged).toEqual(["b.ts"]);
-    // Nothing is reviewed in full because of it.
-    expect(diff.fallbackReason).toBeUndefined();
+    // No earlier review could be compared: the reason says so.
+    expect(diff.fallbackReason).toContain(
+      "The commits of every earlier review are no longer in the repository",
+    );
     expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
   });
 

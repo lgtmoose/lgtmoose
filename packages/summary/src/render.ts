@@ -59,6 +59,11 @@ export interface SummaryInput {
   missingLabels?: readonly string[];
   /** Model usage per provider for this run (`summarizeUsage` in @lgtmoose/harness). */
   usage?: readonly ProviderUsage[];
+  /**
+   * Files the PR changed at an earlier review and no longer changes at all, with the lines it
+   * added then and no longer does (from the PR, so untrusted; rendered as code).
+   */
+  noLongerChanged?: readonly { path: string; lines: readonly string[] }[];
 }
 
 /** One provider's usage over a run, for the footer. */
@@ -260,6 +265,25 @@ function renderStatus(input: SummaryInput): string {
     }
     if (noted.length > LOCKFILE_LIMIT) {
       lines.push(`  - …and ${noted.length - LOCKFILE_LIMIT} more files`);
+    }
+  }
+
+  const dropped = input.noLongerChanged ?? [];
+  if (dropped.length > 0) {
+    lines.push("- **No longer changed by the PR** (it added these lines at an earlier review):");
+    for (const entry of dropped.slice(0, LOCKFILE_LIMIT)) {
+      lines.push(`  - ${inline(clip(entry.path, ITEM_LENGTH))}`);
+      lines.push(
+        ...entry.lines
+          .slice(0, NOTES_PER_LOCKFILE)
+          .map((line) => `    - ${inline(clip(line, ITEM_LENGTH))}`),
+      );
+      if (entry.lines.length > NOTES_PER_LOCKFILE) {
+        lines.push(`    - …and ${entry.lines.length - NOTES_PER_LOCKFILE} more lines`);
+      }
+    }
+    if (dropped.length > LOCKFILE_LIMIT) {
+      lines.push(`  - …and ${dropped.length - LOCKFILE_LIMIT} more files`);
     }
   }
 

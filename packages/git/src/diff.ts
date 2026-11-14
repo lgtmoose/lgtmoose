@@ -2,7 +2,6 @@ import type { Repo } from "./clone.js";
 import { importLines, languageOf } from "./imports.js";
 import { parsePatch, type FilePatch, type Hunk } from "./patch.js";
 import { pool } from "./pool.js";
-import { listTree } from "./tree.js";
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed" | "type-changed";
 
@@ -64,6 +63,12 @@ export interface ReviewDiff {
    * changes them). Not in `files`.
    */
   unchanged: string[];
+  /**
+   * Incremental reviews only: files the PR changed at an earlier review and no longer changes
+   * at all, with the lines it added then and no longer does (a removed check, say). Nothing in
+   * them is left to review, so they're reported, not planned.
+   */
+  noLongerChanged: { path: string; lines: string[] }[];
 }
 
 export interface DiffOptions {
@@ -271,20 +276,6 @@ async function diffRange(
   });
 }
 
-/** The blob (or gitlink) each of these paths has at `sha`; paths it doesn't have are left out. */
-async function blobsAt(
-  repo: Repo,
-  sha: string,
-  paths: readonly string[],
-): Promise<Map<string, string>> {
-  const entries = await listTree((args) => repo.git(args), sha, paths);
-  return new Map(
-    entries.flatMap((entry) =>
-      entry.type === "blob" || entry.type === "commit" ? [[entry.path, entry.sha] as const] : [],
-    ),
-  );
-}
-
 /**
  * Every file `from..to` changes, with hunks and blob SHAs, as a plain commit-to-commit diff (no
  * merge base, no mechanical detection). For following lines from one commit to another.
@@ -333,37 +324,23 @@ function similarity(a: string, b: string): number {
 const REWORDED = 0.5;
 
 /**
- * Texts of lines reworded since the last review: removed in a hunk that adds a similar line.
- * A line replaced by something unrelated (a check swapped for a log line) isn't a rewording,
- * so it stays in the removed list.
+ * The lines a file's PR change added at an earlier review (`before`) that its PR change now
+ * (`current`, undefined when the PR no longer changes it) no longer adds: what a reader should
+ * look at, such as a removed check. Trivial lines are left out, and so are rewordings: a
+ * dropped line with a similar line among those the file adds now and didn't then.
  */
-function rewordedTexts(changed: FileDiff | undefined): Set<string> {
-  const texts = new Set<string>();
-  for (const hunk of changed?.hunks ?? []) {
-    const added = hunk.lines.filter((l) => l.kind === "add").map((l) => l.text);
-    for (const line of hunk.lines) {
-      if (line.kind === "del" && added.some((text) => similarity(line.text, text) >= REWORDED)) {
-        texts.add(line.text);
-      }
-    }
-  }
-  return texts;
-}
-
-/**
- * Lines the PR added at the last review but no longer adds, leaving out trivial lines and
- * rewordings, so what's left is worth a reader's attention (a removed check, say).
- */
-function removedTexts(
+export function noLongerAdded(
   before: FileDiff | undefined,
-  after: FileDiff | undefined,
-  changed?: FileDiff,
+  current: FileDiff | undefined,
 ): string[] {
-  const now = addedTexts(after);
-  const reworded = rewordedTexts(changed);
+  const then = addedTexts(before);
+  const now = addedTexts(current);
+  // What a dropped line may have turned into.
+  const fresh = [...now].flatMap(([text, n]) => (n > (then.get(text) ?? 0) ? [text] : []));
   const removed: string[] = [];
-  for (const [text, count] of addedTexts(before)) {
-    if (TRIVIAL.test(text) || reworded.has(text)) continue;
+  for (const [text, count] of then) {
+    if (TRIVIAL.test(text)) continue;
+    if (fresh.some((line) => similarity(text, line) >= REWORDED)) continue;
     for (let i = now.get(text) ?? 0; i < count; i++) removed.push(text);
   }
   return removed;
@@ -427,7 +404,7 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
   }
   // The PR's diff of the file back then.
   const before = base.previous.get(file.path);
-  const removed = removedTexts(before, file, changed);
+  const removed = noLongerAdded(before, file);
   const prLines = addedLines(file);
   const newLines = changed
     ? [...addedLines(changed)].filter((line) => prLines.has(line)).sort((a, b) => a - b)
@@ -460,7 +437,7 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   const prFileAt = new Map(files.map((file) => [file.path, file]));
   const { reviewedAt } = options;
   if (reviewedAt === undefined || reviewedAt.size === 0) {
-    return { ...result, kind: "full", files, unchanged: [] };
+    return { ...result, kind: "full", files, unchanged: [], noLongerChanged: [] };
   }
 
   // Every baseline commit in use, with what it gives (undefined when it's gone), each diffed
@@ -543,10 +520,9 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       if (anyGone) gone.add(file.path);
       // Still list what it stopped adding since then, from its diff under each earlier name;
       // rewordings drop out against what changed since.
-      const removed = [file.path, ...new Set(otherNames)].flatMap((name) => {
-        const earlier = baseOf(name);
-        return removedTexts(earlier?.previous.get(name), file, earlier?.since.get(file.path));
-      });
+      const removed = [file.path, ...new Set(otherNames)].flatMap((name) =>
+        noLongerAdded(baseOf(name)?.previous.get(name), file),
+      );
       plan(withRemoved(file, removed), otherNames);
       continue;
     }
@@ -562,74 +538,32 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     else plan(moved);
   }
 
-  // Files the PR changed at their last review but no longer changes at all (fully reverted).
-  const reverted: { before: FileDiff; removed: string[] }[] = [];
+  // Recorded names whose file the PR doesn't change under that name any more: reverted, or
+  // renamed away. When the file is in the PR under another name (a reverted rename, a
+  // rename's target), that file is reviewed in full with its real diff, listing what it no
+  // longer adds compared with the old name's change. When the PR no longer changes the file at
+  // all, there's nothing to review; what it stopped adding is reported, and the name covered.
+  const noLongerChanged: { path: string; lines: string[] }[] = [];
   for (const [sha, base] of baselines) {
     if (base === undefined) continue;
     for (const before of base.previousFiles) {
       if (reviewedAt.get(before.path) !== sha || handled.has(before.path)) continue;
       compared = true;
-      const removed = before.status === "deleted" ? [] : removedTexts(before, undefined);
-      // Renamed since, or a rename back then: reviewed in full wherever it is now.
-      const renamed = base.movedAway.has(before.path) || before.oldPath !== undefined;
-      if (removed.length > 0 || renamed) reverted.push({ before, removed });
-      else cover(before.path);
-    }
-  }
-  // Their blobs are the ones at head (the same as at the merge base), not the last review's,
-  // which the file no longer has. A reverted rename is back at an earlier name.
-  const whereNow = (before: FileDiff, base: Baseline | undefined) =>
-    [before.path, base?.movedAway.get(before.path), before.oldPath].filter(
-      (path): path is string => path !== undefined,
-    );
-  const atHead = await blobsAt(
-    repo,
-    repo.headSha,
-    reverted.flatMap(({ before }) => whereNow(before, baseOf(before.path))),
-  );
-  for (const { before, removed } of reverted) {
-    const path = whereNow(before, baseOf(before.path)).find((name) => atHead.has(name));
-    const blob = path === undefined ? undefined : atHead.get(path);
-    if (path === undefined || blob === undefined) {
-      // Added by the PR and dropped again: no file, nothing to review.
-      cover(before.path);
-      continue;
-    }
-    const earlier = planned.get(path);
-    if (earlier !== undefined) {
-      // Already planned under that name: record this name with it, and what it no longer adds
-      // compared with that file (its own PR diff, rewordings left out), not with nothing.
-      const since = baseOf(before.path)?.since.get(path);
-      const dropped = removedTexts(before, prFileAt.get(path), since);
+      const current = [base.movedAway.get(before.path), before.oldPath]
+        .map((name) => (name === undefined ? undefined : prFileAt.get(name)))
+        .find((file) => file !== undefined);
+      const dropped = before.status === "deleted" ? [] : noLongerAdded(before, current);
+      if (current === undefined) {
+        if (dropped.length > 0) noLongerChanged.push({ path: before.path, lines: dropped });
+        cover(before.path);
+        continue;
+      }
+      const earlier = planned.get(current.path) ?? current;
       plan(withRemoved(earlier, [...(earlier.removedSinceLastReview ?? []), ...dropped]), [
         ...(earlier.alsoReviewedAs ?? []),
         before.path,
       ]);
-      continue;
     }
-    if (removed.length === 0) {
-      // A rename undone with nothing it no longer adds: the PR leaves the file as the base has
-      // it, so there's nothing to review.
-      cover(before.path);
-      continue;
-    }
-    const rest: FileDiff = { ...before };
-    delete rest.oldPath;
-    plan(
-      {
-        ...rest,
-        path,
-        status: "modified",
-        oldBlob: blob,
-        newBlob: blob,
-        moved: false,
-        mechanical: false,
-        hunks: [],
-        changedSinceLastReview: [],
-        removedSinceLastReview: removed,
-      },
-      [before.path],
-    );
   }
   // Records for paths the PR doesn't change and that weren't in their baseline's diff: nothing
   // to review, covered at this head. That holds whether or not their commit is still here: the
@@ -642,24 +576,59 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   for (const path of unchanged) {
     if (planned.has(path)) throw new Error(`${path} is both planned and covered.`);
   }
-  // Named in the fallback reason: files a gone commit sends to a full read. A move or an
-  // import-only edit is still read lightly, so it isn't one.
+  // Everything planned is a file of the PR diff, with its real hunks: no made-up entries.
+  for (const path of planned.keys()) {
+    if (!prFileAt.has(path)) throw new Error(`${path} is planned but not in the PR diff.`);
+  }
+  // Named in the fallback reason: files a gone commit sends to a full read (`readingDepth`).
   const readInFull = [...gone].filter((path) => {
     const file = planned.get(path);
-    return file !== undefined && !file.moved && !file.mechanical;
+    return file !== undefined && readingDepth(file) === "full";
   });
+  const anyBaseline = [...baselines.values()].some((base) => base !== undefined);
   return {
     ...result,
-    kind: compared ? "incremental" : "full",
+    kind: compared || anyBaseline ? "incremental" : "full",
     files: [...planned.values()],
     unchanged: [...unchanged],
-    ...(readInFull.length > 0
-      ? {
-          fallbackReason:
-            readInFull.length === 1
-              ? `${readInFull[0] ?? ""} is reviewed in full: the commit it was last reviewed at is no longer in the repository (force-pushed away).`
-              : `${readInFull.length} files are reviewed in full: the commits they were last reviewed at are no longer in the repository (force-pushed away).`,
-        }
-      : {}),
+    noLongerChanged,
+    ...fallback(anyBaseline, readInFull),
   };
+}
+
+/**
+ * Why files are reviewed in full that had an earlier review: every earlier review's commit is
+ * gone (force-pushed away), or some files' are.
+ */
+function fallback(
+  anyBaseline: boolean,
+  readInFull: readonly string[],
+): { fallbackReason?: string } {
+  if (!anyBaseline) {
+    return {
+      fallbackReason:
+        "The commits of every earlier review are no longer in the repository (force-pushed away), so this is a full review.",
+    };
+  }
+  if (readInFull.length === 0) return {};
+  return {
+    fallbackReason:
+      readInFull.length === 1
+        ? `${readInFull[0] ?? ""} is reviewed in full: the commit it was last reviewed at is no longer in the repository (force-pushed away).`
+        : `${readInFull.length} files are reviewed in full: the commits they were last reviewed at are no longer in the repository (force-pushed away).`,
+  };
+}
+
+/** How closely to read a file. "move" and "mechanical" files only need a glance. */
+export type ReadingDepth = "full" | "move" | "mechanical";
+
+/**
+ * How closely a file is read. Lines it stopped adding since the last review always need a
+ * full read, moved or not.
+ */
+export function readingDepth(file: FileDiff): ReadingDepth {
+  if ((file.removedSinceLastReview?.length ?? 0) > 0) return "full";
+  if (file.moved) return "move";
+  if (file.mechanical) return "mechanical";
+  return "full";
 }

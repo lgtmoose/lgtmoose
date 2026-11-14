@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
-import type { FileDiff } from "@lgtmoose/git";
+import { readingDepth, type FileDiff, type ReadingDepth } from "@lgtmoose/git";
 import {
   DEFAULT_SKIP,
   TEST_GLOBS,
@@ -12,8 +12,8 @@ import {
 } from "./classify.js";
 import { BINARY_LOCKFILE_NOTE, lockfileNotes } from "./lockfile.js";
 
-/** How closely to read a file. "move" and "mechanical" files only need a glance. */
-export type ReadingDepth = "full" | "move" | "mechanical";
+// How closely to read a file: one rule, in @lgtmoose/git, which the incremental diff uses too.
+export { readingDepth, type ReadingDepth } from "@lgtmoose/git";
 
 /** Tiers 1 to 7 come from `tiers` globs; 1 is read first. */
 export type Tier = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof OTHER_TIER | typeof TEST_TIER;
@@ -150,14 +150,6 @@ const byPath = (a: string, b: string) => {
   if (a > b) return 1;
   return 0;
 };
-
-export function readingDepth(file: FileDiff): ReadingDepth {
-  // Lines it stopped adding since the last review always need a read, moved or not.
-  if ((file.removedSinceLastReview?.length ?? 0) > 0) return "full";
-  if (file.moved) return "move";
-  if (file.mechanical) return "mechanical";
-  return "full";
-}
 
 /**
  * How many diff lines a file puts into the prompt, which is what batches are sized by. A file

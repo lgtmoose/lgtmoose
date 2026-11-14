@@ -156,6 +156,17 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).not.toContain("Model usage");
   });
 
+  it("lists files the PR no longer changes, with what they no longer add, escaped", () => {
+    const summary = renderSummary(
+      input({
+        noLongerChanged: [{ path: "src/auth.ts", lines: ["requireAdmin(user); <!-- x -->"] }],
+      }),
+    );
+    expect(summary).toContain("No longer changed by the PR");
+    expect(summary).toContain("src\\/auth\\.ts");
+    expect(summary).not.toContain("<!--");
+  });
+
   it("says the label is unchanged when the decision was skipped for an older commit", () => {
     const text = renderSummary(
       input({ decision: { event: "COMMENT", reasons: ["the head moved during the run"] } }),

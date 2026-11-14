@@ -116,11 +116,8 @@ async function standing(
   const at = new Map<FindingRecord, LineRef | undefined>();
   // One check for every commit the findings were raised at.
   const present = await repo.hasCommits(records.map((record) => record.raisedAtSha));
-  const followable = new Map(
-    records.map((record) => [record.raisedAtSha, present.has(record.raisedAtSha)]),
-  );
   // New-side lines: from the head they were raised at to this head.
-  const right = records.filter((r) => r.side === "RIGHT" && followable.get(r.raisedAtSha));
+  const right = records.filter((r) => r.side === "RIGHT" && present.has(r.raisedAtSha));
   for (const [sha, group] of groupBy(right, (record) => record.raisedAtSha)) {
     const moved = await trackLines(
       repo,
@@ -132,7 +129,7 @@ async function standing(
   }
   // Old-side lines: from the base the PR had when they were raised (its merge base with
   // today's) to today's merge base, by their base-side path; one diff per such base.
-  const left = records.filter((r) => r.side === "LEFT" && followable.get(r.raisedAtSha));
+  const left = records.filter((r) => r.side === "LEFT" && present.has(r.raisedAtSha));
   const raisedBases = new Map<string, string>();
   for (const sha of new Set(left.map((record) => record.raisedAtSha))) {
     // No common history: exit 1, no output.
