@@ -75,7 +75,7 @@ account available to anyone else; Team and Enterprise fall under its commercial 
 Neither says a bot may review other people's pull requests on one person's seat. Anthropic
 documents API keys for automation. On a Max, Ultra or Team plan, a key from the plan's linked
 Console organization may draw on the plan's monthly API credits (see docs/providers.md for
-when they apply; requests stop when they run out unless auto-reload is on). To use one, set this
+when they apply; requests stop when they run out, unless the organization has other credits or auto-reload). To use one, set this
 provider's auth to "api-key" in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider anthropic
 Bedrock (auth "bedrock", then ${CLI} deploy) needs no key at all.`,
