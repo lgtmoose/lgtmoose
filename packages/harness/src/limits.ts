@@ -18,13 +18,30 @@ export interface LimitFailure {
  */
 const PLAN_LIMIT =
   /hit your usage limit|usage[_ ]limit[_ ]reached|spend cap|quota[_ ]exceeded|usage[_ ]not[_ ]included|insufficient[_ ]quota|purchase more credits/i;
+/** HTTP status texts, by code, that may follow the number. */
+const STATUS_TEXT: Readonly<Record<number, string>> = {
+  401: "Unauthorized",
+  429: "Too Many Requests",
+};
+/** A count, not a status: "returned 429 results". */
+const NOT_A_STATUS = String.raw`(?!\s*(?:results?|matches|files?|items?|lines?|records?|rows?|entries|bytes|tokens|ms|seconds?|times|changed)\b)`;
+
 /**
- * An HTTP status in a message: the code right after HTTP wording ("HTTP 429", "status 401",
- * "status code: 429", "returned 401", "responded with 429", "error 401"), so a line number in a
- * stack trace (`index.js:429:17`) doesn't count.
+ * An HTTP status in a message, as a regex source: the code right after HTTP wording, so a line
+ * number in a stack trace (`index.js:429:17`) or a count ("search returned 429 results")
+ * doesn't count. The wordings:
+ * - "HTTP 429", "HTTP/1.1 401";
+ * - "status 401", "status code: 429", "statusCode: 429", "status_code=401";
+ * - an error name or "error" before it: "AuthenticationError: 401", "HTTPError: 401",
+ *   "ServerError: 429", "error 401";
+ * - "code 401", "code: 429";
+ * - the code with its status text: "401 Unauthorized", "429 Too Many Requests" (which covers
+ *   "returned 429 Too Many Requests").
  */
 export function httpStatus(code: number): string {
-  return String.raw`(?:\bHTTP(?:\/[\d.]+)?|\bstatus(?: code)?|\berror|\bcode|\breturned|\bresponded(?: with)?|\bfailed with)[\s:=]*${code}\b`;
+  const text = STATUS_TEXT[code];
+  const prefixed = String.raw`(?:\bHTTP(?:\/[\d.]+)?|\bstatus(?:[ _]?code)?|\w*error|\bcode)[\s:=]*${code}\b${NOT_A_STATUS}`;
+  return text === undefined ? prefixed : String.raw`${prefixed}|\b${code}\s+${text}\b`;
 }
 
 /** Throttling: the same credential works again shortly. */

@@ -99,3 +99,20 @@ export function classifyCursorFailure(message: string): LimitFailure | undefined
   if (shared !== undefined || AUTH_FAILURE.test(message)) return { kind: "auth" };
   return undefined;
 }
+
+const STRICT_AUTH = new RegExp(String.raw`\bunauthenticated\b|${httpStatus(401)}`, "i");
+const STRICT_RATE = new RegExp(String.raw`${httpStatus(429)}`, "i");
+
+/**
+ * Like `classifyCursorFailure`, but from machine signals only: connect-rpc codes
+ * (`[unauthenticated]`, `[resource_exhausted]`) and HTTP statuses with their HTTP wording
+ * (`httpStatus`). Never the plan-limit or rate-limit phrases a banner or warning could contain.
+ * For stderr when the error result exists but doesn't say what went wrong.
+ */
+export function classifyStrictCursorFailure(message: string): LimitFailure | undefined {
+  if (RESOURCE_EXHAUSTED.test(message) || STRICT_RATE.test(message)) {
+    return { kind: "rate_limit", ...limitTimes(message) };
+  }
+  if (STRICT_AUTH.test(message)) return { kind: "auth" };
+  return undefined;
+}

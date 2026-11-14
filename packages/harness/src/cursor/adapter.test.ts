@@ -153,30 +153,40 @@ describe("CursorHarness", () => {
     expect(call?.env.HOME?.startsWith(tmpRoot)).toBe(true);
     expect(call?.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
     expect(call?.argv.join(" ")).not.toContain(API_KEY);
-    // The run's home goes when it ends; the checkout copy stays for reuse until dispose.
-    expect((await readdir(tmpRoot)).map((name) => name.replace(/-[^-]+$/, ""))).toEqual([
-      "lgtmoose-cursor-ws",
-    ]);
-    await harness.dispose();
+    // The run's home and its copy of the checkout go when it ends.
     expect(await readdir(tmpRoot)).toEqual([]);
   });
 
-  it("copies the checkout once and reuses it for the repair and later runs", async () => {
+  it("makes a fresh copy for each run, which the repair attempt reuses", async () => {
     await writeFile(join(cwd, "a.ts"), "export {};");
     const harness = await harnessFor([
       { stdout: cursorResult("not json") },
       { stdout: cursorResult(ANSWER) },
     ]);
     await run(harness);
-    // Changing the checkout now doesn't reach the copy the harness keeps.
+    // A later run on the same path sees the checkout as it is now.
     await writeFile(join(cwd, "b.ts"), "export {};");
     await run(harness);
     const calls = await fake!.calls();
     expect(calls).toHaveLength(3);
-    expect(new Set(calls.map((call) => call.cwd)).size).toBe(1);
-    expect(calls[2]?.checkoutEntries).toEqual(["a.ts"]);
-    // The task directory of each run is gone afterwards.
-    expect(await readdir(calls[0]?.cwd ?? "")).toEqual(["a.ts"]);
+    expect(calls[1]?.cwd).toBe(calls[0]?.cwd);
+    expect(calls[2]?.cwd).not.toBe(calls[0]?.cwd);
+    expect(calls[2]?.checkoutEntries).toEqual(["a.ts", "b.ts"]);
+    expect(await readdir(tmpRoot)).toEqual([]);
+  });
+
+  it("keeps concurrent runs on one checkout apart", async () => {
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
+    const prompt = "x".repeat(MAX_CURSOR_ARG_PROMPT_BYTES + 1);
+    await Promise.all([run(harness, { prompt }), run(harness, { prompt })]);
+    const calls = await fake!.calls();
+    expect(calls[0]?.cwd).not.toBe(calls[1]?.cwd);
+    // Each sees only its own task directory.
+    for (const call of calls) {
+      expect(call.checkoutEntries.filter((name) => name.startsWith("lgtmoose-task-"))).toHaveLength(
+        1,
+      );
+    }
   });
 
   it("fails as a process error when the checkout can't be copied", async () => {
@@ -390,6 +400,35 @@ describe("CursorHarness", () => {
     expect((await failure(run(harness))).kind).toBe("auth");
   });
 
+  it.each([
+    ["Error: [unauthenticated] token revoked", "auth"],
+    ["HTTPError: 401", "auth"],
+    ["ConnectError: [resource_exhausted]", "rate_limit"],
+    ["request failed with status 429", "rate_limit"],
+  ] as const)("reads %j on stderr behind a generic error result, as %s", async (stderr, kind) => {
+    const stdout = `${JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "Request failed",
+    })}\n`;
+    const harness = await harnessFor([{ stdout, stderr, exitCode: 1 }]);
+    expect((await failure(run(harness))).kind).toBe(kind);
+  });
+
+  it("ignores limit wording on stderr behind a generic error result", async () => {
+    const stdout = `${JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "Request failed",
+    })}\n`;
+    const harness = await harnessFor([
+      { stdout, stderr: "You've hit your usage limit (banner)", exitCode: 1 },
+    ]);
+    expect((await failure(run(harness))).kind).toBe("process");
+  });
+
   it("doesn't fall back to stderr when the error result says something else", async () => {
     const stdout = `${JSON.stringify({
       type: "result",
@@ -471,7 +510,6 @@ describe("CursorHarness", () => {
     const harness = await harnessFor([{ hang: true }]);
     const error = await failure(run(harness, { timeoutMs: 300 }));
     expect(error.kind).toBe("timeout");
-    await harness.dispose();
     expect(existsSync(tmpRoot) && (await readdir(tmpRoot)).length === 0).toBe(true);
   });
 

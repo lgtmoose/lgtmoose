@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,10 +18,12 @@ import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { addUsage } from "../usage.js";
+import type { LimitFailure } from "../limits.js";
 import { cursorAuth } from "./auth.js";
 import { cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
+  classifyStrictCursorFailure,
   cursorUsage,
   findCursorResult,
   type CursorResult,
@@ -102,82 +103,17 @@ type Attempt<T> =
   | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
   | { kind: "invalid"; problems: string; usage: HarnessUsage; key: string };
 
-/** A copy of one checkout that runs on it share (`copyWorkspace`). */
-interface Workspace {
-  /** The temporary directory holding the copy, removed by `dispose` or at exit. */
-  root: string;
-  /** The copy's real path: the CLI's working directory and its read allowlist. */
-  dir: string;
-  copy: WorkspaceCopy;
-}
-
-/** Copies not yet disposed of, removed when the process exits, whoever forgot them. */
-const LIVE_COPIES = new Set<string>();
-process.once("exit", () => {
-  for (const root of LIVE_COPIES) rmSync(root, { recursive: true, force: true });
-});
-
 /**
- * Runs the Cursor CLI headless (`agent -p`) in read-only ask mode, on a copy of the checkout in a
- * temporary directory. The caller's tree is never changed. The copy is made once per checkout and
- * harness, and reused by the repair attempt and later runs on the same checkout: the model can't
- * write to it. Call `dispose` to remove the copies early; they're removed at exit regardless.
+ * Runs the Cursor CLI headless (`agent -p`) in read-only ask mode, on a copy of the checkout in
+ * the run's temporary directory, which the repair attempt reuses and which goes when the run
+ * ends. The caller's tree is never changed.
  */
 export class CursorHarness implements Harness {
   readonly id = "cursor-agent";
   private readonly options: CursorHarnessOptions;
-  private readonly workspaces = new Map<string, Promise<Workspace>>();
 
   constructor(options: CursorHarnessOptions) {
     this.options = options;
-  }
-
-  /**
-   * Removes every checkout copy this harness made, once its runs are done (a run still going
-   * would lose its workspace). Later runs make new ones.
-   */
-  async dispose(): Promise<void> {
-    const all = [...this.workspaces.values()];
-    this.workspaces.clear();
-    for (const result of await Promise.allSettled(all)) {
-      if (result.status !== "fulfilled") continue;
-      await rm(result.value.root, { recursive: true, force: true });
-      LIVE_COPIES.delete(result.value.root);
-    }
-  }
-
-  /** The copy of the checkout at `cwd`, made on first use. A failed copy is tried again next run. */
-  private workspaceFor(cwd: string, keys: readonly string[]): Promise<Workspace> {
-    const fail = (error: unknown): never => {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new HarnessError("process", `Could not copy the checkout for the CLI: ${message}`, {
-        transcriptKeys: keys,
-        cause: error,
-      });
-    };
-    return realpath(cwd)
-      .then((source) => {
-        const cached = this.workspaces.get(source);
-        if (cached !== undefined) return cached;
-        const made = this.copyCheckout(source);
-        this.workspaces.set(source, made);
-        made.catch(() => this.workspaces.delete(source));
-        return made;
-      })
-      .catch(fail);
-  }
-
-  private async copyCheckout(source: string): Promise<Workspace> {
-    const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-ws-"));
-    LIVE_COPIES.add(root);
-    try {
-      const copy = await copyWorkspace(source, join(root, "checkout"));
-      return { root, dir: await realpath(join(root, "checkout")), copy };
-    } catch (error) {
-      LIVE_COPIES.delete(root);
-      await rm(root, { recursive: true, force: true });
-      throw error;
-    }
   }
 
   async run<T>(options: HarnessRunOptions<T>): Promise<HarnessResult<T>> {
@@ -190,14 +126,14 @@ export class CursorHarness implements Harness {
     const secrets = auth.secrets;
     const keys: string[] = [];
     checkPromptSize(options.prompt, keys);
-    const { dir: workspace, copy } = await this.workspaceFor(options.cwd, keys);
-    // No structured-output flag: the schema is described in the prompt, and checked with zod.
-    const firstPrompt =
-      options.prompt + copyNote(copy) + schemaPromptSuffix(schemaJson(options.schema));
-    checkPromptSize(firstPrompt, keys);
     const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
-    const taskDir = await freeTaskDir(workspace);
     try {
+      const { dir: workspace, copy } = await copyCheckout(options.cwd, root, keys);
+      // No structured-output flag: the schema is described in the prompt, and checked with zod.
+      const firstPrompt =
+        options.prompt + copyNote(copy) + schemaPromptSuffix(schemaJson(options.schema));
+      checkPromptSize(firstPrompt, keys);
+      const taskDir = await freeTaskDir(workspace);
       const home = join(root, "home");
       await mkdir(join(home, ".cursor"), { recursive: true });
       await mkdir(join(home, "tmp"));
@@ -271,9 +207,30 @@ export class CursorHarness implements Harness {
         { transcriptKeys: keys },
       );
     } finally {
-      await rm(join(workspace, taskDir), { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });
     }
+  }
+}
+
+/**
+ * Copies the checkout at `cwd` into the run's `root` (see `copyWorkspace`), returning the copy's
+ * real path, which is the CLI's working directory and its read allowlist. A failure is a
+ * `process` HarnessError.
+ */
+async function copyCheckout(
+  cwd: string,
+  root: string,
+  keys: readonly string[],
+): Promise<{ dir: string; copy: WorkspaceCopy }> {
+  try {
+    const copy = await copyWorkspace(cwd, join(root, "checkout"));
+    return { dir: await realpath(join(root, "checkout")), copy };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new HarnessError("process", `Could not copy the checkout for the CLI: ${message}`, {
+      transcriptKeys: keys,
+      cause: error,
+    });
   }
 }
 
@@ -333,6 +290,18 @@ async function deliver(workspace: string, taskDir: string, n: number, prompt: st
   ].join(" ");
 }
 
+/** Whether a failed run hit a limit or a refused key, from its error result and stderr. */
+function classifyRun(
+  errorText: string | undefined,
+  stderr: string | undefined,
+): LimitFailure | undefined {
+  if (errorText === undefined)
+    return stderr === undefined ? undefined : classifyCursorFailure(stderr);
+  const fromResult = classifyCursorFailure(errorText);
+  if (fromResult !== undefined || stderr === undefined) return fromResult;
+  return classifyStrictCursorFailure(stderr);
+}
+
 /** Throws the right HarnessError when a run didn't print a successful result. */
 function failIfUnusable(
   proc: ProcessResult,
@@ -361,10 +330,11 @@ function failIfUnusable(
   const errorText = (result?.is_error === true ? result.result : undefined)?.trim() || undefined;
   const stderr = proc.stderr.trim() || undefined;
   const detail = [errorText, stderr].filter(Boolean).join("\n") || "no output";
-  // The JSON error result says what went wrong when there is one; stderr only without it, so a
-  // banner or warning there can't decide the kind.
-  const reason = errorText ?? stderr;
-  const limit = reason === undefined ? undefined : classifyCursorFailure(reason);
+  // The JSON error result says what went wrong when there is one. If it's too generic to say
+  // ("Request failed"), stderr may still give a machine signal (a connect code or an HTTP status),
+  // but never its wording, which a banner or warning could contain. Without an error result,
+  // stderr is all there is.
+  const limit = classifyRun(errorText, stderr);
   if (limit !== undefined) {
     const { kind, ...extra } = limit;
     throw fail(kind, `agent stopped: ${detail}`, extra);

@@ -6,10 +6,17 @@ describe("classifyFailure status codes", () => {
     ["HTTP 429", "rate_limit"],
     ["HTTP/1.1 429", "rate_limit"],
     ["status code: 429", "rate_limit"],
-    ["server responded with 429", "rate_limit"],
-    ["request returned 401", "auth"],
-    ["failed with 401", "auth"],
+    ["server responded with status 429", "rate_limit"],
+    ["request returned 401 Unauthorized", "auth"],
+    ["returned HTTP 401", "auth"],
     ["unexpected status 401 Unauthorized", "auth"],
+    ["AuthenticationError: 401 status code", "auth"],
+    ["HTTPError: 401", "auth"],
+    ["ServerError: 429", "rate_limit"],
+    ["statusCode: 429", "rate_limit"],
+    ["status_code=401", "auth"],
+    ["error 401", "auth"],
+    ["code: 429", "rate_limit"],
   ] as const)("reads %j as %s", (message, kind) => {
     expect(classifyFailure(message)?.kind).toBe(kind);
   });
@@ -19,6 +26,10 @@ describe("classifyFailure status codes", () => {
     "at x (cli.js:401:3)",
     "processed 429 files",
     "PR #401",
+    "search returned 429 results",
+    "the query failed with 401 matches pending",
+    "Error: 429 files changed",
+    "status: 429 rows",
   ])("doesn't read a bare number in %j as a status", (message) => {
     expect(classifyFailure(message)).toBeUndefined();
   });
