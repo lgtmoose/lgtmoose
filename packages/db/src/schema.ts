@@ -8,6 +8,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -257,4 +258,48 @@ export const feedback = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("feedback_finding_actor_reaction_key").on(t.findingId, t.actor, t.reaction)],
+);
+
+/**
+ * What the dispatcher last acted on for each PR, so it can order deliveries that GitHub sends
+ * out of order. `repo` is lowercased owner/name. A job older than `last_event_at` is stale, and
+ * a close wins over a reopen with the same time.
+ */
+export const pullRequestDispatches = pgTable(
+  "pull_request_dispatches",
+  {
+    repo: text("repo").notNull(),
+    number: integer("number").notNull(),
+    /** The newest event time (the PR's `updated_at`) the dispatcher has acted on. */
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+    /** Set while the newest event closed the PR. */
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.repo, t.number] })],
+);
+
+/**
+ * Review executions the dispatcher started, until it stops them. A PR's unstopped rows are the
+ * executions a newer job may need to stop, so the dispatcher never lists the state machine's
+ * executions. `repo` is lowercased owner/name.
+ */
+export const dispatchedExecutions = pgTable(
+  "dispatched_executions",
+  {
+    executionArn: text("execution_arn").primaryKey(),
+    repo: text("repo").notNull(),
+    number: integer("number").notNull(),
+    headSha: text("head_sha").notNull(),
+    /** The event time of the job that started it. */
+    eventAt: timestamp("event_at", { withTimezone: true }).notNull(),
+    /** When the dispatcher stopped it, or found it had already ended. */
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("dispatched_executions_active_idx")
+      .on(t.repo, t.number)
+      .where(sql`${t.stoppedAt} is null`),
+  ],
 );

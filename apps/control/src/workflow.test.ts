@@ -10,10 +10,10 @@ import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@l
 import { ShadowPoster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
-import type { ArtifactStore, ControlDeps, RunRecord, RunStore } from "./ports.js";
+import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
 import { post } from "./post.js";
 import { prepare, type RunManifest } from "./prepare.js";
-import { PREPARE_FAILED, runCommand } from "./run.js";
+import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
 const exec = promisify(execFile);
 const RUN_ID = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a11";
@@ -154,13 +154,6 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
       const run = runs.get(runId);
       if (run) run.status = "superseded";
     },
-    async supersedeExecutions(executionArns) {
-      for (const run of runs.values()) {
-        if (executionArns.includes(run.executionArn) && run.status === "running") {
-          run.status = "superseded";
-        }
-      }
-    },
   };
 }
 
@@ -194,7 +187,9 @@ function harness(setup: Setup = {}) {
     pull: async () => pull(setup.head ?? headSha),
     comments: async () => [],
   };
-  const deps: ControlDeps = {
+  const execution = { status: "RUNNING" as string | undefined };
+  const deps: StepDeps = {
+    executionStatus: async () => execution.status,
     store,
     runs,
     tokens: {
@@ -223,7 +218,7 @@ function harness(setup: Setup = {}) {
     archive: tarArchive,
     log: (message) => logs.push(message),
   };
-  return { deps, objects, files, runs, tokens, installations, logs };
+  return { deps, objects, files, runs, tokens, installations, logs, execution };
 }
 
 const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
@@ -356,30 +351,93 @@ describe("runCommand", () => {
     expect(h.tokens.failed).toEqual([]);
   });
 
+  const dead = () => Object.assign(new Error("Task Timed Out"), { name: "TaskTimedOut" });
+  const prepareCommand = {
+    command: "prepare" as const,
+    executionArn: EXECUTION,
+    job: JSON.stringify(JOB),
+    taskToken: "t",
+  };
+
   it("marks the run superseded when its execution was stopped during prepare", async () => {
     const h = harness();
-    const dead = Object.assign(new Error("Task Timed Out"), { name: "TaskTimedOut" });
+    h.execution.status = "ABORTED";
     h.deps.tokens.succeed = async () => {
-      throw dead;
+      throw dead();
     };
-    await runCommand(
-      h.deps,
-      { command: "prepare", executionArn: EXECUTION, job: JSON.stringify(JOB), taskToken: "t" },
-      { ...SETTINGS, shadow: true },
-    );
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
 
     // Any other error is the task's to fail with.
     h.deps.tokens.succeed = async () => {
       throw new Error("throttled");
     };
-    await expect(
-      runCommand(
-        h.deps,
-        { command: "prepare", executionArn: EXECUTION, job: JSON.stringify(JOB), taskToken: "t" },
-        { ...SETTINGS, shadow: true },
-      ),
-    ).rejects.toThrow("throttled");
+    await expect(runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true })).rejects.toThrow(
+      "throttled",
+    );
+  });
+
+  it("leaves the run to the retry when prepare's own attempt timed out", async () => {
+    const h = harness();
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+    // An execution that ended by its own steps keeps what they recorded.
+    h.execution.status = "FAILED";
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("running");
+  });
+
+  it("marks the run failed when prepare failed and its execution was stopped", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.execution.status = "ABORTED";
+    h.deps.tokens.fail = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, { ...prepareCommand, job: "{}" }, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: PREPARE_FAILED });
+  });
+
+  it("reports post on its task token, so stopping the execution can't cut it short", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output({ findings: [] })));
+    const postCommand = { command: "post" as const, executionArn: EXECUTION, runId: RUN_ID };
+    await runCommand(h.deps, { ...postCommand, taskToken: "p" }, { ...SETTINGS, shadow: true });
+    expect(h.tokens.succeeded.at(-1)).toEqual({});
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+
+    // Stopped mid-post: the post still finishes and its run stays posted.
+    h.execution.status = "ABORTED";
+    h.deps.tokens.succeed = async () => {
+      throw dead();
+    };
+    await runCommand(h.deps, { ...postCommand, taskToken: "p" }, { ...SETTINGS, shadow: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+
+    // A failed post fails its token instead of throwing; stopped, it fails the run itself.
+    h.execution.status = "RUNNING";
+    await runCommand(
+      h.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000000", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.tokens.failed.at(-1)).toMatchObject({ error: POST_FAILED });
+    const other = harness();
+    await prepare(other.deps, JOB, EXECUTION, SETTINGS);
+    other.execution.status = "ABORTED";
+    other.deps.tokens.fail = async () => {
+      throw dead();
+    };
+    await runCommand(
+      other.deps,
+      { ...postCommand, runId: "00000000-0000-4000-8000-000000000000", taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(other.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: POST_FAILED });
   });
 
   it("fails prepare's task token instead of throwing", async () => {

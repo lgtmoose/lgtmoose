@@ -1,6 +1,5 @@
 import {
   type DescribeExecutionCommand,
-  ListExecutionsCommand,
   StartExecutionCommand,
   type StopExecutionCommand,
 } from "@aws-sdk/client-sfn";
@@ -14,73 +13,110 @@ import {
   executionName,
   executionPrefix,
   type DispatchDeps,
-  type RunningExecution,
+  type DispatchedExecution,
   type WorkflowInput,
 } from "./dispatch.js";
 
 const SM = "arn:aws:states:eu-west-1:123456789012:stateMachine:Review";
 const OLD = "a".repeat(40);
 const NEW = "b".repeat(40);
+const T1 = "2026-11-14T00:00:01.000Z";
+const T2 = "2026-11-14T00:00:02.000Z";
+const T3 = "2026-11-14T00:00:03.000Z";
 
 function job(overrides: Partial<ReviewJob> = {}): ReviewJob {
   return {
     kind: "pr_updated",
-    deliveryId: "d-1",
+    deliveryId: "d-new",
     installationId: 7,
     repo: "acme/shop",
     prNumber: 12,
     headSha: NEW,
     actor: "dev",
-    receivedAt: "2026-11-14T00:00:00.000Z",
+    receivedAt: "2026-11-14T00:01:00.000Z",
+    eventAt: T2,
     ...overrides,
   };
 }
 
-/** A fake state machine: names are unique for good, as in Step Functions. */
+function must<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("missing");
+  return value;
+}
+
+const arn = (name: string) => executionArnOf(SM, name);
+const nameOf = (sha: string, retryFor?: string) => executionName("acme/shop", 12, sha, retryFor);
+
+/**
+ * A fake state machine and dispatch store. Names are unique for good, as in Step Functions,
+ * and starting a running execution again with the same input returns it.
+ */
 function fakeDeps() {
   const executions = new Map<string, { input: WorkflowInput; status: string }>();
-  const superseded: string[] = [];
-  const stops: { arn: string; cause: string }[] = [];
+  const recorded = new Map<string, DispatchedExecution & { pr: string; stopped: boolean }>();
+  const latest = new Map<string, { eventAt: Date; closed: boolean }>();
+  /** Run status by execution ARN, as `review_runs` would have it. */
+  const runs = new Map<string, string>();
+  const reviewedHeads = new Set<string>();
+  const calls: string[] = [];
   const logs: { message: string; fields?: Record<string, unknown> }[] = [];
+  const pr = (repo: string, n: number) => `${repo.toLowerCase()}#${n}`;
   const deps: DispatchDeps = {
     executions: {
+      arnOf: arn,
       async start(name, input) {
-        const arn = executionArnOf(SM, name);
+        calls.push(`start ${name}`);
         const existing = executions.get(name);
         if (existing === undefined) {
           executions.set(name, { input, status: "RUNNING" });
-          return { started: true, executionArn: arn };
+          return { started: true };
         }
         const same = JSON.stringify(existing.input) === JSON.stringify(input);
-        return { started: existing.status === "RUNNING" && same, executionArn: arn };
+        return { started: existing.status === "RUNNING" && same };
       },
       async status(name) {
         return executions.get(name)?.status;
       },
-      async running(prefix) {
-        const found: RunningExecution[] = [];
-        for (const [name, execution] of executions) {
-          if (execution.status === "RUNNING" && name.startsWith(prefix)) {
-            found.push({ name, executionArn: executionArnOf(SM, name) });
-          }
-        }
-        return found;
-      },
-      async stop(arn, cause) {
-        stops.push({ arn, cause });
-        const name = arn.slice(arn.lastIndexOf(":") + 1);
-        const execution = executions.get(name);
-        if (execution) execution.status = "ABORTED";
+      async stop(executionArn) {
+        calls.push(`stop ${executionArn}`);
+        const execution = executions.get(executionArn.slice(executionArn.lastIndexOf(":") + 1));
+        if (execution?.status === "RUNNING") execution.status = "ABORTED";
       },
     },
-    runs: {
-      async supersedeExecutions(arns) {
-        superseded.push(...arns);
+    store: {
+      async latest(repo, n) {
+        return latest.get(pr(repo, n));
+      },
+      async advance(repo, n, eventAt, closed) {
+        latest.set(pr(repo, n), { eventAt, closed });
+      },
+      async record(repo, n, execution) {
+        if (!recorded.has(execution.executionArn)) {
+          recorded.set(execution.executionArn, { ...execution, pr: pr(repo, n), stopped: false });
+        }
+      },
+      async unstopped(repo, n) {
+        return [...recorded.values()]
+          .filter((r) => r.pr === pr(repo, n) && !r.stopped)
+          .map(({ executionArn, headSha, eventAt }) => ({ executionArn, headSha, eventAt }));
+      },
+      async supersedeRun(executionArn) {
+        calls.push(`supersede ${executionArn}`);
+        if (runs.get(executionArn) === "running") runs.set(executionArn, "superseded");
+      },
+      async markStopped(executionArn) {
+        calls.push(`marked ${executionArn}`);
+        const row = recorded.get(executionArn);
+        if (row) row.stopped = true;
+      },
+      async reviewed(_repo, _n, headSha) {
+        return reviewedHeads.has(headSha);
       },
     },
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
   };
-  return { deps, executions, superseded, stops, logs };
+  const status = (name: string) => executions.get(name)?.status;
+  return { deps, executions, recorded, runs, reviewedHeads, calls, logs, status };
 }
 
 describe("executionName", () => {
@@ -104,126 +140,171 @@ describe("executionName", () => {
     expect(executionPrefix("a-b/c", 1)).not.toBe(executionPrefix("a/b-c", 1));
     expect(executionPrefix("a_b/c", 1)).not.toBe(executionPrefix("a/b_c", 1));
   });
-
-  it("gives each PR a prefix no other PR's names start with", () => {
-    const one = executionPrefix("acme/shop", 1);
-    expect(executionName("acme/shop", 12, NEW).startsWith(one)).toBe(false);
-  });
 });
 
 describe("dispatch", () => {
-  it("starts a push's review with the debounce wait and its job as input", async () => {
+  it("records and starts a push's review with the debounce wait and its job as input", async () => {
     const f = fakeDeps();
     const result = await dispatch(f.deps, job());
-    const name = executionName("acme/shop", 12, NEW);
-    expect(result).toEqual({
-      action: "started",
-      executionArn: executionArnOf(SM, name),
-      stopped: [],
-    });
-    expect(f.executions.get(name)?.input).toEqual({
+    expect(result).toEqual({ action: "started", executionArn: arn(nameOf(NEW)), stopped: [] });
+    expect(f.executions.get(nameOf(NEW))?.input).toEqual({
       ...job(),
       debounceSeconds: PUSH_DEBOUNCE_SECONDS,
     });
+    expect(f.recorded.get(arn(nameOf(NEW)))).toMatchObject({ headSha: NEW, eventAt: new Date(T2) });
   });
 
   it("starts an opened or ready PR's review at once", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ kind: "pr_opened" }));
-    await dispatch(f.deps, job({ kind: "pr_ready", headSha: OLD }));
-    for (const sha of [NEW, OLD]) {
-      expect(f.executions.get(executionName("acme/shop", 12, sha))?.input.debounceSeconds).toBe(0);
-    }
+    await dispatch(f.deps, job({ kind: "pr_opened", headSha: OLD, eventAt: T1 }));
+    await dispatch(f.deps, job({ kind: "pr_ready" }));
+    expect(f.executions.get(nameOf(OLD))?.input.debounceSeconds).toBe(0);
+    expect(f.executions.get(nameOf(NEW))?.input.debounceSeconds).toBe(0);
   });
 
-  it("stops the older head's execution and marks its run superseded", async () => {
+  it("stops older jobs' executions, marking each run superseded before the stop", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ headSha: OLD }));
-    await dispatch(f.deps, job({ kind: "pr_opened", repo: "acme/other", headSha: OLD }));
-    const result = await dispatch(f.deps, job({ deliveryId: "d-2" }));
-    const old = executionArnOf(SM, executionName("acme/shop", 12, OLD));
-    expect(result).toMatchObject({ action: "started", stopped: [old] });
-    expect(f.stops).toEqual([{ arn: old, cause: `Superseded by ${NEW}.` }]);
-    expect(f.superseded).toEqual([old]);
-    // Other PRs' executions keep running.
-    expect(f.executions.get(executionName("acme/other", 12, OLD))?.status).toBe("RUNNING");
-  });
-
-  it("treats a second start for the same head as a duplicate and stops nothing", async () => {
-    const f = fakeDeps();
-    await dispatch(f.deps, job({ headSha: OLD }));
-    await dispatch(f.deps, job({ deliveryId: "d-2" }));
-    // A late redelivery of the old push must not stop the new head's review.
-    const result = await dispatch(f.deps, job({ deliveryId: "d-1", headSha: OLD }));
+    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
+    f.runs.set(arn(nameOf(OLD)), "running");
+    await dispatch(f.deps, job({ kind: "pr_opened", repo: "acme/other", eventAt: T1 }));
+    f.calls.length = 0;
+    const result = await dispatch(f.deps, job());
     expect(result).toEqual({
-      action: "duplicate",
-      name: executionName("acme/shop", 12, OLD),
+      action: "started",
+      executionArn: arn(nameOf(NEW)),
+      stopped: [arn(nameOf(OLD))],
     });
-    expect(f.executions.get(executionName("acme/shop", 12, NEW))?.status).toBe("RUNNING");
+    expect(f.calls).toEqual([
+      `start ${nameOf(NEW)}`,
+      `supersede ${arn(nameOf(OLD))}`,
+      `stop ${arn(nameOf(OLD))}`,
+      `marked ${arn(nameOf(OLD))}`,
+    ]);
+    expect(f.runs.get(arn(nameOf(OLD)))).toBe("superseded");
+    // Other PRs' executions keep running.
+    expect(f.executions.get(executionName("acme/other", 12, NEW))?.status).toBe("RUNNING");
   });
 
-  it("supersedes again when the same message is retried", async () => {
+  it("does nothing for a push older than the PR's newest, even one GitHub sent late", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ headSha: OLD }));
-    let fail = true;
+    await dispatch(f.deps, job());
+    const result = await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
+    expect(result).toMatchObject({ action: "stale" });
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
+    expect(f.executions.has(nameOf(OLD))).toBe(false);
+  });
+
+  it("ignores an old push redelivered while its own execution still runs", async () => {
+    const f = fakeDeps();
+    const old = job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" });
+    await dispatch(f.deps, old);
+    await dispatch(f.deps, job());
+    // Say the stop hasn't taken yet: starting the old one again with the same input would
+    // "succeed", as Step Functions returns a running execution.
+    must(f.executions.get(nameOf(OLD))).status = "RUNNING";
+    expect(await dispatch(f.deps, old)).toMatchObject({ action: "stale" });
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
+  });
+
+  it("does nothing for an open that arrives after a later push", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job());
+    const opened = job({ kind: "pr_opened", headSha: OLD, eventAt: T1, deliveryId: "d-open" });
+    expect(await dispatch(f.deps, opened)).toMatchObject({ action: "stale" });
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
+  });
+
+  it("runs both jobs of the same second: prepare tells them apart by the real head", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ headSha: OLD, deliveryId: "d-old" }));
+    const result = await dispatch(f.deps, job());
+    expect(result).toMatchObject({ action: "started", stopped: [] });
+    expect(f.status(nameOf(OLD))).toBe("RUNNING");
+  });
+
+  it("supersedes again when the same message is retried after a failed stop", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
+    f.runs.set(arn(nameOf(OLD)), "running");
     const { executions } = f.deps;
     const real = { ...executions };
-    executions.stop = async (arn, cause) => {
+    let fail = true;
+    executions.stop = async (executionArn, cause) => {
       if (fail) throw new Error("throttled");
-      await real.stop(arn, cause);
+      await real.stop(executionArn, cause);
     };
-    await expect(dispatch(f.deps, job({ deliveryId: "d-2" }))).rejects.toThrow("throttled");
+    await expect(dispatch(f.deps, job())).rejects.toThrow("throttled");
+    // The run was marked before the stop; the execution wasn't marked stopped.
+    expect(f.runs.get(arn(nameOf(OLD)))).toBe("superseded");
+    expect(f.recorded.get(arn(nameOf(OLD)))?.stopped).toBe(false);
     fail = false;
-    const result = await dispatch(f.deps, job({ deliveryId: "d-2" }));
-    expect(result).toMatchObject({ action: "started" });
-    expect(f.superseded).toEqual([executionArnOf(SM, executionName("acme/shop", 12, OLD))]);
+    expect(await dispatch(f.deps, job())).toMatchObject({ stopped: [arn(nameOf(OLD))] });
+    expect(f.status(nameOf(OLD))).toBe("ABORTED");
+  });
+
+  it("stops every execution of a closed PR, and ignores pushes from before the close", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job());
+    const closed = job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" });
+    expect(await dispatch(f.deps, closed)).toEqual({
+      action: "stopped",
+      stopped: [arn(nameOf(NEW))],
+    });
+    expect(f.status(nameOf(NEW))).toBe("ABORTED");
+    const late = job({ headSha: OLD, eventAt: T1, deliveryId: "d-late" });
+    expect(await dispatch(f.deps, late)).toMatchObject({ action: "stale" });
+    // A reopen in the same second as the close is taken as before it.
+    const tie = job({ kind: "pr_opened", eventAt: T2, deliveryId: "d-tie" });
+    expect(await dispatch(f.deps, tie)).toMatchObject({ action: "stale" });
+  });
+
+  it("keeps a reopened PR's review when the close arrives after the reopen", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T3, deliveryId: "d-reopen" }));
+    const close = job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" });
+    expect(await dispatch(f.deps, close)).toMatchObject({ action: "stale" });
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
   });
 
   it("reviews a PR reopened at the head its close stopped, once per delivery", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ kind: "pr_opened" }));
-    await dispatch(f.deps, job({ kind: "pr_closed", deliveryId: "d-2" }));
-    const reopened = job({ kind: "pr_opened", deliveryId: "d-3" });
-    const result = await dispatch(f.deps, reopened);
-    const retryName = executionName("acme/shop", 12, NEW, "d-3");
-    expect(result).toEqual({ action: "retried", executionArn: executionArnOf(SM, retryName) });
-    expect(retryName.length).toBeLessThanOrEqual(80);
-    expect(retryName.startsWith(executionPrefix("acme/shop", 12))).toBe(true);
-    expect(f.executions.get(retryName)?.status).toBe("RUNNING");
+    await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
+    await dispatch(f.deps, job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" }));
+    const reopened = job({ kind: "pr_opened", eventAt: T3, deliveryId: "d-reopen" });
+    const retry = nameOf(NEW, "d-reopen");
+    expect(await dispatch(f.deps, reopened)).toEqual({
+      action: "retried",
+      executionArn: arn(retry),
+      stopped: [],
+    });
+    expect(f.status(retry)).toBe("RUNNING");
+    expect(retry.startsWith(executionPrefix("acme/shop", 12))).toBe(true);
 
     // The same delivery again, once its retry has ended: a duplicate.
-    const retried = f.executions.get(retryName);
-    if (retried) retried.status = "FAILED";
-    expect(await dispatch(f.deps, reopened)).toEqual({ action: "duplicate", name: retryName });
-    // A later push supersedes the retry like any other execution.
-    if (retried) retried.status = "RUNNING";
-    const push = await dispatch(f.deps, job({ deliveryId: "d-4", headSha: OLD }));
-    expect(push).toMatchObject({ stopped: [executionArnOf(SM, retryName)] });
+    must(f.executions.get(retry)).status = "FAILED";
+    expect(await dispatch(f.deps, reopened)).toMatchObject({ action: "duplicate", name: retry });
   });
 
-  it("doesn't retry a head that was reviewed, or a push", async () => {
+  it("doesn't retry a head that a retry reviewed, or a push", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ kind: "pr_opened" }));
-    const first = f.executions.get(executionName("acme/shop", 12, NEW));
-    if (first) first.status = "SUCCEEDED";
-    expect(await dispatch(f.deps, job({ kind: "pr_ready", deliveryId: "d-2" }))).toMatchObject({
-      action: "duplicate",
-    });
-    if (first) first.status = "ABORTED";
-    expect(await dispatch(f.deps, job({ deliveryId: "d-3" }))).toMatchObject({
-      action: "duplicate",
-    });
+    await dispatch(f.deps, job({ kind: "pr_opened", eventAt: T1, deliveryId: "d-open" }));
+    await dispatch(f.deps, job({ kind: "pr_closed", eventAt: T2, deliveryId: "d-close" }));
+    // An earlier reopen's retry posted the review for this head.
+    f.reviewedHeads.add(NEW);
+    const again = job({ kind: "pr_ready", eventAt: T3, deliveryId: "d-ready" });
+    expect(await dispatch(f.deps, again)).toMatchObject({ action: "duplicate" });
+    f.reviewedHeads.clear();
+    const push = job({ eventAt: "2026-11-14T00:00:04.000Z", deliveryId: "d-push" });
+    expect(await dispatch(f.deps, push)).toMatchObject({ action: "duplicate" });
     expect(f.executions.size).toBe(1);
   });
 
-  it("stops every running execution of a closed PR", async () => {
+  it("falls back to the gateway's time for a job without an event time", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job());
-    const result = await dispatch(f.deps, job({ kind: "pr_closed", headSha: OLD }));
-    const arn = executionArnOf(SM, executionName("acme/shop", 12, NEW));
-    expect(result).toEqual({ action: "stopped", stopped: [arn] });
-    expect(f.stops).toEqual([{ arn, cause: "Pull request closed." }]);
-    expect(f.superseded).toEqual([arn]);
+    const untimed = job();
+    delete untimed.eventAt;
+    await dispatch(f.deps, untimed);
+    expect(f.recorded.get(arn(nameOf(NEW)))?.eventAt).toEqual(new Date(untimed.receivedAt));
   });
 
   it("defers comment jobs to M5 and ignores a push without a head", async () => {
@@ -239,39 +320,54 @@ describe("dispatch", () => {
 });
 
 describe("dispatchBatch", () => {
-  const record = (messageId: string, body: unknown) => ({
+  const record = (messageId: string, group: string | undefined, body: unknown) => ({
     messageId,
     body: typeof body === "string" ? body : JSON.stringify(body),
+    ...(group === undefined ? {} : { attributes: { MessageGroupId: group } }),
   });
 
   it("handles every message and reports no failures", async () => {
     const f = fakeDeps();
     const result = await dispatchBatch(f.deps, [
-      record("m1", job({ headSha: OLD })),
-      record("m2", job({ deliveryId: "d-2" })),
+      record("m1", "pr", job({ headSha: OLD, eventAt: T1 })),
+      record("m2", "pr", job({ deliveryId: "d-2" })),
     ]);
     expect(result).toEqual({ batchItemFailures: [] });
-    expect(f.superseded).toHaveLength(1);
+    expect(f.status(nameOf(OLD))).toBe("ABORTED");
   });
 
-  it("returns the first failure and every message after it, in order", async () => {
+  it("holds back the rest of a failed message's group, and only that group", async () => {
     const f = fakeDeps();
     const result = await dispatchBatch(f.deps, [
-      record("m1", job()),
-      record("m2", "not json"),
-      record("m3", job({ repo: "acme/other" })),
+      record("m1", "a", job()),
+      record("m2", "b", "not json"),
+      record("m3", "a", job({ repo: "acme/shop", eventAt: T3, headSha: OLD })),
+      record("m4", "b", job({ repo: "acme/other" })),
+      record("m5", "c", job({ repo: "acme/third" })),
     ]);
-    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m2" }, { itemIdentifier: "m3" }]);
-    expect(f.executions.size).toBe(1);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m2" }, { itemIdentifier: "m4" }]);
+    expect(f.executions.has(executionName("acme/third", 12, NEW))).toBe(true);
+    expect(f.executions.has(executionName("acme/other", 12, NEW))).toBe(false);
     expect(f.logs.find((l) => l.message === "dispatch failed")?.fields).toMatchObject({
       messageId: "m2",
       error: "The message isn't JSON.",
     });
   });
 
+  it("holds back everything after a failed message without a group", async () => {
+    const f = fakeDeps();
+    const result = await dispatchBatch(f.deps, [
+      record("m1", undefined, "{}"),
+      record("m2", "a", job()),
+    ]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }]);
+  });
+
   it("names a bad job's fields without quoting their values", async () => {
     const f = fakeDeps();
-    await dispatchBatch(f.deps, [record("m1", { ...job(), repo: "secret value", prNumber: -1 })]);
+    await dispatchBatch(f.deps, [
+      record("m1", "a", { ...job(), repo: "secret value", prNumber: -1 }),
+    ]);
     const error = String(f.logs.find((l) => l.message === "dispatch failed")?.fields?.error);
     expect(error).toContain("repo");
     expect(error).toContain("prNumber");
@@ -294,13 +390,13 @@ describe("sfnExecutions", () => {
     });
     const executions = sfnExecutions(c, SM);
     const input = { ...job(), debounceSeconds: 60 };
-    expect(await executions.start("n", input)).toEqual({ started: true, executionArn: "arn:new" });
-    const sent = c.send.mock.calls[0]?.[0] as StartExecutionCommand;
-    expect(sent.input).toEqual({ stateMachineArn: SM, name: "n", input: JSON.stringify(input) });
-    expect(await executions.start("dup", input)).toEqual({
-      started: false,
-      executionArn: "arn:aws:states:eu-west-1:123456789012:execution:Review:dup",
-    });
+    expect(await executions.start("n", input)).toEqual({ started: true });
+    const sent = c.send.mock.calls[0]?.[0] as StartExecutionCommand | undefined;
+    expect(sent?.input).toEqual({ stateMachineArn: SM, name: "n", input: JSON.stringify(input) });
+    expect(await executions.start("dup", input)).toEqual({ started: false });
+    expect(executions.arnOf("dup")).toBe(
+      "arn:aws:states:eu-west-1:123456789012:execution:Review:dup",
+    );
   });
 
   it("rethrows other start errors", async () => {
@@ -313,55 +409,39 @@ describe("sfnExecutions", () => {
     await expect(executions.start("n", { ...job(), debounceSeconds: 0 })).rejects.toThrow();
   });
 
-  it("lists running executions with the prefix across pages", async () => {
-    const c = client((command) => {
-      const token = (command as ListExecutionsCommand).input.nextToken;
-      return token === undefined
-        ? {
-            executions: [
-              { name: "p-1", executionArn: "arn:1" },
-              { name: "q-1", executionArn: "arn:q" },
-            ],
-            nextToken: "t",
-          }
-        : { executions: [{ name: "p-2", executionArn: "arn:2" }] };
-    });
-    expect(await sfnExecutions(c, SM).running("p-")).toEqual([
-      { name: "p-1", executionArn: "arn:1" },
-      { name: "p-2", executionArn: "arn:2" },
-    ]);
-    const first = c.send.mock.calls[0]?.[0] as ListExecutionsCommand;
-    expect(first).toBeInstanceOf(ListExecutionsCommand);
-    expect(first.input).toMatchObject({ stateMachineArn: SM, statusFilter: "RUNNING" });
-  });
-
   it("reads an execution's status by name, and undefined when there's none", async () => {
     const c = client((command) => {
-      const arn = (command as DescribeExecutionCommand).input.executionArn;
-      if (arn?.endsWith(":gone")) throw named("ExecutionDoesNotExist");
+      const executionArn = (command as DescribeExecutionCommand).input.executionArn;
+      if (executionArn?.endsWith(":gone")) throw named("ExecutionDoesNotExist");
       return { status: "ABORTED" };
     });
     const executions = sfnExecutions(c, SM);
     expect(await executions.status("n")).toBe("ABORTED");
     expect(await executions.status("gone")).toBeUndefined();
     const sent = c.send.mock.calls[0]?.[0] as DescribeExecutionCommand | undefined;
-    expect(sent?.input.executionArn).toBe(executionArnOf(SM, "n"));
+    expect(sent?.input.executionArn).toBe(arn("n"));
   });
 
-  it("stops with a cause, and ignores an execution that's gone", async () => {
+  it("stops with a cause; an execution that ended or never started is fine", async () => {
+    const statuses: Record<string, string> = { "arn:done": "SUCCEEDED", "arn:busy": "RUNNING" };
     const c = client((command) => {
-      if ((command as StopExecutionCommand).input.executionArn === "arn:gone") {
-        throw named("ExecutionDoesNotExist");
+      const input = (command as StopExecutionCommand).input;
+      if ("cause" in input) {
+        if (input.executionArn === "arn:1") return {};
+        throw named("ValidationException");
       }
-      return {};
+      const status = statuses[input.executionArn ?? ""];
+      if (status === undefined) throw named("ExecutionDoesNotExist");
+      return { status };
     });
     const executions = sfnExecutions(c, SM);
     await executions.stop("arn:1", "why");
-    await executions.stop("arn:gone", "why");
-    const sent = c.send.mock.calls[0]?.[0] as StopExecutionCommand | undefined;
-    expect(sent?.input).toEqual({
+    expect((c.send.mock.calls[0]?.[0] as StopExecutionCommand | undefined)?.input).toEqual({
       executionArn: "arn:1",
       cause: "why",
     });
+    await executions.stop("arn:done", "why");
+    await executions.stop("arn:never", "why");
+    await expect(executions.stop("arn:busy", "why")).rejects.toThrow("ValidationException");
   });
 });

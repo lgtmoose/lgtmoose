@@ -239,7 +239,9 @@ describe("review state machine", () => {
     expect(States.Batches).toMatchObject({ Type: "Map", ItemsPath: "$.prepared.batches" });
     expect(States.Batches?.Next).toBe("Post");
     expect(States.Post).toMatchObject({ End: true });
-    expect(States.Post?.Resource).toContain("ecs:runTask.sync");
+    // A stop mustn't cut a post short: post reports on a task token instead of `.sync`.
+    expect(States.Post?.Resource).toContain("ecs:runTask.waitForTaskToken");
+    expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 
     const items = States.Batches?.ItemProcessor;
     // Each attempt presigns afresh: Presign and Review run inside one retried Parallel.
@@ -384,7 +386,11 @@ describe("review state machine", () => {
     }
     const control = statements(getAttId(taskDefinition("control").TaskRoleArn));
     expect(actions(control)).toEqual(
-      expect.arrayContaining(["states:SendTaskSuccess", "states:SendTaskFailure"]),
+      expect.arrayContaining([
+        "states:SendTaskSuccess",
+        "states:SendTaskFailure",
+        "states:DescribeExecution",
+      ]),
     );
   });
 
@@ -434,7 +440,6 @@ describe("dispatcher", () => {
     expect(actions(granted)).toEqual(
       expect.arrayContaining([
         "states:StartExecution",
-        "states:ListExecutions",
         "states:StopExecution",
         "states:DescribeExecution",
         "secretsmanager:GetSecretValue",
@@ -447,5 +452,7 @@ describe("dispatcher", () => {
     expect(actions(granted).some((a) => a.startsWith("s3:"))).toBe(false);
     const stop = granted.find((s) => actions([s]).includes("states:StopExecution"));
     expect(JSON.stringify(stop?.Resource)).toContain(":execution:");
+    // It finds a PR's executions in the database, never by listing the state machine's.
+    expect(actions(granted)).not.toContain("states:ListExecutions");
   });
 });

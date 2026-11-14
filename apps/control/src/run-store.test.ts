@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { drizzleRunStore } from "./run-store.js";
+import { drizzleRunStore } from "./aws.js";
 
 // The migrations create the vector extension (for learnings).
 const client = new PGlite({ extensions: { vector } });
@@ -84,19 +84,6 @@ describe("drizzleRunStore", () => {
     await store.supersedeRun(superseded.runId);
     await store.failRun("arn:exec:5", "States.Timeout");
     expect(await runRow(superseded.runId)).toMatchObject({ status: "superseded", error: null });
-  });
-
-  it("supersedes only the unfinished runs of stopped executions", async () => {
-    const running = await start("arn:exec:6", 6);
-    const failed = await start("arn:exec:7", 7);
-    await store.failRun("arn:exec:7", "States.TaskFailed");
-    const other = await start("arn:exec:8", 8);
-    await store.supersedeExecutions(["arn:exec:6", "arn:exec:7", "arn:exec:missing"]);
-    await store.supersedeExecutions([]);
-    expect(await runRow(running.runId)).toMatchObject({ status: "superseded" });
-    expect((await runRow(running.runId))?.finishedAt).toBeInstanceOf(Date);
-    expect(await runRow(failed.runId)).toMatchObject({ status: "failed" });
-    expect(await runRow(other.runId)).toMatchObject({ status: "running" });
   });
 
   it("returns nothing for an unknown run", async () => {

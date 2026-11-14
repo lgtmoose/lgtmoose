@@ -47,6 +47,11 @@ export interface ReviewJob {
   threadNodeId?: string;
   /** ISO 8601 time the gateway received the delivery. */
   receivedAt: string;
+  /**
+   * The PR's `updated_at` from the payload: when GitHub says the event happened, in whole
+   * seconds. Deliveries can arrive out of order, so the dispatcher orders a PR's jobs by this.
+   */
+  eventAt?: string;
 }
 
 export interface Ignored {
@@ -99,6 +104,13 @@ function record(value: unknown): Json | undefined {
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** A timestamp from the payload as ISO 8601, or undefined when it isn't one. */
+function isoTime(value: unknown): string | undefined {
+  const text = str(value);
+  const time = text === undefined ? Number.NaN : Date.parse(text);
+  return Number.isNaN(time) ? undefined : new Date(time).toISOString();
 }
 
 function positiveInt(value: unknown): number | undefined {
@@ -211,6 +223,7 @@ export function toReviewJob(
   }
 
   const headSha = str(record(pr.head)?.sha);
+  const eventAt = isoTime(pr.updated_at);
   return {
     kind,
     deliveryId: options.deliveryId,
@@ -221,5 +234,6 @@ export function toReviewJob(
     actor,
     ...trigger(kind, body),
     receivedAt: options.receivedAt.toISOString(),
+    ...(eventAt === undefined ? {} : { eventAt }),
   };
 }

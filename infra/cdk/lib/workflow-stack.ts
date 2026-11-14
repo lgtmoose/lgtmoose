@@ -264,7 +264,6 @@ export class WorkflowStack extends Stack {
     });
     props.databaseSecret.grantRead(fn);
     stateMachine.grantStartExecution(fn);
-    stateMachine.grant(fn, "states:ListExecutions");
     stateMachine.grantExecution(fn, "states:StopExecution", "states:DescribeExecution");
     fn.addEventSource(
       new SqsEventSource(props.jobQueue, {

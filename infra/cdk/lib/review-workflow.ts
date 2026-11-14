@@ -89,12 +89,14 @@ export interface ReviewWorkflowProps {
  * 3. Batches (map, `maxConcurrency` at once): presign the batch's URLs, then run the reviewer's
  *    sandbox task on it. A batch that still fails after its retries is left without an output,
  *    which the post step counts as a failed batch: the review is incomplete and can't approve.
- * 4. Post (control task): reads the outputs and posts one review, the check run, the summary
- *    and the status label (or records them in shadow mode).
+ * 4. Post (control task, waits for its task token, so a stop can't cut it short): reads the
+ *    outputs and posts one review, the check run, the summary and the status label (or
+ *    records them in shadow mode).
  *
  * Any step failing for good runs the control task's fail step, which marks the run failed and
  * posts nothing more, and the execution fails. An execution stopped from outside (StopExecution)
- * skips it: whatever stops one must mark its run itself.
+ * skips it: the dispatcher marks the run superseded before it stops one, and a prepare or post
+ * task still running then marks the run when its task token turns out dead.
  *
  * Extension points (M4): the cross-file and verify passes go between the batches and post, as
  * steps in `afterBatches`; each reads and writes the run's objects like the batches do.
@@ -259,8 +261,12 @@ export class ReviewWorkflow extends Construct {
       [
         { name: "LGTMOOSE_COMMAND", value: "post" },
         { name: "LGTMOOSE_RUN_ID", value: JsonPath.stringAt("$.prepared.runId") },
+        { name: "LGTMOOSE_TASK_TOKEN", value: JsonPath.taskToken },
       ],
-      IntegrationPattern.RUN_JOB,
+      // Not `.sync`: stopping the execution (a newer push, the PR closed) would stop the task
+      // halfway through posting. With a task token it finishes, and its review, for an older
+      // head, is followed by the next run's.
+      IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       JsonPath.DISCARD,
     );
     // Posting twice would post two reviews: only retry when the task never started.
@@ -334,7 +340,12 @@ export class ReviewWorkflow extends Construct {
         includeExecutionData: false,
       },
     });
-    // Prepare reports through its task token.
+    // Prepare and post report through their task tokens, and check whether their execution
+    // was stopped when a token no longer counts.
     this.stateMachine.grantTaskResponse(props.control.taskDefinition.taskRole);
+    this.stateMachine.grantExecution(
+      props.control.taskDefinition.taskRole,
+      "states:DescribeExecution",
+    );
   }
 }

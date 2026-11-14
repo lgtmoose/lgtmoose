@@ -2,21 +2,26 @@ import { createHash } from "node:crypto";
 import { REVIEW_JOB_KINDS, type ReviewJob } from "@lgtmoose/core";
 import { z } from "zod";
 import { workflowJobSchema } from "./job.js";
-import type { RunStore } from "./ports.js";
 
 /**
  * The dispatcher: reads review jobs from the FIFO queue and turns them into review workflow
  * executions. It never calls GitHub or a model; the workflow's prepare step does that.
  *
+ * GitHub doesn't deliver a PR's events in order, so each job carries its event time (the PR's
+ * `updated_at`) and the dispatcher keeps the newest it has acted on per PR (`DispatchStore`):
+ *
+ * - A job older than that is stale and does nothing: it neither starts nor stops anything.
  * - A push, open or ready job starts an execution named after the PR and its head
  *   (`executionName`), so a second start for the same head is a no-op. An open or ready job
- *   whose head's execution ended without succeeding (stopped when the PR closed, or failed)
- *   starts a retry instead: a PR reopened at the same head is reviewed again.
- * - Once that execution exists, running executions for an older head of the same PR are
- *   stopped, and their runs marked superseded: StopExecution skips the workflow's fail step.
+ *   for a head that has no succeeded run and no running execution (the PR was closed during
+ *   its review, then reopened; or the review failed) starts a retry.
+ * - It then stops the PR's executions started by older jobs, marking each run superseded
+ *   first (StopExecution skips the workflow's fail step). Jobs with the same event time both
+ *   run: whole-second times can't order them, and each prepare step checks the PR's real head.
  * - Pushes are debounced: the execution waits `PUSH_DEBOUNCE_SECONDS` before it does anything,
- *   so a burst of pushes stops each waiting execution before it clones (see `debounceSeconds`).
- * - Closing a PR stops its running executions.
+ *   so the next push in a burst stops it before it clones (see `debounceSeconds`).
+ * - Closing a PR stops the executions of jobs up to the close. A reopen with the same time as
+ *   the close is taken as older: the PR stays closed.
  * - Comment, review and thread jobs go to `conversation`, which does nothing until M5.
  */
 
@@ -44,7 +49,8 @@ export const reviewJobSchema = workflowJobSchema.extend({
   commentId: z.number().int().positive().optional(),
   reviewId: z.number().int().positive().optional(),
   threadNodeId: z.string().min(1).optional(),
-  receivedAt: z.string().min(1),
+  receivedAt: z.iso.datetime(),
+  eventAt: z.iso.datetime().optional(),
 });
 
 /** The review workflow's input: the job, and how long to wait before preparing. */
@@ -87,98 +93,147 @@ export function debounceSeconds(job: Pick<ReviewJob, "kind">): number {
   return job.kind === "pr_updated" ? PUSH_DEBOUNCE_SECONDS : 0;
 }
 
-/** A running execution of the review workflow. */
-export interface RunningExecution {
-  name: string;
-  executionArn: string;
+/** When the job's event happened: GitHub's time, or the gateway's for a job without one. */
+export function eventTime(job: { eventAt?: string; receivedAt: string }): Date {
+  return new Date(job.eventAt ?? job.receivedAt);
 }
 
 /** The review state machine, as the dispatcher uses it. */
 export interface Executions {
+  /** The ARN the named execution has, or will have once started. */
+  arnOf(name: string): string;
   /**
    * Starts an execution. `started` is false when one with this name already exists with a
-   * different input or has finished (Step Functions keeps names for 90 days): the job is a
-   * duplicate. Starting a running execution again with the same input returns it.
+   * different input or has finished (Step Functions keeps names for 90 days). Starting a
+   * running execution again with the same input returns it.
    */
-  start(name: string, input: WorkflowInput): Promise<{ started: boolean; executionArn: string }>;
+  start(name: string, input: WorkflowInput): Promise<{ started: boolean }>;
   /** The status of the named execution (RUNNING, SUCCEEDED, ABORTED…), if there is one. */
   status(name: string): Promise<string | undefined>;
-  /** Running executions whose name starts with `prefix`. */
-  running(prefix: string): Promise<RunningExecution[]>;
-  /** Stops an execution; one that already ended is left as it is. */
+  /** Stops an execution; one that has ended, or never started, is left as it is. */
   stop(executionArn: string, cause: string): Promise<void>;
 }
 
-/**
- * `review_runs`, as the dispatcher uses it. An execution stopped before its prepare step
- * recorded a run has none yet; prepare marks it when its task token turns out to be dead.
- */
-export type DispatchRuns = Pick<RunStore, "supersedeExecutions">;
+/** An execution the dispatcher started and hasn't stopped yet. */
+export interface DispatchedExecution {
+  executionArn: string;
+  headSha: string;
+  eventAt: Date;
+}
+
+/** The dispatcher's records in the database. `repo` is passed as the job has it. */
+export interface DispatchStore {
+  /** The newest event the dispatcher acted on for the PR, and whether it closed the PR. */
+  latest(repo: string, prNumber: number): Promise<{ eventAt: Date; closed: boolean } | undefined>;
+  /** Records the job's event as the PR's newest. */
+  advance(repo: string, prNumber: number, eventAt: Date, closed: boolean): Promise<void>;
+  /** Records an execution before it's started, so a crash in between can't lose track of it. */
+  record(repo: string, prNumber: number, execution: DispatchedExecution): Promise<void>;
+  /** The PR's executions that haven't been stopped. */
+  unstopped(repo: string, prNumber: number): Promise<DispatchedExecution[]>;
+  /** Marks the execution's run superseded, if it has one that hasn't finished. */
+  supersedeRun(executionArn: string): Promise<void>;
+  /** Marks the execution stopped, so later jobs leave it alone. */
+  markStopped(executionArn: string): Promise<void>;
+  /** Whether a run for the PR at this head succeeded: it was reviewed and posted. */
+  reviewed(repo: string, prNumber: number, headSha: string): Promise<boolean>;
+}
 
 export interface DispatchDeps {
   executions: Executions;
-  runs: DispatchRuns;
+  store: DispatchStore;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
 /** What the dispatcher did with a job; for logs and tests. */
 export type DispatchResult =
   | { action: "started"; executionArn: string; stopped: string[] }
-  | { action: "retried"; executionArn: string }
-  | { action: "duplicate"; name: string }
+  | { action: "retried"; executionArn: string; stopped: string[] }
+  | { action: "duplicate"; name: string; stopped: string[] }
   | { action: "stopped"; stopped: string[] }
+  | { action: "stale"; reason: string }
   | { action: "deferred"; reason: string }
   | { action: "ignored"; reason: string };
 
-/** Stops the PR's running executions other than `keep`, and marks their runs superseded. */
-async function stopOthers(
+/**
+ * Stops the PR's executions from jobs before `before` (up to and including it with
+ * `inclusive`), except `keep`. Each run is marked superseded before its execution is stopped,
+ * and the execution marked stopped after: a failure in between leaves it for the retried job
+ * to stop again, never a stopped run still marked running.
+ */
+async function stopOlder(
   deps: DispatchDeps,
   job: ReviewJob,
   cause: string,
-  keep?: string,
+  before: Date,
+  options: { inclusive?: boolean; keep?: string } = {},
 ): Promise<string[]> {
-  const running = await deps.executions.running(executionPrefix(job.repo, job.prNumber));
-  const stale = running.filter((execution) => execution.name !== keep);
-  for (const execution of stale) await deps.executions.stop(execution.executionArn, cause);
-  const arns = stale.map((execution) => execution.executionArn);
-  if (arns.length > 0) await deps.runs.supersedeExecutions(arns);
-  return arns;
+  const cutoff = before.getTime();
+  const stale = (await deps.store.unstopped(job.repo, job.prNumber)).filter((execution) => {
+    if (execution.executionArn === options.keep) return false;
+    const at = execution.eventAt.getTime();
+    return options.inclusive ? at <= cutoff : at < cutoff;
+  });
+  for (const execution of stale) {
+    await deps.store.supersedeRun(execution.executionArn);
+    await deps.executions.stop(execution.executionArn, cause);
+    await deps.store.markStopped(execution.executionArn);
+  }
+  return stale.map((execution) => execution.executionArn);
 }
 
-async function review(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
-  if (job.headSha === undefined) return { action: "ignored", reason: "no head SHA" };
-  const input: WorkflowInput = { ...job, debounceSeconds: debounceSeconds(job) };
-  const name = executionName(job.repo, job.prNumber, job.headSha);
-  const { started, executionArn } = await deps.executions.start(name, input);
-  if (started) {
-    const stopped = await stopOthers(deps, job, `Superseded by ${job.headSha}.`, name);
-    return { action: "started", executionArn, stopped };
+/** Records and starts the named execution. */
+async function startExecution(
+  deps: DispatchDeps,
+  job: ReviewJob & { headSha: string },
+  name: string,
+  eventAt: Date,
+): Promise<{ started: boolean; executionArn: string }> {
+  const executionArn = deps.executions.arnOf(name);
+  await deps.store.record(job.repo, job.prNumber, { executionArn, headSha: job.headSha, eventAt });
+  const { started } = await deps.executions.start(name, {
+    ...job,
+    debounceSeconds: debounceSeconds(job),
+  });
+  return { started, executionArn };
+}
+
+async function review(
+  deps: DispatchDeps,
+  job: ReviewJob & { headSha: string },
+  eventAt: Date,
+): Promise<DispatchResult> {
+  await deps.store.advance(job.repo, job.prNumber, eventAt, false);
+  let name = executionName(job.repo, job.prNumber, job.headSha);
+  let { started, executionArn } = await startExecution(deps, job, name, eventAt);
+  let action: "started" | "retried" = "started";
+  // A push for a head that already has an execution is a duplicate; so is an open or ready
+  // job for a head that was reviewed, or is being.
+  if (!started && job.kind !== "pr_updated" && (await needsRetry(deps, job, name))) {
+    name = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
+    ({ started, executionArn } = await startExecution(deps, job, name, eventAt));
+    action = "retried";
   }
-  // A push for a head that already has an execution is a duplicate. So is a late redelivery
-  // of an old push, and superseding then would stop the review of the PR's real head.
-  if (job.kind === "pr_updated") return { action: "duplicate", name };
-  return retry(deps, { ...job, headSha: job.headSha }, input, name);
+  // This job is the PR's newest, so what older jobs started can go, duplicate or not.
+  const stopped = await stopOlder(deps, job, `Superseded by ${job.headSha}.`, eventAt, {
+    keep: executionArn,
+  });
+  return started ? { action, executionArn, stopped } : { action: "duplicate", name, stopped };
 }
 
 /**
- * An open or ready job for a head whose execution ended without succeeding: the PR was closed
- * mid-review and then reopened, or the review failed. It runs again, superseding nothing: if
- * the job is old, the PR's real head has its own execution, and this one's prepare step finds
- * the head moved on and stops.
+ * An open or ready job for a head that already had an execution needs another only when the
+ * head was never reviewed and its execution isn't running: the PR was closed mid-review and
+ * reopened, or the review failed. A succeeded retry counts as reviewed.
  */
-async function retry(
+async function needsRetry(
   deps: DispatchDeps,
   job: ReviewJob & { headSha: string },
-  input: WorkflowInput,
   name: string,
-): Promise<DispatchResult> {
+): Promise<boolean> {
+  if (await deps.store.reviewed(job.repo, job.prNumber, job.headSha)) return false;
   const status = await deps.executions.status(name);
-  if (status === undefined || status === "RUNNING" || status === "SUCCEEDED") {
-    return { action: "duplicate", name };
-  }
-  const retryName = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
-  const { started, executionArn } = await deps.executions.start(retryName, input);
-  return started ? { action: "retried", executionArn } : { action: "duplicate", name: retryName };
+  return status !== undefined && status !== "RUNNING";
 }
 
 /**
@@ -192,19 +247,40 @@ async function conversation(_deps: DispatchDeps, job: ReviewJob): Promise<Dispat
 /** Handles one job. Throws when it should be retried (and, in the end, dead-lettered). */
 export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
   switch (job.kind) {
-    case "pr_opened":
-    case "pr_ready":
-    case "pr_updated":
-      return review(deps, job);
-    case "pr_closed":
-      return { action: "stopped", stopped: await stopOthers(deps, job, "Pull request closed.") };
     case "comment":
     case "review":
     case "review_comment":
     case "thread_resolved":
     case "thread_unresolved":
       return conversation(deps, job);
+    case "pr_opened":
+    case "pr_ready":
+    case "pr_updated":
+    case "pr_closed":
+      break;
   }
+  const eventAt = eventTime(job);
+  const latest = await deps.store.latest(job.repo, job.prNumber);
+  if (latest !== undefined) {
+    const last = latest.eventAt.getTime();
+    const at = eventAt.getTime();
+    // A close wins a tie: a reopen in the same second as the close is taken as before it.
+    if (at < last || (at === last && latest.closed && job.kind !== "pr_closed")) {
+      return {
+        action: "stale",
+        reason: `older than the PR's ${latest.eventAt.toISOString()} event`,
+      };
+    }
+  }
+  if (job.kind === "pr_closed") {
+    await deps.store.advance(job.repo, job.prNumber, eventAt, true);
+    const stopped = await stopOlder(deps, job, "Pull request closed.", eventAt, {
+      inclusive: true,
+    });
+    return { action: "stopped", stopped };
+  }
+  if (job.headSha === undefined) return { action: "ignored", reason: "no head SHA" };
+  return review(deps, { ...job, headSha: job.headSha }, eventAt);
 }
 
 /** A queue message's job. Errors name the bad fields, never their values. */
@@ -229,19 +305,31 @@ export function parseQueuedJob(body: string): ReviewJob {
 export interface QueueRecord {
   messageId: string;
   body: string;
+  attributes?: { MessageGroupId?: string };
 }
 
 /**
- * Handles a batch from the FIFO queue in order. The first failure and every message after it
- * are returned for redelivery: later messages may be for the same PR, and must not overtake
- * it. A message that isn't a valid job fails too, so it ends up in the dead-letter queue where
+ * Handles a batch from the FIFO queue in order. A failed message is returned for redelivery
+ * with every later message of its group (its PR), which must not overtake it; other groups go
+ * on. A message that isn't a valid job fails too, so it ends up in the dead-letter queue where
  * someone can look at it.
  */
 export async function dispatchBatch(
   deps: DispatchDeps,
   records: readonly QueueRecord[],
 ): Promise<{ batchItemFailures: { itemIdentifier: string }[] }> {
-  for (const [index, record] of records.entries()) {
+  const failedGroups = new Set<string>();
+  const failures: { itemIdentifier: string }[] = [];
+  for (const record of records) {
+    // A record without a group (never on a FIFO queue) could be any PR's: after a failure it's
+    // held back, and its own failure holds back everything after it.
+    const group = record.attributes?.MessageGroupId ?? "";
+    const held =
+      group === "" ? failedGroups.size > 0 : failedGroups.has(group) || failedGroups.has("");
+    if (held) {
+      failures.push({ itemIdentifier: record.messageId });
+      continue;
+    }
     let job: ReviewJob | undefined;
     try {
       job = parseQueuedJob(record.body);
@@ -260,10 +348,9 @@ export async function dispatchBatch(
         deliveryId: job?.deliveryId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return {
-        batchItemFailures: records.slice(index).map((r) => ({ itemIdentifier: r.messageId })),
-      };
+      failedGroups.add(group);
+      failures.push({ itemIdentifier: record.messageId });
     }
   }
-  return { batchItemFailures: [] };
+  return { batchItemFailures: failures };
 }

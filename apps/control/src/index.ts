@@ -1,4 +1,6 @@
+import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
+import { describeStatus } from "./dispatch-aws.js";
 import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
 import { runCommand } from "./run.js";
 
@@ -16,7 +18,12 @@ async function main(): Promise<void> {
   const settings = readReviewSettings(process.env);
   const deps = await awsControlDeps(env, { shadow: settings.shadow });
   try {
-    await runCommand(deps, command, settings);
+    const sfn = new SFNClient({});
+    await runCommand(
+      { ...deps, executionStatus: (arn) => describeStatus(sfn, arn) },
+      command,
+      settings,
+    );
   } finally {
     await deps.close();
   }
