@@ -40,8 +40,11 @@ export interface BedrockAccess {
    * each. Legacy models are left out, except those in `legacyToCheck` (ones a tier pins).
    */
   anthropicModels(options?: { legacyToCheck?: ReadonlySet<string> }): Promise<ModelAccess[]>;
-  /** The system-defined inference profiles this region can call, for Anthropic models. */
-  inferenceProfiles(): Promise<InferenceProfile[]>;
+  /**
+   * The system-defined inference profiles this region can call, for Anthropic models.
+   * Undefined when this identity may not list them (no bedrock:ListInferenceProfiles).
+   */
+  inferenceProfiles(): Promise<InferenceProfile[] | undefined>;
 }
 
 /** A cross-region inference profile, such as `us.anthropic.…`, and the model it runs. */
@@ -175,6 +178,8 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
             new ListInferenceProfilesCommand({ typeEquals: "SYSTEM_DEFINED", nextToken }),
           );
         } catch (error) {
+          // Only this permission is missing: the rest of the check can still run.
+          if (errorName(error) === "AccessDeniedException") return undefined;
           throw awsError("Bedrock", region, "ListInferenceProfiles", error);
         }
         for (const profile of page.inferenceProfileSummaries ?? []) {

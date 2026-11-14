@@ -49,6 +49,8 @@ function harness(
     stored?: StoredCredential[];
     models?: ModelAccess[];
     profiles?: InferenceProfile[];
+    /** The identity may not list inference profiles. */
+    noProfileList?: boolean;
     remove?: RemoveResult;
     put?: PutResult;
   } = {},
@@ -60,9 +62,11 @@ function harness(
   const validated: (true | string)[] = [];
   const confirms: string[] = [];
   const legacyAsked: string[][] = [];
+  const reruns: (string | undefined)[] = [];
   const store: CredentialStore = {
-    put: (label, value) => {
+    put: (label, value, putOptions) => {
       puts.push({ label, value });
+      reruns.push(putOptions?.rerun);
       return Promise.resolve(options.put ?? { outcome: "created" });
     },
     list: () => Promise.resolve(options.stored ?? []),
@@ -100,7 +104,8 @@ function harness(
         legacyAsked.push([...(asked?.legacyToCheck ?? [])]);
         return Promise.resolve(options.models ?? []);
       },
-      inferenceProfiles: () => Promise.resolve(options.profiles ?? []),
+      inferenceProfiles: () =>
+        Promise.resolve(options.noProfileList === true ? undefined : (options.profiles ?? [])),
     }),
     run,
     trapSignals: () => () => {},
@@ -111,7 +116,7 @@ function harness(
     const result = await runAuth(argv, () => Promise.resolve(deps));
     return { ...result, all: [...out, result.stdout, result.stderr].join("") };
   };
-  return { go, puts, removed, out, run, validated, confirms, legacyAsked };
+  return { go, puts, removed, out, run, validated, confirms, legacyAsked, reruns };
 }
 
 const SECRETS = [OAUTH, ANTHROPIC_KEY, "SECRET-REFRESH", "SECRET-ACCESS", "SECRET-CURSOR"];
@@ -246,6 +251,12 @@ describe("auth", () => {
     expectNoSecrets(result.all);
   });
 
+  it("tells the store the exact command, so its messages can say to run it again", async () => {
+    const h = harness({ answers: [ANTHROPIC_KEY] });
+    await h.go(["api-key", "--provider", "anthropic", "--id", "anthropic"]);
+    expect(h.reruns).toEqual(["pnpm lgtmoose auth api-key --provider anthropic --id anthropic"]);
+  });
+
   it("cursor: a user API key bills to a personal plan, so it gets the warning", async () => {
     const config = {
       ...baseConfig,
@@ -373,7 +384,7 @@ describe("auth", () => {
     expect(result.stdout).toContain(`  ok       eu.${SONNET} or global.${SONNET}`);
     expect(result.stdout).toContain(
       `not checked  bedrock standard (sonnet): Claude Code picks the sonnet model at runtime. ` +
-        `Pin a model id in models.standard to have it checked (usable sonnet models here: ${SONNET})`,
+        `Pin a model id in models.standard to have it checked (usable sonnet ids here: eu.${SONNET}, global.${SONNET})`,
     );
     expect(result.stdout).toContain("needs no stored secret");
     expect(h.puts).toEqual([]);
@@ -395,7 +406,8 @@ describe("auth", () => {
       profiles: [],
     }).go(["bedrock"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stdout + result.stderr).toContain(`${OPUS} (no inference profile here)`);
+    expect(result.stderr).toContain(`  blocked  ${OPUS}: no way to call it here`);
+    expect(result.stderr).toContain("no usable opus model");
   });
 
   it("bedrock: handles Claude Code modifiers, opusplan and default", async () => {
@@ -443,6 +455,29 @@ describe("auth", () => {
       `us.${OPUS} isn't an inference profile eu-west-2 can call: use global.${OPUS}`,
     );
     expect(result.stderr).toContain("set that tier in the provider's models to an id listed as ok");
+  });
+
+  it("bedrock: without bedrock:ListInferenceProfiles, profile ids aren't checked but on-demand ids are", async () => {
+    const config = pinned({
+      fast: `eu.${HAIKU}`,
+      standard: SONNET,
+      deep: "anthropic.claude-nope-v1:0",
+    });
+    const result = await harness({
+      config,
+      models: [model(HAIKU), model(SONNET), model(OPUS, { inferenceTypes: ["INFERENCE_PROFILE"] })],
+      noProfileList: true,
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      `not checked  bedrock fast (eu.${HAIKU}): eu.${HAIKU}: needs bedrock:ListInferenceProfiles`,
+    );
+    expect(result.stderr).toMatch(/ok {11}bedrock standard/);
+    expect(result.stderr).toContain("anthropic.claude-nope-v1:0 isn't offered");
+    expect(result.stderr).toContain(
+      `  unknown  ${OPUS}: callable only through an inference profile`,
+    );
+    expect(result.stderr).toContain("so profile ids weren't checked. On-demand ids were.");
   });
 
   it("bedrock: a global. id is checked against the list too", async () => {

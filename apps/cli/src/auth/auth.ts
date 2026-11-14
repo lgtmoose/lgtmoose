@@ -171,6 +171,8 @@ interface Flags {
   yes: boolean;
   help: boolean;
   positionals: string[];
+  /** This command as typed, for messages that say to run it again. Holds no secrets: none are flags. */
+  rerun: string;
 }
 
 function parseFlags(argv: readonly string[]): Flags {
@@ -200,6 +202,7 @@ function parseFlags(argv: readonly string[]): Flags {
       yes: values.yes === true,
       help: values.help === true,
       positionals,
+      rerun: ["pnpm lgtmoose auth", ...argv].join(" "),
     };
   } catch (error) {
     throw new UsageError(errorMessage(error));
@@ -336,10 +339,13 @@ async function store(
   provider: ProviderConfig,
   value: string,
   deps: AuthDeps,
+  flags: Flags,
 ): Promise<string> {
   const { outcome, tagError } = await deps
     .credentials(config.region)
-    .put({ providerId: provider.id, harness: provider.harness, auth: provider.auth }, value);
+    .put({ providerId: provider.id, harness: provider.harness, auth: provider.auth }, value, {
+      rerun: flags.rerun,
+    });
   const name = SECRET_NAMES.provider(provider.id);
   const verb = { created: "Stored", updated: "Replaced", restored: "Restored and replaced" }[
     outcome
@@ -391,7 +397,7 @@ async function authClaude(flags: Flags, deps: AuthDeps): Promise<string> {
       );
     }
   }
-  return store(config, provider, await ask(KINDS.claudeOauth, deps), deps);
+  return store(config, provider, await ask(KINDS.claudeOauth, deps), deps, flags);
 }
 
 async function authCodex(flags: Flags, deps: AuthDeps): Promise<string> {
@@ -400,7 +406,7 @@ async function authCodex(flags: Flags, deps: AuthDeps): Promise<string> {
   const provider = pickProvider(config, [{ harness: "codex", auth }], flags.id, "auth codex");
   await confirmPlanCredential(provider, flags, deps);
   if (flags.accessToken) {
-    return store(config, provider, await ask(KINDS.codexAccessToken, deps), deps);
+    return store(config, provider, await ask(KINDS.codexAccessToken, deps), deps, flags);
   }
   deps.out(
     "\nRunning codex login in a temporary CODEX_HOME. It's deleted as soon as codex " +
@@ -416,7 +422,7 @@ async function authCodex(flags: Flags, deps: AuthDeps): Promise<string> {
       ? new AuthError(`${error.message} Install the Codex CLI (npm install -g @openai/codex).`)
       : error;
   });
-  return store(config, provider, authJson, deps);
+  return store(config, provider, authJson, deps, flags);
 }
 
 async function authCursor(flags: Flags, deps: AuthDeps): Promise<string> {
@@ -431,7 +437,7 @@ async function authCursor(flags: Flags, deps: AuthDeps): Promise<string> {
     "auth cursor",
   );
   await confirmPlanCredential(provider, flags, deps);
-  return store(config, provider, await ask(KINDS.cursorKey, deps), deps);
+  return store(config, provider, await ask(KINDS.cursorKey, deps), deps, flags);
 }
 
 async function authApiKey(flags: Flags, deps: AuthDeps): Promise<string> {
@@ -447,7 +453,7 @@ async function authApiKey(flags: Flags, deps: AuthDeps): Promise<string> {
       : [{ harness: "codex", auth: "api-key" }];
   const provider = pickProvider(config, targets, flags.id, `auth api-key --provider ${vendor}`);
   const kind = vendor === "anthropic" ? KINDS.anthropicKey : KINDS.openaiKey;
-  return store(config, provider, await ask(kind, deps), deps);
+  return store(config, provider, await ask(kind, deps), deps, flags);
 }
 
 async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string; ok: boolean }> {
@@ -471,17 +477,21 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     tiers.flatMap(({ model }) => (model.kind === "id" ? [model.id] : [])),
   );
   const bedrock = deps.bedrock(region);
-  const models = await bedrock.anthropicModels({ legacyToCheck });
-  const profiles = await bedrock.inferenceProfiles();
+  const [models, profiles] = await Promise.all([
+    bedrock.anthropicModels({ legacyToCheck }),
+    bedrock.inferenceProfiles(),
+  ]);
   const current = models.filter((model) => !model.legacy);
-  const usable = current.filter((model) => model.usable);
+  // Usable means callable here too: access granted, and an id this region can call it by.
+  const callable = current.filter(
+    (model) => model.usable && (pinnableIds(model, profiles)?.length ?? 0) > 0,
+  );
+  const maybe = current.filter(
+    (model) => model.usable && pinnableIds(model, profiles) === undefined,
+  );
   const lines = current
     .toSorted((a, b) => a.modelId.localeCompare(b.modelId))
-    .map((model) =>
-      model.usable
-        ? `  ok       ${pinText(model, profiles)}`
-        : `  blocked  ${model.modelId}: ${model.problems.join(", ")}`,
-    );
+    .map((model) => modelLine(model, profiles));
 
   const tierLines: string[] = [];
   let blocked = false;
@@ -509,8 +519,14 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
     );
   }
   // The tiers decide. With none to check, the best this can say is whether anything is usable.
-  const ok = !blocked && (anyChecked || usable.length > 0);
-  if (!anyChecked && usable.length === 0) {
+  const ok = !blocked && (anyChecked || callable.length > 0 || maybe.length > 0);
+  if (profiles === undefined) {
+    notes.push(
+      "Couldn't list inference profiles (this AWS identity lacks bedrock:ListInferenceProfiles), " +
+        "so profile ids weren't checked. On-demand ids were.",
+    );
+  }
+  if (!anyChecked && callable.length === 0 && maybe.length === 0) {
     notes.unshift(
       current.length === 0
         ? `Bedrock offers no Anthropic models in ${region}. Pick another region.`
@@ -587,18 +603,33 @@ function parseModel(configured: string): ParsedModel {
 const supports = (model: ModelAccess, type: string) =>
   model.inferenceTypes.length === 0 || model.inferenceTypes.includes(type);
 
+const NEEDS_PROFILE_LIST = "needs bedrock:ListInferenceProfiles";
+
 /**
  * The ids this region can call a model by: its own id when it's callable on demand, else the
- * system-defined inference profiles Bedrock lists for it here.
+ * system-defined inference profiles Bedrock lists for it here. Empty when there's no way to
+ * call it here; undefined when the profiles couldn't be listed.
  */
-function pinnableIds(model: ModelAccess, profiles: readonly InferenceProfile[]): string[] {
+function pinnableIds(
+  model: ModelAccess,
+  profiles: readonly InferenceProfile[] | undefined,
+): string[] | undefined {
   if (supports(model, "ON_DEMAND")) return [model.modelId];
+  if (profiles === undefined) return undefined;
   return profiles.filter((profile) => profile.modelId === model.modelId).map((p) => p.id);
 }
 
-function pinText(model: ModelAccess, profiles: readonly InferenceProfile[]): string {
+/** One line of the model list: whether it's usable here, and the ids to pin if so. */
+function modelLine(model: ModelAccess, profiles: readonly InferenceProfile[] | undefined): string {
+  if (!model.usable) return `  blocked  ${model.modelId}: ${model.problems.join(", ")}`;
   const ids = pinnableIds(model, profiles);
-  return ids.length > 0 ? ids.join(" or ") : `${model.modelId} (no inference profile here)`;
+  if (ids === undefined) {
+    return `  unknown  ${model.modelId}: callable only through an inference profile (${NEEDS_PROFILE_LIST})`;
+  }
+  if (ids.length === 0) {
+    return `  blocked  ${model.modelId}: no way to call it here (no on-demand use, no inference profile in this region)`;
+  }
+  return `  ok       ${ids.join(" or ")}`;
 }
 
 type TierState = "ok" | "blocked" | "not checked";
@@ -609,7 +640,8 @@ interface Verdict {
 
 interface BedrockFacts {
   models: readonly ModelAccess[];
-  profiles: readonly InferenceProfile[];
+  /** Undefined when they couldn't be listed. */
+  profiles: readonly InferenceProfile[] | undefined;
   region: string;
 }
 
@@ -629,24 +661,26 @@ function tierVerdict(model: ParsedModel, tier: Tier, facts: BedrockFacts): Verdi
 
 /**
  * Aliases can't be checked from here: Claude Code picks the model at runtime, perhaps not one
- * this would pick. So the verdict is informational, except that a family with no usable
+ * this would pick. So the verdict is informational, except that a family with no callable
  * model at all is certain to fail.
  */
 function familyVerdict(families: readonly string[], tier: Tier, facts: BedrockFacts): Verdict {
   const hints: string[] = [];
   for (const family of families) {
     const pattern = new RegExp(`^anthropic\\.claude-(?:[\\d-]+-)?${family}(?:-|$)`);
-    const usable = facts.models.filter(
-      (model) =>
-        !model.legacy &&
-        model.usable &&
-        pattern.test(model.modelId) &&
-        pinnableIds(model, facts.profiles).length > 0,
-    );
-    if (usable.length === 0) {
+    const ids: string[] = [];
+    let unknown = 0;
+    for (const model of facts.models) {
+      if (model.legacy || !model.usable || !pattern.test(model.modelId)) continue;
+      const pins = pinnableIds(model, facts.profiles);
+      if (pins === undefined) unknown += 1;
+      else ids.push(...pins);
+    }
+    if (ids.length === 0 && unknown === 0) {
       return { state: "blocked", detail: `no usable ${family} model in ${facts.region}` };
     }
-    hints.push(`usable ${family} models here: ${usable.map((m) => m.modelId).join(", ")}`);
+    const more = unknown > 0 ? ` (and ${unknown} more: ${NEEDS_PROFILE_LIST})` : "";
+    hints.push(`usable ${family} ids here: ${ids.join(", ") || "none listed"}${more}`);
   }
   return {
     state: "not checked",
@@ -668,6 +702,7 @@ function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts):
   const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
   const instead = () => {
     const ids = pinnableIds(access, facts.profiles);
+    if (ids === undefined) return `use one of its inference profiles (${NEEDS_PROFILE_LIST})`;
     return ids.length > 0
       ? `use ${ids.join(" or ")}`
       : `${facts.region} has no inference profile for it`;
@@ -682,6 +717,9 @@ function idVerdict(id: string, prefix: string | undefined, facts: BedrockFacts):
     return { state: "ok", detail: `${id}${legacy}` };
   }
   const profileId = `${prefix}.${id}`;
+  if (facts.profiles === undefined) {
+    return { state: "not checked", detail: `${profileId}: ${NEEDS_PROFILE_LIST}` };
+  }
   if (!facts.profiles.some((profile) => profile.id === profileId && profile.modelId === id)) {
     return {
       state: "blocked",

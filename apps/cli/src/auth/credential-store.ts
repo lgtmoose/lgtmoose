@@ -68,7 +68,12 @@ export interface CredentialStore {
    * stores a new version of an existing one, or first restores one that `auth remove`
    * scheduled for deletion.
    */
-  put(label: CredentialLabel, value: string): Promise<PutResult>;
+  put(
+    label: CredentialLabel,
+    value: string,
+    /** The command that stored it, for messages that tell the person to run it again. */
+    options?: { rerun?: string },
+  ): Promise<PutResult>;
   /** Every provider credential, by name prefix. Secrets scheduled for deletion are left out. */
   list(): Promise<StoredCredential[]>;
   /** Schedules the provider's credential for deletion. */
@@ -146,37 +151,46 @@ const DEFINITE_CLIENT_ERRORS = new Set([
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The recovery window that puts a re-deleted secret back on its old purge date. When
- * DescribeSecret's DeletedDate is in the future it's the purge date, so the remaining days are
- * used, clamped to Secrets Manager's 7 to 30. When it's past or missing, the window the earlier
- * remove chose can't be known, so this falls back to the default and says so.
+ * The recovery window that puts a re-deleted secret back on, or just before, its old purge
+ * date. DescribeSecret's DeletedDate is when the earlier remove ran, and the window it chose
+ * isn't returned, so this assumes lgtmoose's own (RECOVERY_DAYS), which `auth remove` uses. The
+ * whole days left are rounded down, so the date never moves later, then clamped to Secrets
+ * Manager's 7 to 30, which can move it later; the note says which.
  */
 export function rescheduleDays(
-  scheduled: Date | undefined,
+  deletedAt: Date | undefined,
   now: Date,
 ): { days: number; note: string } {
-  if (scheduled === undefined || scheduled.getTime() <= now.getTime()) {
+  if (deletedAt === undefined) {
     return {
       days: RECOVERY_DAYS,
-      note: ": the earlier remove's window isn't known, so its date may have moved",
+      note: "the earlier removal's date couldn't be read, so the date may have moved",
     };
   }
-  const remaining = Math.ceil((scheduled.getTime() - now.getTime()) / DAY_MS);
+  const purge = deletedAt.getTime() + RECOVERY_DAYS * DAY_MS;
+  const remaining = Math.max(0, Math.floor((purge - now.getTime()) / DAY_MS));
   const days = Math.min(30, Math.max(7, remaining));
+  const assuming = `assuming the earlier removal used lgtmoose's ${RECOVERY_DAYS}-day window`;
   return {
     days,
     note:
       days === remaining
-        ? ", the same date as before"
-        : `: ${remaining} days were left, but Secrets Manager needs 7 to 30`,
+        ? `on or before the date it had, ${assuming}`
+        : `later than before: it had ${remaining} days left, ${assuming}, but Secrets Manager ` +
+          "needs at least 7",
   };
 }
 
 /** Said whenever a restore stands with the old value in it. */
-function oldValueLive(providerId: string, certainty: "does" | "may" = "does"): string {
+function oldValueLive(
+  providerId: string,
+  rerun: string | undefined,
+  certainty: "does" | "may" = "does",
+): string {
+  const again = rerun ?? "the same pnpm lgtmoose auth command";
   return (
     `The earlier removal is cancelled: the secret is restored and ${certainty} hold the OLD ` +
-    "credential, which sandbox tasks will use. Run pnpm lgtmoose auth again for it, or " +
+    `credential, which sandbox tasks will use. Run ${again} again, or ` +
     `pnpm lgtmoose auth remove ${providerId}.`
   );
 }
@@ -201,24 +215,25 @@ export function awsCredentialStore(
   /**
    * After UpdateSecret failed: did the version it asked for become current anyway? A timeout
    * or a dropped connection can fail a call AWS still applied, and DescribeSecret can lag, so
-   * it asks a few times. True when the version is current; false only when an answer listed
-   * the versions without it; undefined when no answer came.
+   * it asks again while it gets no answer. True when the version is current; false when an
+   * answer listed the versions without it; undefined when no answer came.
    */
   async function versionLanded(name: string, token: string): Promise<boolean | undefined> {
-    let absent = false;
     for (const [attempt, wait] of LANDED_CHECK_WAITS_MS.entries()) {
       if (attempt > 0) await sleep(wait);
       try {
         const { VersionIdsToStages } = await client.send(
           new DescribeSecretCommand({ SecretId: name }),
         );
-        if (VersionIdsToStages?.[token]?.includes("AWSCURRENT")) return true;
-        if (VersionIdsToStages !== undefined) absent = true;
+        // The first answer that lists the versions decides.
+        if (VersionIdsToStages !== undefined) {
+          return VersionIdsToStages[token]?.includes("AWSCURRENT") ?? false;
+        }
       } catch {
         // No answer this time; try again.
       }
     }
-    return absent ? false : undefined;
+    return undefined;
   }
 
   /** When the secret was set to be deleted, read before restoring it. Undefined if unknown. */
@@ -237,29 +252,37 @@ export function awsCredentialStore(
   async function undoRestore(
     name: string,
     providerId: string,
+    rerun: string | undefined,
     error: unknown,
-    scheduled: Date | undefined,
+    deletedAt: Date | undefined,
   ): Promise<Error> {
     const reason = awsMessage(error);
-    const { days, note } = rescheduleDays(scheduled, now());
+    const { days, note } = rescheduleDays(deletedAt, now());
+    let deletionDate: Date | undefined;
     try {
-      await client.send(new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: days }));
+      ({ DeletionDate: deletionDate } = await client.send(
+        new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: days }),
+      ));
     } catch (deleteError) {
       return new Error(
         `Restored ${name} (${region}) but couldn't store the new value: ${reason} Scheduling ` +
-          `its deletion again failed too (${awsReason(deleteError)}). ${oldValueLive(providerId)}`,
+          `its deletion again failed too (${awsReason(deleteError)}). ` +
+          oldValueLive(providerId, rerun),
         { cause: error },
       );
     }
+    const when =
+      deletionDate === undefined ? `in ${days} days` : `on ${deletionDate.toISOString()}`;
     return new Error(
       `Couldn't store the new value in ${name} (${region}): ${reason} It was restored first, ` +
-        `so it's scheduled for deletion again, in ${days} days${note}.`,
+        `so it's scheduled for deletion again, ${when}: ${note}.`,
       { cause: error },
     );
   }
 
   return {
-    async put(label, value) {
+    async put(label, value, putOptions = {}) {
+      const { rerun } = putOptions;
       const name = SECRET_NAMES.provider(label.providerId);
       let outcome: PutResult["outcome"];
       try {
@@ -308,13 +331,13 @@ export function awsCredentialStore(
         // or a lagging answer could mean the new value is in, and undoing would delete it.
         if (landed === false && DEFINITE_CLIENT_ERRORS.has(errorName(error) ?? "")) {
           throw outcome === "restored"
-            ? await undoRestore(name, label.providerId, error, scheduledDate)
+            ? await undoRestore(name, label.providerId, rerun, error, scheduledDate)
             : context(name, error);
         }
         if (landed !== true) {
           const holds =
             outcome === "restored"
-              ? oldValueLive(label.providerId, "may")
+              ? oldValueLive(label.providerId, rerun, "may")
               : "It holds either the new value or the previous one. Run this again to be sure.";
           throw new Error(
             `Couldn't tell whether the new value was stored in ${name} (${region}): ` +

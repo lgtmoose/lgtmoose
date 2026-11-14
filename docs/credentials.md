@@ -28,7 +28,7 @@ Before storing a plan credential, auth shows a warning about vendor terms and as
 - Anything that isn't a Bedrock model id fails, such as an Anthropic API id like `claude-sonnet-4-5-20250929`.
 - `default` and ARNs are reported as not checked.
 
-The list of models shows the ids to pin for each one: the bare id when it can be called on demand, otherwise the inference profiles Bedrock lists for it in the region.
+The list of models shows the ids to pin for each one: the bare id when it can be called on demand, otherwise the inference profiles Bedrock lists for it in the region. A model with neither can't be called here, so it's listed as blocked. Without `bedrock:ListInferenceProfiles`, profile ids are reported as not checked, while on-demand ids are still checked.
 
 Access is checked for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note. An account-wide error, such as access denied or throttling, fails the command.
 

@@ -199,6 +199,18 @@ describe("awsBedrockAccess", () => {
     ]);
   });
 
+  it("treats a denied profile listing as unknown, and fails on any other error", async () => {
+    const failing = (name: string): BedrockSender => ({
+      send: () => Promise.reject(Object.assign(new Error("nope"), { name })),
+    });
+    await expect(
+      awsBedrockAccess(failing("AccessDeniedException"), "eu-west-2").inferenceProfiles(),
+    ).resolves.toBeUndefined();
+    await expect(
+      awsBedrockAccess(failing("ThrottlingException"), "eu-west-2").inferenceProfiles(),
+    ).rejects.toThrow("failed on ListInferenceProfiles: nope.");
+  });
+
   it("wraps a failed listing with the region", async () => {
     const client: BedrockSender = {
       send: () => Promise.reject(Object.assign(new Error("denied"), { name: "AccessDenied" })),
