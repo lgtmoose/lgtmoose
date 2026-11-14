@@ -68,6 +68,21 @@
               "type": "string",
               "pattern": "^[\\w.:@/[\\]-]{1,128}$"
             }
+          },
+          "vertex": {
+            "type": "object",
+            "properties": {
+              "region": {
+                "default": "global",
+                "type": "string",
+                "pattern": "^(global|us|eu|[a-z]+-[a-z]+\\d+)$"
+              },
+              "projectId": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [

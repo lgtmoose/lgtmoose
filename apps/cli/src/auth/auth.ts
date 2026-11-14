@@ -2,6 +2,9 @@ import { parseArgs } from "node:util";
 import {
   PROVIDER_ID_PATTERN,
   SECRET_NAMES,
+  BEDROCK_MODEL_ID,
+  MODEL_ALIAS_FAMILIES,
+  MODEL_MODIFIER,
   TIERS,
   isPlanCredential,
   modelFor,
@@ -49,6 +52,8 @@ export interface AuthDeps {
   tmpRoot?: string;
   /** Progress for the person. Never receives a secret. */
   out: (text: string) => void;
+  /** Reads `auth vertex`'s service-account key file. */
+  readKeyFile: (path: string) => Promise<string>;
 }
 
 export interface CommandResult {
@@ -126,6 +131,7 @@ Methods:
   bedrock                   Check the Bedrock models each tier pins can be called here. Aliases such
                             as sonnet are only hinted at; pin model ids to check them. Stores nothing
   api-key --provider <p>    Paste an API key: anthropic or openai
+  vertex <key-file>         Upload a Google Cloud service-account key (JSON) for Vertex AI
   list                      Show every provider credential, and which providers lack one
   remove <id>               Delete provider <id>'s credential (recoverable for 7 days)
 
@@ -260,6 +266,7 @@ const METHOD_FLAGS: Record<string, readonly (keyof Flags)[]> = {
   cursor: ["id", "acceptVendorTerms"],
   bedrock: ["id"],
   "api-key": ["id", "provider"],
+  vertex: ["id"],
   list: [],
   remove: ["yes"],
 };
@@ -284,8 +291,11 @@ function checkFlags(method: string, flags: Flags): void {
       throw new UsageError(`auth ${method} doesn't take ${name}.`);
     }
   }
-  const extra = flags.positionals.slice(method === "remove" ? 2 : 1);
+  const extra = flags.positionals.slice(method === "remove" || method === "vertex" ? 2 : 1);
   if (extra.length > 0) throw new UsageError(`Unexpected argument "${extra[0]}".`);
+  if (method === "vertex" && flags.positionals[1] === undefined) {
+    throw new UsageError(`auth vertex needs the key file: ${CLI} auth vertex <key-file>.`);
+  }
   if (method === "remove" && flags.positionals[1] === undefined) {
     throw new UsageError(`auth remove needs the provider id: ${CLI} auth remove <id>.`);
   }
@@ -500,6 +510,56 @@ async function authApiKey(flags: Flags, deps: AuthDeps): Promise<string> {
   return store(config, provider, await ask(kind, deps), deps, flags);
 }
 
+/**
+ * Stores a service-account key file's JSON. The sandbox writes it into the run's temporary home
+ * with mode 0600 and points GOOGLE_APPLICATION_CREDENTIALS at it
+ * (https://code.claude.com/docs/en/google-vertex-ai).
+ */
+async function authVertex(flags: Flags, deps: AuthDeps): Promise<string> {
+  const config = await loadConfig(deps);
+  const provider = pickProvider(
+    config,
+    [
+      { harness: "claude-code", auth: "vertex" },
+      { harness: "agent-sdk", auth: "vertex" },
+    ],
+    flags.id,
+    "auth vertex",
+  );
+  // checkFlags makes sure the path is there.
+  const path = flags.positionals[1] ?? "";
+  let text: string;
+  try {
+    text = await deps.readKeyFile(path);
+  } catch (error) {
+    throw new AuthError(`Could not read ${path}: ${errorMessage(error)}`);
+  }
+  let key: unknown;
+  try {
+    key = JSON.parse(text);
+  } catch {
+    // Never echo the file: it holds a private key.
+    throw new AuthError(`${path} isn't JSON. Download the service account's key as JSON.`);
+  }
+  const fields = typeof key === "object" && key !== null ? (key as Record<string, unknown>) : {};
+  if (
+    fields.type !== "service_account" ||
+    typeof fields.private_key !== "string" ||
+    typeof fields.client_email !== "string"
+  ) {
+    throw new AuthError(
+      `${path} isn't a service-account key: it needs type "service_account", client_email and private_key.`,
+    );
+  }
+  // Runs need a project: the config's, else the key's own.
+  if (provider.vertex?.projectId === undefined && typeof fields.project_id !== "string") {
+    throw new AuthError(
+      `${path} has no project_id. Set ${provider.id}.vertex.projectId in lgtmoose.config.ts.`,
+    );
+  }
+  return store(config, provider, JSON.stringify(key), deps, flags);
+}
+
 async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string; ok: boolean }> {
   const config = await loadConfig(deps);
   const region = config.region;
@@ -602,24 +662,6 @@ async function authBedrock(flags: Flags, deps: AuthDeps): Promise<{ text: string
   };
 }
 
-/**
- * The families Claude Code's aliases follow. Claude Code (or an ANTHROPIC_DEFAULT_*_MODEL
- * override) picks the model at runtime, so all auth can check is that the family has one.
- * `opusplan` plans with Opus and works with Sonnet.
- */
-const ALIAS_FAMILIES: Readonly<Record<string, readonly string[]>> = {
-  haiku: ["haiku"],
-  sonnet: ["sonnet"],
-  opus: ["opus"],
-  opusplan: ["opus", "sonnet"],
-};
-
-/** A Claude Code modifier such as `[1m]` (the 1M-token context window): `sonnet[1m]`. */
-const MODIFIER = /\[[^\]]*\]$/;
-
-/** A Bedrock model id, bare (`anthropic.…`) or through a cross-region profile (`us.anthropic.…`). */
-const BEDROCK_ID = /^(?:([a-z-]+)\.)?(anthropic\..+)$/;
-
 type ParsedModel = { configured: string } & (
   | { kind: "alias"; families: readonly string[] }
   | { kind: "id"; id: string; prefix: string | undefined }
@@ -629,8 +671,10 @@ type ParsedModel = { configured: string } & (
 
 /** What a tier's configured model value means under Bedrock auth. */
 function parseModel(configured: string): ParsedModel {
-  const value = configured.replace(MODIFIER, "");
-  const families = ALIAS_FAMILIES[value];
+  const value = configured.replace(MODEL_MODIFIER, "");
+  const families = Object.hasOwn(MODEL_ALIAS_FAMILIES, value)
+    ? MODEL_ALIAS_FAMILIES[value]
+    : undefined;
   if (families !== undefined) return { configured, kind: "alias", families };
   if (value === "default") {
     return { configured, kind: "unchecked", why: "Claude Code's default model, chosen at runtime" };
@@ -638,7 +682,7 @@ function parseModel(configured: string): ParsedModel {
   if (value.startsWith("arn:")) {
     return { configured, kind: "unchecked", why: "an ARN, which this can't look up" };
   }
-  const match = BEDROCK_ID.exec(value);
+  const match = BEDROCK_MODEL_ID.exec(value);
   const id = match?.[2];
   if (id === undefined) {
     return {
@@ -1015,6 +1059,8 @@ export async function runAuth(
         return ok(await authCursor(flags, deps));
       case "api-key":
         return ok(await authApiKey(flags, deps));
+      case "vertex":
+        return ok(await authVertex(flags, deps));
       case "list":
         return ok(await authList(deps));
       default:

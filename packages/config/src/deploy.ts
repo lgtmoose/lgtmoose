@@ -84,6 +84,27 @@ const providerSchema = z
     auth: z.enum(AUTH_METHODS),
     /** Models per tier, overriding `DEFAULT_TIER_MODELS` for this provider's harness. */
     models: z.partialRecord(z.enum(TIERS), modelName).optional(),
+    /**
+     * Google Cloud settings for `vertex` auth. The service-account key itself is the stored
+     * credential (`lgtmoose auth`); its `project_id` is used when `projectId` is left out.
+     */
+    vertex: z
+      .object({
+        /** CLOUD_ML_REGION: `global`, a multi-region (`us`, `eu`) or a region (`us-east5`). */
+        region: z
+          .string()
+          .regex(
+            /^(global|us|eu|[a-z]+-[a-z]+\d+)$/,
+            "use global, us, eu or a region like us-east5",
+          )
+          .default("global"),
+        projectId: z
+          .string()
+          .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/, "use a Google Cloud project ID")
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((provider, ctx) => {
@@ -93,6 +114,13 @@ const providerSchema = z
         code: "custom",
         path: ["auth"],
         message: `${provider.harness} doesn't support "${provider.auth}". Use one of: ${allowed.join(", ")}`,
+      });
+    }
+    if (provider.vertex !== undefined && provider.auth !== "vertex") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["vertex"],
+        message: 'vertex settings apply only to auth: "vertex"',
       });
     }
   });

@@ -9,6 +9,12 @@ export interface HarnessRunOptions<T> {
    * CLI's own, and the prompt is PR content, not a secret. The credential never goes on argv.
    */
   prompt: string;
+  /**
+   * Instructions that are the same on every batch (the role's rules and rule packs). The
+   * agent-sdk harness sends them as a cached system prompt; the CLI harnesses put them before
+   * `prompt` (see `fullPrompt`).
+   */
+  system?: string;
   /** The checkout to review. The model can read only inside it. */
   cwd: string;
   /** What the model must return. Its output is parsed and validated with this. */
@@ -24,6 +30,11 @@ export interface HarnessRunOptions<T> {
    * (see `MODEL_TIERS`). `model` still wins when the harness gets one.
    */
   tier?: ModelTier;
+}
+
+/** The task for a harness without a system prompt: `system` (when given), then `prompt`. */
+export function fullPrompt(options: Pick<HarnessRunOptions<unknown>, "prompt" | "system">): string {
+  return options.system === undefined ? options.prompt : `${options.system}\n\n${options.prompt}`;
 }
 
 /** Model tiers from the deploy config: cheap and quick, the default, and the strongest. */
