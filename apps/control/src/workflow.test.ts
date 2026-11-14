@@ -11,7 +11,7 @@ import { ShadowPoster, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
 import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
-import { post } from "./post.js";
+import { REVIEW_CLAIM_TTL_MS, post, reviewMarker } from "./post.js";
 import { prepare, type RunManifest } from "./prepare.js";
 import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
@@ -186,11 +186,18 @@ function harness(setup: Setup = {}) {
     async putFile(key, path) {
       files.set(key, await readFile(path));
     },
+    async putTextIfAbsent(key, body) {
+      if (objects.has(key)) return false;
+      objects.set(key, body);
+      return true;
+    },
     async getText(key) {
       return objects.get(key);
     },
   };
   const runs = memoryRuns();
+  /** Markers of the reviews "on GitHub", as the test sets them. */
+  const reviewsOnGitHub = new Set<string>();
   const reader: PullReader = {
     pull: async () => ({ ...pull(setup.head ?? headSha), state: setup.state ?? "open" }),
     comments: async () => [],
@@ -219,6 +226,7 @@ function harness(setup: Setup = {}) {
         token: async () => "",
         poster: (runId) =>
           new ShadowPoster({ store: { put: (key, body) => store.putText(key, body) }, runId }),
+        reviewPosted: async (_pull, marker) => reviewsOnGitHub.has(marker),
       };
     },
     clone: cloneAtSha,
@@ -230,7 +238,18 @@ function harness(setup: Setup = {}) {
     archive: tarArchive,
     log: (message) => logs.push(message),
   };
-  return { deps, objects, files, runs, tokens, installations, logs, execution, heartbeats };
+  return {
+    deps,
+    objects,
+    files,
+    runs,
+    tokens,
+    installations,
+    logs,
+    execution,
+    heartbeats,
+    reviewsOnGitHub,
+  };
 }
 
 const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
@@ -381,14 +400,84 @@ describe("post", () => {
     expect(await post(h.deps, RUN_ID, async () => false)).toMatchObject({ posted: true });
   });
 
+  it("posts the review once when a retry overlaps the attempt it replaced", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    // Both attempts read no saved progress, as when they overlap: the first claims the review,
+    // the second finds the claim and backs off.
+    const getText = h.deps.store.getText.bind(h.deps.store);
+    h.deps.store.getText = async (key) =>
+      key === runKeys(RUN_ID).posted ? undefined : getText(key);
+    const [first, second] = await Promise.allSettled([post(h.deps, RUN_ID), post(h.deps, RUN_ID)]);
+    expect(calls.filter((call) => call === "submitReview")).toHaveLength(1);
+    expect([first.status, second.status].sort()).toEqual(["fulfilled", "rejected"]);
+    expect(h.objects.has(runKeys(RUN_ID).reviewClaim)).toBe(true);
+  });
+
+  it("finds a claimed review on GitHub, or posts it once the claim has expired", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    const claim = runKeys(RUN_ID).reviewClaim;
+    // An attempt claimed and posted the review, then died before saving its progress.
+    h.objects.set(claim, JSON.stringify({ claimedAt: Date.now() }));
+    h.reviewsOnGitHub.add(reviewMarker(RUN_ID));
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(calls).not.toContain("submitReview");
+
+    // One that claimed it and died before posting: posted once the claim has expired.
+    const g = harness();
+    await prepare(g.deps, JOB, EXECUTION, SETTINGS);
+    g.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const again = countingPoster(g);
+    g.objects.set(claim, JSON.stringify({ claimedAt: Date.now() }));
+    await expect(post(g.deps, RUN_ID)).rejects.toThrow("Another attempt claimed");
+    expect(again).not.toContain("submitReview");
+    g.objects.set(claim, JSON.stringify({ claimedAt: Date.now() - REVIEW_CLAIM_TTL_MS - 1 }));
+    expect(await post(g.deps, RUN_ID)).toMatchObject({ posted: true });
+    expect(again.filter((call) => call === "submitReview")).toHaveLength(1);
+  });
+
+  it("marks its review so a retry can find it", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    await post(h.deps, RUN_ID);
+    const [review] = shadowRecords(h.objects, "review");
+    expect(JSON.stringify(review)).toContain(`<!-- ${reviewMarker(RUN_ID)} -->`);
+  });
+
+  it("fails rather than start over when its saved progress can't be read", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    for (const bad of ["{", JSON.stringify({ review: "yes" })]) {
+      h.objects.set(runKeys(RUN_ID).posted, bad);
+      await expect(post(h.deps, RUN_ID)).rejects.toThrow("saved progress");
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("leaves the summary and label to a newer run that already posted", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
     const calls = countingPoster(h);
     h.runs.newer.posted = true;
+    let checks = 0;
+    const newerRunPosted = h.runs.newerRunPosted.bind(h.runs);
+    h.runs.newerRunPosted = async (runId) => {
+      checks += 1;
+      return newerRunPosted(runId);
+    };
     expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true });
     expect(calls).toEqual(["submitReview", "completeCheckRun"]);
+    // One check covers both the summary and the label.
+    expect(checks).toBe(1);
   });
 
   it("records what it posted when it's stopped while posting", async () => {
@@ -579,10 +668,64 @@ describe("runCommand", () => {
     };
     await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
     expect(cloned).toBe(false);
-    expect(h.logs).toContain("gave up the step: a retry has taken over");
+    expect(h.logs).toContain("gave up the step: a retry may have taken over");
     // Nothing reported on the token, and the retry's outcome isn't touched.
     expect(h.tokens.succeeded).toEqual([]);
     expect(h.tokens.failed).toEqual([]);
+  });
+
+  /** The token dies on the second heartbeat, while the clone waits for it. */
+  function dyingMidClone(h: ReturnType<typeof harness>) {
+    h.deps.heartbeatIntervalMs = 5;
+    h.deps.statusRetryMs = 1;
+    let beats = 0;
+    let died: () => void = () => undefined;
+    const tokenDied = new Promise<void>((resolve) => {
+      died = resolve;
+    });
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      if (beats === 1) return;
+      died();
+      throw dead();
+    };
+    const clone = h.deps.clone.bind(h.deps);
+    const state = { cloned: false };
+    h.deps.clone = async (options) => {
+      await tokenDied;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      state.cloned = true;
+      return clone(options);
+    };
+    return state;
+  }
+
+  it("gives the step up when it can't confirm its execution was stopped", async () => {
+    const h = harness();
+    const state = dyingMidClone(h);
+    let checks = 0;
+    h.deps.executionStatus = async () => {
+      checks += 1;
+      throw new Error("throttled");
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(checks).toBe(3);
+    expect(state.cloned).toBe(false);
+    expect(h.logs).toContain("gave up the step: a retry may have taken over");
+  });
+
+  it("finishes the step when a retried check confirms its execution was stopped", async () => {
+    const h = harness();
+    dyingMidClone(h);
+    let checks = 0;
+    h.deps.executionStatus = async () => {
+      checks += 1;
+      if (checks < 3) throw new Error("throttled");
+      return "ABORTED";
+    };
+    await runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    expect(h.logs).not.toContain("gave up the step: a retry may have taken over");
+    expect(h.tokens.succeeded).toHaveLength(1);
   });
 
   it("sends heartbeats while a step runs, and stops when it's done", async () => {

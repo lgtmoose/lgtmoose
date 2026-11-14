@@ -15,6 +15,7 @@ import {
   GitHubPoster,
   ShadowPoster,
   installationTokenProvider,
+  reviewMarkerComment,
 } from "@lgtmoose/poster";
 import { and, eq, gt, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -37,6 +38,25 @@ export function s3ArtifactStore(client: S3Client, bucket: string): ArtifactStore
           ContentType: "application/json",
         }),
       );
+    },
+    async putTextIfAbsent(key, body) {
+      try {
+        await client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: body,
+            ContentType: "application/json",
+            IfNoneMatch: "*",
+          }),
+        );
+        return true;
+      } catch (error) {
+        // 412: it exists. 409: another write of it is in flight.
+        const name = errorName(error);
+        if (name === "PreconditionFailed" || name === "ConditionalRequestConflict") return false;
+        throw error;
+      }
     },
     async putFile(key, path, contentType) {
       const { size } = await stat(path);
@@ -348,6 +368,16 @@ export async function awsControlDeps(
                 labelReader: new GitHubLabelClient(client, pull),
               })
             : new GitHubPoster(client),
+        async reviewPosted(pull, marker) {
+          if (options.shadow) return false;
+          const comment = reviewMarkerComment(marker);
+          const reviews = await client.list<{ body?: unknown }>(
+            `/repos/${pull.owner}/${pull.repo}/pulls/${pull.pull}/reviews`,
+          );
+          return reviews.some(
+            (review) => typeof review.body === "string" && review.body.includes(comment),
+          );
+        },
       };
     },
     clone: cloneAtSha,

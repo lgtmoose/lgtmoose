@@ -5,6 +5,8 @@ import type { Poster, PullRef } from "@lgtmoose/poster";
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
+  /** Writes the object only if there's none yet; false when there was one. */
+  putTextIfAbsent(key: string, body: string): Promise<boolean>;
   /** Uploads a local file, such as the checkout archive. */
   putFile(key: string, path: string, contentType: string): Promise<void>;
   /** The object's text, or undefined when there's no such object. */
@@ -77,6 +79,11 @@ export interface ControlDeps {
     reader: PullReader;
     token: () => Promise<string>;
     poster: (runId: string, pull: PullRef) => Poster;
+    /**
+     * Whether the PR has a review whose body carries `marker` (see `reviewMarkerComment`).
+     * Always false in shadow mode, where reviews are recorded, not posted.
+     */
+    reviewPosted: (pull: PullRef, marker: string) => Promise<boolean>;
   }>;
   clone(options: CloneOptions): Promise<Repo>;
   cloneUrl(owner: string, repo: string): string;

@@ -20,6 +20,11 @@ export interface ReviewInput {
   nitCap: number;
   /** A line or two for the top of the review body, such as a link to the summary comment. */
   intro?: string;
+  /**
+   * Text for a hidden HTML comment at the end of the body, so the poster can find this review
+   * again (say, the run's ID). Letters, digits, `-`, `_` and `:` only.
+   */
+  marker?: string;
 }
 
 export interface ReviewPayload {
@@ -35,6 +40,19 @@ export interface ReviewPayload {
   nitsLeftOut: number;
   /** The intro the body starts with, kept so a retry rebuilds the same body. */
   intro?: string;
+  /** The hidden marker at the end of the body, kept for the same reason. */
+  marker?: string;
+}
+
+/** The hidden comment a marked review's body ends with. */
+export function reviewMarkerComment(marker: string): string {
+  if (!/^[\w:-]{1,100}$/.test(marker))
+    throw new Error("A review marker is letters, digits, -, _ and :.");
+  return `<!-- ${marker} -->`;
+}
+
+function withMarker(body: string, marker: string | undefined): string {
+  return marker === undefined ? body : `${body}\n\n${reviewMarkerComment(marker)}`;
 }
 
 /**
@@ -167,12 +185,16 @@ export function buildReview(input: ReviewInput): ReviewPayload {
   }
   return {
     event: input.event,
-    body: reviewBody(input.event, inBody, capped.left, input.intro, comments.length),
+    body: withMarker(
+      reviewBody(input.event, inBody, capped.left, input.intro, comments.length),
+      input.marker,
+    ),
     comments,
     commented,
     inBody,
     nitsLeftOut: capped.left,
     ...(input.intro === undefined ? {} : { intro: input.intro }),
+    ...(input.marker === undefined ? {} : { marker: input.marker }),
   };
 }
 
@@ -184,7 +206,10 @@ export function withCommentsInBody(payload: ReviewPayload): ReviewPayload {
   const inBody = [...payload.inBody, ...payload.commented];
   return {
     ...payload,
-    body: reviewBody(payload.event, inBody, payload.nitsLeftOut, payload.intro),
+    body: withMarker(
+      reviewBody(payload.event, inBody, payload.nitsLeftOut, payload.intro),
+      payload.marker,
+    ),
     comments: [],
     commented: [],
     inBody,

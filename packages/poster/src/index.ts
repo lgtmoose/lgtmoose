@@ -23,6 +23,7 @@ export {
 export {
   buildReview,
   reviewBody,
+  reviewMarkerComment,
   withCommentsInBody,
   type ReviewComment,
   type ReviewInput,

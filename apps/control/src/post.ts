@@ -88,20 +88,70 @@ const postProgressSchema = z.object({
   label: z.boolean().optional(),
 });
 
-/** Next to the run's prepared review: `runs/<id>/posted.json`. */
-export function postProgressKey(runId: string): string {
-  return runKeys(runId).prepared.replace(/prepared\.json$/, "posted.json");
-}
-
-/** An earlier attempt's progress. Unreadable progress counts as none: posting starts over. */
+/**
+ * An earlier attempt's progress. Progress that's there but can't be read fails the step: a
+ * retry mustn't assume nothing was posted.
+ */
 function readProgress(text: string | undefined): PostProgress {
   if (text === undefined) return {};
+  let json: unknown;
   try {
-    const parsed = postProgressSchema.safeParse(JSON.parse(text));
-    return parsed.success ? withoutUndefined(parsed.data) : {};
+    json = JSON.parse(text);
   } catch {
-    return {};
+    throw new Error("The post step's saved progress isn't JSON.");
   }
+  const parsed = postProgressSchema.safeParse(json);
+  if (!parsed.success) throw new Error("The post step's saved progress doesn't match its schema.");
+  return withoutUndefined(parsed.data);
+}
+
+function parseJson(text: string | undefined): unknown {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The hidden marker in a run's review, by which a retry finds it on GitHub. */
+export function reviewMarker(runId: string): string {
+  return `lgtmoose-run:${runId}`;
+}
+
+/**
+ * How long a review claim is honoured without its review showing up on GitHub. An attempt
+ * posts within seconds of claiming, so past this it's taken to have died before posting, and
+ * the review is posted. Shorter than the Post step's retries take, so they get past it.
+ */
+export const REVIEW_CLAIM_TTL_MS = 2 * 60_000;
+
+const claimSchema = z.object({ claimedAt: z.number() });
+
+/**
+ * Claims the run's review for this attempt, before it posts it, so two attempts (a retry and
+ * the attempt it replaced, still alive) can't both post. Returns true when another attempt has
+ * already posted it; throws when another attempt holds a recent claim and its review isn't on
+ * GitHub yet (the step's retry tries again); returns false when this attempt should post.
+ */
+async function reviewClaimed(
+  deps: ControlDeps,
+  github: Awaited<ReturnType<ControlDeps["github"]>>,
+  pull: PullRef,
+  runId: string,
+  claimKey: string,
+): Promise<boolean> {
+  const now = Date.now();
+  if (await deps.store.putTextIfAbsent(claimKey, JSON.stringify({ claimedAt: now }))) return false;
+  if (await github.reviewPosted(pull, reviewMarker(runId))) return true;
+  const claim = claimSchema.safeParse(parseJson(await deps.store.getText(claimKey)));
+  // An unreadable claim is no claim.
+  const age = claim.success ? now - claim.data.claimedAt : Number.POSITIVE_INFINITY;
+  if (age < REVIEW_CLAIM_TTL_MS) {
+    throw new Error("Another attempt claimed this run's review and may be posting it.");
+  }
+  deps.log("review claim expired; posting", { runId, ageMs: age });
+  return false;
 }
 
 /** Why a run for `headSha` no longer counts, given the PR as GitHub has it now. */
@@ -177,9 +227,8 @@ export async function post(
   // may never stop this execution (it may not have seen the event that made it stale).
   // What an earlier attempt of this step posted: a retry carries on from there, and once the
   // review is posted the run is recorded whatever happens to the PR meanwhile.
-  const progressKey = postProgressKey(runId);
-  const progress = readProgress(await deps.store.getText(progressKey));
-  const save = () => deps.store.putText(progressKey, JSON.stringify(progress));
+  const progress = readProgress(await deps.store.getText(keys.posted));
+  const save = () => deps.store.putText(keys.posted, JSON.stringify(progress));
 
   let stale: string | undefined;
   if (!progress.review) {
@@ -199,6 +248,7 @@ export async function post(
     outsideDiff: report.body,
     files: prepared.files,
     nitCap: config.gate.nit_cap,
+    marker: reviewMarker(runId),
   });
   const record = () =>
     deps.runs.succeedRun(runId, {
@@ -210,6 +260,11 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
   try {
+    if (!progress.review && (await reviewClaimed(deps, github, pull, runId, keys.reviewClaim))) {
+      // Posted by an attempt that died before it saved its progress.
+      progress.review = true;
+      await save();
+    }
     if (!progress.review) {
       await poster.submitReview(pull, pr.headSha, payload);
       progress.review = true;
@@ -228,7 +283,9 @@ export async function post(
     }
     // The summary comment and the label are the PR's, not this head's: once a newer run has
     // posted they're its, and an older run finishing late leaves them alone.
-    if (!progress.summary && !(await deps.runs.newerRunPosted(runId))) {
+    const prLevel =
+      !(progress.summary && progress.label) && !(await deps.runs.newerRunPosted(runId));
+    if (!progress.summary && prLevel) {
       const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
       const comment = await poster.upsertSummaryComment(pull, report.summary, summaryId);
       const id = comment.id ?? summaryId;
@@ -236,11 +293,7 @@ export async function post(
       progress.summary = true;
       await save();
     }
-    if (
-      decision.label !== undefined &&
-      !progress.label &&
-      !(await deps.runs.newerRunPosted(runId))
-    ) {
+    if (decision.label !== undefined && !progress.label && prLevel) {
       const labels = await syncStatusLabel(poster.labels(pull), {
         target: decision.label,
         statusLabels: statusLabels(config),

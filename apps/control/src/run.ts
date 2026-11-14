@@ -26,7 +26,26 @@ export interface StepDeps extends ControlDeps {
   heartbeat(taskToken: string): Promise<void>;
   /** For tests: the heartbeat interval. */
   heartbeatIntervalMs?: number;
+  /** For tests: the wait between execution status checks after a dead token. */
+  statusRetryMs?: number;
 }
+
+/** Tries to read the execution's status a few times; undefined if every try failed. */
+async function confirmedStatus(deps: StepDeps, executionArn: string): Promise<string | undefined> {
+  for (let attempt = 1; attempt <= STATUS_ATTEMPTS; attempt += 1) {
+    try {
+      return await deps.executionStatus(executionArn);
+    } catch (error) {
+      deps.log("execution status check failed", { attempt, error: causeOf(error) });
+      if (attempt < STATUS_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, deps.statusRetryMs ?? 1_000));
+      }
+    }
+  }
+  return undefined;
+}
+
+const STATUS_ATTEMPTS = 3;
 
 /** This attempt of the step was given up: a retry has taken over. */
 export class StepAbandoned extends Error {
@@ -37,10 +56,11 @@ export class StepAbandoned extends Error {
  * Runs `work` while sending heartbeats on its task token: one at once, then every interval. A
  * failed heartbeat (throttling, a network blip) is logged and the beats go on. A dead token
  * stops them, and then:
- * - on a running execution, this attempt timed out and a retry has the step: `work` is given
- *   up (StepAbandoned), so the two don't race;
- * - on a stopped one, `work` finishes, and its outcome is found dead on the token afterwards
- *   (a stop mustn't cut a post short).
+ * - on an execution confirmed stopped (ABORTED), `work` finishes, and its outcome is found dead
+ *   on the token afterwards (a stop mustn't cut a post short);
+ * - otherwise, running or unknown (the status check failed every time), this attempt timed
+ *   out and a retry may have the step: `work` is given up (StepAbandoned), so the two don't
+ *   race. Post's review claim covers a retry that overlaps it anyway.
  */
 async function withHeartbeat<T>(
   deps: StepDeps,
@@ -57,8 +77,9 @@ async function withHeartbeat<T>(
   abandoned.catch(() => undefined);
   const onDead = async () => {
     beating = false;
-    const status = await deps.executionStatus(executionArn).catch(() => undefined);
-    if (status === "RUNNING") abandon(new StepAbandoned("a retry has taken over this step"));
+    if ((await confirmedStatus(deps, executionArn)) !== "ABORTED") {
+      abandon(new StepAbandoned("a retry may have taken over this step"));
+    }
   };
   const beat = () => {
     if (!beating) return;
@@ -112,9 +133,9 @@ async function report(
   }
 }
 
-/** A retry has the step: this attempt reports nothing. The process exits with its work. */
+/** A retry may have the step: this attempt reports nothing. The process exits with its work. */
 function gaveUp(deps: StepDeps, executionArn: string): void {
-  deps.log("gave up the step: a retry has taken over", { executionArn });
+  deps.log("gave up the step: a retry may have taken over", { executionArn });
 }
 
 /**

@@ -37,6 +37,10 @@ export function runKeys(runId: string) {
   const batch = (index: number) => `${root}batches/${assertIndex(index)}/`;
   return {
     prepared: `${root}prepared.json`,
+    /** What the post step has posted so far, for a retry to carry on from. */
+    posted: `${root}posted.json`,
+    /** Written once, before the run's review is posted: the attempt that writes it posts. */
+    reviewClaim: `${root}review-claim.json`,
     checkout: `${root}checkout.tar.gz`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,

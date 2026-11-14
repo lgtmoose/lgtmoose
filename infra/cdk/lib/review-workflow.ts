@@ -292,10 +292,13 @@ export class ReviewWorkflow extends Construct {
       jitterStrategy: JitterType.FULL,
     });
     // A GitHub write failed, or the task died: post records its progress in the run's
-    // objects, so a retry carries on from there and never posts a second review.
+    // objects, and claims the review before posting it, so a retry carries on from there and
+    // never posts a second review. A retry waiting out another attempt's claim fails until the
+    // claim expires (`REVIEW_CLAIM_TTL_MS` in @lgtmoose/control, 2 minutes), so the last
+    // attempt starts after it: 1 + 2 + 4 minutes.
     post.addRetry({
       errors: [POST_FAILED, Errors.HEARTBEAT_TIMEOUT],
-      maxAttempts: 2,
+      maxAttempts: 3,
       interval: Duration.minutes(1),
       backoffRate: 2,
       jitterStrategy: JitterType.FULL,
