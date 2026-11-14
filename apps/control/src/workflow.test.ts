@@ -20,7 +20,7 @@ import type {
   RunStore,
 } from "./ports.js";
 import { post } from "./post.js";
-import { RESUME_RUNS, prepare, type RunManifest } from "./prepare.js";
+import { RESUME_RUNS, prepare, readManifest, type RunManifest } from "./prepare.js";
 import { PREPARE_FAILED, runCommand } from "./run.js";
 
 const exec = promisify(execFile);
@@ -144,6 +144,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       lastReviewedSha: pr.lastReviewedSha,
       statusLabel: pr.statusLabel,
       lastReviewEvent: pr.lastReviewEvent,
+      lastReviewId: pr.lastReviewId,
     });
   return {
     runs,
@@ -158,6 +159,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
         lastReviewedSha: undefined,
         statusLabel: undefined,
         lastReviewEvent: undefined,
+        lastReviewId: undefined,
         status: "running",
         executionArn: input.executionArn,
         files: [],
@@ -205,8 +207,10 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
       if (!run) return;
       Object.assign(run, { status: "succeeded", result });
       Object.assign(pr, {
-        ...(result.reviewedSha === undefined ? {} : { lastReviewedSha: result.reviewedSha }),
-        ...(result.reviewEvent === undefined ? {} : { lastReviewEvent: result.reviewEvent }),
+        lastReviewedSha: result.reviewedSha,
+        ...(result.review === undefined
+          ? {}
+          : { lastReviewEvent: result.review.event, lastReviewId: result.review.id }),
         statusLabel: result.statusLabel,
         summaryCommentId: result.summaryCommentId,
       });
@@ -270,6 +274,8 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
 interface Setup {
   /** The head the PR is at when it's read. */
   head?: string;
+  /** What GitHub says the state of any review is; unset for a reader that can't tell. */
+  reviewState?: string;
 }
 
 function harness(setup: Setup = {}) {
@@ -294,9 +300,22 @@ function harness(setup: Setup = {}) {
   };
   const runs = memoryRuns();
   const findings = memoryFindings();
+  const reviewStates: number[] = [];
+  const logFields: Record<string, unknown>[] = [];
+  /** What each `fetchCommits` on a clone asked for. */
+  const fetched: string[][] = [];
+  const { reviewState } = setup;
   const reader: PullReader = {
     pull: async () => pull(setup.head ?? headSha),
     comments: async () => [],
+    ...(reviewState === undefined
+      ? {}
+      : {
+          reviewState: async (_target: unknown, id: number) => {
+            reviewStates.push(id);
+            return reviewState;
+          },
+        }),
   };
   const deps: ControlDeps = {
     store,
@@ -319,16 +338,42 @@ function harness(setup: Setup = {}) {
           new ShadowPoster({ store: { put: (key, body) => store.putText(key, body) }, runId }),
       };
     },
-    clone: cloneAtSha,
+    async clone(options) {
+      const repo = await cloneAtSha(options);
+      return {
+        ...repo,
+        async fetchCommits(shas) {
+          const list = [...shas];
+          fetched.push(list);
+          await repo.fetchCommits(list);
+        },
+      };
+    },
     cloneUrl: () => pathToFileURL(remote).href,
     async workDir() {
       const dir = await mkdtemp(join(root, "task-"));
       return { dir, remove: () => rm(dir, { recursive: true, force: true }) };
     },
     archive: tarArchive,
-    log: (message) => logs.push(message),
+    log: (message, fields) => {
+      logs.push(message);
+      logFields.push({ message, ...fields });
+    },
   };
-  return { deps, objects, files, runs, findings, tokens, installations, logs, setup };
+  return {
+    deps,
+    objects,
+    files,
+    runs,
+    findings,
+    tokens,
+    installations,
+    logs,
+    logFields,
+    fetched,
+    setup,
+    reviewStates,
+  };
 }
 
 const JOB = { installationId: 99, repo: "acme/shop", prNumber: 7 };
@@ -409,7 +454,7 @@ describe("post", () => {
     expect(comment).toMatchObject({ comment_id: 41 });
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({
       status: "succeeded",
-      result: { filesDone: 1, reviewedSha: headSha, reviewEvent: "REQUEST_CHANGES" },
+      result: { filesDone: 1, reviewedSha: headSha, review: { event: "REQUEST_CHANGES" } },
     });
   });
 
@@ -632,30 +677,63 @@ describe("later runs", () => {
     expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
   });
 
-  it("reviews no batch when the head is the one reviewed last, and approves again", async () => {
+  it("reviews no batch and posts no second approval when the head is the one reviewed last", async () => {
     const h = harness();
     await review(h, 1);
     const { prepared, posted } = await review(h, 2);
     expect(prepared.batches).toEqual([]);
-    // An approval is posted again: a push may have dismissed the earlier one as stale.
-    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
-    expect(reviews(h)).toBe(2);
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: false });
+    expect(reviews(h)).toBe(1);
   });
 
-  it("starts the next incremental review from the last complete run when a batch failed", async () => {
+  it("approves again after a push only when the earlier approval was dismissed", async () => {
+    for (const [state, again] of [
+      ["APPROVED", false],
+      ["DISMISSED", true],
+    ] as const) {
+      const h = harness({ reviewState: state });
+      await review(h, 1);
+      // Shadow mode has no review IDs; a real poster records GitHub's.
+      h.runs.pr.lastReviewId = 900;
+      headSha = await commit({ "src/other.ts": `export const rate = ${state.length};\n` }, state);
+
+      const { posted } = await review(h, 2);
+
+      expect(posted).toMatchObject({ event: "APPROVE", reviewed: again });
+      expect(h.reviewStates).toEqual([900]);
+    }
+  });
+
+  it("approves again after a push when it can't tell whether the approval stands", async () => {
+    const h = harness();
+    await review(h, 1);
+    headSha = await commit({ "src/other.ts": "export const rate = 8;\n" }, "push");
+    expect((await review(h, 2)).posted).toMatchObject({ event: "APPROVE", reviewed: true });
+  });
+
+  it("reviews a failed batch's files on later runs, though the range moves on", async () => {
     const h = harness();
     const first = headSha;
-    // No batch output: the batch failed.
+    // No batch output: the batch failed. The head still becomes the start of the next range.
     const failed = await prepare(h.deps, JOB, exec(1), SETTINGS);
     expect((await post(h.deps, failed.runId)).complete).toBe(false);
-    expect(h.runs.pr.lastReviewedSha).toBeUndefined();
+    expect(h.runs.pr.lastReviewedSha).toBe(first);
     headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated");
 
-    const { prepared } = await review(h, 2);
+    // Fails again: src/total.ts is still unreviewed, however many runs go by.
+    const again = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    expect(promptOf(h, again.runId)).toContain("src/total.ts");
+    expect(h.runs.runs.get(again.runId)).toMatchObject({ kind: "incremental", fromSha: first });
+    await post(h.deps, again.runId);
+    headSha = await commit({ "src/other.ts": "export const rate = 17;\n" }, "unrelated again");
 
-    expect(first).not.toBe(headSha);
+    const { prepared } = await review(h, 3);
     expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
-    expect(h.runs.pr.lastReviewedSha).toBe(headSha);
+
+    // Once it's been reviewed, it's done.
+    headSha = await commit({ "src/other.ts": "export const rate = 27;\n" }, "and again");
+    const { prepared: after } = await review(h, 4);
+    expect(promptOf(h, after.runId)).not.toContain("src/total.ts");
   });
 
   it("reviews a file again when it returns to a blob whose finding was marked outdated", async () => {
@@ -690,7 +768,7 @@ describe("later runs", () => {
     const fixRun = await prepare(h.deps, JOB, exec(2), SETTINGS);
     await post(h.deps, fixRun.runId);
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
-    expect(h.runs.pr.lastReviewedSha).toBe(reviewed);
+    expect(reviewed).not.toBe(h.runs.pr.lastReviewedSha);
     // Revert the fix: src/total.ts is as it was at the reviewed head, so nothing is in range.
     headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "revert the fix");
 
@@ -724,6 +802,89 @@ describe("later runs", () => {
     expect(h.runs.pr.lastReviewEvent).toBe("COMMENT");
   });
 
+  it("reopens an outdated old-side finding only once the PR deletes its line again", async () => {
+    const h = harness();
+    // The PR deletes "return sum;" (line 6 of the base): a finding on the deleted line.
+    const without = HEAD_TOTAL.replace("  return sum;\n", "");
+    headSha = await commit({ "src/total.ts": without }, "drop the return");
+    const left = finding({
+      side: "LEFT",
+      line: 6,
+      title: "Return was removed",
+      evidence: "return sum;",
+    });
+    await review(h, 1, [left]);
+    // Put the return back: the PR no longer deletes the line, so the finding is outdated.
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "restore the return");
+    await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    // The file is still in the PR (its loop change), but line 6 isn't deleted: stays outdated.
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("let sum = 0;", "let sum = 0; // start") },
+      "touch another line",
+    );
+    await review(h, 3);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    // Deleted again: it reopens.
+    headSha = await commit({ "src/total.ts": without }, "drop the return again");
+    await review(h, 4);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("reviews a change again when it's re-applied after a full revert", async () => {
+    const h = harness();
+    await addOther();
+    await review(h, 1);
+    // Revert src/other.ts to the base: the PR no longer changes it.
+    headSha = await commit({ "src/other.ts": OTHER }, "revert other");
+    await review(h, 2);
+    // Re-apply the reviewed change: the same blob as run 1 saw, but run 2 saw the base's.
+    headSha = await commit({ "src/other.ts": "export const rate = 3;\n" }, "re-apply");
+
+    const { prepared } = await review(h, 3);
+
+    expect(promptOf(h, prepared.runId)).toContain("src/other.ts");
+  });
+
+  it("fetches the commits of outdated findings only while the PR changes their file", async () => {
+    const h = harness();
+    await addOther();
+    const raised = headSha;
+    await review(h, 1, [finding()]);
+    // Fix the loop line: the finding goes outdated, but the PR still changes the file.
+    headSha = await commit(
+      { "src/total.ts": TOTAL.replace("i < items.length; i++", "i <= items.length - 1; i++") },
+      "fix",
+    );
+    await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(h.fetched.at(-1)).toEqual([raised]);
+    // Revert src/total.ts to the base: the PR leaves it alone, so the finding isn't followed.
+    headSha = await commit({ "src/total.ts": TOTAL }, "leave total.ts alone");
+    await review(h, 3);
+    expect(h.fetched.at(-1)).toEqual([]);
+  });
+
+  it("logs carried batches and carried findings separately", async () => {
+    const h = harness();
+    await addOther();
+    const stopped = await prepare(h.deps, JOB, exec(1), SETTINGS);
+    const two = [
+      finding(),
+      finding({ title: "Total isn't rounded", line: 6, evidence: "return sum;" }),
+    ];
+    h.objects.set(runKeys(stopped.runId).batchOutput(0), JSON.stringify(output({ findings: two })));
+    await h.deps.runs.supersedeRun(stopped.runId);
+    headSha = await commit({ "src/other.ts": "export const rate = 6;\n" }, "newer push");
+
+    await prepare(h.deps, JOB, exec(2), SETTINGS);
+
+    expect(h.logFields.findLast((entry) => entry.message === "prepared")).toMatchObject({
+      carriedBatches: 1,
+      carriedFindings: 2,
+    });
+  });
+
   it("posts a run prepared before incremental reviews (manifest version 1)", async () => {
     const h = harness();
     const prepared = await prepare(h.deps, JOB, exec(1), SETTINGS);
@@ -739,6 +900,28 @@ describe("later runs", () => {
     expect(await post(h.deps, prepared.runId)).toMatchObject({
       event: "REQUEST_CHANGES",
       findings: 1,
+    });
+  });
+});
+
+describe("readManifest", () => {
+  const review = { plan: { skipped: [] }, jobs: [] };
+
+  it("refuses unknown versions and version 1 manifests that have incremental fields", () => {
+    expect(() => readManifest(JSON.stringify({ version: 3, installationId: 1, review }))).toThrow(
+      "Unsupported run manifest",
+    );
+    expect(() =>
+      readManifest(
+        JSON.stringify({ version: 1, installationId: 1, review: { ...review, carried: [[]] } }),
+      ),
+    ).toThrow("Unsupported run manifest");
+  });
+
+  it("fills in a main-branch version 1 manifest", () => {
+    expect(readManifest(JSON.stringify({ version: 1, installationId: 1, review }))).toMatchObject({
+      version: 2,
+      review: { kind: "full", done: [], carried: [] },
     });
   });
 });

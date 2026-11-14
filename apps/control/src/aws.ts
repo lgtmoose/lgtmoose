@@ -131,6 +131,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         lastReviewedSha: pullRequests.lastReviewedSha,
         statusLabel: pullRequests.statusLabel,
         lastReviewEvent: pullRequests.lastReviewEvent,
+        lastReviewId: pullRequests.lastReviewId,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
@@ -144,6 +145,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           lastReviewedSha: row.lastReviewedSha ?? undefined,
           statusLabel: row.statusLabel ?? undefined,
           lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
+          lastReviewId: row.lastReviewId ?? undefined,
         };
   }
 
@@ -265,8 +267,10 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         await tx
           .update(pullRequests)
           .set({
-            ...(result.reviewedSha === undefined ? {} : { lastReviewedSha: result.reviewedSha }),
-            ...(result.reviewEvent === undefined ? {} : { lastReviewEvent: result.reviewEvent }),
+            lastReviewedSha: result.reviewedSha,
+            ...(result.review === undefined
+              ? {}
+              : { lastReviewEvent: result.review.event, lastReviewId: result.review.id ?? null }),
             statusLabel: result.statusLabel ?? null,
             summaryCommentId: result.summaryCommentId ?? null,
             updatedAt: now(),

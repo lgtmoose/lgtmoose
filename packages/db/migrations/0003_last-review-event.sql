@@ -1,1 +1,0 @@
-ALTER TABLE "pull_requests" ADD COLUMN "last_review_event" text;

@@ -10,6 +10,11 @@ export interface PullReader {
   pull(target: PullTarget): Promise<PullRequest>;
   /** Comments on the PR's conversation and on its diff, oldest first, up to `limit` of each. */
   comments(target: PullTarget, limit: number): Promise<PullComment[]>;
+  /**
+   * The state of one of the PR's reviews: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED or
+   * PENDING. Optional: the dry run doesn't need it.
+   */
+  reviewState?(target: PullTarget, reviewId: number): Promise<string>;
 }
 
 export interface PullRequest {

@@ -7,7 +7,6 @@ import {
   type BatchInput,
   type PreparedReview,
   type ResumedWork,
-  unreviewedReasons,
 } from "@lgtmoose/pipeline";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { readOutcome } from "./outcomes.js";
@@ -33,7 +32,7 @@ export interface RunManifest {
 interface LegacyManifest {
   version: 1;
   installationId: number;
-  review: Omit<PreparedReview, "kind" | "done" | "carried" | "unreviewed">;
+  review: Omit<PreparedReview, "kind" | "done" | "carried">;
 }
 
 /** What the prepare step hands the state machine: the run and the batches to map over. */
@@ -73,23 +72,24 @@ function runKind(
 
 /**
  * Parses a run's manifest. Written by the run's own prepare step with the control task's role:
- * trusted, not model output. A version 1 manifest (from before incremental reviews) gets the
- * fields it lacks, so a run prepared before a deploy still posts after it.
+ * trusted, not model output. A version 1 manifest from before incremental reviews (it has none
+ * of their fields) gets them, so a run prepared before a deploy still posts after it. Any other
+ * version, or a version 1 with some of those fields, is refused rather than guessed at.
  */
 export function readManifest(text: string): RunManifest {
-  const manifest = JSON.parse(text) as RunManifest | LegacyManifest;
-  if (manifest.version === MANIFEST_VERSION) return manifest;
-  const { review } = manifest;
+  const manifest = JSON.parse(text) as { version?: unknown; review?: Record<string, unknown> };
+  if (manifest.version === MANIFEST_VERSION) return manifest as unknown as RunManifest;
+  const incrementalFields = ["kind", "done", "carried", "unreviewed"].filter(
+    (field) => manifest.review !== undefined && field in manifest.review,
+  );
+  if (manifest.version !== 1 || manifest.review === undefined || incrementalFields.length > 0) {
+    throw new Error(`Unsupported run manifest (version ${JSON.stringify(manifest.version)}).`);
+  }
+  const legacy = manifest as unknown as LegacyManifest;
   return {
-    ...manifest,
+    ...legacy,
     version: MANIFEST_VERSION,
-    review: {
-      ...review,
-      kind: "full",
-      done: [],
-      carried: [],
-      unreviewed: unreviewedReasons(review.plan.skipped),
-    },
+    review: { ...legacy.review, kind: "full", done: [], carried: [] },
   };
 }
 
@@ -121,7 +121,7 @@ async function resumableBatches(deps: ControlDeps, earlierId: string): Promise<R
   const { review } = readManifest(text);
   const byPath = new Map(review.files.map((file) => [file.path, file]));
   const depthOf = new Map(review.plan.files.map((planned) => [planned.file.path, planned.depth]));
-  const alreadyDone = new Set(review.done);
+  const alreadyDone = new Set(review.done.map((entry) => entry.path));
   const jobs = review.jobs.filter((job) => job.prompt !== undefined);
   const outcomes = await Promise.all(
     jobs.map((job) => readOutcome(deps.store, earlierId, job.index)),
@@ -233,7 +233,8 @@ export async function prepare(
       kind: prepared.kind,
       batches: batches.length,
       done: prepared.done.length,
-      carried: prepared.carried.length,
+      carriedBatches: prepared.carried.length,
+      carriedFindings: prepared.carried.flat().length,
       ...(prepared.fallbackReason === undefined ? {} : { fallback: prepared.fallbackReason }),
     });
     return { runId: run.runId, superseded: false, batches };

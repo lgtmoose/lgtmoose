@@ -1,5 +1,5 @@
 {
-  "id": "2955bec0-407c-41d2-aa69-4bd23bf53b07",
+  "id": "9dd468e8-cc0c-4718-97b5-ef297c478a04",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -859,6 +859,12 @@
         "last_review_event": {
           "name": "last_review_event",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_review_id": {
+          "name": "last_review_id",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },

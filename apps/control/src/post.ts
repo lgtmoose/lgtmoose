@@ -1,17 +1,19 @@
 import { statusLabels } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
-import { diffCommits, trackLines, type Repo } from "@lgtmoose/git";
+import { diffCommits, trackLines, type FileDiff, type LineRef, type Repo } from "@lgtmoose/git";
 import {
   finishReview,
   runKeys,
   type BatchOutcome,
   type EarlierFinding,
+  type PullReader,
+  type PullTarget,
   type ReviewReport,
 } from "@lgtmoose/pipeline";
 import { annotationsFor, buildReview, type PullRef } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { readOutcome } from "./outcomes.js";
-import type { ControlDeps, FindingRecord } from "./ports.js";
+import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest } from "./prepare.js";
 
 /** What the post step did, for the log and the state machine. */
@@ -42,26 +44,59 @@ function costOf(report: ReviewReport): number | undefined {
 }
 
 /**
+ * The findings to follow to the new head: open ones, and outdated ones only while the PR still
+ * changes their file (so they could stand again). Outdated findings on files the PR left alone
+ * stay as they are, which keeps the work from growing with the PR's age.
+ */
+function toTrack(records: readonly FindingRecord[], prFiles: readonly FileDiff[]): FindingRecord[] {
+  const { changed, atHead } = prPaths(prFiles);
+  return records.filter(
+    (record) =>
+      record.status === "open" || (record.side === "RIGHT" ? atHead : changed).has(record.path),
+  );
+}
+
+/** Paths the PR changes (deleting included), and those of them still there at head. */
+function prPaths(prFiles: readonly FileDiff[]): { changed: Set<string>; atHead: Set<string> } {
+  return {
+    changed: new Set(prFiles.map((file) => file.path)),
+    atHead: new Set(prFiles.flatMap((file) => (file.status === "deleted" ? [] : [file.path]))),
+  };
+}
+
+/**
  * Splits the PR's tracked findings into those standing at `headSha`, moved to where their lines
  * are now, and those whose lines don't exist there (changed, deleted, or the PR no longer
  * changes the file). Open findings that no longer stand are `outdated`; outdated ones that stand
- * again, such as after a fix is reverted, are `reopened`. A finding on the old side stands while
- * the PR still changes its file. When the commit a finding was raised at is gone (force-pushed
+ * again, such as after a fix is reverted, are `reopened`.
+ *
+ * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
+ * when it was raised (its merge base with today's) to today's merge base, and stands while the
+ * PR still deletes that line. When the commit a finding was raised at is gone (force-pushed
  * away), its lines can't be followed: an open one stands at its old place while the PR still
  * changes the file, and an outdated one stays outdated.
  */
 async function standing(
   repo: Repo,
   records: readonly FindingRecord[],
+  prFiles: readonly FileDiff[],
   mergeBase: string,
   headSha: string,
 ): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
-  const prFiles = await diffCommits(repo, mergeBase, headSha);
-  // Old-side lines are in the PR while it changes the file (deleting it included); new-side
-  // lines only while the file is still there at head.
-  const changed = new Set(prFiles.map((file) => file.path));
-  const atHead = new Set(prFiles.flatMap((file) => (file.status === "deleted" ? [] : [file.path])));
+  const { changed, atHead } = prPaths(prFiles);
+  const deletedLines = new Map(
+    prFiles.map((file) => [
+      file.path,
+      new Set(
+        file.hunks.flatMap((hunk) =>
+          hunk.lines.flatMap((line) =>
+            line.kind === "del" && line.oldLine !== undefined ? [line.oldLine] : [],
+          ),
+        ),
+      ),
+    ]),
+  );
   const open: EarlierFinding[] = [];
   const outdated: string[] = [];
   const reopened: string[] = [];
@@ -71,26 +106,32 @@ async function standing(
     if (group === undefined) bySha.set(record.raisedAtSha, [record]);
     else group.push(record);
   }
+  const refs = (list: readonly FindingRecord[]) =>
+    list.map((record) => ({ path: record.path, line: record.line }));
   for (const [sha, group] of bySha) {
     const right = group.filter((record) => record.side === "RIGHT");
+    const left = group.filter((record) => record.side === "LEFT");
     const followable = await repo.hasCommit(sha);
-    const moved = followable
-      ? await trackLines(
-          repo,
-          sha,
-          headSha,
-          right.map((record) => ({ path: record.path, line: record.line })),
-        )
-      : right.map((record) => ({ path: record.path, line: record.line }));
-    const at = new Map(right.map((record, i) => [record, moved[i]]));
+    const movedRight = followable ? await trackLines(repo, sha, headSha, refs(right)) : refs(right);
+    let movedLeft: (LineRef | undefined)[] = refs(left);
+    if (followable && left.length > 0) {
+      const raisedBase = (await repo.git(["merge-base", sha, mergeBase])).trim();
+      movedLeft = await trackLines(repo, raisedBase, mergeBase, refs(left));
+    }
+    const at = new Map([
+      ...right.map((record, i) => [record, movedRight[i]] as const),
+      ...left.map((record, i) => [record, movedLeft[i]] as const),
+    ]);
     for (const record of group) {
-      const place =
-        record.side === "RIGHT" ? at.get(record) : { path: record.path, line: record.line };
-      const inPr = record.side === "RIGHT" ? atHead : changed;
-      const stands =
+      const isLeft = record.side === "LEFT";
+      const place = at.get(record);
+      const inPr = place !== undefined && (isLeft ? changed : atHead).has(place.path);
+      // Followed: the line must still exist (new side) or still be deleted (old side). Not
+      // followable: an open finding keeps its place while its file is in the PR.
+      const followed =
         place !== undefined &&
-        inPr.has(place.path) &&
-        (record.status === "open" || followable || record.side === "LEFT");
+        (!isLeft || (deletedLines.get(place.path)?.has(place.line) ?? false));
+      const stands = inPr && (followable ? followed : record.status === "open");
       if (!stands) {
         if (record.status === "open") outdated.push(record.id);
         continue;
@@ -117,16 +158,36 @@ async function standing(
 }
 
 /**
+ * Whether the approval we posted last still stands on GitHub. A push can dismiss it as stale,
+ * so after one it's checked; unknown (shadow mode, no ID, the read failed) counts as not.
+ */
+async function approvalStands(
+  reader: PullReader,
+  target: PullTarget,
+  run: RunRecord,
+  headSha: string,
+): Promise<boolean> {
+  if (run.lastReviewEvent !== "APPROVE") return false;
+  // Nothing was pushed since: nothing could have dismissed it.
+  if (run.lastReviewedSha === headSha) return true;
+  if (run.lastReviewId === undefined || reader.reviewState === undefined) return false;
+  try {
+    return (await reader.reviewState(target, run.lastReviewId)) === "APPROVED";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The post step: reads the prepared review and every batch's output, finishes the review
  * (placement, duplicates, decision, summary) and posts it: one review, the check run, the
  * summary comment and the status label. In shadow mode the poster records instead.
  *
  * Our findings from earlier runs that are still open count towards the decision; those whose
  * lines are gone are marked outdated, and outdated ones whose lines are back are reopened. An
- * incremental run that found nothing new, and whose
- * decision is the review event and label already on the PR (other than an approval), posts no
- * review, but still updates the check run, the summary and the label, and records the head as
- * reviewed.
+ * incremental run that found nothing new, and whose decision is the review event and label
+ * already on the PR (for an approval, one that still stands), posts no review, but still
+ * updates the check run, the summary and the label, and records the head as reviewed.
  */
 export async function post(deps: ControlDeps, runId: string): Promise<PostOutput> {
   const run = await deps.runs.getRun(runId);
@@ -154,17 +215,20 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   let outdated: string[];
   let reopened: string[];
   try {
-    // Blobs only, for the cited code: no checkout. The commits earlier findings were raised at
-    // are fetched too, to follow their lines.
+    // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
       url: deps.cloneUrl(target.owner, target.repo),
       dir: work.dir,
       headSha: pr.headSha,
-      otherShas: [pr.baseSha, ...new Set(records.map((record) => record.raisedAtSha))],
+      otherShas: [pr.baseSha],
       token: await github.token(),
       checkout: "none",
     });
-    const earlier = await standing(repo, records, prepared.mergeBase, pr.headSha);
+    const prFiles = await diffCommits(repo, prepared.mergeBase, pr.headSha);
+    const tracked = toTrack(records, prFiles);
+    // The commits those findings were raised at, to follow their lines: one request.
+    await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
+    const earlier = await standing(repo, tracked, prFiles, prepared.mergeBase, pr.headSha);
     ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
@@ -176,15 +240,17 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
 
   const { decision } = report;
   const fresh = report.inline.length + report.body.length;
-  // Nothing to say when the review on GitHub already says it: same event, same label. An
-  // approval is always posted again, since a push can dismiss the earlier one as stale.
+  // Nothing to say when the review on GitHub already says it: same event, same label, and for
+  // an approval, one that still stands (a push can dismiss it as stale).
   const quiet =
     report.kind === "incremental" &&
     fresh === 0 &&
     decision.label !== undefined &&
     decision.label === run.statusLabel &&
     decision.event === run.lastReviewEvent &&
-    decision.event !== "APPROVE";
+    (decision.event !== "APPROVE" ||
+      (await approvalStands(github.reader, target, run, pr.headSha)));
+  let posted: { event: ReviewEvent; id: number | undefined } | undefined;
   if (!quiet) {
     const payload = buildReview({
       event: decision.event,
@@ -193,7 +259,8 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       files: prepared.files,
       nitCap: config.gate.nit_cap,
     });
-    await poster.submitReview(pull, pr.headSha, payload);
+    const review = await poster.submitReview(pull, pr.headSha, payload);
+    posted = { event: decision.event, id: review.id };
   }
   if (decision.conclusion !== undefined) {
     await poster.completeCheckRun(pull, {
@@ -218,16 +285,15 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   await deps.findings.reopen(reopened, pr.headSha);
   await deps.findings.saveFindings(run.pullRequestId, runId, pr.headSha, report.posted);
   await deps.runs.recordFiles(runId, report.reviewedFiles);
-  // A failed batch's files weren't reviewed: the next incremental run starts from the last
-  // complete one, so they're in its range again (the rest are done by blob).
-  const batchFailed = report.batches.some((batch) => batch.error !== undefined);
+  // A failed batch's files have no record at this head, so the next run reviews them however
+  // far the incremental range has moved on.
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,
     costUsd: costOf(report),
-    reviewedSha: batchFailed ? undefined : pr.headSha,
+    reviewedSha: pr.headSha,
     statusLabel: decision.label ?? run.statusLabel,
     summaryCommentId: comment.id ?? run.summaryCommentId,
-    reviewEvent: quiet ? undefined : decision.event,
+    review: posted,
   });
   deps.log("posted", {
     runId,

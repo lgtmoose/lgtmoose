@@ -62,7 +62,7 @@ describe("drizzleRunStore", () => {
       reviewedSha: "a".repeat(40),
       statusLabel: "lgtmoose: changes requested",
       summaryCommentId: 77,
-      reviewEvent: "REQUEST_CHANGES",
+      review: { event: "REQUEST_CHANGES", id: 501 },
     });
     expect(await runRow(run.runId)).toMatchObject({
       status: "succeeded",
@@ -85,18 +85,19 @@ describe("drizzleRunStore", () => {
     await store.setPlan(next.runId, { filesTotal: 1, kind: "full", fromSha: undefined });
     expect(await runRow(next.runId)).toMatchObject({ kind: "full", fromSha: null, filesTotal: 1 });
 
-    // A run with a failed batch and no review posted keeps the last reviewed head and event.
+    // A run that posted no review keeps the last review's event and ID, but records its head.
     await store.succeedRun(next.runId, {
       filesDone: 0,
       costUsd: undefined,
-      reviewedSha: undefined,
+      reviewedSha: "c".repeat(40),
       statusLabel: "lgtmoose: changes requested",
       summaryCommentId: 77,
-      reviewEvent: undefined,
+      review: undefined,
     });
     expect(await store.getRun(next.runId)).toMatchObject({
-      lastReviewedSha: "a".repeat(40),
+      lastReviewedSha: "c".repeat(40),
       lastReviewEvent: "REQUEST_CHANGES",
+      lastReviewId: 501,
     });
   });
 
@@ -108,7 +109,7 @@ describe("drizzleRunStore", () => {
         reviewedSha: "a".repeat(40),
         statusLabel: undefined,
         summaryCommentId: undefined,
-        reviewEvent: undefined,
+        review: undefined,
       });
     const first = await start("arn:exec:files:1", 20);
     const second = await start("arn:exec:files:2", 20);
@@ -152,7 +153,7 @@ describe("drizzleRunStore", () => {
       reviewedSha: "a".repeat(40),
       statusLabel: undefined,
       summaryCommentId: undefined,
-      reviewEvent: undefined,
+      review: undefined,
     });
     const stopped = await start("arn:exec:unposted:3", 30);
     const failed = await start("arn:exec:unposted:4", 30);

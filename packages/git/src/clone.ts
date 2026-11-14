@@ -8,6 +8,11 @@ export interface Repo {
   git(args: readonly string[], options?: Pick<RunOptions, "okExitCodes">): Promise<string>;
   /** Whether the commit is in this checkout (it may have been force-pushed away). */
   hasCommit(sha: string): Promise<boolean>;
+  /**
+   * Fetches more commits (with history, without file contents in a partial clone), in one
+   * request when it can. Commits the remote no longer has are skipped: `hasCommit` says false.
+   */
+  fetchCommits(shas: Iterable<string>): Promise<void>;
   /** True when head's whole tree is on disk (`checkout: "full"`), so its blobs are local. */
   readonly fullCheckout: boolean;
   /**
@@ -140,16 +145,34 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
 
   const fetched = new Set([options.headSha]);
   await fetch([options.headSha]);
-  // One at a time, so a commit that's gone doesn't stop the others.
-  for (const sha of new Set(options.otherShas ?? [])) {
-    if (fetched.has(sha)) continue;
+  /**
+   * Fetches commits in one request; if one of them is gone, the request fails as a whole, so
+   * they're fetched one at a time instead, skipping the ones that are gone.
+   */
+  const fetchCommits = async (shas: Iterable<string>): Promise<void> => {
+    const wanted = [...new Set(shas)].filter((sha) => !fetched.has(sha));
+    for (const sha of wanted) {
+      if (!SHA.test(sha)) throw new Error(`Not a full commit SHA: ${JSON.stringify(sha)}`);
+    }
+    if (wanted.length === 0) return;
     try {
-      await fetch([sha]);
-      fetched.add(sha);
+      await fetch(wanted);
+      for (const sha of wanted) fetched.add(sha);
+      return;
     } catch (error) {
       if (!isMissingObjectError(error)) throw error;
     }
-  }
+    if (wanted.length === 1) return;
+    for (const sha of wanted) {
+      try {
+        await fetch([sha]);
+        fetched.add(sha);
+      } catch (error) {
+        if (!isMissingObjectError(error)) throw error;
+      }
+    }
+  };
+  await fetchCommits(options.otherShas ?? []);
   if (options.checkout === "none") {
     // HEAD and the index point at head without writing (or downloading) any file.
     await run(["update-ref", "--no-deref", "HEAD", options.headSha]);
@@ -212,6 +235,7 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
       return exitCode === 0;
     },
     readBlobs,
+    fetchCommits,
     checkoutPaths: async (paths) => {
       if (paths.length === 0) return;
       const literal = { env: { GIT_LITERAL_PATHSPECS: "1" } };

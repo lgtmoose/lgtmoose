@@ -85,4 +85,11 @@ describe("githubPullReader", () => {
     expect(await githubPullReader(get).comments(target, 150)).toHaveLength(150);
     expect(calls.filter((path) => path.includes("issues"))).toHaveLength(2);
   });
+
+  it("reads one review's state, and refuses an ID that isn't one", async () => {
+    const { get } = fakeGet({ "/repos/acme/shop/pulls/7/reviews/55": { state: "DISMISSED" } });
+    const reader = githubPullReader(get);
+    expect(await reader.reviewState?.(target, 55)).toBe("DISMISSED");
+    await expect(reader.reviewState?.(target, -1)).rejects.toThrow("Not a review ID");
+  });
 });

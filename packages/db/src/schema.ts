@@ -89,6 +89,8 @@ export const pullRequests = pgTable(
      * with nothing new can tell whether the review on GitHub still says the right thing.
      */
     lastReviewEvent: text("last_review_event"),
+    /** That review's GitHub ID, to tell whether an approval was dismissed since. */
+    lastReviewId: bigint("last_review_id", { mode: "number" }),
     paused: boolean("paused").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

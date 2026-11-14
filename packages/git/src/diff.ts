@@ -223,6 +223,28 @@ async function diffRange(
   });
 }
 
+/** Paths per ls-tree, to stay well under the OS argument limit. */
+const PATHS_PER_LIST = 1000;
+
+/** The blob (or gitlink) each of these paths has at `sha`; paths it doesn't have are left out. */
+async function blobsAt(
+  repo: Repo,
+  sha: string,
+  paths: readonly string[],
+): Promise<Map<string, string>> {
+  const blobs = new Map<string, string>();
+  for (let i = 0; i < paths.length; i += PATHS_PER_LIST) {
+    // `:(literal)`: no path is read as a glob or pathspec magic.
+    const literal = paths.slice(i, i + PATHS_PER_LIST).map((path) => `:(literal)${path}`);
+    const out = await repo.git(["ls-tree", "-z", "--full-tree", sha, "--", ...literal]);
+    for (const entry of out.split("\0")) {
+      const match = /^\d+ (?:blob|commit) ([0-9a-f]{40,64})\t(.*)$/s.exec(entry);
+      if (match?.[1] !== undefined && match[2] !== undefined) blobs.set(match[2], match[1]);
+    }
+  }
+  return blobs;
+}
+
 /**
  * Every file `from..to` changes, with hunks and blob SHAs, as a plain commit-to-commit diff (no
  * merge base, no mechanical detection). For following lines from one commit to another.
@@ -384,18 +406,32 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       });
     }
   }
-  // Files the PR changed at the last review but no longer changes at all (fully reverted).
-  for (const before of previousFiles) {
-    if (seen.has(before.path) || before.status === "deleted") continue;
+  // Files the PR changed at the last review but no longer changes at all (fully reverted). Their
+  // blobs are the ones at head (the same as at the merge base), not the last review's, which the
+  // file no longer has.
+  const reverted = previousFiles.flatMap((before) => {
+    if (seen.has(before.path) || before.status === "deleted") return [];
     const removed = removedTexts(before, undefined);
-    if (removed.length > 0) {
-      incremental.push({
-        ...before,
-        hunks: [],
-        changedSinceLastReview: [],
-        removedSinceLastReview: removed,
-      });
-    }
+    return removed.length > 0 ? [{ before, removed }] : [];
+  });
+  const atHead = await blobsAt(
+    repo,
+    repo.headSha,
+    reverted.map(({ before }) => before.path),
+  );
+  for (const { before, removed } of reverted) {
+    const blob = atHead.get(before.path);
+    incremental.push({
+      ...before,
+      status: blob === undefined ? "deleted" : "modified",
+      oldBlob: blob,
+      newBlob: blob,
+      moved: false,
+      mechanical: false,
+      hunks: [],
+      changedSinceLastReview: [],
+      removedSinceLastReview: removed,
+    });
   }
   return {
     kind: "incremental",

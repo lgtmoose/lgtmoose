@@ -337,6 +337,36 @@ describe("reviewDiff: incremental review", () => {
     expect(files["auth.ts"]?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
     // Fully reverted: no longer in the PR diff, but what it took out is still worth a mention.
     expect(files["other.ts"]).toMatchObject({ hunks: [], removedSinceLastReview: ["temporary"] });
+    // Its blobs are the ones at head (the base's version), not the reviewed version it dropped.
+    const atHead = await fixture.git(["rev-parse", `${head}:other.ts`]);
+    expect(files["other.ts"]).toMatchObject({
+      status: "modified",
+      oldBlob: atHead,
+      newBlob: atHead,
+    });
+  });
+
+  it("gives a file added and then fully reverted no blob at head", async () => {
+    const base = await setUp({ "keep.txt": "k\n" });
+    await fixture.write({ "added.ts": "export const debug = true;\n" });
+    const reviewed = await fixture.commit("add a file");
+    await fixture.remove("added.ts");
+    const head = await fixture.commit("drop it again");
+
+    const files = byPath(
+      (
+        await reviewDiff(await clone(head, [base, reviewed]), {
+          baseSha: base,
+          lastReviewed: reviewed,
+        })
+      ).files,
+    );
+    expect(files["added.ts"]).toMatchObject({
+      status: "deleted",
+      oldBlob: undefined,
+      newBlob: undefined,
+      removedSinceLastReview: ["export const debug = true;"],
+    });
   });
 
   it("doesn't call a file renamed since the last review reverted", async () => {

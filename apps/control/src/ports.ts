@@ -24,6 +24,8 @@ export interface RunRecord {
   statusLabel: string | undefined;
   /** The event of the last review posted on the PR. */
   lastReviewEvent: ReviewEvent | undefined;
+  /** That review's GitHub ID; undefined in shadow mode. */
+  lastReviewId: number | undefined;
 }
 
 /** A file version a run reviewed. */
@@ -116,14 +118,14 @@ export interface RunStore {
       costUsd: number | undefined;
       /**
        * The head to record as the PR's last reviewed commit, the start of the next incremental
-       * review. Undefined when a batch failed: the record stays at the last complete run, so the
-       * failed batch's files are reviewed next time.
+       * review. Recorded even when a batch failed: its files have no record at this head, so
+       * the next run reviews them (see `prepareReview`).
        */
-      reviewedSha: string | undefined;
+      reviewedSha: string;
       statusLabel: string | undefined;
       summaryCommentId: number | undefined;
-      /** The event of the review this run posted. Undefined when it posted none. */
-      reviewEvent: ReviewEvent | undefined;
+      /** The review this run posted: its event and ID. Undefined when it posted none. */
+      review: { event: ReviewEvent; id: number | undefined } | undefined;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */

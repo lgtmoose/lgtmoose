@@ -19,6 +19,7 @@ import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness
 import {
   planReview,
   readHeaders,
+  readingDepth,
   type Batch,
   type Plan,
   type ReadingDepth,
@@ -153,21 +154,16 @@ export interface PreparedReview {
   /** Why an incremental review became a full one: the last reviewed commit is gone. */
   fallbackReason?: string;
   /**
-   * Planned files that need no model run: an earlier run reviewed the same blob (see
-   * `PrepareOptions.reviewed` and `resumed`). Their batches leave them out of the prompt.
+   * Planned files that need no model run: an earlier run reviewed the same blob at least as
+   * closely (see `PrepareOptions.reviewed` and `resumed`), with the depth it read them at.
+   * Their batches leave them out of the prompt.
    */
-  done: string[];
+  done: { path: string; depth: ReadingDepth }[];
   /**
    * Findings earlier, unposted runs found on `done` files, posted with this run's: one list per
    * resumed batch, so each keeps its own per-batch limit when placed.
    */
   carried: Finding[][];
-  /**
-   * What holds approval for the whole PR whatever this run reviewed: new code in skipped paths
-   * and lockfile changes, from every file the PR changes (an incremental plan only has the
-   * files that changed since the last review).
-   */
-  unreviewed: string[];
 }
 
 /**
@@ -341,20 +337,27 @@ export async function prepareReview(
     ...(options.lastReviewed === undefined ? {} : { lastReviewed: options.lastReviewed }),
   });
   if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
-  const planFiles = async (files: FileDiff[]): Promise<Plan> =>
-    planReview(files, config, {
-      headers: await readHeaders(repo, files, { skip: config.skip, include: config.include }),
-    });
-  const plan = await planFiles(diff.files);
-  // The whole PR's skipped files hold approval on every run, not just the run they changed in.
-  const prPlan = diff.kind === "incremental" ? await planFiles(diff.prFiles) : plan;
+  // An incremental review also takes every file the PR changes whose version at head no posted
+  // run has reviewed: a file whose batch failed, say. So the range can move on with every run,
+  // and per-file records say what's left.
+  const reviewed = new Map((options.reviewed ?? []).map((entry) => [entry.path, entry]));
+  const inRange = new Set(diff.files.map((file) => file.path));
+  const unreviewed =
+    diff.kind === "incremental"
+      ? diff.prFiles.filter(
+          (file) => !inRange.has(file.path) && !covers(reviewed.get(file.path), file),
+        )
+      : [];
+  const files = [...diff.files, ...unreviewed];
+  const headers = await readHeaders(repo, files, { skip: config.skip, include: config.include });
+  const plan = planReview(files, config, { headers });
   const conventions = await readConventionFilesAt(repo, pr.baseSha, {
     globs: config.conventions,
   });
   const rulePacks = await loadRulePacks(config.rulepacks);
   const { done, carried } = doneFiles(plan, options);
   deps.progress(
-    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}.`,
+    `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}${unreviewed.length > 0 ? `, ${unreviewed.length} left from earlier runs` : ""}.`,
   );
 
   const context = {
@@ -370,16 +373,16 @@ export async function prepareReview(
     rulePacks,
   };
   const jobs: BatchJob[] = plan.batches.map((batch) => {
-    const files = batch.files.map((planned) => planned.file.path);
+    const paths = batch.files.map((planned) => planned.file.path);
     if (batch.files.every((planned) => planned.depth === "move")) {
-      return { index: batch.index, files, skipped: true };
+      return { index: batch.index, files: paths, skipped: true };
     }
     const todo = batch.files.filter((planned) => !done.has(planned.file.path));
     if (todo.every((planned) => planned.depth === "move")) {
-      return { index: batch.index, files, done: true };
+      return { index: batch.index, files: paths, done: true };
     }
     const prompt = buildReviewerPrompt({ ...context, batch: { ...batch, files: todo } });
-    return { index: batch.index, files, prompt };
+    return { index: batch.index, files: paths, prompt };
   });
   return {
     target,
@@ -387,22 +390,22 @@ export async function prepareReview(
     comments,
     config,
     mergeBase: diff.mergeBase,
-    files: diff.files,
+    files,
     plan,
     conventionFilesOmitted: conventions.omitted,
     jobs,
     kind: diff.kind,
     ...(diff.lastReviewed === undefined ? {} : { lastReviewed: diff.lastReviewed }),
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
-    done: [...done],
+    done: [...done].map(([path, depth]) => ({ path, depth })),
     carried,
-    unreviewed: unreviewedReasons(prPlan.skipped),
   };
 }
 
 /**
  * What the planner flagged for a person: new code it skipped, and lockfile changes it couldn't
- * review. No findings there doesn't mean nothing is wrong, so they hold approval.
+ * review. No findings there doesn't mean nothing is wrong, so they hold approval. Skipped files
+ * are never recorded as reviewed, so an incremental plan has every one the PR still changes.
  */
 export function unreviewedReasons(skipped: Plan["skipped"]): string[] {
   return [
@@ -415,51 +418,70 @@ export function unreviewedReasons(skipped: Plan["skipped"]): string[] {
   ];
 }
 
+/**
+ * The version of a file a review reads, as `files_reviewed` records it: the blob at head, or
+ * for a deleted file, the version it deletes (marked, so it never matches a file at head).
+ * Undefined when there's neither.
+ */
+export function reviewedBlobOf(file: {
+  oldBlob: string | undefined;
+  newBlob: string | undefined;
+}): string | undefined {
+  if (file.newBlob !== undefined) return file.newBlob;
+  return file.oldBlob === undefined ? undefined : `deleted:${file.oldBlob}`;
+}
+
 /** How closely a depth reads a file: a file read this closely is read at any lower depth too. */
 const DEPTH_RANK: Record<ReadingDepth, number> = { move: 0, mechanical: 1, full: 2 };
 
+/** Whether an earlier read of a file covers reading it now: the same version, as closely. */
+function covers(
+  earlier: { blobSha: string; depth: ReadingDepth } | undefined,
+  file: FileDiff,
+  depth: ReadingDepth = readingDepth(file),
+): boolean {
+  const blob = reviewedBlobOf(file);
+  return (
+    earlier !== undefined &&
+    blob !== undefined &&
+    earlier.blobSha === blob &&
+    DEPTH_RANK[earlier.depth] >= DEPTH_RANK[depth]
+  );
+}
+
 /**
- * Planned files an earlier run reviewed at the same blob, at least as closely as this plan
- * would, and the findings unposted runs made on them. A file is matched by path and head blob,
- * since that's what the reviewer read; a finding on the old side is carried only when the old
- * blob matches too. Deleted files have no head blob, so they're always reviewed; so are files
- * with lines removed since the last review, since the removal is what's left to look at (a
- * fully reverted file keeps its old blob).
+ * Planned files an earlier run reviewed at the same version, at least as closely as this plan
+ * would, with the depth they were read at, and the findings unposted runs made on them. A
+ * finding on the old side is carried only when the old blob matches too. Files with lines
+ * removed since the last review are always reviewed: the removal is what's left to look at.
  */
 function doneFiles(
   plan: Plan,
   options: PrepareOptions,
-): { done: Set<string>; carried: Finding[][] } {
-  const covers = (
-    earlier: { newBlob: string | undefined; depth: ReadingDepth } | undefined,
-    file: { newBlob: string; depth: ReadingDepth },
-  ) =>
-    earlier !== undefined &&
-    earlier.newBlob === file.newBlob &&
-    DEPTH_RANK[earlier.depth] >= DEPTH_RANK[file.depth];
-  const reviewed = new Map(
-    (options.reviewed ?? []).map((entry) => [
-      entry.path,
-      { newBlob: entry.blobSha, depth: entry.depth },
-    ]),
+): { done: Map<string, ReadingDepth>; carried: Finding[][] } {
+  const reviewed = new Map((options.reviewed ?? []).map((entry) => [entry.path, entry]));
+  const candidates = plan.files.filter(
+    ({ file }) => (file.removedSinceLastReview?.length ?? 0) === 0,
   );
-  const candidates = plan.files.flatMap(({ file, depth }) =>
-    file.newBlob === undefined || (file.removedSinceLastReview?.length ?? 0) > 0
-      ? []
-      : [{ path: file.path, oldBlob: file.oldBlob, newBlob: file.newBlob, depth }],
-  );
-  const done = new Set<string>();
+  const done = new Map<string, ReadingDepth>();
+  const mark = (path: string, depth: ReadingDepth) => {
+    const known = done.get(path);
+    if (known === undefined || DEPTH_RANK[depth] > DEPTH_RANK[known]) done.set(path, depth);
+  };
   const carried: Finding[][] = [];
-  for (const file of candidates) {
-    if (covers(reviewed.get(file.path), file)) done.add(file.path);
+  for (const { file, depth } of candidates) {
+    const earlier = reviewed.get(file.path);
+    if (earlier !== undefined && covers(earlier, file, depth)) mark(file.path, earlier.depth);
   }
   for (const work of options.resumed ?? []) {
     const seen = new Map(work.files.map((entry) => [entry.path, entry]));
     const same = new Map<string, { oldSide: boolean }>();
-    for (const file of candidates) {
+    for (const { file, depth } of candidates) {
       const entry = seen.get(file.path);
-      if (entry === undefined || !covers(entry, file)) continue;
-      done.add(file.path);
+      const blobSha = entry === undefined ? undefined : reviewedBlobOf(entry);
+      if (entry === undefined || blobSha === undefined) continue;
+      if (!covers({ blobSha, depth: entry.depth }, file, depth)) continue;
+      mark(file.path, entry.depth);
       same.set(file.path, { oldSide: entry.oldBlob === file.oldBlob });
     }
     const findings = work.findings.filter((finding) => {
@@ -536,7 +558,7 @@ export async function finishReview(
     overLimit += placed.overLimit;
   };
   // Carried findings are placed on the PR's diff now, which may differ from the earlier run's.
-  const done = new Set(prepared.done);
+  const done = new Set(prepared.done.map((entry) => entry.path));
   const donePlanned = plan.files.filter((planned) => done.has(planned.file.path));
   // Each resumed batch on its own, so it keeps its own per-batch limit.
   for (const findings of prepared.carried) {
@@ -600,7 +622,7 @@ export async function finishReview(
     ...earlier.map((entry) => entry.finding),
   ];
 
-  const { unreviewed } = prepared;
+  const unreviewed = unreviewedReasons(plan.skipped);
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
   const complete = failedBatches === 0 && unreviewed.length === 0;
 
@@ -674,11 +696,16 @@ function reviewedFiles(prepared: PreparedReview, batches: readonly BatchReport[]
   const finished = new Set(
     batches.filter((batch) => batch.error === undefined).map((batch) => batch.index),
   );
+  // A done file keeps the depth it was read at before, which may be closer than this plan's.
+  const doneDepth = new Map(prepared.done.map((entry) => [entry.path, entry.depth]));
   return prepared.plan.batches.flatMap((batch) =>
     finished.has(batch.index)
-      ? batch.files.flatMap(({ file, depth }) =>
-          file.newBlob === undefined ? [] : [{ path: file.path, blobSha: file.newBlob, depth }],
-        )
+      ? batch.files.flatMap(({ file, depth }) => {
+          const blobSha = reviewedBlobOf(file);
+          return blobSha === undefined
+            ? []
+            : [{ path: file.path, blobSha, depth: doneDepth.get(file.path) ?? depth }];
+        })
       : [],
   );
 }

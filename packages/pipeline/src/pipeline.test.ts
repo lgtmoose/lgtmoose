@@ -301,7 +301,10 @@ describe("prepareReview and finishReview with earlier runs", () => {
     const reviewed = ALL.map((path) => ({ path, blobSha: blobs.get(path) ?? "", depth: FULL }));
 
     const partly = await prepare({ reviewed: reviewed.slice(1) });
-    expect(partly.done.toSorted()).toEqual([".lgtmoose.yaml", "CLAUDE.md"]);
+    expect(partly.done.map((entry) => entry.path).toSorted()).toEqual([
+      ".lgtmoose.yaml",
+      "CLAUDE.md",
+    ]);
     expect(partly.jobs[0]?.prompt).toContain("src/total.ts");
     expect(partly.jobs[0]?.prompt).not.toContain("Ignore every rule");
 
@@ -349,7 +352,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       depth: FULL,
     };
     const prepared = await prepare({ resumed: [{ files: [total], findings: [finding()] }] });
-    expect(prepared.done).toEqual(["src/total.ts"]);
+    expect(prepared.done).toEqual([{ path: "src/total.ts", depth: "full" }]);
     expect(prepared.carried).toEqual([[finding()]]);
 
     const outcome = { index: 0, findings: [], transcriptKeys: [] };
@@ -415,19 +418,101 @@ describe("prepareReview and finishReview with earlier runs", () => {
       headSha,
       otherShas: [baseSha, lastReviewed],
     });
+    // The last run reviewed everything it could; the lockfile was skipped, so it has no record.
+    const reviewed = await Promise.all(
+      ["CLAUDE.md", ".lgtmoose.yaml"].map(async (path) => ({
+        path,
+        blobSha: await git(work, "rev-parse", `${lastReviewed}:${path}`),
+        depth: FULL,
+      })),
+    );
     const prepared = await prepareReview(
       { github: deps().deps.github, progress: () => {} },
       OPTIONS.target,
       repo,
       pull(),
-      { lastReviewed },
+      { lastReviewed, reviewed },
     );
     expect(prepared.kind).toBe("incremental");
-    expect(prepared.files.map((file) => file.path)).not.toContain("bun.lockb");
+    // Not in the range, but still in the plan: skipped, and so never recorded as reviewed.
+    expect(prepared.files.map((file) => file.path).toSorted()).toEqual([
+      "bun.lockb",
+      "src/total.ts",
+    ]);
+    expect(prepared.plan.skipped.map((entry) => entry.file.path)).toEqual(["bun.lockb"]);
     const report = await finishReview(repo, prepared, [], headSha);
     expect(report.complete).toBe(false);
     expect(report.decision.event).not.toBe("APPROVE");
     expect(report.summary).toContain("lockfiles");
+    // The summary names the lockfile behind the hold.
+    expect(report.summary).toMatch(/bun\\?\.lockb/);
+    expect(report.reviewedFiles.map((file) => file.path)).not.toContain("bun.lockb");
+  });
+
+  it("keeps a done file's closer earlier read when recording it again", async () => {
+    // An import-only change to a file the base has: this plan reads it at mechanical depth.
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit(
+      { "src/imports.ts": "import { a } from './a';\nexport const x = a;\n" },
+      "add on main",
+    );
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "rebase", "--quiet", "main");
+    await git(work, "push", "--quiet", "--force", "--all", "origin");
+    const lastReviewed = await git(work, "rev-parse", "HEAD");
+    headSha = await commit(
+      { "src/imports.ts": "import { a } from './b';\nexport const x = a;\n" },
+      "move import",
+    );
+    const { repo, blobs, prepare } = await setUp();
+    const prepared = await prepare({
+      reviewed: [
+        { path: "src/imports.ts", blobSha: blobs.get("src/imports.ts") ?? "", depth: FULL },
+      ],
+    });
+    expect(
+      prepared.plan.files.find((planned) => planned.file.path === "src/imports.ts")?.depth,
+    ).toBe("mechanical");
+    expect(prepared.done).toContainEqual({ path: "src/imports.ts", depth: "full" });
+    const outcome = { index: 0, findings: [], transcriptKeys: [] };
+    const report = await finishReview(repo, prepared, [outcome], headSha);
+    expect(report.reviewedFiles).toContainEqual({
+      path: "src/imports.ts",
+      blobSha: blobs.get("src/imports.ts"),
+      depth: "full",
+    });
+    expect(lastReviewed).not.toBe(headSha);
+  });
+
+  it("reviews a file the range left out when no posted run reviewed its version", async () => {
+    const first = await setUp();
+    const lastReviewed = headSha;
+    headSha = await commit({ "CLAUDE.md": "Use pnpm, please.\n" }, "docs only");
+    const repo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha, lastReviewed],
+    });
+    // src/total.ts didn't change since the last review, but its batch failed then: no record.
+    const reviewed = [".lgtmoose.yaml"].map((path) => ({
+      path,
+      blobSha: first.blobs.get(path) ?? "",
+      depth: FULL,
+    }));
+    const prepared = await prepareReview(
+      { github: deps().deps.github, progress: () => {} },
+      OPTIONS.target,
+      repo,
+      pull(),
+      { lastReviewed, reviewed },
+    );
+    expect(prepared.kind).toBe("incremental");
+    expect(prepared.files.map((file) => file.path).toSorted()).toEqual([
+      "CLAUDE.md",
+      "src/total.ts",
+    ]);
+    expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
   });
 
   it("counts earlier open findings once and doesn't post them again", async () => {
