@@ -57,10 +57,11 @@ export interface Poster {
    */
   markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<MarkedReview[]>;
   /**
-   * The external IDs (see `CheckRunInput.externalId`) of our check runs on the head. Always
-   * none in shadow mode.
+   * Our App's check runs on the head that carry an external ID (see
+   * `CheckRunInput.externalId`), with how many annotations each has. Always none in shadow
+   * mode.
    */
-  checkRunIds(pull: PullRef, headSha: string): Promise<string[]>;
+  checkRunsOn(pull: PullRef, headSha: string): Promise<OurCheckRun[]>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -115,10 +116,19 @@ interface ListedComment {
   performed_via_github_app?: { id?: number } | null;
 }
 
+/** One of our check runs on a commit, by its external ID. */
+export interface OurCheckRun {
+  externalId: string;
+  /** How many annotations it has: GitHub's `annotations_count`. */
+  annotations: number;
+}
+
 /** A check run as the check-runs endpoint lists it. */
 interface ListedCheckRun {
   id: number;
   external_id?: string | null;
+  /** The App that created it. */
+  app?: { id?: number } | null;
   output?: { annotations_count?: number } | null;
 }
 
@@ -263,9 +273,11 @@ export class GitHubPoster implements Poster {
     return run.id;
   }
 
-  async checkRunIds(pull: PullRef, headSha: string): Promise<string[]> {
+  async checkRunsOn(pull: PullRef, headSha: string): Promise<OurCheckRun[]> {
     return (await this.checkRuns(pull, headSha)).flatMap((run) =>
-      typeof run.external_id === "string" ? [run.external_id] : [],
+      typeof run.external_id === "string"
+        ? [{ externalId: run.external_id, annotations: run.output?.annotations_count ?? 0 }]
+        : [],
     );
   }
 
@@ -278,14 +290,20 @@ export class GitHubPoster implements Poster {
     return (await this.checkRuns(pull, headSha)).find((run) => run.external_id === externalId);
   }
 
-  /** Our check runs on the head, every one of them. */
+  /**
+   * Our check runs on the head, every one of them. Only our App's: a workflow in the PR can
+   * create a check run with our name and any external ID (its token has `checks: write`), so
+   * neither says the run is ours. Without the App's ID (tests, local runs) the name decides.
+   */
   private async checkRuns(pull: PullRef, headSha: string): Promise<ListedCheckRun[]> {
     // `filter=all`: by default GitHub lists only the latest run of each name.
     const name = encodeURIComponent(CHECK_NAME);
-    return this.github.list<ListedCheckRun>(
+    const runs = await this.github.list<ListedCheckRun>(
       `${repoPath(pull)}/commits/${headSha}/check-runs?check_name=${name}&filter=all`,
       (page) => (page as { check_runs?: ListedCheckRun[] }).check_runs ?? [],
     );
+    const { appId } = this.options;
+    return appId === undefined ? runs : runs.filter((run) => run.app?.id === appId);
   }
 
   async upsertSummaryComment(

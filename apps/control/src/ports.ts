@@ -64,6 +64,7 @@ export interface RunStore {
       filesDone: number;
       costUsd: number | undefined;
       headSha: string;
+      /** The label it set or set out to; undefined leaves the PR's recorded one alone. */
       statusLabel: string | undefined;
       summaryCommentId: number | undefined;
     },
@@ -86,12 +87,12 @@ export interface RunStore {
       filesDone: number;
       costUsd: number | undefined;
       /**
-       * The PR-level outputs this run wrote (the covering run's, or its own when that run
-       * never wrote them): recorded on the PR too, unless a newer run has written PR-level
-       * state, and the run then counts as having written it.
+       * The covering run's PR-level outputs this run wrote: recorded on the PR too, unless a
+       * newer run has written PR-level state, and the run then counts as having written it.
        */
       pr?: {
         headSha: string;
+        /** The label it set or set out to; undefined leaves the PR's recorded one alone. */
         statusLabel: string | undefined;
         summaryCommentId: number | undefined;
       };

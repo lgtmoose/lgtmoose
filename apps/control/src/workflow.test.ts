@@ -248,6 +248,8 @@ function harness(setup: Setup = {}) {
   const reviewsOnGitHub = new Map<string, MarkedReview[]>();
   /** The external IDs of our check runs "on GitHub", as the post or the test put them there. */
   const checkRunsOnGitHub = new Set<string>();
+  /** How many annotations each of those has, when not none. */
+  const checkRunAnnotations = new Map<string, number>();
   /** ECS task statuses by ARN, as the test sets them. */
   const tasks = new Map<string, string>();
   const reader: PullReader = {
@@ -285,11 +287,18 @@ function harness(setup: Setup = {}) {
           });
           // As if the reviews were on GitHub, for the tests that put them there.
           shadow.markersAt = async (_pull, commitId) => [...(reviewsOnGitHub.get(commitId) ?? [])];
-          shadow.checkRunIds = async () => [...checkRunsOnGitHub];
+          shadow.checkRunsOn = async () =>
+            [...checkRunsOnGitHub].map((externalId) => ({
+              externalId,
+              annotations: checkRunAnnotations.get(externalId) ?? 0,
+            }));
           const completeCheckRun = shadow.completeCheckRun.bind(shadow);
           shadow.completeCheckRun = async (ref, input) => {
             const done = await completeCheckRun(ref, input);
-            if (input.externalId !== undefined) checkRunsOnGitHub.add(input.externalId);
+            if (input.externalId !== undefined) {
+              checkRunsOnGitHub.add(input.externalId);
+              checkRunAnnotations.set(input.externalId, input.annotations.length);
+            }
             return done;
           };
           return shadow;
@@ -317,6 +326,7 @@ function harness(setup: Setup = {}) {
     heartbeats,
     reviewsOnGitHub,
     checkRunsOnGitHub,
+    checkRunAnnotations,
     /**
      * Puts a review of ours with this marker on the commit, and, `finished`, its run's check
      * run too: that run finished the head.
@@ -908,6 +918,40 @@ describe("post", () => {
     expect(reviews(calls)).toHaveLength(1);
   });
 
+  it("takes a check run sent in full, though never saved as done, as finishing the head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // The covering run saved how many annotations its check run was to have, sent them all,
+    // and died before saving that it was done.
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 2, review: true, checkRunAnnotations: 2 }),
+    );
+    h.checkRunsOnGitHub.add(RUN_ID);
+    h.checkRunAnnotations.set(RUN_ID, 2);
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      coveredBy: reviewMarker(RUN_ID, true),
+    });
+    expect(reviews(calls)).toEqual([]);
+  });
+
+  it("doesn't take a check run with annotations still to come as finishing the head", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true), "COMMENTED", false);
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 2, review: true, checkRunAnnotations: 120 }),
+    );
+    h.checkRunsOnGitHub.add(RUN_ID);
+    h.checkRunAnnotations.set(RUN_ID, 50);
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
   it("finds the covering run's check run on GitHub when its progress is gone", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
@@ -992,8 +1036,8 @@ describe("post", () => {
     });
   });
 
-  it("falls back to its own decision's label when the covering run saved none", async () => {
-    const { h, taskStatus } = await ready();
+  it("sets no label of its own when the covering run's decision set none", async () => {
+    const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
     h.addReview(headSha, reviewMarker(RUN_ID, true));
     await h.deps.store.createText(
@@ -1001,9 +1045,12 @@ describe("post", () => {
       JSON.stringify({ ...theirOutputs, label: false }),
     );
     await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
-    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
-      pr: { headSha, statusLabel: expect.any(String) },
-    });
+    // Their summary only: this run's own decision was never posted.
+    expect(calls).toEqual(["upsertSummaryComment"]);
+    const result = h.runs.runs.get(RUN_2)?.coverResult;
+    expect(result).toMatchObject({ pr: { headSha } });
+    // Recorded without a label, which leaves the PR's recorded one as it is.
+    expect(result?.pr?.statusLabel).toBeUndefined();
   });
 
   it("lets another run's off-ECS head claim expire before taking it over", async () => {
@@ -1204,6 +1251,7 @@ describe("post", () => {
       attempt: "attempt-1",
       writes: 5,
       decisionLabel: expect.any(String),
+      checkRunAnnotations: expect.any(Number),
       review: true,
       checkRun: true,
       summary: true,

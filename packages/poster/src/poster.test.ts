@@ -183,20 +183,44 @@ describe("GitHubPoster", () => {
     expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
   });
 
-  it("lists the external IDs of our check runs on the head", async () => {
+  it("lists our App's check runs on the head with their annotation counts", async () => {
     const { poster: p, calls } = poster([
       {
         status: 200,
         body: {
           check_runs: [
-            { id: 4, external_id: "run-1" },
-            { id: 5, external_id: null },
+            { id: 4, external_id: "run-1", app: { id: 99 }, output: { annotations_count: 3 } },
+            { id: 5, external_id: null, app: { id: 99 } },
           ],
         },
       },
     ]);
-    expect(await p.checkRunIds(PULL, "abc")).toEqual(["run-1"]);
+    expect(await p.checkRunsOn(PULL, "abc")).toEqual([{ externalId: "run-1", annotations: 3 }]);
     expect(calls[0]?.url).toContain("/commits/abc/check-runs?check_name=LGTMoose&filter=all");
+  });
+
+  it("ignores a check run forged with our name and a run's external ID", async () => {
+    // A workflow in the PR, with its GITHUB_TOKEN's checks: write, made this one.
+    const forged = { id: 6, external_id: "run-1", app: { id: 15368 } };
+    const listing = { status: 200, body: { check_runs: [forged] } };
+    const github = (responses: { status: number; body?: unknown }[]) => {
+      const fake = fakeFetch(responses);
+      const client = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+      return { poster: new GitHubPoster(client, { appId: 99 }), calls: fake.calls };
+    };
+    expect(await github([listing]).poster.checkRunsOn(PULL, "abc")).toEqual([]);
+    // Nor does completing our check run take the forged one over: it creates ours.
+    const created = github([listing, { status: 201, body: { id: 9 } }]);
+    const input = {
+      headSha: "abc",
+      conclusion: "success" as const,
+      title: "t",
+      summary: "s",
+      annotations: [],
+      externalId: "run-1",
+    };
+    expect(await created.poster.completeCheckRun(PULL, input)).toBe(9);
+    expect(created.calls[1]).toMatchObject({ method: "POST" });
   });
 
   it("sends the annotation pages an earlier attempt didn't get to", async () => {

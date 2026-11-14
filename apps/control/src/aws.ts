@@ -222,7 +222,12 @@ async function newerRunPosted(
 async function recordOnPr(
   tx: Pick<Db, "select" | "update">,
   run: { runId: string; pullRequestId: string },
-  pr: { headSha: string; statusLabel: string | undefined; summaryCommentId: number | undefined },
+  pr: {
+    headSha: string;
+    /** The PR's label; undefined leaves the recorded one as it is. */
+    statusLabel: string | undefined;
+    summaryCommentId: number | undefined;
+  },
   now: () => Date,
 ): Promise<void> {
   await tx
@@ -235,7 +240,7 @@ async function recordOnPr(
     .update(pullRequests)
     .set({
       lastReviewedSha: pr.headSha,
-      statusLabel: pr.statusLabel ?? null,
+      ...(pr.statusLabel === undefined ? {} : { statusLabel: pr.statusLabel }),
       summaryCommentId: pr.summaryCommentId ?? null,
       updatedAt: now(),
     })

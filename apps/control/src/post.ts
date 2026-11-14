@@ -102,6 +102,8 @@ interface PostProgress {
   labelTarget?: string;
   /** The label its decision calls for, saved before its first write to GitHub. */
   decisionLabel?: string;
+  /** How many annotations its check run is to have, saved before creating it. */
+  checkRunAnnotations?: number;
 }
 
 const postProgressSchema = z.object({
@@ -117,6 +119,7 @@ const postProgressSchema = z.object({
   labelTarget: z.string().optional(),
   /** The label its decision calls for, saved before its first write to GitHub. */
   decisionLabel: z.string().optional(),
+  checkRunAnnotations: z.number().int().nonnegative().optional(),
 });
 
 /**
@@ -192,6 +195,25 @@ export function coveringReviews(
       ? incomplete.filter((review) => review.state === "CHANGES_REQUESTED")
       : incomplete),
   ];
+}
+
+/** `read`, called the first time only: its promise is shared by every later call. */
+function once<T>(read: () => Promise<T>): () => Promise<T> {
+  let result: Promise<T> | undefined;
+  return () => (result ??= read());
+}
+
+/** `read` per key, called once for each key. */
+function memo<T>(read: (key: string) => Promise<T>): (key: string) => Promise<T> {
+  const results = new Map<string, Promise<T>>();
+  return (key) => {
+    let result = results.get(key);
+    if (result === undefined) {
+      result = read(key);
+      results.set(key, result);
+    }
+    return result;
+  };
 }
 
 /** The run a review marker names. */
@@ -428,11 +450,7 @@ export async function post(
   };
 
   // Our reviews on the head, from any run: listed once per post.
-  let listing: Promise<MarkedReview[]> | undefined;
-  const headReviews = () => {
-    listing ??= poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-    return listing;
-  };
+  const headReviews = once(() => poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX));
   const ownMarker = `${REVIEW_MARKER_PREFIX}${runId}:`;
   const ownReview = async () =>
     (await headReviews()).some((review) => review.marker.startsWith(ownMarker));
@@ -472,7 +490,8 @@ export async function post(
     deps.runs.succeedRun(runId, {
       ...counts,
       headSha: pr.headSha,
-      // The label it set, or meant to: the reconciler re-syncs a label that didn't take.
+      // The label it set, or meant to: the reconciler re-syncs a label that didn't take. None
+      // (the decision was skipped) leaves the recorded one as it is, like the label itself.
       statusLabel: decision.label,
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
     });
@@ -497,46 +516,65 @@ export async function post(
     await save();
   };
   /** The head's check run. This run holds the head, so it's this run's to write. */
+  const annotations = annotationsFor([...report.inline, ...report.body]);
+  /**
+   * What a run this one's review covers needs from it, saved before the first write to GitHub:
+   * the label its decision calls for, to set should this run not, and how many annotations its
+   * check run is to have, to tell from GitHub's count that it was sent in full, should this
+   * run die before saving that it was. A retry whose report came out differently saves its own.
+   */
+  const saveIntent = async () => {
+    const checkRunAnnotations = decision.conclusion === undefined ? undefined : annotations.length;
+    if (
+      progress.decisionLabel === decision.label &&
+      progress.checkRunAnnotations === checkRunAnnotations
+    ) {
+      return;
+    }
+    if (decision.label === undefined) delete progress.decisionLabel;
+    else progress.decisionLabel = decision.label;
+    if (checkRunAnnotations === undefined) delete progress.checkRunAnnotations;
+    else progress.checkRunAnnotations = checkRunAnnotations;
+    await save();
+  };
   const writeCheckRun = async () => {
     if (decision.conclusion === undefined || progress.checkRun) return;
+    await saveIntent();
     await poster.completeCheckRun(pull, {
       headSha: pr.headSha,
       conclusion: decision.conclusion,
       title: CHECK_TITLE[decision.event],
       summary: report.summary,
-      annotations: annotationsFor([...report.inline, ...report.body]),
+      annotations,
       // A retry finds the run an earlier attempt created, instead of adding another.
       externalId: runId,
     });
     progress.checkRun = true;
     await save();
   };
+  // Read once per post: other runs' saved progress, and our check runs on the head.
+  const theirProgress = memo((theirRun) =>
+    deps.store.getText(runKeys(theirRun).posted).then(readTheirs),
+  );
+  const headCheckRuns = once(() => poster.checkRunsOn(pull, pr.headSha));
   /**
    * Whether the run behind a review on the head finished the head: its check run is on GitHub
-   * too (from its saved progress, else looked up by its external ID, since saved progress
-   * expires). Without a check run (`gate.check_run: off`), the review alone does.
+   * too. Its saved progress says so, or GitHub lists our App's check run under its external ID
+   * with every annotation it was to have (it saved how many before creating the run, and may
+   * have died before saving that it was done). With that progress gone (it expires) or
+   * unreadable, our App's check run under its external ID is enough. Without a check run
+   * (`gate.check_run: off`), the review alone is.
    */
   const finishedHead = async (marker: string) => {
     if (decision.conclusion === undefined) return true;
     const theirRun = markerRun(marker);
     const theirs = await theirProgress(theirRun);
-    if (theirs !== undefined) return theirs.checkRun === true;
-    return (await headCheckRuns()).includes(theirRun);
-  };
-  // Read once per post: other runs' saved progress, and our check runs on the head.
-  const progressOf = new Map<string, Promise<PostProgress | undefined>>();
-  const theirProgress = (theirRun: string) => {
-    let read = progressOf.get(theirRun);
-    if (read === undefined) {
-      read = deps.store.getText(runKeys(theirRun).posted).then(readTheirs);
-      progressOf.set(theirRun, read);
-    }
-    return read;
-  };
-  let checkRunListing: Promise<string[]> | undefined;
-  const headCheckRuns = () => {
-    checkRunListing ??= poster.checkRunIds(pull, pr.headSha);
-    return checkRunListing;
+    if (theirs?.checkRun === true) return true;
+    const expected = theirs?.checkRunAnnotations;
+    // Readable progress without a count: it never got as far as creating its check run.
+    if (theirs !== undefined && expected === undefined) return false;
+    const listed = (await headCheckRuns()).find((check) => check.externalId === theirRun);
+    return listed !== undefined && (expected === undefined || listed.annotations === expected);
   };
   /** Whether a run is done with its post: no attempt of it can come along and write still. */
   const settled = async (theirRun: string) => {
@@ -573,8 +611,9 @@ export async function post(
     const theirRun = markerRun(coveredBy);
     const theirs = await theirProgress(theirRun);
     // An earlier attempt's saved target first: the label it set out to write.
-    const label =
-      progress.labelTarget ?? theirs?.labelTarget ?? theirs?.decisionLabel ?? decision.label;
+    // Never this run's own decision's: it wasn't posted. With neither (the covering run's
+    // decision set no label), it writes none and leaves the PR's recorded label as it is.
+    const label = progress.labelTarget ?? theirs?.labelTarget ?? theirs?.decisionLabel;
     const summaryBody = theirs?.summaryBody;
     const owesSummary = !progress.summary && summaryBody !== undefined;
     // Once its summary is out, it owes the label whatever the covering run's progress says now.
@@ -612,12 +651,7 @@ export async function post(
         }
       }
       if (coveredBy === undefined) {
-        // Its decision's label, for a run its review covers to set should this one not. A retry
-        // whose decision came out differently saves its own.
-        if (decision.label !== undefined && progress.decisionLabel !== decision.label) {
-          progress.decisionLabel = decision.label;
-          await save();
-        }
+        await saveIntent();
         try {
           await poster.submitReview(pull, pr.headSha, payload);
         } catch (error) {

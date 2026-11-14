@@ -1,7 +1,13 @@
 import type { LabelClient } from "@lgtmoose/summary";
 import type { CheckRunInput } from "./check-run.js";
 import type { PullRef } from "./github.js";
-import type { MarkedReview, PostedReview, Poster, SummaryCommentResult } from "./poster.js";
+import type {
+  MarkedReview,
+  OurCheckRun,
+  PostedReview,
+  Poster,
+  SummaryCommentResult,
+} from "./poster.js";
 import type { ReviewPayload } from "./review.js";
 
 /** Where shadow mode writes. `S3TranscriptStore` from @lgtmoose/harness fits. */
@@ -94,7 +100,7 @@ export class ShadowPoster implements Poster {
     return [];
   }
 
-  async checkRunIds(_pull: PullRef, _headSha: string): Promise<string[]> {
+  async checkRunsOn(_pull: PullRef, _headSha: string): Promise<OurCheckRun[]> {
     return [];
   }
 

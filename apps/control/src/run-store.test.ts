@@ -256,6 +256,30 @@ describe("drizzleRunStore", () => {
     expect(await store.newerRunPosted(await loaded(run.runId))).toBe(true);
   });
 
+  it("leaves the PR's recorded label alone when a run records none", async () => {
+    const run = await start("arn:exec:29", 29, "a".repeat(40), new Date("2026-11-14T00:00:01Z"));
+    await store.succeedRun(run.runId, posted("a".repeat(40), 16));
+    const covered = await start(
+      "arn:exec:30",
+      29,
+      "a".repeat(40),
+      new Date("2026-11-14T00:00:02Z"),
+    );
+    await store.coverRun(covered.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      pr: { headSha: "a".repeat(40), statusLabel: undefined, summaryCommentId: 16 },
+    });
+    expect(await prRow(run.pullRequestId)).toMatchObject({ statusLabel: "label a" });
+    // Nor does a posted run whose decision set no label (it was skipped).
+    const next = await start("arn:exec:31", 29, "b".repeat(40), new Date("2026-11-14T00:00:03Z"));
+    await store.succeedRun(next.runId, { ...posted("b".repeat(40), 16), statusLabel: undefined });
+    expect(await prRow(run.pullRequestId)).toMatchObject({
+      lastReviewedSha: "b".repeat(40),
+      statusLabel: "label a",
+    });
+  });
+
   it("supersedes only a queued or running run", async () => {
     const failed = await start("arn:exec:13", 13);
     await store.failRun("arn:exec:13", "States.TaskFailed");

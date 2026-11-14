@@ -44,6 +44,7 @@ export {
   GitHubPoster,
   type GitHubPosterOptions,
   type MarkedReview,
+  type OurCheckRun,
   type PostedReview,
   type Poster,
   type SummaryCommentResult,
