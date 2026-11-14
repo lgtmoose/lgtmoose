@@ -161,6 +161,16 @@ describe("parseRulePack", () => {
     );
   });
 
+  it("treats every line ending as one, so a lone CR can't escape the code block", () => {
+    const parsed = parseRulePack(
+      pack(`title: R\nrules:\n${RULE}`, "Intro\r# Heading\u2028- item\u0085> quote"),
+      "./rules/r.md",
+      "repo",
+    );
+    expect(parsed.text).toContain("    Intro\n    # Heading\n    - item\n    > quote");
+    expect(parsed.text).not.toMatch(/\r|\u2028|\u0085/);
+  });
+
   it("leaves a trusted pack's body as markdown, fenced code included", () => {
     const body = "## When to apply\n\n```c\n#include <x.h>\n```";
     const parsed = parseRulePack(pack(`id: x\ntitle: X\nrules:\n${RULE}`, body), "x", "private");
@@ -351,6 +361,50 @@ describe("selectRulePacks", () => {
       dirs: fixtures,
     });
     expect(selected.problems).toEqual([expect.stringMatching(/x\.md couldn't be read/)]);
+    expect(selected.warnings).toEqual([
+      expect.stringMatching(/together failed, so one at a time: fetch failed/),
+      expect.stringMatching(/Reading \.\/rules\/x\.md failed: fetch failed/),
+    ]);
+  });
+
+  it("falls back to one read at a time, leaving out only the file at fault", async () => {
+    const base = await commit({ "rules/a.md": repoPack("A"), "rules/b.md": repoPack("B") });
+    const blobOfA = (await git("rev-parse", `${base}:rules/a.md`)).trim();
+    const picky = {
+      ...repo,
+      readBlobs: async (shas: Iterable<string>) => {
+        const list = [...shas];
+        if (list.includes(blobOfA)) throw new Error("too big");
+        return repo.readBlobs(list);
+      },
+    };
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo: picky,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(
+      selected.packs.filter((loaded) => loaded.source === "repo").map((loaded) => loaded.id),
+    ).toEqual(["./rules/b.md"]);
+    expect(selected.problems).toEqual([expect.stringMatching(/a\.md couldn't be read/)]);
+  });
+
+  it("sends a missing or broken mandatory pack to the operator, not the repo", async () => {
+    await rm(new URL("security.md", fixtures.builtin));
+    const selected = await selectRulePacks([], { dirs: fixtures });
+    expect(selected.problems).toEqual([]);
+    expect(selected.warnings).toEqual([expect.stringMatching(/Unknown rule pack "security"/)]);
+  });
+
+  it("reads a README named explicitly", async () => {
+    const base = await commit({ "rules/readme.md": repoPack("Readme pack") });
+    const selected = await selectRulePacks(["./rules/readme.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(selected.packs.at(-1)?.title).toBe("Readme pack");
+    expect(selected.problems).toEqual([]);
   });
 
   it("reads repo packs from the base commit, not the working tree or later commits", async () => {

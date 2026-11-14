@@ -98,12 +98,26 @@ ${OUTPUT_SCHEMA}
 
 /** Moves markdown headings down two levels, so a pack's own headings nest under ours. */
 export function demoteHeadings(text: string): string {
-  let inFence = false;
+  // Fences as CommonMark reads them: up to three spaces of indent, and closed only by the same
+  // character at least as many times, so an indented or nested fence doesn't flip the state.
+  let fence: { char: string; length: number } | undefined;
   return text
     .split("\n")
     .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
-      return !inFence && /^#{1,4} /.test(line) ? `##${line}` : line;
+      const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (marker !== null) {
+        const run = marker[1] ?? "";
+        const char = run.charAt(0);
+        if (fence === undefined) {
+          fence = { char, length: run.length };
+          return line;
+        }
+        if (char === fence.char && run.length >= fence.length && (marker[2] ?? "").trim() === "") {
+          fence = undefined;
+          return line;
+        }
+      }
+      return fence === undefined && /^#{1,4} /.test(line) ? `##${line}` : line;
     })
     .join("\n");
 }

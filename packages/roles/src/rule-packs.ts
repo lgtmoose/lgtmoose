@@ -96,7 +96,8 @@ class UnknownRulePackError extends RulePackError {
 
 /** Splits `---` front matter from the body. */
 function splitFrontMatter(text: string): { front: string; body: string } | undefined {
-  const normalised = text.replace(/\r\n/g, "\n");
+  // CR, NEL and the Unicode separators end lines for a markdown reader too.
+  const normalised = text.replace(/\r\n?|[\u0085\u2028\u2029]/g, "\n");
   const match = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/.exec(normalised);
   return match === null ? undefined : { front: match[1] ?? "", body: (match[2] ?? "").trim() };
 }
@@ -361,6 +362,11 @@ const RULES_PACK_PATH = /^rules\/[a-z0-9][a-z0-9-]*\.md$/;
 /** Files read at most, so a `rules` folder full of packs can't make the review fetch them all. */
 const MAX_REPO_PACK_READS = 2 * REPO_RULE_PACK_LIMITS.maxFiles;
 
+/** A short reason for the operator's log. Git errors never carry the token. */
+function reasonOf(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
+}
+
 /** Code-unit order, as convention files are sorted, so it doesn't depend on the locale. */
 function byCodeUnit(a: string, b: string): number {
   return Number(a > b) - Number(a < b);
@@ -377,16 +383,19 @@ async function readRepoPacks(
   sha: string,
   wanted: ReadonlySet<string>,
   problems: string[],
+  warnings: string[],
 ): Promise<{ path: string; text: string }[]> {
   const listing = await repo.git(["ls-tree", "-z", sha, "--", "rules/"]);
   const all = wanted.has("rules/*.md");
   const entries: { path: string; blob: string }[] = [];
   for (const line of listing.split("\0")) {
     const [, , blob, path] = RULES_ENTRY.exec(line) ?? [];
-    if (blob === undefined || path === undefined || /^rules\/readme\.md$/i.test(path)) continue;
+    if (blob === undefined || path === undefined) continue;
+    const readme = /^rules\/readme\.md$/i.test(path);
     if (RULES_PACK_PATH.test(path)) {
-      if (all || wanted.has(path)) entries.push({ path, blob });
-    } else if (all && /\.md$/i.test(path)) {
+      // The glob skips a README; naming one explicitly reads it.
+      if (wanted.has(path) || (all && !readme)) entries.push({ path, blob });
+    } else if (all && !readme && /\.md$/i.test(path)) {
       problems.push(
         `./${path} was left out: name repo rule packs with lowercase letters, digits and hyphens, ending in .md.`,
       );
@@ -402,28 +411,37 @@ async function readRepoPacks(
   const { maxBytes, maxFiles, maxTotalBytes } = REPO_RULE_PACK_LIMITS;
   const chosen: { path: string; text: string }[] = [];
   let total = 0;
-  let reads = 0;
-  for (const entry of entries) {
+  const toRead = entries.slice(0, MAX_REPO_PACK_READS);
+  for (const entry of entries.slice(MAX_REPO_PACK_READS)) {
+    problems.push(
+      `./${entry.path} was left out: only the first ${MAX_REPO_PACK_READS} pack files in rules/ are read.`,
+    );
+  }
+  // One batch for the usual case. If it fails (a huge file, a failed fetch), one at a time, so
+  // only the file at fault is left out.
+  let blobs: Map<string, Buffer>;
+  try {
+    blobs = await repo.readBlobs(toRead.map((entry) => entry.blob));
+  } catch (error) {
+    warnings.push(`Reading repo rule packs together failed, so one at a time: ${reasonOf(error)}`);
+    blobs = new Map();
+    for (const entry of toRead) {
+      try {
+        const one = (await repo.readBlobs([entry.blob])).get(entry.blob);
+        if (one !== undefined) blobs.set(entry.blob, one);
+      } catch (inner) {
+        warnings.push(`Reading ./${entry.path} failed: ${reasonOf(inner)}`);
+      }
+    }
+  }
+  for (const entry of toRead) {
     if (chosen.length >= maxFiles) {
       problems.push(
         `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`,
       );
       continue;
     }
-    if (reads >= MAX_REPO_PACK_READS) {
-      problems.push(
-        `./${entry.path} was left out: only the first ${MAX_REPO_PACK_READS} pack files in rules/ are read.`,
-      );
-      continue;
-    }
-    reads += 1;
-    // One at a time, so one huge or unreadable file is only that file's problem.
-    let content: Buffer | undefined;
-    try {
-      content = (await repo.readBlobs([entry.blob])).get(entry.blob);
-    } catch {
-      content = undefined;
-    }
+    const content = blobs.get(entry.blob);
     if (content === undefined) {
       problems.push(`./${entry.path} couldn't be read, so it was left out.`);
     } else if (content.length > maxBytes) {
@@ -486,15 +504,14 @@ export async function selectRulePacks(
   );
   const packs: RulePack[] = [];
   for (const [i, result] of loaded.entries()) {
-    if (result instanceof UnknownRulePackError) problems.push(result.message);
-    else if (!(result instanceof RulePackError)) packs.push(result);
+    if (!(result instanceof RulePackError)) packs.push(result);
+    else if (i < MANDATORY_RULE_PACKS.length) warnings.push(result.message);
+    else if (result instanceof UnknownRulePackError) problems.push(result.message);
     else {
       // A broken built-in or private pack is the deployment's to fix, and its details stay in
       // the log. The repo only learns that a pack it asked for couldn't be used.
       warnings.push(result.message);
-      if (i >= MANDATORY_RULE_PACKS.length) {
-        problems.push(`Rule pack "${named[i]}" couldn't be loaded; ask whoever runs LGTMoose.`);
-      }
+      problems.push(`Rule pack "${named[i]}" couldn't be loaded; ask whoever runs LGTMoose.`);
     }
   }
 
@@ -504,7 +521,13 @@ export async function selectRulePacks(
       return { packs, problems, warnings };
     }
     const floors = severityFloors(packs);
-    for (const file of await readRepoPacks(options.repo, options.baseSha, repoPaths, problems)) {
+    for (const file of await readRepoPacks(
+      options.repo,
+      options.baseSha,
+      repoPaths,
+      problems,
+      warnings,
+    )) {
       const name = `./${file.path}`;
       let parsed: ParsedPack;
       try {
