@@ -59,16 +59,6 @@ describe("awsBedrockAccess", () => {
         legacy: false,
         callerAuthorized: false,
       },
-      // Legacy models are kept, marked, so a tier that pins one can still be checked.
-      {
-        modelId: "anthropic.old",
-        name: "anthropic.old",
-        usable: false,
-        problems: ["model access not granted", "agreement not available"],
-        inferenceTypes: [],
-        legacy: true,
-        callerAuthorized: true,
-      },
       {
         modelId: "anthropic.blocked",
         name: "anthropic.blocked",
@@ -83,7 +73,15 @@ describe("awsBedrockAccess", () => {
       byProvider: "Anthropic",
       byOutputModality: "TEXT",
     });
-    expect(sent.filter((c) => c instanceof GetFoundationModelAvailabilityCommand)).toHaveLength(3);
+    expect(sent.filter((c) => c instanceof GetFoundationModelAvailabilityCommand)).toHaveLength(2);
+    // A legacy model is checked only when asked for: a tier pins it.
+    const withLegacy = await awsBedrockAccess(client, "us-east-1").anthropicModels({
+      legacyToCheck: new Set(["anthropic.old"]),
+    });
+    expect(withLegacy.find((m) => m.modelId === "anthropic.old")).toMatchObject({
+      legacy: true,
+      usable: false,
+    });
   });
 
   it("treats one model Bedrock won't describe as that model's problem", async () => {

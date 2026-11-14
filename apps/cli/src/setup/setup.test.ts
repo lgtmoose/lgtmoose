@@ -225,16 +225,19 @@ describe("runSetup: first run", () => {
     expect(result.all).not.toContain(h.secrets.get(SECRET_NAMES.githubWebhook));
   });
 
-  it("stops before creating an App when its secret is scheduled for deletion", async () => {
-    const h = harness({ scheduled: [SECRET_NAMES.githubApp] });
-    const result = await setup(["--org", "acme", "--region", "eu-west-1", "--yes"], h);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("scheduled for deletion");
-    expect(result.stderr).toContain("restore-secret");
-    expect(h.openBrowser).not.toHaveBeenCalled();
-    expect(h.convertManifest).not.toHaveBeenCalled();
-    expect(h.secrets.size).toBe(0);
-  });
+  it.each([SECRET_NAMES.githubApp, SECRET_NAMES.githubWebhook])(
+    "stops before creating an App when %s is scheduled for deletion",
+    async (name) => {
+      const h = harness({ scheduled: [name] });
+      const result = await setup(["--org", "acme", "--region", "eu-west-1", "--yes"], h);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(`${name} is scheduled for deletion`);
+      expect(result.stderr).toContain("restore-secret");
+      expect(h.openBrowser).not.toHaveBeenCalled();
+      expect(h.convertManifest).not.toHaveBeenCalled();
+      expect(h.secrets.size).toBe(0);
+    },
+  );
 
   it("stops with a clear message when the exchange fails, storing nothing", async () => {
     const h = harness();

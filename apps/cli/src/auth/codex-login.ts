@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { errorText } from "../aws-errors.js";
 import type { InteractiveRunner, SignalTrap } from "./process.js";
 
 export interface CodexLoginOptions {
@@ -77,7 +78,7 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     await (options.removeDir ?? ((path) => rm(path, { recursive: true, force: true })))(home);
   } catch (error) {
     leftover =
-      ` Also couldn't delete ${home} (${error instanceof Error ? error.message : String(error)}); ` +
+      ` Also couldn't delete ${home} (${errorText(error)}); ` +
       "delete it yourself, as it may hold the sign-in.";
   } finally {
     untrap();
@@ -89,9 +90,15 @@ export async function codexLogin(options: CodexLoginOptions): Promise<string> {
     throw new LoginInterrupted(`codex login was interrupted.${leftover ?? ""}`);
   }
   if ("error" in outcome) {
-    if (leftover === undefined) throw outcome.error;
-    const reason = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-    throw new CodexLoginError(`${reason}${leftover}`, { cause: outcome.error });
+    const { error } = outcome;
+    if (leftover === undefined) throw error;
+    // Keep the error itself, so callers' instanceof checks (CommandNotFound) still work, and
+    // add the note to what it says.
+    if (error instanceof Error) {
+      error.message = `${errorText(error)}.${leftover}`;
+      throw error;
+    }
+    throw new CodexLoginError(`${errorText(error)}.${leftover}`, { cause: error });
   }
   if (leftover !== undefined) throw new CodexLoginError(`Nothing stored.${leftover}`);
   return outcome.authJson;

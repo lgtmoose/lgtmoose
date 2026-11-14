@@ -24,7 +24,11 @@ Before storing a plan credential, auth shows a warning about vendor terms and as
 - A cross-region profile id (`us.`, `eu.`, `apac.` and so on) must suit the region. `global.` suits any region.
 - A context-window suffix such as `:200k` is checked as its base model.
 - A pinned legacy model is checked too, and flagged.
-- Claude Code aliases (`sonnet`, `opus`, `haiku`, `opusplan`, `default`, with or without `[1m]`) and ARNs are reported as not checked. Claude Code picks the Bedrock model for an alias itself, so pin a model id in `models` to have it checked.
+- A Claude Code family alias (`haiku`, `sonnet`, `opus`, with or without a modifier such as `[1m]`) passes when that family has at least one usable, current model in the region. `opusplan` needs both Opus and Sonnet. Claude Code picks the model at runtime, so this doesn't say which; pin a model id in `models` to have that exact model checked.
+- Anything that isn't a Bedrock model id fails, such as an Anthropic API id like `claude-sonnet-4-5-20250929`.
+- `default` and ARNs are reported as not checked.
+
+The list of models shows the id to pin for each one: the bare id when it can be called on demand, or the region's profile id when it can only be called through one.
 
 Access is checked for the whole account (region, model access, agreement), which also covers the sandbox task role. Your own IAM permission to call a model is shown only as a note. An account-wide error, such as access denied or throttling, fails the command.
 

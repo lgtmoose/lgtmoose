@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { checkAuthJson, codexLogin, CodexLoginError, LoginInterrupted } from "./codex-login.js";
-import type { InteractiveRunner, SignalTrap } from "./process.js";
+import { CommandNotFound, type InteractiveRunner, type SignalTrap } from "./process.js";
 
 const AUTH_JSON = JSON.stringify({ tokens: { refresh_token: "SECRET-REFRESH" } });
 const noTrap: SignalTrap = () => () => {};
@@ -136,6 +136,22 @@ describe("codexLogin", () => {
     expect(error).toBeInstanceOf(CodexLoginError);
     expect(String(error)).toContain("exited with code 3");
     expect(String(error)).toMatch(/couldn't delete .*lgtmoose-codex-auth-.*EACCES/);
+  });
+
+  it("keeps the real error's type when the removal also fails", async () => {
+    const run: InteractiveRunner = () =>
+      Promise.reject(new CommandNotFound("codex isn't installed, or isn't on your PATH."));
+    const removeDir = () => Promise.reject(new Error("EACCES"));
+    const error = await codexLogin({
+      run,
+      trapSignals: noTrap,
+      deviceAuth: false,
+      tmpRoot,
+      removeDir,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CommandNotFound);
+    expect(String(error)).toContain("codex isn't installed");
+    expect(String(error)).toContain("EACCES");
   });
 
   it("a Ctrl+C wins over an error reading auth.json", async () => {

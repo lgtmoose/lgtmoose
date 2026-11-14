@@ -143,6 +143,10 @@ async function setUpApp(
     return { slug: existing?.slug };
   }
 
+  // The new App's private key exists only until storeAppSecrets writes it, so both secrets it
+  // writes must be writable first. readExistingApp read the App secret; this read throws
+  // SecretScheduledForDeletion for a webhook secret that can't be created again yet.
+  await store.read(SECRET_NAMES.githubWebhook);
   const app = await createApp(inputs, deps);
   // GitHub may not generate a webhook secret while the webhook is inactive. Make one here;
   // `lgtmoose deploy` sends it to GitHub when it sets the real webhook URL.

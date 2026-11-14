@@ -35,11 +35,20 @@ export function awsError(service: string, region: string, what: string, error: u
   });
 }
 
+/** Any thrown value's message, without a trailing full stop, for putting inside a sentence. */
+export function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
+}
+
 /** An AWS SDK error's message as one sentence, with the sign-in hint when it applies. */
 export function awsMessage(error: unknown): string {
   const hint = CREDENTIAL_ERRORS.has(errorName(error) ?? "")
     ? " Sign in to AWS first (for example `aws sso login`), then try again."
     : "";
-  const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
-  return `${message}.${hint}`;
+  return `${errorText(error)}.${hint}`;
+}
+
+/** `awsMessage` without its final full stop, for putting in parentheses. */
+export function awsReason(error: unknown): string {
+  return awsMessage(error).replace(/\.$/, "");
 }

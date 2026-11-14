@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   CreateSecretCommand,
   DeleteSecretCommand,
@@ -16,7 +17,13 @@ import {
   type AuthMethod,
   type Harness,
 } from "@lgtmoose/config";
-import { awsError, awsMessage, errorName, isScheduledForDeletion } from "../aws-errors.js";
+import {
+  awsError,
+  awsMessage,
+  awsReason,
+  errorName,
+  isScheduledForDeletion,
+} from "../aws-errors.js";
 
 /** What a provider credential is for. Stored as tags, never with the value. */
 export interface CredentialLabel {
@@ -110,6 +117,8 @@ export interface CredentialSender {
     DeletionDate?: Date | undefined;
     /** DescribeSecret's answer, for a secret scheduled for deletion. */
     DeletedDate?: Date | undefined;
+    /** DescribeSecret's answer: each version id and its stages, such as AWSCURRENT. */
+    VersionIdsToStages?: Record<string, string[]> | undefined;
   }>;
 }
 
@@ -121,8 +130,24 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
     awsError("Secrets Manager", region, name, error);
 
   /**
-   * The restore worked but the new value didn't, so the OLD credential is live again.
-   * Schedules the deletion again, and says plainly if even that fails.
+   * After UpdateSecret failed: did the version it asked for become current anyway? A timeout
+   * or a dropped connection can fail a call AWS still applied. Undefined when it can't tell.
+   */
+  async function versionLanded(name: string, token: string): Promise<boolean | undefined> {
+    try {
+      const { VersionIdsToStages } = await client.send(
+        new DescribeSecretCommand({ SecretId: name }),
+      );
+      return VersionIdsToStages?.[token]?.includes("AWSCURRENT") ?? false;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The restore worked but the new value definitely didn't, so the OLD credential is live
+   * again. Schedules the deletion again. The earlier remove's window isn't known, so it
+   * uses the default one and says so, and gives the reason if even that fails.
    */
   async function undoRestore(name: string, error: unknown): Promise<Error> {
     const reason = awsMessage(error);
@@ -130,16 +155,18 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
       await client.send(
         new DeleteSecretCommand({ SecretId: name, RecoveryWindowInDays: RECOVERY_DAYS }),
       );
-    } catch {
+    } catch (deleteError) {
       return new Error(
-        `Restored ${name} (${region}) but couldn't store the new value: ${reason} It holds ` +
-          "the OLD credential again, and sandbox tasks will use it. Run this again, or remove it.",
+        `Restored ${name} (${region}) but couldn't store the new value: ${reason} Scheduling ` +
+          `its deletion again failed too (${awsReason(deleteError)}). It holds the OLD ` +
+          "credential again, and sandbox tasks will use it. Run this again, or remove it.",
         { cause: error },
       );
     }
     return new Error(
       `Couldn't store the new value in ${name} (${region}): ${reason} It was restored first, ` +
-        `so it's scheduled for deletion again, in ${RECOVERY_DAYS} days.`,
+        `so it's scheduled for deletion again, in ${RECOVERY_DAYS} days: the earlier remove's ` +
+        "window isn't known, so its date may have moved.",
       { cause: error },
     );
   }
@@ -172,6 +199,8 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
           throw context(name, error);
         }
       }
+      // Our own version id, so a failed call can be checked for whether it landed anyway.
+      const token = randomUUID();
       try {
         // A new version of the value. The provider's harness or auth may have changed since
         // the secret was created, so the description and tags are rewritten too.
@@ -180,17 +209,32 @@ export function awsCredentialStore(client: CredentialSender, region: string): Cr
             SecretId: name,
             SecretString: value,
             Description: credentialDescription(label),
+            ClientRequestToken: token,
           }),
         );
       } catch (error) {
-        if (outcome === "restored") throw await undoRestore(name, error);
-        throw context(name, error);
+        const landed = await versionLanded(name, token);
+        if (landed === false) {
+          throw outcome === "restored" ? await undoRestore(name, error) : context(name, error);
+        }
+        if (landed === undefined) {
+          const holds =
+            outcome === "restored"
+              ? "It was restored first, so it holds either the new value or the OLD one."
+              : "It holds either the new value or the previous one.";
+          throw new Error(
+            `Couldn't tell whether the new value was stored in ${name} (${region}): ` +
+              `${awsMessage(error)} ${holds} Run this again to be sure.`,
+            { cause: error },
+          );
+        }
+        // It landed: the failure was only in hearing back.
       }
       try {
         await client.send(new TagResourceCommand({ SecretId: name, Tags: credentialTags(label) }));
       } catch (error) {
         // The value is stored, so this isn't a failure to store it.
-        return { outcome, tagError: awsMessage(error).replace(/\.$/, "") };
+        return { outcome, tagError: awsReason(error) };
       }
       return { outcome };
     },

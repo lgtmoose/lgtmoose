@@ -34,8 +34,11 @@ export interface ModelAccess {
 
 /** The Bedrock calls `auth bedrock` makes. Tests swap in a fake. */
 export interface BedrockAccess {
-  /** Anthropic's base text models in the region, and whether this account may use each. */
-  anthropicModels(): Promise<ModelAccess[]>;
+  /**
+   * Anthropic's current base text models in the region, and whether this account may use
+   * each. Legacy models are left out, except those in `legacyToCheck` (ones a tier pins).
+   */
+  anthropicModels(options?: { legacyToCheck?: ReadonlySet<string> }): Promise<ModelAccess[]>;
 }
 
 type Command = ListFoundationModelsCommand | GetFoundationModelAvailabilityCommand;
@@ -73,7 +76,7 @@ const PER_MODEL_ERRORS = new Set(["ValidationException", "ResourceNotFoundExcept
 
 export function awsBedrockAccess(client: BedrockSender, region: string): BedrockAccess {
   return {
-    async anthropicModels() {
+    async anthropicModels(options = {}) {
       let summaries;
       try {
         ({ modelSummaries: summaries } = await client.send(
@@ -86,6 +89,8 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         (model): model is typeof model & { modelId: string } =>
           model.modelId !== undefined &&
           !CONTEXT_VARIANT.test(model.modelId) &&
+          (model.modelLifecycle?.status !== "LEGACY" ||
+            (options.legacyToCheck?.has(model.modelId) ?? false)) &&
           // Bedrock leaves this out for some models; only drop the ones it says are provisioned-only.
           (model.inferenceTypesSupported === undefined ||
             model.inferenceTypesSupported.some((type) => CALLABLE.has(type))),
