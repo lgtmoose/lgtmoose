@@ -140,6 +140,23 @@ export interface DispatchStore {
    * step never submits a second review for a head that has one of ours.
    */
   reviewed(repo: string, prNumber: number, headSha: string): Promise<boolean>;
+  /**
+   * Follows `actor` resolving or unresolving one of our review threads, by the thread's first
+   * comment (the one the finding records). Unresolved: one resolved that way is open again.
+   * Resolved: an open or outdated finding becomes `resolved_by_human`, unless it's blocking or
+   * in a protected category (`needsTrustedResolver`). Then the resolution is held: the finding
+   * stays open, with a `resolved` event that didn't count. The dispatcher can't read GitHub, so
+   * it can't check the resolver's write access; the next run's thread sync does, and resolves
+   * it then if they have it. Returns how many findings changed and how many were held (both 0
+   * when the comment isn't one of ours, or the finding is already there).
+   */
+  followThread(
+    repo: string,
+    prNumber: number,
+    firstCommentId: number,
+    resolved: boolean,
+    actor: string,
+  ): Promise<{ changed: number; held: number }>;
 }
 
 export interface DispatchDeps {
@@ -158,6 +175,7 @@ export type DispatchResult =
   | { action: "stopped"; stopped: string[] }
   | { action: "stale"; reason: string }
   | { action: "deferred"; reason: string }
+  | { action: "resolved" | "unresolved"; changed: number; held: number }
   | { action: "ignored"; reason: string };
 
 /**
@@ -255,11 +273,44 @@ async function needsRetry(
 }
 
 /**
- * Comment, review and thread jobs: replies and dispute handling, on a path that doesn't clone.
- * The seam for M5; until then they're acknowledged and dropped.
+ * Comment and review jobs: replies and dispute handling, on a path that doesn't clone. The seam
+ * for M5; until then they're acknowledged and dropped.
  */
 async function conversation(_deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
   return { action: "deferred", reason: `${job.kind} jobs arrive with M5` };
+}
+
+/**
+ * A person resolved or unresolved a review thread: the finding behind it follows at once, with
+ * no review run. The person's latest action wins, as in the post step's thread sync: resolving
+ * takes the finding out of the decision, unresolving puts it back. The bot never reopens a
+ * finding a person resolved on its own. A blocking or protected finding isn't cleared here at
+ * all (see `DispatchStore.followThread`). The decision on GitHub catches up on the next run.
+ */
+async function threadJob(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
+  if (job.commentId === undefined) {
+    return { action: "ignored", reason: "the thread's first comment isn't in the event" };
+  }
+  const resolved = job.kind === "thread_resolved";
+  const { changed, held } = await deps.store.followThread(
+    job.repo,
+    job.prNumber,
+    job.commentId,
+    resolved,
+    job.actor,
+  );
+  if (changed + held === 0) {
+    return { action: "ignored", reason: "not a thread of one of our open findings" };
+  }
+  deps.log("review thread followed", {
+    repo: job.repo,
+    prNumber: job.prNumber,
+    commentId: job.commentId,
+    resolved,
+    changed,
+    held,
+  });
+  return { action: resolved ? "resolved" : "unresolved", changed, held };
 }
 
 /** Handles one job. Throws when it should be retried (and, in the end, dead-lettered). */
@@ -268,9 +319,10 @@ export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<Di
     case "comment":
     case "review":
     case "review_comment":
+      return conversation(deps, job);
     case "thread_resolved":
     case "thread_unresolved":
-      return conversation(deps, job);
+      return threadJob(deps, job);
     case "pr_opened":
     case "pr_ready":
     case "pr_updated":

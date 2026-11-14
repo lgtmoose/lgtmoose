@@ -157,8 +157,16 @@ function trigger(
     }
     case "thread_resolved":
     case "thread_unresolved": {
-      const id = str(record(payload.thread)?.node_id);
-      return id === undefined ? {} : { threadNodeId: id };
+      // The thread's first comment is the one a finding records (`github_comment_id`), so the
+      // dispatcher can follow the thread without asking GitHub.
+      const thread = record(payload.thread);
+      const id = str(thread?.node_id);
+      const first = Array.isArray(thread?.comments) ? record(thread.comments[0]) : undefined;
+      const commentId = positiveInt(first?.id);
+      return {
+        ...(id === undefined ? {} : { threadNodeId: id }),
+        ...(commentId === undefined ? {} : { commentId }),
+      };
     }
     default:
       return {};

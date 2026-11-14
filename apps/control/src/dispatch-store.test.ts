@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { pullRequests, reviewRuns } from "@lgtmoose/db";
+import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -14,6 +14,9 @@ const db = drizzle(client);
 const store = drizzleDispatchStore(db);
 const T1 = new Date("2026-11-14T00:00:01.000Z");
 const T2 = new Date("2026-11-14T00:00:02.000Z");
+
+/** Rows as JSON, for an order-independent comparison. */
+const byJson = (a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b));
 
 // PGlite starts slowly, and more slowly while turbo runs other packages alongside.
 beforeAll(async () => {
@@ -81,5 +84,116 @@ describe("drizzleDispatchStore", () => {
   it("counts a covered run's head as reviewed: another run's review is on it", async () => {
     await run(20, "arn:c1", "h20", "covered");
     expect(await store.reviewed("Acme/Shop", 20, "h20")).toBe(true);
+  });
+
+  async function threadPr(number: number) {
+    const [pull] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "Acme/Shop",
+        number,
+        author: "dev",
+        headSha: "h",
+        baseSha: "b",
+      })
+      .returning({ id: pullRequests.id });
+    if (pull === undefined) throw new Error("no pull request");
+    const add = async (
+      commentId: number,
+      severity: "blocking" | "should_fix" | "nit",
+      options: { source?: "self" | "bot"; ruleCategory?: string } = {},
+    ) => {
+      const [row] = await db
+        .insert(findings)
+        .values({
+          pullRequestId: pull.id,
+          fingerprint: `f${commentId}`,
+          ruleCategory: options.ruleCategory ?? "correctness",
+          severity,
+          path: "a.ts",
+          line: 1,
+          side: "RIGHT",
+          title: "t",
+          body: "b",
+          raisedAtSha: "h",
+          source: options.source ?? "self",
+          githubCommentId: commentId,
+        })
+        .returning({ id: findings.id });
+      if (row === undefined) throw new Error("no finding");
+      return row.id;
+    };
+    const status = async (id: string) =>
+      (await db.select().from(findings).where(eq(findings.id, id)))[0]?.status;
+    const events = (id: string) =>
+      db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    return { add, status, events };
+  }
+
+  it("follows a should_fix finding's thread resolved by anyone, the author included", async () => {
+    const { add, status, events } = await threadPr(30);
+    const id = await add(3_000_000_001, "should_fix");
+    await add(3_000_000_002, "should_fix", { source: "bot" });
+
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, true, "dev")).toEqual({
+      changed: 1,
+      held: 0,
+    });
+    expect(await status(id)).toBe("resolved_by_human");
+    // Already resolved: nothing to do.
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, true, "dev")).toEqual({
+      changed: 0,
+      held: 0,
+    });
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, false, "dev")).toEqual({
+      changed: 1,
+      held: 0,
+    });
+    expect(await status(id)).toBe("open");
+    // Not ours, another PR's: left alone.
+    expect(await store.followThread("acme/shop", 30, 3_000_000_002, true, "dev")).toEqual({
+      changed: 0,
+      held: 0,
+    });
+    expect(await store.followThread("acme/shop", 31, 3_000_000_001, true, "dev")).toEqual({
+      changed: 0,
+      held: 0,
+    });
+    const recorded = await events(id);
+    expect(
+      recorded.map((event) => [event.type, event.actorLogin, event.counted]).sort(byJson),
+    ).toEqual([
+      ["resolved", "dev", true],
+      ["unresolved", "dev", null],
+    ]);
+  });
+
+  it("holds a blocking or protected finding's resolution: it stays open, recorded as not counted", async () => {
+    const { add, status, events } = await threadPr(32);
+    const blocking = await add(3_000_000_011, "blocking");
+    const protectedOne = await add(3_000_000_012, "nit", { ruleCategory: "authz" });
+
+    // The PR's author, and anyone else too: the dispatcher can't check write access, so the
+    // next run's thread sync decides.
+    for (const actor of ["dev", "maintainer"]) {
+      expect(await store.followThread("acme/shop", 32, 3_000_000_011, true, actor)).toEqual({
+        changed: 0,
+        held: 1,
+      });
+    }
+    expect(await store.followThread("acme/shop", 32, 3_000_000_012, true, "dev")).toEqual({
+      changed: 0,
+      held: 1,
+    });
+    expect(await status(blocking)).toBe("open");
+    expect(await status(protectedOne)).toBe("open");
+    const recorded = await events(blocking);
+    expect(
+      recorded.map((event) => [event.type, event.actorLogin, event.counted]).sort(byJson),
+    ).toEqual([
+      ["resolved", "dev", false],
+      ["resolved", "maintainer", false],
+    ]);
   });
 });

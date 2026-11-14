@@ -16,6 +16,7 @@ import {
 import {
   finishReview,
   headKeys,
+  otherReviewerFindings,
   runKeys,
   type BatchOutcome,
   type EarlierFinding,
@@ -36,6 +37,7 @@ import { TASK_MISSING } from "./ecs.js";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest } from "./prepare.js";
+import { resolutionHeld } from "./thread-policy.js";
 
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
@@ -792,9 +794,39 @@ export async function post(
   // What people did to our comments' threads first: a resolved one takes its finding out of the
   // decision, and one unresolved again puts it back. If the threads can't be read, findings
   // stay as they are.
+  // Read once: also tells which of other reviewers' threads are resolved. Unread, other
+  // reviewers' comments don't count (a resolved one can't be told apart).
+  let threads: Awaited<ReturnType<typeof github.threads.reviewThreads>> | undefined;
+  // Our blocking or protected findings whose thread is resolved, but not by someone it counts
+  // for (`resolutionHeld`): they stay open, and the summary says so.
+  let heldResolutions = 0;
   try {
-    const threads = await github.threads.reviewThreads(target);
-    const synced = await deps.findings.syncThreads(run.pullRequestId, threads, pr.headSha);
+    threads = await github.threads.reviewThreads(target);
+    const before = await deps.findings.trackedFindings(run.pullRequestId);
+    const byComment = new Map(
+      before.flatMap((record) =>
+        record.githubCommentId === undefined ? [] : [[record.githubCommentId, record] as const],
+      ),
+    );
+    const permission = memo(async (login: string) =>
+      github.permission === undefined ? "none" : github.permission(target, login),
+    );
+    const counted: typeof threads = [];
+    for (const thread of threads) {
+      const record =
+        thread.firstCommentId === undefined ? undefined : byComment.get(thread.firstCommentId);
+      const held =
+        thread.resolved && record !== undefined
+          ? await resolutionHeld(record, thread.resolvedBy, pr.author, permission)
+          : undefined;
+      if (held === undefined) {
+        counted.push(thread);
+      } else {
+        heldResolutions += 1;
+        deps.log("review thread resolution held", { runId, findingId: record?.id, reason: held });
+      }
+    }
+    const synced = await deps.findings.syncThreads(run.pullRequestId, counted, pr.headSha);
     if (synced.resolved + synced.unresolved > 0) deps.log("review threads", { runId, ...synced });
   } catch (error) {
     deps.log("review threads unread", {
@@ -884,6 +916,30 @@ export async function post(
     }
     ({ outdated, reopened } = earlier);
     latest = await github.reader.pull(target);
+    // Other reviewers' unresolved Critical, Major and bug comments on the files this review
+    // covers: open findings of theirs, counted and listed, never posted. Their text is untrusted
+    // and goes nowhere but the severity check.
+    const others =
+      threads === undefined
+        ? []
+        : otherReviewerFindings(prepared.comments, {
+            paths: new Set(
+              prepared.files.flatMap((file) => (file.status === "deleted" ? [] : [file.path])),
+            ),
+            resolved: new Set(
+              threads.flatMap((thread) =>
+                thread.resolved && thread.firstCommentId !== undefined
+                  ? [thread.firstCommentId]
+                  : [],
+              ),
+            ),
+            ...(github.appId === undefined ? {} : { ourAppId: github.appId }),
+            ourCommentIds: new Set(
+              [...records, ...closedRecords].flatMap((record) =>
+                record.githubCommentId === undefined ? [] : [record.githubCommentId],
+              ),
+            ),
+          });
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
       earlier: earlier.open.map(withoutId),
       closed,
@@ -891,7 +947,16 @@ export async function post(
         fingerprint: record.fingerprint,
         severity: record.severity,
       })),
+      others,
+      heldResolutions,
     });
+    if (report.others > 0 || report.misses.length > 0) {
+      deps.log("other reviewers' findings", {
+        runId,
+        counted: report.others,
+        missed: report.misses.length,
+      });
+    }
   } finally {
     await work.remove();
   }
@@ -1043,6 +1108,13 @@ export async function post(
     // A failed batch's files have no record at this head, so the next run reviews them however
     // far the incremental range has moved on.
     await deps.runs.recordFiles(runId, report.reviewedFiles);
+    // What other reviewers caught that we didn't, for the evals: no comment text.
+    if (report.misses.length > 0) {
+      await deps.store.putText(
+        runKeys(runId).misses,
+        `${JSON.stringify({ version: 1, runId, headSha: pr.headSha, misses: report.misses })}\n`,
+      );
+    }
     progress.findings = true;
     await save();
   };

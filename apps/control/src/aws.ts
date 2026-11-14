@@ -30,6 +30,7 @@ import type { ControlEnv, EmbeddingsSettings } from "./env.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
 import { s3ArtifactStore } from "./s3-store.js";
+import { toPermission } from "./thread-policy.js";
 
 export { s3ArtifactStore };
 
@@ -729,6 +730,28 @@ export async function awsControlDeps(
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
+        appId: app.appId,
+        async permission(target, login) {
+          const path = `/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/collaborators/${encodeURIComponent(login)}/permission`;
+          try {
+            const reply = await client.request<{ permission?: unknown; role_name?: unknown }>(
+              "GET",
+              path,
+            );
+            // `role_name` has maintain and triage; `permission` folds them into write and read.
+            const role = typeof reply.role_name === "string" ? reply.role_name : undefined;
+            const permission = typeof reply.permission === "string" ? reply.permission : undefined;
+            const named = toPermission(role);
+            return named !== "none" ? named : toPermission(permission);
+          } catch (error) {
+            // Not a collaborator: no access. Anything else is a failed read, and the caller
+            // treats it the same way, so the resolution doesn't count.
+            log("collaborator permission unread", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return "none";
+          }
+        },
         // GitHub Apps can call GraphQL with the installation token.
         threads: graphQlThreadReader(
           (query, variables) => client.graphql(query, variables),

@@ -32,6 +32,14 @@ export {
 export type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 export { githubPullReader, type GitHubGet } from "./github-reader.js";
 export {
+  otherReviewerFindings,
+  otherReviewerSeverity,
+  reviewerMisses,
+  type OtherReviewerFinding,
+  type OtherReviewerOptions,
+  type ReviewerMiss,
+} from "./other-reviewers.js";
+export {
   RUN_PREFIX,
   FALLBACK_ERROR_KINDS,
   TRANSCRIPT_ATTEMPTS,

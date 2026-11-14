@@ -39,4 +39,17 @@ export interface PullComment {
   line?: number;
   startLine?: number;
   side?: "LEFT" | "RIGHT";
+  /** Whether a bot (an App) or a person wrote it, as GitHub says. Set for comments on the diff. */
+  authorType?: "bot" | "human";
+  /**
+   * The author's relationship to the repository, as GitHub reports it on the comment
+   * (`author_association`: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE…).
+   */
+  association?: string;
+  /** For a reply on the diff: the ID of the comment it replies to (its thread's first one). */
+  inReplyTo?: number;
+  /** The GitHub App that posted it, when one did (`performed_via_github_app.id`). */
+  viaAppId?: number;
+  /** Its page on GitHub. */
+  url?: string;
 }

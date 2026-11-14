@@ -193,6 +193,21 @@ describe("toReviewJob: comments, reviews and threads", () => {
       threadNodeId: "PRRT_kwDOA",
     });
   });
+
+  it("carries a review thread's first comment ID", () => {
+    const payload = prEvent(
+      "resolved",
+      {},
+      {
+        thread: { node_id: "PRRT_kwDOA", comments: [{ id: 3_000_000_001 }, { id: 3_000_000_002 }] },
+      },
+    );
+    expect(toReviewJob("pull_request_review_thread", payload, options)).toMatchObject({
+      kind: "thread_resolved",
+      threadNodeId: "PRRT_kwDOA",
+      commentId: 3_000_000_001,
+    });
+  });
 });
 
 describe("toReviewJob: ignore rules", () => {

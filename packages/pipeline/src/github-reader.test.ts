@@ -69,8 +69,66 @@ describe("githubPullReader", () => {
     });
     expect(await githubPullReader(get).comments(target, 50)).toEqual([
       { author: "a", body: "Looks good" },
-      { author: "ghost", body: "Off by one", path: "src/a.ts", line: 3, side: "RIGHT" },
-      { author: "c", body: "Outdated", path: "src/a.ts" },
+      {
+        author: "ghost",
+        body: "Off by one",
+        path: "src/a.ts",
+        line: 3,
+        side: "RIGHT",
+        authorType: "human",
+      },
+      { author: "c", body: "Outdated", path: "src/a.ts", authorType: "human" },
+    ]);
+  });
+
+  it("keeps who wrote a diff comment, its thread and its link", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/issues/7/comments?per_page=100&page=1": [],
+      "/repos/acme/shop/pulls/7/comments?per_page=100&page=1": [
+        {
+          id: 5,
+          body: "_🔴 Critical_",
+          user: { login: "coderabbitai[bot]", type: "Bot" },
+          path: "src/a.ts",
+          line: 4,
+          author_association: "NONE",
+          performed_via_github_app: { id: 347564 },
+          html_url: "https://github.com/acme/shop/pull/7#discussion_r5",
+        },
+        {
+          id: 6,
+          body: "Agreed",
+          user: { login: "alice", type: "User" },
+          path: "src/a.ts",
+          line: 4,
+          author_association: "MEMBER",
+          in_reply_to_id: 5,
+          performed_via_github_app: null,
+        },
+      ],
+    });
+    expect(await githubPullReader(get).comments(target, 50)).toEqual([
+      {
+        id: 5,
+        author: "coderabbitai[bot]",
+        body: "_🔴 Critical_",
+        path: "src/a.ts",
+        line: 4,
+        authorType: "bot",
+        association: "NONE",
+        viaAppId: 347564,
+        url: "https://github.com/acme/shop/pull/7#discussion_r5",
+      },
+      {
+        id: 6,
+        author: "alice",
+        body: "Agreed",
+        path: "src/a.ts",
+        line: 4,
+        authorType: "human",
+        association: "MEMBER",
+        inReplyTo: 5,
+      },
     ]);
   });
 

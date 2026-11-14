@@ -2,14 +2,17 @@ import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { StartExecutionCommand, StopExecutionCommand, type SFNClient } from "@aws-sdk/client-sfn";
 import {
   dispatchedExecutions,
+  findingEvents,
+  findings,
   pullRequestDispatches,
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
+import { needsTrustedResolver } from "./thread-policy.js";
 
 /** `arn:…:states:region:account:stateMachine:Name` → `…:execution:Name:<name>`. */
 export function executionArnOf(stateMachineArn: string, name: string): string {
@@ -155,6 +158,59 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
         )
         .limit(1);
       return row !== undefined;
+    },
+    async followThread(repo, number, firstCommentId, resolved, actor) {
+      const from = resolved ? (["open", "outdated"] as const) : (["resolved_by_human"] as const);
+      return db.transaction(async (tx) => {
+        const rows = await tx
+          .select({
+            id: findings.id,
+            sha: findings.raisedAtSha,
+            severity: findings.severity,
+            ruleCategory: findings.ruleCategory,
+          })
+          .from(findings)
+          .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
+          .where(
+            and(
+              sql`lower(${pullRequests.repo}) = ${lower(repo)}`,
+              eq(pullRequests.number, number),
+              eq(findings.source, "self"),
+              inArray(findings.status, [...from]),
+              eq(findings.githubCommentId, firstCommentId),
+            ),
+          );
+        // A blocking or protected finding isn't cleared here: write access can't be checked
+        // without GitHub. Its resolution is recorded as not counted, for the next run's sync.
+        const held = resolved ? rows.filter((row) => needsTrustedResolver(row)) : [];
+        const moved = rows.filter((row) => !held.includes(row));
+        if (moved.length > 0) {
+          await tx
+            .update(findings)
+            .set({ status: resolved ? "resolved_by_human" : "open", updatedAt: now() })
+            .where(
+              inArray(
+                findings.id,
+                moved.map((row) => row.id),
+              ),
+            );
+        }
+        if (rows.length > 0) {
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: resolved ? ("resolved" as const) : ("unresolved" as const),
+              actor: "human" as const,
+              actorLogin: actor,
+              ...(resolved ? { counted: !held.includes(row) } : {}),
+              // No review ran: the commit the finding was last raised at.
+              sha: row.sha,
+              githubCommentId: firstCommentId,
+            })),
+          );
+        }
+        return { changed: moved.length, held: held.length };
+      });
     },
   };
 }
