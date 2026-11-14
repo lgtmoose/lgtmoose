@@ -604,6 +604,12 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       plan(earlier, [...(earlier.alsoReviewedAs ?? []), before.path]);
       continue;
     }
+    if (removed.length === 0) {
+      // A rename undone with nothing it no longer adds: the PR leaves the file as the base has
+      // it, so there's nothing to review.
+      cover(before.path);
+      continue;
+    }
     const rest: FileDiff = { ...before };
     delete rest.oldPath;
     plan(
