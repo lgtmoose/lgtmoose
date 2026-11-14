@@ -100,6 +100,8 @@ interface PostProgress {
   /** What it wrote to the PR, so a run its review covers can bring the PR up to it. */
   summaryBody?: string;
   labelTarget?: string;
+  /** The label its decision calls for, saved before its first write to GitHub. */
+  decisionLabel?: string;
 }
 
 const postProgressSchema = z.object({
@@ -113,6 +115,8 @@ const postProgressSchema = z.object({
   label: z.boolean().optional(),
   summaryBody: z.string().optional(),
   labelTarget: z.string().optional(),
+  /** The label its decision calls for, saved before its first write to GitHub. */
+  decisionLabel: z.string().optional(),
 });
 
 /**
@@ -211,6 +215,11 @@ export interface PostOptions {
   attempt?: PostAttempt;
   /** An ECS task's last status (RUNNING, STOPPED…, or MISSING), for a claim's holder. */
   taskStatus?: (taskArn: string) => Promise<string>;
+  /**
+   * Another execution's status (RUNNING, SUCCEEDED…), undefined when it doesn't exist: whether
+   * a covering run may still be retried.
+   */
+  executionStatus?: (executionArn: string) => Promise<string | undefined>;
 }
 
 const claimSchema = z.object({
@@ -337,6 +346,7 @@ export async function post(
   const running = options.running ?? (async () => true);
   const attempt = options.attempt ?? { id: randomUUID(), taskArn: undefined };
   const taskStatus = options.taskStatus ?? (async () => TASK_MISSING);
+  const executionStatus = options.executionStatus ?? (async () => undefined);
   const run = await deps.runs.getRun(runId);
   if (run === undefined) throw new Error(`No review run ${runId}.`);
   const keys = runKeys(runId);
@@ -509,8 +519,30 @@ export async function post(
   const finishedHead = async (marker: string) => {
     if (decision.conclusion === undefined) return true;
     const theirRun = markerRun(marker);
-    const theirs = readTheirs(await deps.store.getText(runKeys(theirRun).posted));
-    return theirs?.checkRun === true || poster.checkRunExists(pull, pr.headSha, theirRun);
+    const theirs = await theirProgress(theirRun);
+    if (theirs !== undefined) return theirs.checkRun === true;
+    return (await headCheckRuns()).includes(theirRun);
+  };
+  // Read once per post: other runs' saved progress, and our check runs on the head.
+  const progressOf = new Map<string, Promise<PostProgress | undefined>>();
+  const theirProgress = (theirRun: string) => {
+    let read = progressOf.get(theirRun);
+    if (read === undefined) {
+      read = deps.store.getText(runKeys(theirRun).posted).then(readTheirs);
+      progressOf.set(theirRun, read);
+    }
+    return read;
+  };
+  let checkRunListing: Promise<string[]> | undefined;
+  const headCheckRuns = () => {
+    checkRunListing ??= poster.checkRunIds(pull, pr.headSha);
+    return checkRunListing;
+  };
+  /** Whether a run is done with its post: no attempt of it can come along and write still. */
+  const settled = async (theirRun: string) => {
+    const theirs = await deps.runs.getRun(theirRun);
+    if (theirs?.executionArn === undefined) return true;
+    return (await executionStatus(theirs.executionArn)) !== "RUNNING";
   };
   /**
    * A covered run's record, from what its saved progress says it wrote (this attempt's or an
@@ -529,29 +561,40 @@ export async function post(
       : {}),
   });
   /**
-   * Records the covered run. When its head is still the PR's, the PR's record isn't there yet
-   * (the covering run's own record deferred to this newer run, say) and no run for a later
-   * event has written the PR's state, it brings the PR up to the head: the covering run's
-   * summary and label, from that run's saved progress, and the record. Never its own
-   * decision, which wasn't posted.
+   * Records the covered run, first bringing the PR up to the head when this run still owes it
+   * the summary or the label (by its own progress), the head is still the PR's, and no run for
+   * a later event has written the PR's state: the covering run's summary, from its saved
+   * progress, and its label (the one it set, else the one its decision called for, else this
+   * run's own). Only once the covering run is settled, though: one still to be retried writes
+   * them itself, and a label it then leaves to this newer run would be left unset. The label
+   * is saved as this run's target before the first write, so its record always carries it.
    */
   const cover = async (coveredBy: string) => {
-    const catchUp =
+    const theirRun = markerRun(coveredBy);
+    const theirs = await theirProgress(theirRun);
+    // An earlier attempt's saved target first: the label it set out to write.
+    const label =
+      progress.labelTarget ?? theirs?.labelTarget ?? theirs?.decisionLabel ?? decision.label;
+    const summaryBody = theirs?.summaryBody;
+    const owesSummary = !progress.summary && summaryBody !== undefined;
+    // Once its summary is out, it owes the label whatever the covering run's progress says now.
+    const owesLabel =
+      label !== undefined && !progress.label && (progress.summary === true || owesSummary);
+    if (
+      (owesSummary || owesLabel) &&
       latest.headSha === pr.headSha &&
-      run.lastReviewedSha !== pr.headSha &&
-      !(await deps.runs.newerRunPosted(run));
-    const theirs = catchUp
-      ? readTheirs(await deps.store.getText(runKeys(markerRun(coveredBy)).posted))
-      : undefined;
-    if (theirs?.summaryBody !== undefined) {
+      (await settled(theirRun)) &&
+      !(await deps.runs.newerRunPosted(run))
+    ) {
+      if (label !== undefined && progress.labelTarget === undefined) {
+        progress.labelTarget = label;
+        await save();
+      }
       // Checked again right before each write, as on the posting path.
-      if (!progress.summary && !(await deps.runs.newerRunPosted(run))) {
-        await writeSummary(theirs.summaryBody);
+      if (owesSummary && !(await deps.runs.newerRunPosted(run))) {
+        await writeSummary(summaryBody);
       }
-      const label = theirs.labelTarget;
-      if (label !== undefined && !progress.label && !(await deps.runs.newerRunPosted(run))) {
-        await writeLabel(label);
-      }
+      if (owesLabel && !(await deps.runs.newerRunPosted(run))) await writeLabel(label);
     }
     await deps.runs.coverRun(runId, coveredResult(progress));
   };
@@ -569,6 +612,12 @@ export async function post(
         }
       }
       if (coveredBy === undefined) {
+        // Its decision's label, for a run its review covers to set should this one not. A retry
+        // whose decision came out differently saves its own.
+        if (decision.label !== undefined && progress.decisionLabel !== decision.label) {
+          progress.decisionLabel = decision.label;
+          await save();
+        }
         try {
           await poster.submitReview(pull, pr.headSha, payload);
         } catch (error) {

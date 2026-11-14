@@ -57,10 +57,10 @@ export interface Poster {
    */
   markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<MarkedReview[]>;
   /**
-   * Whether our check run with this external ID (see `CheckRunInput.externalId`) is on the
-   * head. Always false in shadow mode.
+   * The external IDs (see `CheckRunInput.externalId`) of our check runs on the head. Always
+   * none in shadow mode.
    */
-  checkRunExists(pull: PullRef, headSha: string, externalId: string): Promise<boolean>;
+  checkRunIds(pull: PullRef, headSha: string): Promise<string[]>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -263,8 +263,10 @@ export class GitHubPoster implements Poster {
     return run.id;
   }
 
-  async checkRunExists(pull: PullRef, headSha: string, externalId: string): Promise<boolean> {
-    return (await this.findCheckRun(pull, headSha, externalId)) !== undefined;
+  async checkRunIds(pull: PullRef, headSha: string): Promise<string[]> {
+    return (await this.checkRuns(pull, headSha)).flatMap((run) =>
+      typeof run.external_id === "string" ? [run.external_id] : [],
+    );
   }
 
   /** Our check run on the head with this external ID, if there is one. */
@@ -273,13 +275,17 @@ export class GitHubPoster implements Poster {
     headSha: string,
     externalId: string,
   ): Promise<ListedCheckRun | undefined> {
+    return (await this.checkRuns(pull, headSha)).find((run) => run.external_id === externalId);
+  }
+
+  /** Our check runs on the head, every one of them. */
+  private async checkRuns(pull: PullRef, headSha: string): Promise<ListedCheckRun[]> {
     // `filter=all`: by default GitHub lists only the latest run of each name.
     const name = encodeURIComponent(CHECK_NAME);
-    const runs = await this.github.list<ListedCheckRun>(
+    return this.github.list<ListedCheckRun>(
       `${repoPath(pull)}/commits/${headSha}/check-runs?check_name=${name}&filter=all`,
       (page) => (page as { check_runs?: ListedCheckRun[] }).check_runs ?? [],
     );
-    return runs.find((run) => run.external_id === externalId);
   }
 
   async upsertSummaryComment(

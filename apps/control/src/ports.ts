@@ -34,8 +34,8 @@ export interface RunRecord {
   summaryCommentId: number | undefined;
   /** The head the run reviews. */
   headSha: string;
-  /** The head the PR's record is at: the last posted review's. */
-  lastReviewedSha: string | undefined;
+  /** The execution the run belongs to. */
+  executionArn: string | undefined;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

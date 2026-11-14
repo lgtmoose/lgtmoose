@@ -183,11 +183,19 @@ describe("GitHubPoster", () => {
     expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
   });
 
-  it("tells whether our check run with an external ID is on the head", async () => {
-    const listing = { status: 200, body: { check_runs: [{ id: 4, external_id: "run-1" }] } };
-    const { poster: p, calls } = poster([listing, listing]);
-    expect(await p.checkRunExists(PULL, "abc", "run-1")).toBe(true);
-    expect(await p.checkRunExists(PULL, "abc", "run-2")).toBe(false);
+  it("lists the external IDs of our check runs on the head", async () => {
+    const { poster: p, calls } = poster([
+      {
+        status: 200,
+        body: {
+          check_runs: [
+            { id: 4, external_id: "run-1" },
+            { id: 5, external_id: null },
+          ],
+        },
+      },
+    ]);
+    expect(await p.checkRunIds(PULL, "abc")).toEqual(["run-1"]);
     expect(calls[0]?.url).toContain("/commits/abc/check-runs?check_name=LGTMoose&filter=all");
   });
 

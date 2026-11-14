@@ -165,10 +165,7 @@ describe("drizzleRunStore", () => {
     expect(await store.newerRunPosted(await loaded(later.runId))).toBe(false);
     await store.succeedRun(earlier.runId, posted("a".repeat(40), 9));
     expect(await prRow(later.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
-    expect(await loaded(later.runId)).toMatchObject({
-      headSha: "c".repeat(40),
-      lastReviewedSha: "c".repeat(40),
-    });
+    expect(await loaded(later.runId)).toMatchObject({ headSha: "c".repeat(40) });
   });
 
   it("records a covered run's PR outputs on the PR, unless a newer run posted", async () => {

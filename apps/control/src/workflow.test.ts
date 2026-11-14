@@ -153,7 +153,6 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; newer: { posted: boo
         pullRequestId: "pr-1",
         summaryCommentId: 41,
         headSha: input.headSha,
-        lastReviewedSha: undefined,
         status: "running",
         executionArn: input.executionArn,
       };
@@ -286,8 +285,7 @@ function harness(setup: Setup = {}) {
           });
           // As if the reviews were on GitHub, for the tests that put them there.
           shadow.markersAt = async (_pull, commitId) => [...(reviewsOnGitHub.get(commitId) ?? [])];
-          shadow.checkRunExists = async (_pull, _sha, externalId) =>
-            checkRunsOnGitHub.has(externalId);
+          shadow.checkRunIds = async () => [...checkRunsOnGitHub];
           const completeCheckRun = shadow.completeCheckRun.bind(shadow);
           shadow.completeCheckRun = async (ref, input) => {
             const done = await completeCheckRun(ref, input);
@@ -595,7 +593,7 @@ describe("post", () => {
     label: true,
   };
 
-  it("posts nothing, PR-level either, when the covering run wrote the head's outputs", async () => {
+  it("posts nothing of its own when the covering run wrote the head's outputs", async () => {
     // A stopped run's post finished after the PR was reopened; the reopen's retry is a new run.
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
@@ -605,18 +603,20 @@ describe("post", () => {
       runKeys(RUN_ID).posted,
       JSON.stringify({ ...theirOutputs, labelTarget: "Approved" }),
     );
-    const second = h.runs.runs.get(RUN_2);
-    if (second) second.lastReviewedSha = headSha;
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
       posted: false,
       coveredBy: reviewMarker(RUN_ID, true),
     });
-    // No review, check run, summary or label from a decision that was never posted.
-    expect(calls).toEqual([]);
+    // No review or check run, and no summary or label from a decision that was never posted:
+    // their summary and label, put back on the PR (idempotent when they're there already).
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    const [summary] = shadowRecords(h.objects, "summary-comment");
+    expect(summary).toMatchObject({ body: "their summary" });
     // Succeeded, without touching the PR's record (that's the posting run's).
     expect(h.runs.runs.get(RUN_2)).toMatchObject({ status: "covered", covered: true });
     expect(h.runs.runs.get(RUN_2)).not.toHaveProperty("result");
-    // A retry of it carries on covered, still writing nothing.
+    // A retry of it carries on covered, writing nothing more.
+    calls.length = 0;
     expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
       coveredBy: reviewMarker(RUN_ID, true),
     });
@@ -892,6 +892,22 @@ describe("post", () => {
     expect(reviews(calls)).toEqual([]);
   });
 
+  it("goes by the covering run's readable progress over a check run on GitHub", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    // Its check run is on GitHub, but its progress says it didn't finish it (it died mid-way
+    // through the annotation pages, say): not finished.
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ attempt: "x", writes: 1, review: true }),
+    );
+    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
   it("finds the covering run's check run on GitHub when its progress is gone", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
@@ -930,27 +946,64 @@ describe("post", () => {
     };
     await expect(post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).rejects.toThrow("blip");
     expect(calls).toEqual(["upsertSummaryComment"]);
-    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
-    // Its retry, with the covering run's progress gone meanwhile, still records it so.
+    // Recorded with the label it set out to write, never none.
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
+    // Its retry, with the covering run's progress gone meanwhile, still owes the label and
+    // writes it.
     h.objects.delete(runKeys(RUN_ID).posted);
     h.tasks.set(TASK_B, "STOPPED");
     await post(h.deps, RUN_2, { ...as(TASK_C), taskStatus });
-    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({ pr: { headSha } });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Approved" },
+    });
   });
 
-  it("leaves the PR alone when covered and the PR's record is already at this head", async () => {
+  it("leaves the PR to a covering run that may still be retried", async () => {
     const { h, calls, taskStatus } = await ready();
     secondRun(h, RUN_2);
     h.addReview(headSha, reviewMarker(RUN_ID, true));
-    await h.deps.store.createText(runKeys(RUN_ID).posted, JSON.stringify(theirOutputs));
-    // The covering run recorded the PR at this head itself.
-    const second = h.runs.runs.get(RUN_2);
-    if (second) second.lastReviewedSha = headSha;
-    expect(await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus })).toMatchObject({
-      coveredBy: reviewMarker(RUN_ID, true),
-    });
+    // It wrote its check run and summary, but not yet its label, and its execution runs on:
+    // its retry writes that, and would leave it to this newer run if this run wrote anything.
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false, decisionLabel: "Requires Changes" }),
+    );
+    const executionStatus = async () => "RUNNING";
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus, executionStatus });
     expect(calls).toEqual([]);
     expect(h.runs.runs.get(RUN_2)?.coverResult).not.toHaveProperty("pr");
+  });
+
+  it("sets the label the covering run's decision called for when it never set it", async () => {
+    const { h, calls, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false, decisionLabel: "Requires Changes" }),
+    );
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
+    expect(calls).toEqual(["upsertSummaryComment", "labels"]);
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: "Requires Changes" },
+    });
+  });
+
+  it("falls back to its own decision's label when the covering run saved none", async () => {
+    const { h, taskStatus } = await ready();
+    secondRun(h, RUN_2);
+    h.addReview(headSha, reviewMarker(RUN_ID, true));
+    await h.deps.store.createText(
+      runKeys(RUN_ID).posted,
+      JSON.stringify({ ...theirOutputs, label: false }),
+    );
+    await post(h.deps, RUN_2, { ...as(TASK_B), taskStatus });
+    expect(h.runs.runs.get(RUN_2)?.coverResult).toMatchObject({
+      pr: { headSha, statusLabel: expect.any(String) },
+    });
   });
 
   it("lets another run's off-ECS head claim expire before taking it over", async () => {
@@ -1138,8 +1191,8 @@ describe("post", () => {
       return read;
     };
     await expect(post(h.deps, RUN_ID)).rejects.toThrow("saved this post's progress");
-    // The review went up before the save failed; the run is recorded and nothing else posted.
-    expect(calls).toEqual(["submitReview"]);
+    // Its first save (its decision's label, before the review) fails: nothing is posted.
+    expect(calls).toEqual([]);
   });
 
   it("saves progress that names its attempt and counts its writes", async () => {
@@ -1149,7 +1202,8 @@ describe("post", () => {
     await post(h.deps, RUN_ID, as(TASK_A, "attempt-1"));
     expect(JSON.parse(h.objects.get(runKeys(RUN_ID).posted) ?? "{}")).toMatchObject({
       attempt: "attempt-1",
-      writes: 4,
+      writes: 5,
+      decisionLabel: expect.any(String),
       review: true,
       checkRun: true,
       summary: true,

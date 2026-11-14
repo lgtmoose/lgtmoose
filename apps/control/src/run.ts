@@ -211,6 +211,7 @@ export async function runCommand(
             running,
             attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
             taskStatus: (taskArn) => deps.taskStatus(taskArn),
+            executionStatus: (arn) => deps.executionStatus(arn),
           }),
         );
       } catch (error) {

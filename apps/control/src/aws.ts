@@ -25,6 +25,7 @@ import {
 import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { alias } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
 import type { ControlEnv } from "./env.js";
@@ -176,8 +177,12 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 /** Any drizzle Postgres database: node-postgres in the task, PGlite in tests. */
 type Db = PgDatabase<PgQueryResultHKT>;
 
+/** `review_runs` again, for the run a query compares the others with. */
+const self = alias(reviewRuns, "self");
 /** A run's place among its PR's runs: its event time, else when its row was made. */
-const runOrder = sql<Date>`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`;
+const orderOf = (runs: typeof reviewRuns | typeof self) =>
+  sql<Date>`coalesce(${runs.eventAt}, ${runs.createdAt})`;
+const runOrder = orderOf(reviewRuns);
 
 async function newerRunPosted(
   db: Pick<Db, "select">,
@@ -198,7 +203,10 @@ async function newerRunPosted(
         // (or a driver's string) can be coarser than the column.
         gt(
           runOrder,
-          sql`(select coalesce(r.event_at, r.created_at) from review_runs r where r.id = ${run.runId})`,
+          sql`(${db
+            .select({ order: orderOf(self) })
+            .from(self)
+            .where(eq(self.id, run.runId))})`,
         ),
       ),
     )
@@ -243,7 +251,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         pullRequestId: reviewRuns.pullRequestId,
         summaryCommentId: pullRequests.summaryCommentId,
         headSha: reviewRuns.headSha,
-        lastReviewedSha: pullRequests.lastReviewedSha,
+        executionArn: reviewRuns.executionArn,
       })
       .from(reviewRuns)
       .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
@@ -255,7 +263,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           pullRequestId: row.pullRequestId,
           summaryCommentId: row.summaryCommentId ?? undefined,
           headSha: row.headSha,
-          lastReviewedSha: row.lastReviewedSha ?? undefined,
+          executionArn: row.executionArn ?? undefined,
         };
   }
 

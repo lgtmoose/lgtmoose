@@ -94,8 +94,8 @@ export class ShadowPoster implements Poster {
     return [];
   }
 
-  async checkRunExists(_pull: PullRef, _headSha: string, _externalId: string): Promise<boolean> {
-    return false;
+  async checkRunIds(_pull: PullRef, _headSha: string): Promise<string[]> {
+    return [];
   }
 
   labels(pull: PullRef): LabelClient {
