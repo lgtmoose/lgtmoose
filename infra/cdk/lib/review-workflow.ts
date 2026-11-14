@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Duration, RemovalPolicy } from "aws-cdk-lib";
 import type { ISecurityGroup, SubnetSelection } from "aws-cdk-lib/aws-ec2";
 import type { ContainerDefinition, ICluster, TaskDefinition } from "aws-cdk-lib/aws-ecs";
-import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { Effect, PolicyStatement, Role } from "aws-cdk-lib/aws-iam";
 import { LogGroup, type RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
 import {
@@ -17,6 +17,7 @@ import {
   JsonPath,
   LogLevel,
   Map as MapState,
+  Parallel,
   Pass,
   StateMachine,
   Succeed,
@@ -46,6 +47,15 @@ export const BATCH_TIMEOUT = Duration.minutes(20);
 const SANDBOX_OVERHEAD = Duration.minutes(10);
 /** How often a failed sandbox task is started again. */
 const SANDBOX_ATTEMPTS = 3;
+
+/** How long a batch's presigned URLs last: one attempt, with room to start the task. */
+const URL_TTL = BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).plus(Duration.minutes(15));
+
+/**
+ * The presigner role's session: long enough for every URL signed with it. Role chaining (the
+ * function assuming another role) allows at most one hour.
+ */
+const PRESIGNER_SESSION = Duration.hours(1);
 
 /** RunTask failing to start a task: no capacity, throttling. Safe to retry for any step. */
 const ECS_START_ERRORS = ["ECS.AmazonECSException", "ECS.ServerException"];
@@ -146,25 +156,35 @@ export class ReviewWorkflow extends Construct {
       timeout: Duration.seconds(30),
       environment: {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
-        // Covers every attempt of the batch. URLs signed with the function's temporary
-        // credentials stop working earlier if those expire first.
-        LGTMOOSE_URL_TTL_SECONDS: String(
-          BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD).toSeconds() * SANDBOX_ATTEMPTS + 15 * 60,
-        ),
+        // One attempt of the batch, with room to start. Each attempt is presigned afresh.
+        LGTMOOSE_URL_TTL_SECONDS: String(URL_TTL.toSeconds()),
       },
       logGroup: new LogGroup(this, "PresignLogs", {
         retention: props.retention,
         removalPolicy: RemovalPolicy.DESTROY,
       }),
     });
-    // Only run objects: the function presigns on its own credentials, so this is all a URL can
-    // ever reach. No List either: a batch's URLs name its objects.
-    presignFunction.addToRolePolicy(
+    // URLs are signed with this role's credentials, assumed for a fixed hour on each
+    // invocation: a URL signed with temporary credentials stops working when they expire, and
+    // the function's own may be close to expiring. Only run objects, so this is all a URL can
+    // ever reach; no List either, since a batch's URLs name its objects.
+    const presigner = new Role(this, "PresignerRole", {
+      assumedBy: presignFunction.role!,
+      maxSessionDuration: PRESIGNER_SESSION,
+      description: "Signs review batches' S3 URLs (assumed by the presign function).",
+    });
+    presigner.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["s3:GetObject", "s3:PutObject"],
         resources: [props.artifactBucket.arnForObjects(`${RUN_PREFIX}*`)],
       }),
+    );
+    presigner.grantAssumeRole(presignFunction.role!);
+    presignFunction.addEnvironment("LGTMOOSE_PRESIGNER_ROLE_ARN", presigner.roleArn);
+    presignFunction.addEnvironment(
+      "LGTMOOSE_PRESIGNER_SESSION_SECONDS",
+      String(PRESIGNER_SESSION.toSeconds()),
     );
 
     const presign = new LambdaInvoke(this, "Presign", {
@@ -201,22 +221,22 @@ export class ReviewWorkflow extends Construct {
       resultPath: JsonPath.DISCARD,
       taskTimeout: Timeout.duration(BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD)),
     });
-    // A model failure is written as the batch's output and the task succeeds; a failed task is
-    // infrastructure (an expired URL, the image, capacity), worth another go.
-    sandbox.addRetry({
+    const batchFailed = new Pass(this, "BatchFailed", {
+      comment: "No output: the post step counts the batch as failed.",
+    });
+    // One attempt: fresh URLs, then the sandbox task. A model failure is written as the batch's
+    // output and the task succeeds; a failed task is infrastructure (the image, capacity),
+    // worth another go, and the retry presigns again so its URLs are new too.
+    const batch = new Parallel(this, "Attempt", { resultPath: JsonPath.DISCARD });
+    batch.branch(presign.next(sandbox));
+    batch.addRetry({
       errors: [Errors.ALL],
       maxAttempts: SANDBOX_ATTEMPTS - 1,
       interval: Duration.seconds(30),
       backoffRate: 2,
       jitterStrategy: JitterType.FULL,
     });
-
-    const batchFailed = new Pass(this, "BatchFailed", {
-      comment: "No output: the post step counts the batch as failed.",
-    });
-    const batch = presign.next(sandbox);
-    presign.addCatch(batchFailed, { errors: [Errors.ALL], resultPath: "$.error" });
-    sandbox.addCatch(batchFailed, { errors: [Errors.ALL], resultPath: "$.error" });
+    batch.addCatch(batchFailed, { errors: [Errors.ALL], resultPath: "$.error" });
 
     const batches = new MapState(this, "Batches", {
       itemsPath: "$.prepared.batches",

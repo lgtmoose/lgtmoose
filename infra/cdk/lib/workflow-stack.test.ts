@@ -182,6 +182,7 @@ interface State {
   Retry?: { ErrorEquals: string[]; MaxAttempts?: number; BackoffRate?: number }[];
   Catch?: { ErrorEquals: string[]; Next: string }[];
   ItemProcessor?: { StartAt: string; States: Record<string, State> };
+  Branches?: { StartAt: string; States: Record<string, State> }[];
   Choices?: { Variable: string; BooleanEquals?: boolean; Next: string }[];
   Default?: string;
 }
@@ -196,6 +197,11 @@ function definition(): { StartAt: string; States: Record<string, State>; Timeout
     .map((part) => (typeof part === "string" ? part : "REF"))
     .join("");
   return JSON.parse(text) as ReturnType<typeof definition>;
+}
+
+/** The states of one batch attempt: the Parallel branch inside the map. */
+function batchStates(): Record<string, State> {
+  return definition().States.Batches?.ItemProcessor?.States.Attempt?.Branches?.[0]?.States ?? {};
 }
 
 function overrides(state: State | undefined): Record<string, unknown> {
@@ -230,9 +236,12 @@ describe("review state machine", () => {
     expect(States.Post?.Resource).toContain("ecs:runTask.sync");
 
     const items = States.Batches?.ItemProcessor;
-    expect(items?.StartAt).toBe("Presign");
-    expect(items?.States.Presign?.Next).toBe("Review");
-    expect(items?.States.Review?.Resource).toContain("ecs:runTask.sync");
+    // Each attempt presigns afresh: Presign and Review run inside one retried Parallel.
+    expect(items?.StartAt).toBe("Attempt");
+    expect(items?.States.Attempt?.Type).toBe("Parallel");
+    const attempt = batchStates();
+    expect(attempt.Presign?.Next).toBe("Review");
+    expect(attempt.Review?.Resource).toContain("ecs:runTask.sync");
   });
 
   it("caps the map at the configured concurrency", () => {
@@ -255,13 +264,13 @@ describe("review state machine", () => {
       LGTMOOSE_COMMAND: "fail",
       LGTMOOSE_ERROR: "$:$.error.Error",
     });
-    expect(overrides(States.Batches?.ItemProcessor?.States.Review)).toEqual({
+    expect(overrides(batchStates().Review)).toEqual({
       LGTMOOSE_BATCH_URLS: "$:$.presigned.urls",
     });
   });
 
   it("starts sandbox tasks in the sandbox subnets, with the reviewer's task and no public IP", () => {
-    const review = definition().States.Batches?.ItemProcessor?.States.Review;
+    const review = batchStates().Review;
     const network = (
       review?.Parameters?.NetworkConfiguration as
         | {
@@ -277,10 +286,9 @@ describe("review state machine", () => {
     expect(network.AssignPublicIp ?? "DISABLED").toBe("DISABLED");
     expect(network.Subnets.length).toBeGreaterThan(0);
     // Every task the machine starts: no public addresses anywhere.
-    const all = [
-      ...Object.values(definition().States),
-      ...Object.values(definition().States.Batches?.ItemProcessor?.States ?? {}),
-    ].filter((s) => s.Resource?.includes("ecs:runTask"));
+    const all = [...Object.values(definition().States), ...Object.values(batchStates())].filter(
+      (s) => s.Resource?.includes("ecs:runTask"),
+    );
     expect(all).toHaveLength(4);
     for (const state of all) {
       expect(JSON.stringify(state.Parameters?.NetworkConfiguration)).not.toContain("ENABLED");
@@ -294,12 +302,17 @@ describe("review state machine", () => {
     const { States, TimeoutSeconds } = definition();
     // No execution timeout: it would skip the fail step. Each task bounds its own time.
     expect(TimeoutSeconds).toBeUndefined();
-    const review = States.Batches?.ItemProcessor?.States.Review;
+    const review = batchStates().Review;
+    const attempt = States.Batches?.ItemProcessor?.States.Attempt;
     for (const state of [States.Prepare, States.Post, review, States.MarkFailed]) {
       expect(state?.TimeoutSeconds).toBeGreaterThan(0);
+    }
+    for (const state of [States.Prepare, States.Post, attempt, States.MarkFailed]) {
       expect(state?.Retry?.[0]?.BackoffRate).toBe(2);
     }
     expect(review?.TimeoutSeconds).toBe(30 * 60);
+    // The attempt retries as a whole, so the sandbox task itself doesn't.
+    expect(review?.Retry).toBeUndefined();
     expect(States.Post?.Retry?.flatMap((r) => r.ErrorEquals)).not.toContain("States.ALL");
     expect(States.Post?.Retry?.flatMap((r) => r.ErrorEquals)).not.toContain("States.TaskFailed");
   });
@@ -315,8 +328,7 @@ describe("review state machine", () => {
     expect(States.ReviewFailed?.Type).toBe("Fail");
     // A batch that fails for good leaves no output; the review is incomplete, not failed.
     const items = States.Batches?.ItemProcessor?.States ?? {};
-    expect(items.Review?.Catch?.[0]?.Next).toBe("BatchFailed");
-    expect(items.Presign?.Catch?.[0]?.Next).toBe("BatchFailed");
+    expect(items.Attempt?.Catch?.[0]?.Next).toBe("BatchFailed");
   });
 
   it("logs without execution data, which holds task tokens and presigned URLs", () => {
@@ -338,13 +350,25 @@ describe("review state machine", () => {
     }
   });
 
-  it("lets the presign function reach only run objects, and the control task answer tokens", () => {
+  it("signs URLs with a presigner role that reaches only run objects, for a fixed hour", () => {
     const fn = Object.entries(resources).find(
       ([, r]) =>
         r.Type === "AWS::Lambda::Function" &&
         JSON.stringify(r.Properties.Environment).includes("LGTMOOSE_URL_TTL_SECONDS"),
     );
-    const granted = statements(getAttId(fn?.[1].Properties.Role));
+    const env =
+      (fn?.[1].Properties.Environment as { Variables?: Record<string, unknown> } | undefined)
+        ?.Variables ?? {};
+    // One attempt (30 minutes) plus room to start, inside the one-hour session.
+    expect(env.LGTMOOSE_URL_TTL_SECONDS).toBe("2700");
+    expect(env.LGTMOOSE_PRESIGNER_SESSION_SECONDS).toBe("3600");
+    const presignerId = getAttId(env.LGTMOOSE_PRESIGNER_ROLE_ARN);
+    expect(resources[presignerId]?.Properties.MaxSessionDuration).toBe(3600);
+    // The function itself can only assume the presigner role; it reaches no S3 on its own.
+    const own = statements(getAttId(fn?.[1].Properties.Role));
+    expect(actions(own).filter((a) => a.startsWith("s3:"))).toEqual([]);
+    expect(actions(own)).toContain("sts:AssumeRole");
+    const granted = statements(presignerId);
     const s3 = granted.filter((s) => actions([s]).some((a) => a.startsWith("s3:")));
     expect(s3.length).toBeGreaterThan(0);
     for (const statement of s3) {
