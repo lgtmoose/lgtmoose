@@ -1318,6 +1318,73 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
   });
 
+  const REWRITTEN = [
+    "export function grandTotal(orders: Order[]): number {",
+    "  return orders.reduce((all, order) => all + order.amount * order.rate, 0);",
+    "}",
+    "",
+    "export function averageOrder(orders: Order[]): number {",
+    "  return grandTotal(orders) / orders.length;",
+    "}",
+    "",
+  ].join("\n");
+  // On the base's `return sum;`, which the rewrite deletes.
+  const droppedReturn = finding({
+    side: "LEFT",
+    line: 6,
+    title: "Return was removed",
+    evidence: "return sum;",
+  });
+
+  it("keeps an old-side finding in a rewritten file the PR then renames", async () => {
+    const h = harness();
+    headSha = await commit({ "src/total.ts": REWRITTEN }, "rewrite total");
+    await review(h, 1, [droppedReturn]);
+    // Renamed with a small edit: on the head side a rename, on the base side src/total.ts is
+    // still deleted, its return with it.
+    await git(work, "mv", "src/total.ts", "src/orders.ts");
+    headSha = await commit({ "src/orders.ts": `// Order totals.\n${REWRITTEN}` }, "rename");
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("keeps an old-side finding whose commit is gone on its base file, not a head-only one", async () => {
+    const h = harness();
+    // Raised at a commit that's then force-pushed away.
+    headSha = await commit({ "src/total.ts": REWRITTEN }, "rewrite total");
+    await review(h, 1, [droppedReturn]);
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    // Not quite the same file, so it's read again.
+    headSha = await commit({ "src/total.ts": `${REWRITTEN}// End.\n` }, "rewrite total, again");
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+    // A new-side finding at this commit, which stays: following it learns the rename below.
+    const average = finding({
+      line: 6,
+      title: "Average divides by zero for no orders",
+      evidence: "grandTotal(orders) / orders.length",
+    });
+    await review(h, 2, [average]);
+    await git(work, "mv", "src/total.ts", "src/orders.ts");
+    headSha = await commit(
+      { "src/orders.ts": `// Order totals.\n${REWRITTEN}// End.\n` },
+      "rename",
+    );
+
+    const third = await review(h, 3);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }, { status: "open" }]);
+    expect(third.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    // Listed on the deleted base file, where its line is; not on the file the rename added.
+    const summaries = shadowRecords(h.objects, "summary-comment");
+    const last = summaries.at(-1)?.body;
+    const summary = typeof last === "string" ? last : "";
+    const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
+    expect(row).toContain("total");
+    expect(row).not.toContain("orders");
+  });
+
   it("skips following findings when there are none", async () => {
     const h = harness();
     await review(h, 1);
