@@ -30,6 +30,10 @@ interface Setup {
   input?: object;
   /** What removing symlinks finds. */
   links?: string[];
+  /** A credential the harness refreshed during the run. */
+  refreshed?: string;
+  /** Whether the batch has a URL to hand a refreshed credential back. */
+  credentialUrl?: boolean;
 }
 
 function setup(options: Setup = {}) {
@@ -44,6 +48,9 @@ function setup(options: Setup = {}) {
       input: `${BASE}/input.json?X-Amz-Signature=s`,
       output: `${BASE}/output.json?X-Amz-Signature=s`,
       transcripts: { [TRANSCRIPT]: `${BASE}/t1.jsonl?X-Amz-Signature=s` },
+      ...(options.credentialUrl === true
+        ? { credential: `${BASE}/credential.json?X-Amz-Signature=s` }
+        : {}),
     },
     "/runs/input.json": options.input ?? {
       version: 1,
@@ -64,10 +71,14 @@ function setup(options: Setup = {}) {
     if (path === "/runs/checkout.tar.gz") return new Response(new Uint8Array([1, 2, 3]));
     return Response.json(objects[path]);
   }) as typeof fetch;
-  const harness = (transcripts: TranscriptStore): Harness => ({
+  const harness = (
+    transcripts: TranscriptStore,
+    onAuthRefreshed: (credential: string) => Promise<void>,
+  ): Harness => ({
     id: "fake",
     run: async <T>(run: HarnessRunOptions<T>) => {
       runs.push(run as HarnessRunOptions<unknown>);
+      if (options.refreshed !== undefined) await onAuthRefreshed(options.refreshed);
       await transcripts.put(TRANSCRIPT, "{}\n");
       await transcripts.put("transcripts/other/9.jsonl", "{}\n");
       if (options.run === "timeout") {
@@ -150,6 +161,21 @@ describe("runSandboxBatch", () => {
     expect(error?.message).toContain("HTTP 403");
     expect(error?.message).not.toContain("secret");
     expect(s.puts.size).toBe(0);
+  });
+
+  it("hands a refreshed credential back to its URL, never to the log", async () => {
+    const s = setup({ refreshed: '{"tokens":{"refresh_token":"r2"}}', credentialUrl: true });
+    await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.puts.get("/runs/credential.json")).toBe('{"tokens":{"refresh_token":"r2"}}');
+    expect(s.logs.join("\n")).not.toContain("r2");
+  });
+
+  it("drops a refreshed credential when there's no URL for it", async () => {
+    const s = setup({ refreshed: '{"tokens":{"refresh_token":"r2"}}' });
+    await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.puts.has("/runs/credential.json")).toBe(false);
+    expect(s.logs.some((line) => line.includes("nowhere to hand it back"))).toBe(true);
+    expect(s.logs.join("\n")).not.toContain("r2");
   });
 
   it("rejects an input that doesn't match its schema", async () => {

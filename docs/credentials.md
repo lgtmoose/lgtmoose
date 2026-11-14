@@ -83,9 +83,52 @@ It keeps the `claude-code` harness's policy: the same read-only tools (Read, Gre
 
 The SDK version (`@anthropic-ai/claude-agent-sdk` in `packages/harness`) tracks the Claude Code version the sandbox image installs, and the harness runs that installed `claude` binary.
 
+## The credential broker
+
+The broker controls how review runs use the stored credentials. It runs as two Lambdas, and it never puts a credential in a log.
+
+- **One credential per task.** Each provider has its own sandbox task definition, and that task definition carries only that provider's secret, `LGTMOOSE_PROVIDER_CREDENTIAL`.
+  - The ECS execution role reads the secret to start the task.
+  - The task's own role can't read any secret.
+  - The task has no GitHub token.
+  - Only the credential's variables reach the CLI, never the rest of the task's environment.
+- **Leases.** Before each sandbox task starts, its batch takes a lease on the reviewer's credential, and it gives the lease back after the task, whether the task worked or not.
+  - A credential has a fixed number of slots. Leases count across every review that runs at once.
+  - When every slot is in use, the batch waits and asks again: every 20 seconds at first, then up to every 2 minutes, for about three hours. A batch that never gets a slot fails, and its review is incomplete.
+  - A lease ends early when its review was stopped (a newer push, say). If a lease is never given back, it expires after 40 minutes.
+- **Concurrency.** A provider's `concurrency` in `lgtmoose.config.ts` sets how many slots it has. The defaults:
+
+  | Credential                                                                              | Slots     |
+  | --------------------------------------------------------------------------------------- | --------- |
+  | ChatGPT sign-in (`chatgpt-login`)                                                       | 1, always |
+  | Other plan credentials (`oauth-token`, a Codex `access-token`, a Cursor user `api-key`) | 2         |
+  | API keys and service accounts                                                           | 16        |
+
+  Lower it for a plan that objects to parallel use:
+
+  ```ts
+  { id: "claude", harness: "claude-code", auth: "oauth-token", concurrency: 1 }
+  ```
+
+- **Refreshed tokens.** Codex refreshes a ChatGPT sign-in's tokens during a run, and the refresh retires the old refresh token. That is why a sign-in has one slot. The sandbox hands the new `auth.json` to a presigned URL for its batch. When the batch gives its lease back, the broker stores the new `auth.json` as a new version of the secret, but only if all of these hold:
+  - the batch still holds its lease;
+  - the secret hasn't changed since the task started, so a newer `lgtmoose auth codex` isn't overwritten;
+  - the new file is an `auth.json` for the same ChatGPT account.
+
+  The handed-back object is deleted either way. The broker can read and write the value of a ChatGPT sign-in's secret only. For every other credential it can only describe the secret.
+
+- **Audit log.** The broker's log group records every lease taken, taken over and given back, and every refresh stored or refused. Each entry has the run, the batch, the slot and the secret's version ID, never a value. The log is kept for 3 months on the `lean` profile and a year on `standard`, and it is kept when the stack is deleted.
+- **Health and alarms.** Each stored credential has an alarm, `CredentialAlarm-<id>`, on the `LGTMoose` `CredentialProblem` metric for that provider. Two things set the metric to 1:
+  - A check every 6 hours. It describes each provider's secret without reading it, and flags a secret that is missing, scheduled for deletion or has no current version. It also flags a Claude `oauth-token` stored 330 days ago or more, since `claude setup-token` tokens last a year.
+  - A review run that the vendor refused for auth, which is how an expired or revoked token shows up.
+
+  The alarm clears once a check finds nothing wrong. The fix is usually `lgtmoose auth` for that provider.
+
+A Bedrock provider has no stored credential. It has no lease, no slots and no alarm.
+
 ## Secret contract
 
-The credential broker (NIC-825) and the CDK stacks rely on this.
+The credential broker and the CDK stacks rely on this.
 
 - **Name:** `lgtmoose/provider/<id>`, where `<id>` is the provider's `id` in `lgtmoose.config.ts`. It's built by `SECRET_NAMES.provider(id)`, with the prefix in `PROVIDER_SECRET_PREFIX` (`@lgtmoose/config`).
 - **Value:** the credential as plain text, exactly what the sandbox reads from `LGTMOOSE_PROVIDER_CREDENTIAL`. The sandbox trims it before use.

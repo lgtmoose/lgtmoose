@@ -6,17 +6,17 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 
 ## Components
 
-| Component         | Runs on                               | Holds GitHub credentials | Job                                                                      |
-| ----------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------ |
-| Gateway           | Lambda behind API Gateway             | Webhook secret only      | Verify HMAC, dedupe deliveries, enqueue                                  |
-| Queue             | SQS FIFO, group = `owner/repo#pr`     | No                       | Order jobs per PR                                                        |
-| Dispatcher        | Lambda                                | No                       | Start a Step Functions run, supersede older runs                         |
-| Review workflow   | Step Functions                        | No                       | prepare → map batches → cross-file → map verify → post                   |
-| Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                  |
-| Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch |
-| Credential broker | Control plane + Secrets Manager       | No                       | Hand each sandbox task one model credential; write back refreshed tokens |
-| Reconciler        | Scheduled Lambda                      | Yes (read)               | Re-queue anything missed. No model calls.                                |
-| State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                            |
+| Component         | Runs on                               | Holds GitHub credentials | Job                                                                       |
+| ----------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
+| Gateway           | Lambda behind API Gateway             | Webhook secret only      | Verify HMAC, dedupe deliveries, enqueue                                   |
+| Queue             | SQS FIFO, group = `owner/repo#pr`     | No                       | Order jobs per PR                                                         |
+| Dispatcher        | Lambda                                | No                       | Start a Step Functions run, supersede older runs                          |
+| Review workflow   | Step Functions                        | No                       | prepare → map batches → cross-file → map verify → post                    |
+| Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                   |
+| Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch  |
+| Credential broker | Lambdas + Secrets Manager             | No                       | Lease each sandbox task one model credential; write back refreshed tokens |
+| Reconciler        | Scheduled Lambda                      | Yes (read)               | Re-queue anything missed. No model calls.                                 |
+| State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                             |
 
 ## Harnesses
 

@@ -1,7 +1,10 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { Alarm, ComparisonOperator, Metric, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import type { ISecurityGroup, IVpc, SubnetSelection } from "aws-cdk-lib/aws-ec2";
+import { Rule, Schedule } from "aws-cdk-lib/aws-events";
+import { LambdaFunction } from "aws-cdk-lib/aws-events-targets";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import {
   Capability,
@@ -23,15 +26,24 @@ import type { IBucket } from "aws-cdk-lib/aws-s3";
 import type { ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { providerModelEnv, STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import {
+  credentialConcurrency,
+  providerModelEnv,
+  STACK_OUTPUTS,
+  type DeployConfig,
+} from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
 import { bedrockStatements } from "./bedrock.js";
-import { BATCH_TIMEOUT, ReviewWorkflow } from "./review-workflow.js";
+import { BATCH_TIMEOUT, ReviewWorkflow, secretArnPattern } from "./review-workflow.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
+const CREDENTIAL_HEALTH_HANDLER = join(REPO_ROOT, "apps/control/src/credential-health-lambda.ts");
+
+/** How often stored credentials are checked, and the period their alarms look at. */
+export const CREDENTIAL_CHECK_INTERVAL = Duration.hours(6);
 
 /**
  * The dispatcher's limit per batch. It's well under the job queue's visibility timeout (five
@@ -128,6 +140,8 @@ export class WorkflowStack extends Stack {
   readonly sandboxTaskDefinitions: ReadonlyMap<string, FargateTaskDefinition>;
   readonly reviewWorkflow: ReviewWorkflow;
   readonly dispatchFunction: NodejsFunction;
+  /** Provider id → the alarm on its credential's `CredentialProblem`. */
+  readonly credentialAlarms: ReadonlyMap<string, Alarm>;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -218,6 +232,17 @@ export class WorkflowStack extends Stack {
     if (reviewerTask === undefined || reviewerContainer === undefined) {
       throw new Error(`No sandbox task for the reviewer provider ${props.reviewerProviderId}.`);
     }
+    const reviewer = props.providers.find((provider) => provider.id === props.reviewerProviderId);
+    const reviewerSecret = props.providerSecrets.get(props.reviewerProviderId);
+    const reviewerCredential =
+      reviewer === undefined || reviewerSecret === undefined
+        ? undefined
+        : {
+            providerId: reviewer.id,
+            auth: reviewer.auth,
+            limit: credentialConcurrency(reviewer),
+            secret: reviewerSecret,
+          };
     this.reviewWorkflow = new ReviewWorkflow(this, "Review", {
       cluster: this.cluster,
       retention,
@@ -229,7 +254,11 @@ export class WorkflowStack extends Stack {
       sandboxSubnets: props.sandboxSubnets,
       sandboxSecurityGroup: props.sandboxSecurityGroup,
       maxConcurrency: props.maxConcurrency,
+      ...(reviewerCredential === undefined ? {} : { credential: reviewerCredential }),
+      auditRetention: lean ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_YEAR,
     });
+
+    this.credentialAlarms = this.credentialHealth(props, retention);
 
     this.dispatchFunction = this.dispatcher(props, retention);
 
@@ -304,6 +333,80 @@ export class WorkflowStack extends Stack {
       }),
     );
     return fn;
+  }
+
+  /**
+   * The credential health check and an alarm per stored credential. The check runs every
+   * `CREDENTIAL_CHECK_INTERVAL` and describes each provider's secret, never reading its value;
+   * the broker also reports a run refused for auth (an expired or revoked token). Either sets
+   * the provider's `CredentialProblem` metric to 1, which alarms until a check finds it fine.
+   */
+  private credentialHealth(
+    props: WorkflowStackProps,
+    retention: RetentionDays,
+  ): Map<string, Alarm> {
+    const alarms = new Map<string, Alarm>();
+    const stored = props.providers.flatMap((provider) => {
+      const secret = props.providerSecrets.get(provider.id);
+      return secret === undefined ? [] : [{ provider, secret }];
+    });
+    if (stored.length === 0) return alarms;
+    const fn = lgtmooseFunction(this, "CredentialHealthFunction", {
+      entry: CREDENTIAL_HEALTH_HANDLER,
+      description: "Checks each model provider's stored credential, without reading it.",
+      memorySize: 256,
+      timeout: Duration.minutes(1),
+      environment: {
+        LGTMOOSE_CREDENTIALS: JSON.stringify(
+          Object.fromEntries(
+            stored.map(({ provider, secret }) => [
+              provider.id,
+              {
+                secretId: secret.secretArn,
+                auth: provider.auth,
+                limit: credentialConcurrency(provider),
+              },
+            ]),
+          ),
+        ),
+      },
+      logGroup: new LogGroup(this, "CredentialHealthLogs", {
+        retention,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"],
+        resources: stored.map(({ secret }) => secretArnPattern(secret)),
+      }),
+    );
+    new Rule(this, "CredentialHealthSchedule", {
+      description: "Runs the credential health check.",
+      schedule: Schedule.rate(CREDENTIAL_CHECK_INTERVAL),
+      targets: [new LambdaFunction(fn, { retryAttempts: 2 })],
+    });
+    for (const { provider } of stored) {
+      alarms.set(
+        provider.id,
+        new Alarm(this, `CredentialAlarm-${provider.id}`, {
+          alarmDescription: `The ${provider.id} provider's credential is missing, being deleted, expiring, or was refused for auth. Run lgtmoose auth for it.`,
+          metric: new Metric({
+            namespace: "LGTMoose",
+            metricName: "CredentialProblem",
+            dimensionsMap: { Provider: provider.id },
+            statistic: "Maximum",
+            period: CREDENTIAL_CHECK_INTERVAL,
+          }),
+          threshold: 1,
+          comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          evaluationPeriods: 1,
+          treatMissingData: TreatMissingData.NOT_BREACHING,
+        }),
+      );
+    }
+    return alarms;
   }
 
   private taskDefinition(

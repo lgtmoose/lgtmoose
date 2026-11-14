@@ -31,6 +31,8 @@ export const presignEventSchema = z
       }
     }, "not a run ID"),
     index: z.number().int().min(0),
+    /** A ChatGPT sign-in: also a PUT for the refreshed `auth.json` (`BatchUrls.credential`). */
+    credentialRefresh: z.boolean().optional(),
   })
   .strict();
 
@@ -52,7 +54,7 @@ export async function presignBatch(
   event: PresignEvent,
   expiresInSeconds: number,
 ): Promise<PresignResult> {
-  const { runId, index } = presignEventSchema.parse(event);
+  const { runId, index, credentialRefresh } = presignEventSchema.parse(event);
   const keys = runKeys(runId);
   const transcripts: Record<string, string> = {};
   for (const key of batchTranscriptKeys(runId, index)) {
@@ -67,6 +69,9 @@ export async function presignBatch(
     input: await deps.presign("GET", keys.batchInput(index), expiresInSeconds),
     output: await deps.presign("PUT", keys.batchOutput(index), expiresInSeconds),
     transcripts,
+    ...(credentialRefresh === true
+      ? { credential: await deps.presign("PUT", keys.batchCredential(index), expiresInSeconds) }
+      : {}),
   });
   await deps.putText(keys.batchUrls(index), JSON.stringify(urls));
   return { urls: await deps.presign("GET", keys.batchUrls(index), expiresInSeconds) };

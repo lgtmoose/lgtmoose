@@ -15,6 +15,7 @@ import { z } from "zod";
  * - `runs/<id>/batches/<n>/urls.json`: the batch's presigned URLs (`BatchUrls`)
  * - `runs/<id>/batches/<n>/output.json`: a `BatchOutput`, written by the sandbox
  * - `runs/<id>/batches/<n>/transcripts/...`: the batch's run transcripts
+ * - `runs/<id>/batches/<n>/credential.json`: a ChatGPT sign-in's refreshed `auth.json`, briefly
  */
 export const RUN_PREFIX = "runs/";
 
@@ -45,6 +46,11 @@ export function runKeys(runId: string) {
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,
+    /**
+     * A ChatGPT sign-in's refreshed `auth.json`, written by the sandbox when Codex refreshed its
+     * tokens. The credential broker stores it in the provider's secret and deletes this object.
+     */
+    batchCredential: (index: number) => `${batch(index)}credential.json`,
     /** Where a transcript key from the harness is stored for this batch. */
     batchTranscript: (index: number, key: string) => `${batch(index)}${key}`,
   };
@@ -111,6 +117,11 @@ export const batchUrlsSchema = z
     output: httpsUrl,
     /** Transcript key (from the harness) to its presigned PUT URL. */
     transcripts: z.record(z.string(), httpsUrl),
+    /**
+     * For a ChatGPT sign-in: a PUT for the refreshed `auth.json` (`batchCredential`), which the
+     * credential broker stores once the task is done.
+     */
+    credential: httpsUrl.optional(),
   })
   .strict();
 

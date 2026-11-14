@@ -77,6 +77,9 @@ export const DEFAULT_TIER_MODELS: Readonly<
   "cursor-agent": {},
 };
 
+/** The most sandbox tasks one credential can be configured for at once. */
+export const MAX_CREDENTIAL_CONCURRENCY = 64;
+
 const providerSchema = z
   .object({
     id: z.string().regex(PROVIDER_ID_PATTERN, "use lowercase letters, digits and hyphens (max 32)"),
@@ -105,9 +108,28 @@ const providerSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * How many sandbox tasks may use this provider's credential at once, across every review
+     * (`credentialConcurrency` has the defaults). A ChatGPT sign-in can only be 1.
+     */
+    concurrency: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_CREDENTIAL_CONCURRENCY)
+      .optional()
+      .describe("Sandbox tasks that may use this provider's credential at once, across reviews."),
   })
   .strict()
   .superRefine((provider, ctx) => {
+    if (provider.auth === "chatgpt-login" && (provider.concurrency ?? 1) !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["concurrency"],
+        message:
+          "a ChatGPT sign-in runs one task at a time: a refresh rotates its tokens, so another task's copy would stop working",
+      });
+    }
     const allowed: readonly string[] = HARNESS_AUTH[provider.harness];
     if (!allowed.includes(provider.auth)) {
       ctx.addIssue({
@@ -210,6 +232,23 @@ export type DeployConfigInput = z.input<typeof deployConfigSchema>;
 /** The validated config with every default filled in. */
 export type DeployConfig = z.output<typeof deployConfigSchema>;
 export type ProviderConfig = DeployConfig["providers"][number];
+
+/**
+ * How many sandbox tasks may use a provider's credential at once: its `concurrency`, or a
+ * default.
+ * - A ChatGPT sign-in is always 1. Codex refreshes its tokens during a run, and the refresh
+ *   retires the old refresh token. So one task holds it at a time, and only that task's
+ *   refreshed `auth.json` is stored.
+ * - Other plan credentials default to 2, since plans throttle or flag heavy parallel use.
+ * - API keys and service accounts default to 16.
+ */
+export function credentialConcurrency(
+  provider: Pick<ProviderConfig, "harness" | "auth" | "concurrency">,
+): number {
+  if (provider.auth === "chatgpt-login") return 1;
+  if (provider.concurrency !== undefined) return provider.concurrency;
+  return isPlanCredential(provider) ? 2 : 16;
+}
 
 /** Typed helper for lgtmoose.config.ts. It returns its argument; validation happens at load time. */
 export function defineConfig(config: DeployConfigInput): DeployConfigInput {

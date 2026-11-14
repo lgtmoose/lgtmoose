@@ -75,9 +75,9 @@ async function main(): Promise<void> {
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
       dropSymlinks,
-      harness: (transcripts): Harness => {
+      harness: (transcripts, onAuthRefreshed): Harness => {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
-        if (env.harness === "codex") return new CodexHarness(options);
+        if (env.harness === "codex") return new CodexHarness({ ...options, onAuthRefreshed });
         if (env.harness === "cursor-agent") return new CursorHarness(options);
         if (env.harness === "agent-sdk") {
           // The image's pinned claude (CLAUDE_CODE_VERSION), which the SDK version tracks.
