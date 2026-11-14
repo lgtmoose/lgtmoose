@@ -1283,6 +1283,41 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
   });
 
+  it("follows a resolved finding on a rewritten file the PR then renames with a small edit", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    // The PR rewrites src/total.ts: against the base, nothing of it is left.
+    const rewritten = [
+      "export function grandTotal(orders: Order[]): number {",
+      "  return orders.reduce((all, order) => all + order.amount * order.rate, 0);",
+      "}",
+      "",
+      "export function averageOrder(orders: Order[]): number {",
+      "  return grandTotal(orders) / orders.length;",
+      "}",
+      "",
+    ].join("\n");
+    headSha = await commit({ "src/total.ts": rewritten }, "rewrite total");
+    const average = finding({
+      line: 6,
+      title: "Average divides by zero for no orders",
+      evidence: "grandTotal(orders) / orders.length",
+    });
+    await review(h, 1, [average]);
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    // Renamed with a small edit: against the base it's a deletion and an addition, but a rename
+    // since the finding's commit.
+    await git(work, "mv", "src/total.ts", "src/orders.ts");
+    headSha = await commit(
+      { "src/orders.ts": `// Order totals.\n${rewritten}` },
+      "rename to orders.ts",
+    );
+
+    const again = await review(h, 2, [{ ...average, path: "src/orders.ts", line: 7 }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+  });
+
   it("skips following findings when there are none", async () => {
     const h = harness();
     await review(h, 1);

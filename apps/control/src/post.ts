@@ -100,10 +100,13 @@ interface History {
 /**
  * Names from the PR's diff alone (merge base to head): each file's head name under its own and
  * its base-side name. Enough to tell which findings need their commits' history to be placed.
+ * A path the PR deletes isn't placed: against the merge base, a file rewritten and then renamed
+ * shows as deleted plus added, though it's a rename since the finding's commit. Its history says
+ * where it went, or that it's gone.
  */
 function prNames(changes: readonly ChangedPath[]): Map<string, string> {
   const names = new Map<string, string>();
-  for (const file of changes) names.set(file.path, file.path);
+  for (const file of changes) if (file.status !== "deleted") names.set(file.path, file.path);
   for (const file of changes) {
     if (file.oldPath !== undefined && file.status !== "deleted" && !names.has(file.oldPath)) {
       names.set(file.oldPath, file.path);
