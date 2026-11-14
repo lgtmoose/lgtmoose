@@ -1,7 +1,7 @@
 import type { LabelClient } from "@lgtmoose/summary";
 import { CHECK_NAME, annotationPages, checkOutput, type CheckRunInput } from "./check-run.js";
 import { GitHubError, repoPath, type GitHubClient, type PullRef } from "./github.js";
-import { withCommentsInBody, type ReviewPayload } from "./review.js";
+import { reviewMarkerComment, withCommentsInBody, type ReviewPayload } from "./review.js";
 
 /** What posting a review did. */
 export interface PostedReview {
@@ -30,11 +30,16 @@ export interface Poster {
   startCheckRun(pull: PullRef, headSha: string): Promise<number | undefined>;
   /** Completes (or creates, without `existingId`) the check run with its conclusion and annotations. */
   completeCheckRun(pull: PullRef, input: CheckRunInput): Promise<number | undefined>;
-  /** Edits the summary comment in place when `commentId` still exists, else creates it. */
+  /**
+   * Edits the summary comment in place when `commentId` still exists, else creates it. With a
+   * `marker`, the body ends with it hidden, and without a `commentId` a comment carrying it is
+   * edited instead of creating another.
+   */
   upsertSummaryComment(
     pull: PullRef,
     body: string,
     commentId?: number,
+    marker?: string,
   ): Promise<SummaryCommentResult>;
   /** Status label calls for this PR, for `syncStatusLabel`. */
   labels(pull: PullRef): LabelClient;
@@ -120,6 +125,11 @@ export class GitHubPoster implements Poster {
   }
 
   async completeCheckRun(pull: PullRef, input: CheckRunInput): Promise<number> {
+    if (input.existingId === undefined && input.externalId !== undefined) {
+      // Created by an earlier attempt: done. Completing it again would add its annotations twice.
+      const existing = await this.findCheckRun(pull, input.headSha, input.externalId);
+      if (existing !== undefined) return existing;
+    }
     const [first = [], ...rest] = annotationPages(input.annotations);
     const fields = {
       status: "completed",
@@ -132,6 +142,7 @@ export class GitHubPoster implements Poster {
         ? await this.github.request<{ id: number }>("POST", `${repoPath(pull)}/check-runs`, {
             name: CHECK_NAME,
             head_sha: input.headSha,
+            ...(input.externalId === undefined ? {} : { external_id: input.externalId }),
             ...fields,
           })
         : await this.github.request<{ id: number }>(
@@ -148,11 +159,36 @@ export class GitHubPoster implements Poster {
     return run.id;
   }
 
+  /** Our check run on the head with this external ID, if there is one. */
+  private async findCheckRun(
+    pull: PullRef,
+    headSha: string,
+    externalId: string,
+  ): Promise<number | undefined> {
+    const runs = await this.github.list<{ id: number; external_id?: string | null }>(
+      `${repoPath(pull)}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}`,
+      (page) =>
+        (page as { check_runs?: { id: number; external_id?: string | null }[] }).check_runs ?? [],
+    );
+    return runs.find((run) => run.external_id === externalId)?.id;
+  }
+
   async upsertSummaryComment(
     pull: PullRef,
     body: string,
     commentId?: number,
+    marker?: string,
   ): Promise<SummaryCommentResult> {
+    if (marker !== undefined) body = `${body}\n\n${reviewMarkerComment(marker)}`;
+    if (commentId === undefined && marker !== undefined) {
+      // No stored ID (a first review, or an attempt that didn't get to store it): find the
+      // comment by its marker, so a retry edits the one an earlier attempt made.
+      const comment = reviewMarkerComment(marker);
+      const comments = await this.github.list<{ id: number; body?: string | null }>(
+        `${repoPath(pull)}/issues/${pull.pull}/comments`,
+      );
+      commentId = comments.find((candidate) => candidate.body?.includes(comment) === true)?.id;
+    }
     if (commentId !== undefined) {
       try {
         await this.github.request("PATCH", `${repoPath(pull)}/issues/comments/${commentId}`, {

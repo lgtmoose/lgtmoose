@@ -29,8 +29,11 @@ export interface StepDeps extends ControlDeps {
   heartbeatIntervalMs?: number;
   /** For tests: the wait between execution status checks after a dead token. */
   statusRetryMs?: number;
-  /** This task's ECS task ARN, which post's review claim names; undefined off ECS. */
-  taskArn: string | undefined;
+  /**
+   * This task's ECS task ARN, which post's review claim names; undefined off ECS. Read when
+   * the post step starts, so a failure to read it fails the step like any other.
+   */
+  taskArn(): Promise<string | undefined>;
   /** An ECS task's last status, or MISSING: whether a review claim's holder still runs. */
   taskStatus(taskArn: string): Promise<string>;
 }
@@ -203,10 +206,10 @@ export async function runCommand(
       let failure: unknown;
       try {
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
-        await withHeartbeat(deps, executionArn, command.taskToken, () =>
+        await withHeartbeat(deps, executionArn, command.taskToken, async () =>
           post(deps, command.runId, {
             running,
-            attempt: { id: randomUUID(), taskArn: deps.taskArn },
+            attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
             taskStatus: (taskArn) => deps.taskStatus(taskArn),
           }),
         );

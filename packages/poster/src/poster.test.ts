@@ -39,6 +39,12 @@ describe("GitHubClient", () => {
     await expect(github.request("POST", "/x", {})).rejects.toThrow();
   });
 
+  it("throws on a 2xx whose body isn't JSON, rather than give back nothing", async () => {
+    const empty: typeof fetch = async () => new Response("", { status: 201 });
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: empty });
+    await expect(github.request("POST", "/x", {})).rejects.toThrow("without a JSON body");
+  });
+
   it("follows pages until a short one", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
     const { github, calls } = poster([
@@ -141,6 +147,66 @@ describe("GitHubPoster", () => {
         conclusion: "action_required",
         details_url: "https://github.com/acme/app/pull/7#issuecomment-1",
       },
+    });
+  });
+
+  it("reuses the check run with its external ID, else creates it with one", async () => {
+    const input = {
+      headSha: "abc",
+      conclusion: "success" as const,
+      title: "No changes needed",
+      summary: "ok",
+      annotations: [],
+      externalId: "run-1",
+    };
+    const found = poster([
+      {
+        status: 200,
+        body: {
+          check_runs: [
+            { id: 3, external_id: "other" },
+            { id: 4, external_id: "run-1" },
+          ],
+        },
+      },
+    ]);
+    expect(await found.poster.completeCheckRun(PULL, input)).toBe(4);
+    expect(found.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "GET https://api.github.com/repos/acme/app/commits/abc/check-runs?check_name=LGTMoose&per_page=100&page=1",
+    ]);
+    const created = poster([
+      { status: 200, body: { check_runs: [] } },
+      { status: 201, body: { id: 9 } },
+    ]);
+    expect(await created.poster.completeCheckRun(PULL, input)).toBe(9);
+    expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
+  });
+
+  it("finds the summary comment by its marker when there's no stored ID", async () => {
+    const { poster: p, calls } = poster([
+      {
+        status: 200,
+        body: [
+          { id: 5, body: "someone else" },
+          { id: 6, body: "x\n\n<!-- lgtmoose-summary -->" },
+        ],
+      },
+      { status: 200, body: { id: 6 } },
+      { status: 200, body: [] },
+      { status: 201, body: { id: 7 } },
+    ]);
+    expect(await p.upsertSummaryComment(PULL, "body", undefined, "lgtmoose-summary")).toEqual({
+      id: 6,
+      created: false,
+    });
+    expect(calls[1]).toMatchObject({
+      method: "PATCH",
+      url: "https://api.github.com/repos/acme/app/issues/comments/6",
+      body: { body: "body\n\n<!-- lgtmoose-summary -->" },
+    });
+    expect(await p.upsertSummaryComment(PULL, "body", undefined, "lgtmoose-summary")).toEqual({
+      id: 7,
+      created: true,
     });
   });
 

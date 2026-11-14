@@ -389,6 +389,7 @@ export async function awsControlDeps(
         appId: app.appId,
         privateKey: app.privateKey,
         installationId,
+        timeoutMs: GITHUB_TIMEOUT_MS,
       });
       // Bounded well under the post step's heartbeat timeout: a hung write fails the attempt.
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });

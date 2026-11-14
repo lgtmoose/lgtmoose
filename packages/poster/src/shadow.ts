@@ -76,8 +76,13 @@ export class ShadowPoster implements Poster {
     pull: PullRef,
     body: string,
     commentId?: number,
+    marker?: string,
   ): Promise<SummaryCommentResult> {
-    await this.record(pull, "summary-comment", { comment_id: commentId ?? null, body });
+    await this.record(pull, "summary-comment", {
+      comment_id: commentId ?? null,
+      body,
+      ...(marker === undefined ? {} : { marker }),
+    });
     return { id: commentId, created: commentId === undefined };
   }
 

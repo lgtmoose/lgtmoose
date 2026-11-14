@@ -38,14 +38,13 @@ async function main(): Promise<void> {
   }
   const deps = await awsControlDeps(env, { shadow: settings.shadow });
   const ecs = new ECSClient({});
-  const taskArn = command.command === "post" ? await currentTaskArn(process.env) : undefined;
   try {
     await runCommand(
       {
         ...deps,
         executionStatus: (arn) => describeStatus(sfn, arn),
         heartbeat: (token) => sendHeartbeat(sfn, token),
-        taskArn,
+        taskArn: () => currentTaskArn(process.env),
         taskStatus: (arn) => taskStatus(ecs, arn),
       },
       command,

@@ -12,6 +12,7 @@ import { GitHubError, annotationsFor, buildReview, type PullRef } from "@lgtmoos
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import type { ControlDeps } from "./ports.js";
+import { TASK_MISSING } from "./ecs.js";
 import type { RunManifest } from "./prepare.js";
 
 /** What the post step did, for the log and the state machine. */
@@ -140,8 +141,15 @@ export interface PostOptions {
 
 const claimSchema = z.object({ attempt: z.string(), taskArn: z.string().optional() });
 
-/** A claim's holder is done with it: its task has stopped, or ECS no longer knows the task. */
-const HOLDER_GONE = new Set(["STOPPED", "DEPROVISIONING", "MISSING"]);
+/**
+ * A claim's holder is done with it: its containers have stopped (DEPROVISIONING comes after
+ * STOPPING, as the task's network is torn down), the task has stopped or been deleted, or ECS
+ * no longer knows it. A task still DEACTIVATING or STOPPING may yet be running its process.
+ */
+const HOLDER_GONE = new Set(["DEPROVISIONING", "STOPPED", "DELETED", TASK_MISSING]);
+
+/** The summary comment's hidden marker: one per PR, so any run finds the PR's comment. */
+export const SUMMARY_MARKER = "lgtmoose-summary";
 
 /**
  * Claims the run's review for this attempt before it posts it, so two attempts (a retry and
@@ -229,7 +237,7 @@ export async function post(
 ): Promise<PostOutput> {
   const running = options.running ?? (async () => true);
   const attempt = options.attempt ?? { id: randomUUID(), taskArn: undefined };
-  const taskStatus = options.taskStatus ?? (async () => "MISSING");
+  const taskStatus = options.taskStatus ?? (async () => TASK_MISSING);
   const run = await deps.runs.getRun(runId);
   if (run === undefined) throw new Error(`No review run ${runId}.`);
   const keys = runKeys(runId);
@@ -273,8 +281,21 @@ export async function post(
   // may never stop this execution (it may not have seen the event that made it stale).
   // What an earlier attempt of this step posted: a retry carries on from there, and once the
   // review is posted the run is recorded whatever happens to the PR meanwhile.
-  const progress = readProgress(await deps.store.getText(keys.posted));
-  const save = () => deps.store.putText(keys.posted, JSON.stringify(progress));
+  const saved = await deps.store.getTagged(keys.posted);
+  const progress = readProgress(saved?.text);
+  // Each save is conditional on the version this attempt last wrote (or read), so two
+  // overlapping attempts can't overwrite each other's progress: the second fails its step.
+  let progressEtag = saved?.etag;
+  const save = async () => {
+    const body = JSON.stringify(progress);
+    const etag =
+      progressEtag === undefined
+        ? await deps.store.createText(keys.posted, body)
+        : await deps.store.replaceText(keys.posted, body, progressEtag);
+    if (etag === undefined)
+      throw new Error("Another attempt saved this post's progress meanwhile.");
+    progressEtag = etag;
+  };
 
   let stale: string | undefined;
   if (!progress.review) {
@@ -319,7 +340,16 @@ export async function post(
         } catch (error) {
           // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise
           // (a timeout, a 5xx) it may be, and the claim stays until this task has stopped.
-          if (refused(error)) await deps.store.deleteIfMatch(keys.reviewClaim, claim.etag);
+          if (refused(error)) {
+            await deps.store
+              .deleteIfMatch(keys.reviewClaim, claim.etag)
+              .catch((release: unknown) => {
+                deps.log("releasing the review claim failed", {
+                  runId,
+                  error: release instanceof Error ? release.message : String(release),
+                });
+              });
+          }
           throw error;
         }
       }
@@ -334,6 +364,8 @@ export async function post(
         title: CHECK_TITLE[decision.event],
         summary: report.summary,
         annotations: annotationsFor([...report.inline, ...report.body]),
+        // A retry finds the run an earlier attempt created, instead of adding another.
+        externalId: runId,
       });
       progress.checkRun = true;
       await save();
@@ -343,7 +375,14 @@ export async function post(
     // Checked right before each write: a newer run may finish posting in between.
     if (!progress.summary && !(await deps.runs.newerRunPosted(runId))) {
       const summaryId = progress.summaryCommentId ?? run.summaryCommentId;
-      const comment = await poster.upsertSummaryComment(pull, report.summary, summaryId);
+      // Found by its marker when there's no stored ID, so a retry edits the comment an
+      // earlier attempt created.
+      const comment = await poster.upsertSummaryComment(
+        pull,
+        report.summary,
+        summaryId,
+        SUMMARY_MARKER,
+      );
       const id = comment.id ?? summaryId;
       if (id !== undefined) progress.summaryCommentId = id;
       progress.summary = true;

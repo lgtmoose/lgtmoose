@@ -76,7 +76,14 @@ export class GitHubClient {
       throw new GitHubError(response.status, message, method, path);
     }
     if (response.status === 204) return undefined as T;
-    return (await response.json().catch(() => undefined)) as T;
+    // A body cut off (a timeout mid-read) throws from text(); an empty or broken one is an
+    // error too, never `undefined` for a caller to read fields from.
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new Error(`GitHub ${method} ${path} answered ${response.status} without a JSON body.`);
+    }
   }
 
   /** Every item of a paginated list endpoint, a page of 100 at a time until a short page. */

@@ -11,7 +11,7 @@ import { GitHubError, ShadowPoster, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
 import type { ArtifactStore, RunRecord, RunStore } from "./ports.js";
-import { post, reviewMarker, type PostAttempt } from "./post.js";
+import { SUMMARY_MARKER, post, reviewMarker, type PostAttempt } from "./post.js";
 import { prepare, type RunManifest } from "./prepare.js";
 import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
@@ -204,8 +204,10 @@ function harness(setup: Setup = {}) {
     },
     async getTagged(key) {
       const text = objects.get(key);
-      const etag = etags.get(key);
-      return text === undefined || etag === undefined ? undefined : { text, etag };
+      if (text === undefined) return undefined;
+      // An object a test put there directly gets its ETag on first read.
+      if (!etags.has(key)) etags.set(key, `"set-${key}"`);
+      return { text, etag: etags.get(key) ?? "" };
     },
     async deleteIfMatch(key, etag) {
       if (etags.get(key) === etag) {
@@ -230,7 +232,7 @@ function harness(setup: Setup = {}) {
   const heartbeats = { count: 0 };
   const deps: StepDeps = {
     executionStatus: async () => execution.status,
-    taskArn: undefined,
+    taskArn: async () => undefined,
     taskStatus: async (arn) => tasks.get(arn) ?? "MISSING",
     heartbeat: async () => {
       heartbeats.count += 1;
@@ -450,9 +452,9 @@ describe("post", () => {
     h.tasks.set(TASK_B, "RUNNING");
     // Both attempts read no saved progress, as when they overlap: the first claims the review,
     // the second finds the claim held by a running task and backs off.
-    const getText = h.deps.store.getText.bind(h.deps.store);
-    h.deps.store.getText = async (key) =>
-      key === runKeys(RUN_ID).posted ? undefined : getText(key);
+    const getTagged = h.deps.store.getTagged.bind(h.deps.store);
+    h.deps.store.getTagged = async (key) =>
+      key === runKeys(RUN_ID).posted ? undefined : getTagged(key);
     const [first, second] = await Promise.allSettled([
       post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus }),
       post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus }),
@@ -533,6 +535,38 @@ describe("post", () => {
     expect(h.objects.has(claim)).toBe(true);
   });
 
+  it("keeps GitHub's refusal as the error when releasing the claim fails too", async () => {
+    const { h, taskStatus } = await ready();
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => ({
+          ...real.poster(runId, pull),
+          submitReview: async () => {
+            throw new GitHubError(422, "Unprocessable", "POST", "/reviews");
+          },
+        }),
+      };
+    };
+    h.deps.store.deleteIfMatch = async () => {
+      throw new Error("S3 down");
+    };
+    await expect(post(h.deps, RUN_ID, { ...as(TASK_A), taskStatus })).rejects.toThrow("HTTP 422");
+    expect(h.logs).toContain("releasing the review claim failed");
+  });
+
+  it("takes over a claim whose holder's task ECS has deleted", async () => {
+    const { h, calls, claim, taskStatus } = await ready();
+    await h.deps.store.createText(claim, JSON.stringify({ attempt: "old", taskArn: TASK_A }));
+    h.tasks.set(TASK_A, "DELETED");
+    expect(await post(h.deps, RUN_ID, { ...as(TASK_B), taskStatus })).toMatchObject({
+      posted: true,
+    });
+    expect(reviews(calls)).toHaveLength(1);
+  });
+
   it("marks its review so a retry can find it", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
@@ -540,6 +574,58 @@ describe("post", () => {
     await post(h.deps, RUN_ID);
     const [review] = shadowRecords(h.objects, "review");
     expect(JSON.stringify(review)).toContain(`<!-- ${reviewMarker(RUN_ID)} -->`);
+  });
+
+  it("fails its step rather than overwrite progress another attempt saved", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const calls = countingPoster(h);
+    // Another attempt saves progress after this one read it.
+    const { store } = h.deps;
+    const getTagged = store.getTagged.bind(store);
+    store.getTagged = async (key) => {
+      const read = await getTagged(key);
+      if (key === runKeys(RUN_ID).posted) await store.createText(key, JSON.stringify({}));
+      return read;
+    };
+    await expect(post(h.deps, RUN_ID)).rejects.toThrow("saved this post's progress");
+    // The review went up before the save failed; the run is recorded and nothing else posted.
+    expect(calls).toEqual(["submitReview"]);
+  });
+
+  it("creates its check run and summary comment idempotently", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const seen: { externalId?: string; marker?: string } = {};
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (id) => {
+      const real = await github(id);
+      return {
+        ...real,
+        poster: (runId, pull) => {
+          const poster = real.poster(runId, pull);
+          return {
+            ...poster,
+            submitReview: poster.submitReview.bind(poster),
+            labels: poster.labels.bind(poster),
+            startCheckRun: poster.startCheckRun.bind(poster),
+            completeCheckRun: async (ref, input) => {
+              if (input.externalId !== undefined) seen.externalId = input.externalId;
+              return poster.completeCheckRun(ref, input);
+            },
+            upsertSummaryComment: async (ref, body, commentId, marker) => {
+              if (marker !== undefined) seen.marker = marker;
+              return poster.upsertSummaryComment(ref, body, commentId, marker);
+            },
+          };
+        },
+      };
+    };
+    await post(h.deps, RUN_ID);
+    // GitHubPoster reuses the check run with this external ID, and the comment with this marker.
+    expect(seen).toEqual({ externalId: RUN_ID, marker: SUMMARY_MARKER });
   });
 
   it("fails rather than start over when its saved progress can't be read", async () => {
@@ -857,6 +943,22 @@ describe("runCommand", () => {
     expect(beats).toBeGreaterThan(0);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(h.heartbeats.count).toBe(beats);
+  });
+
+  it("fails the post step's token when it can't read its own task ARN", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.deps.taskArn = async () => {
+      throw new Error("The task metadata endpoint answered 500.");
+    };
+    await runCommand(
+      h.deps,
+      { command: "post", executionArn: EXECUTION, runId: RUN_ID, taskToken: "p" },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.tokens.failed).toEqual([
+      { error: POST_FAILED, cause: expect.stringContaining("500") },
+    ]);
   });
 
   it("reports post on its task token, so stopping the execution can't cut it short", async () => {
