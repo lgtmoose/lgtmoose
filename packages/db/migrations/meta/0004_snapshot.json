@@ -1,5 +1,5 @@
 {
-  "id": "c8ac759e-c61f-456a-8733-2e65176e0f85",
+  "id": "3c9bb445-b947-4d12-8a3b-f85ea36d97d2",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1116,6 +1116,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "wrote_pr": {
+          "name": "wrote_pr",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "started_at": {
           "name": "started_at",

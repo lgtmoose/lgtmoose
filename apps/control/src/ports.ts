@@ -76,13 +76,14 @@ export interface RunStore {
   /** Marks the execution's run failed, if it got as far as having one. */
   failRun(executionArn: string, error: string): Promise<void>;
   /**
-   * Whether a run of the same PR created after this one has succeeded. Its summary comment and
-   * label are then the PR's, and an older run mustn't write over them.
+   * Whether a run of the same PR for a later event has written PR-level state: it succeeded,
+   * or it was covered and wrote the PR's outputs (`coverRun` with `pr`). Its summary comment
+   * and label are then the PR's, and an older run mustn't write over them.
    */
   newerRunPosted(run: RunRecord): Promise<boolean>;
   /**
-   * Marks the run covered: it posted nothing, since another run's review already covered its
-   * head. The PR's record is left to the run that posted.
+   * Marks the run covered: it posted no review, since another run's review already covered its
+   * head. Without `pr`, the PR's record is left to the run that posted.
    */
   coverRun(
     runId: string,
@@ -90,9 +91,9 @@ export interface RunStore {
       filesDone: number;
       costUsd: number | undefined;
       /**
-       * The covering run's PR-level outputs, when this run applied them to the PR (its head
-       * is the PR's, and the record wasn't there yet): recorded on the PR too, unless a newer
-       * run has posted.
+       * The PR-level outputs this run wrote (the covering run's, or its own when that run
+       * never wrote them): recorded on the PR too, unless a newer run has written PR-level
+       * state, and the run then counts as having written it.
        */
       pr?: {
         headSha: string;

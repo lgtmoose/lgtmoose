@@ -116,6 +116,11 @@ export const reviewRuns = pgTable(
      * `updated_at`): runs of a PR are ordered by it, not by when their rows were made.
      */
     eventAt: timestamp("event_at", { withTimezone: true }),
+    /**
+     * Whether the run wrote PR-level state (summary, label, the PR's record): set when it
+     * succeeds, and when a covered run writes the PR's outputs. Older runs defer to such a run.
+     */
+    wrotePr: boolean("wrote_pr").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

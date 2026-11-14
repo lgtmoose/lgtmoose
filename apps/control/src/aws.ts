@@ -176,7 +176,6 @@ function parseSecret<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
 /** Any drizzle Postgres database: node-postgres in the task, PGlite in tests. */
 type Db = PgDatabase<PgQueryResultHKT>;
 
-/** Whether a run of the PR created after `run` has succeeded: posted its review. */
 /** A run's place among its PR's runs: its event time, else when its row was made. */
 const runOrder = sql<Date>`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`;
 
@@ -184,14 +183,16 @@ async function newerRunPosted(
   db: Pick<Db, "select">,
   run: { pullRequestId: string; order: Date },
 ): Promise<boolean> {
-  // `succeeded` only: a covered run posted nothing, so it never stands in for the run that did.
+  // A run that wrote PR-level state: it succeeded, or it was covered and wrote the PR's
+  // outputs. A covered run that wrote nothing doesn't count: it never stands in for the run
+  // that posted.
   const [newer] = await db
     .select({ id: reviewRuns.id })
     .from(reviewRuns)
     .where(
       and(
         eq(reviewRuns.pullRequestId, run.pullRequestId),
-        eq(reviewRuns.status, "succeeded"),
+        eq(reviewRuns.wrotePr, true),
         gt(runOrder, run.order),
       ),
     )
@@ -320,6 +321,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           .update(reviewRuns)
           .set({
             status: "succeeded",
+            wrotePr: true,
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),
@@ -338,6 +340,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           .update(reviewRuns)
           .set({
             status: "covered",
+            // Once set, kept: a later call without `pr` (a retry) doesn't undo what was written.
+            ...(result.pr === undefined ? {} : { wrotePr: true }),
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),

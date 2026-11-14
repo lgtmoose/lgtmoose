@@ -127,7 +127,11 @@ describe("drizzleRunStore", () => {
   it("marks a covered run covered, without touching its PR", async () => {
     const run = await start("arn:exec:15", 15);
     await store.coverRun(run.runId, { filesDone: 2, costUsd: 0.5 });
-    expect(await runRow(run.runId)).toMatchObject({ status: "covered", filesDone: 2 });
+    expect(await runRow(run.runId)).toMatchObject({
+      status: "covered",
+      filesDone: 2,
+      wrotePr: false,
+    });
     expect(await prRow(run.pullRequestId)).toMatchObject({
       lastReviewedSha: null,
       statusLabel: null,
@@ -191,6 +195,48 @@ describe("drizzleRunStore", () => {
       pr: { headSha: "d".repeat(40), statusLabel: "label d", summaryCommentId: 12 },
     });
     expect(await prRow(run.pullRequestId)).toMatchObject({ lastReviewedSha: "e".repeat(40) });
+  });
+
+  it("leaves the PR to a newer covered run that caught it up", async () => {
+    // Heads go A → B → A: the run at A's second event is covered by A's review and catches the
+    // PR up to A. The run at B, older by event time, finishes later and must leave the PR be.
+    const atB = await start("arn:exec:24", 24, "b".repeat(40), new Date("2026-11-14T00:00:02Z"));
+    const backAtA = await start(
+      "arn:exec:25",
+      24,
+      "a".repeat(40),
+      new Date("2026-11-14T00:00:03Z"),
+    );
+    await store.coverRun(backAtA.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      pr: { headSha: "a".repeat(40), statusLabel: "label a", summaryCommentId: 14 },
+    });
+    expect(await runRow(backAtA.runId)).toMatchObject({ status: "covered", wrotePr: true });
+    // The older run sees it before it writes the summary or label, and its record defers too.
+    expect(await store.newerRunPosted(await loaded(atB.runId))).toBe(true);
+    await store.succeedRun(atB.runId, posted("b".repeat(40), 14));
+    expect(await prRow(atB.pullRequestId)).toMatchObject({
+      lastReviewedSha: "a".repeat(40),
+      statusLabel: "label a",
+    });
+    // The same goes for an older covered run.
+    const coveredAtB = await start(
+      "arn:exec:26",
+      24,
+      "b".repeat(40),
+      new Date("2026-11-14T00:00:02.5Z"),
+    );
+    await store.coverRun(coveredAtB.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      pr: { headSha: "b".repeat(40), statusLabel: "label b", summaryCommentId: 14 },
+    });
+    expect(await prRow(atB.pullRequestId)).toMatchObject({ lastReviewedSha: "a".repeat(40) });
+    // A retry of the newer run that records without `pr` doesn't undo what it wrote.
+    await store.coverRun(backAtA.runId, { filesDone: 1, costUsd: undefined });
+    expect(await runRow(backAtA.runId)).toMatchObject({ wrotePr: true });
+    expect(await store.newerRunPosted(await loaded(atB.runId))).toBe(true);
   });
 
   it("supersedes only a queued or running run", async () => {
