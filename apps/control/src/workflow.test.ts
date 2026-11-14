@@ -1413,6 +1413,29 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
   });
 
+  it("keeps an old-side finding whose commit is gone after the base renames its file too", async () => {
+    const h = harness();
+    const left = await renamedWithDroppedReturn();
+    await review(h, 1, [left]);
+    // Main renames src/total.ts to src/amount.ts; the PR is redone on it (its rename now from
+    // src/amount.ts), and the commit the finding was raised at is gone.
+    await git(work, "checkout", "--quiet", "main");
+    await git(work, "mv", "src/total.ts", "src/amount.ts");
+    baseSha = await commit({}, "main: rename");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    await git(work, "mv", "src/amount.ts", "src/sum.ts");
+    headSha = await commit({ "src/sum.ts": HEAD_TOTAL.replace("  return sum;\n", "") }, "redone");
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    // Its recorded base file (src/total.ts) isn't in the PR any more; through its head name,
+    // its base file is src/amount.ts, whose return the PR still deletes.
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
   it("keeps a resolved old-side finding resolved through a second rename by the PR", async () => {
     let threads: ReviewThread[] = [];
     const h = harness({ commentIds: true, threads: () => threads });

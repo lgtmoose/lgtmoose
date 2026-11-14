@@ -72,9 +72,9 @@ interface Names {
 
 /**
  * The findings to follow to the new head: those `followAll` picks, and the rest only while the
- * PR still changes their file: a new-side one's file at head (under `nameAtHead`), an old-side
- * one's on the base side (under `nameAtMergeBase`). Findings on files the PR left alone stay as
- * they are, which keeps the work from growing with the PR's age.
+ * PR still changes their file: a new-side one's file at head (`names.nameAtHead`), an old-side
+ * one's base file (`names.baseNow`). Findings on files the PR left alone stay as they are,
+ * which keeps the work from growing with the PR's age.
  */
 function toTrack<T extends TrackedRecord>(
   records: readonly T[],
@@ -149,10 +149,15 @@ function prBaseNames(changes: readonly ChangedPath[]): Map<string, string> {
 function prOnlyNames(changes: readonly ChangedPath[]): Names {
   const head = prNames(changes);
   const base = prBaseNames(changes);
+  const { changedBase } = prPaths(changes);
   return {
     nameAtHead: (path) => head.get(path) ?? path,
-    // Before any history is read: the base-side name as recorded.
-    baseNow: (record) => record.basePath ?? base.get(record.path) ?? record.path,
+    // Before any history is read: the base-side name as recorded, if the PR still changes a
+    // file by that name; else the head name's base side.
+    baseNow: (record) =>
+      record.basePath !== undefined && changedBase.has(record.basePath)
+        ? record.basePath
+        : (base.get(record.path) ?? record.path),
   };
 }
 
@@ -220,10 +225,19 @@ async function readHistory(
     nameAtBase.set(base, earlier);
     movedSince.set(base, later);
   }
+  const { changedBase } = prPaths(changes);
+  // Its recorded base-side name, followed through the base's renames since the base it was
+  // raised on. Without that base (its commit is gone, or shares no history), the base's renames
+  // aren't known: the recorded name stands only if the PR still changes a file by that name;
+  // otherwise its head name's base side does.
   const baseNow = (record: TrackedRecord) => {
     if (record.basePath === undefined) return nameAtMergeBase(record.path);
-    const base = raisedBase.get(record.raisedAtSha) ?? "";
-    return movedSince.get(base)?.get(record.basePath) ?? record.basePath;
+    const base = raisedBase.get(record.raisedAtSha);
+    const moved =
+      base === undefined || base === ""
+        ? record.basePath
+        : (movedSince.get(base)?.get(record.basePath) ?? record.basePath);
+    return changedBase.has(moved) ? moved : nameAtMergeBase(record.path);
   };
   return { present, raisedBase, nameAtHead, baseNow, nameAtBase, since };
 }
