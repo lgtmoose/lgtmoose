@@ -79,8 +79,8 @@ when they apply; requests stop when they run out, unless the organization has ot
 provider's auth to "api-key" in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider anthropic
 Bedrock (auth "bedrock", then ${CLI} deploy) needs no key at all.`,
-  "codex/chatgpt-login": `OpenAI's terms forbid sharing account credentials or making your account available to
-others. OpenAI recommends an API key for automation: set this provider's auth to "api-key"
+  "codex/chatgpt-login": `OpenAI's terms appear to forbid sharing account credentials or making your account
+available to others (see docs/providers.md). OpenAI recommends an API key for automation: set this provider's auth to "api-key"
 in lgtmoose.config.ts, run the command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider openai
 On ChatGPT Business or Enterprise, a Codex access token is the documented alternative
@@ -91,8 +91,8 @@ dedicated bot user in the workspace, not as a person, and keep the deployment pr
 An OpenAI API key avoids the question: set this provider's auth to "api-key", run the
 command below, then ${CLI} deploy:
   ${CLI} auth api-key --provider openai`,
-  "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't be
-shared. Cursor's service accounts (Enterprise) are made for automation: set this provider's
+  "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor's terms appear to forbid
+sharing logins (see docs/providers.md). Cursor's service accounts (Enterprise) are made for automation: set this provider's
 auth to "service-account" in lgtmoose.config.ts, store a service-account key, then
 ${CLI} deploy. Without Enterprise, a claude-code provider on Bedrock, or one with an
 Anthropic API key (${CLI} auth api-key --provider anthropic), avoids the question.`,

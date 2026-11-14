@@ -3,6 +3,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CLI } from "../paths.js";
 import {
   AUTH_HELP,
   PLAN_CREDENTIAL_HEADER,
@@ -178,7 +179,7 @@ describe("auth", () => {
     for (const text of [claude, login, token, cursor]) {
       expect(text).toContain("docs/providers.md");
       // Each says to redeploy after changing the provider's auth.
-      expect(text).toContain("deploy");
+      expect(text).toContain(`${CLI} deploy`);
     }
     expect(claude).not.toContain("Codex");
     expect(claude).toContain("Ultra plans fall under Anthropic's consumer terms");

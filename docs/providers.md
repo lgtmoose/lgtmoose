@@ -70,7 +70,7 @@ The earlier announced change to Agent SDK billing was paused on 2026-06-15 ("for
 
 ## Cursor
 
-**CLI keys.** The CLI takes a user API key or a service-account key as `CURSOR_API_KEY`. [Service accounts](https://cursor.com/docs/account/enterprise/service-accounts) are an Enterprise feature. Cursor describes them as letting teams run automation "without tying integrations to individual developers' personal accounts" (excerpt). A user API key bills to that user's plan.
+**CLI keys.** The CLI takes a user API key or a service-account key as `CURSOR_API_KEY`. [Service accounts](https://cursor.com/docs/account/enterprise/service-accounts) are an Enterprise feature. Cursor describes them as letting teams run automation "without tying integrations to individual developers' personal accounts" (excerpt). A user API key bills to that user's plan (excerpt).
 
 **Terms.** Cursor's [Master Services Agreement](https://cursor.com/terms/msa) makes the customer responsible for ensuring an authorized user's login isn't shared by several people (excerpt). Cursor staff on the forum say account sharing is against the [Terms of Service](https://cursor.com/terms-of-service); that is a secondary source. The excerpts of the consumer terms found no explicit clause on bots.
 
@@ -78,12 +78,12 @@ The earlier announced change to Agent SDK billing was paused on 2026-06-15 ("for
 
 ## GitHub: do App approvals count towards required reviews?
 
-**What GitHub documents.** Required reviews count approvals from people with write permission in the repository ([About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches), [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)). Two related points:
+**What GitHub documents.** Required reviews count approvals from people with write permission in the repository ([About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches), [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)) (excerpts). Two related points:
 
-- Submitting a review needs the App's "Pull requests: write" permission ([Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)).
+- Submitting a review needs the App's "Pull requests: write" permission ([Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), excerpt).
 - A search excerpt of [Approving a pull request with required reviews](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/approving-a-pull-request-with-required-reviews) says Copilot's reviews don't count towards required approvals. That page couldn't be read in full here, so this is unconfirmed.
 
-**What GitHub doesn't document.** Nothing says whether a GitHub App's approval counts. Community tests report that it counts only when the App also has "Contents: write". LGTMoose's App asks for "Contents: read", so its approvals should be expected not to count.
+**What GitHub doesn't document.** Nothing says whether a GitHub App's approval counts. A secondary, unverified source, a [community test write-up](https://github.com/nateinaction/factory/issues/18), reports that it counts only when the App also has "Contents: write". LGTMoose's App asks for "Contents: read", so its approvals should be expected not to count.
 
 **What GitHub doesn't say about changes requested either.** GitHub documents that a changes-requested review blocks merging until the same reviewer approves, but not whether that applies to a GitHub App's review when the App's approvals don't count. Don't rely on it as the gate.
 
