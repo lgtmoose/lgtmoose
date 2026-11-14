@@ -10,7 +10,7 @@ rules:
     example: |
       if (!user) return null;
       const [open, setOpen] = useState(false);
-  - id: missing-dependency
+  - id: stale-hook-dependencies
     category: correctness
     severity: should_fix
     rule: A useEffect, useMemo or useCallback that reads a value missing from its dependency list, so it uses a stale value.

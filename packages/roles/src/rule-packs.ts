@@ -626,6 +626,7 @@ export async function selectRulePacks(
       return { packs, problems, warnings };
     }
     const floors = severityFloors(packs);
+    const trustedIds = new Set(packs.flatMap((loaded) => loaded.rules.map((rule) => rule.id)));
     // Categories named to the repo, leaving out those only private packs use.
     const shown = [
       ...severityFloors(packs.filter((loaded) => loaded.source === "builtin")).keys(),
@@ -640,7 +641,16 @@ export async function selectRulePacks(
         problems.push(...error.issues);
         return false;
       }
-      const soft = softRules(parsed.rules, floors, shown);
+      // A repo rule can't reuse a trusted rule's id, so it can't pose as a softer version of it.
+      const soft = [
+        ...parsed.rules
+          .filter((rule) => trustedIds.has(rule.id))
+          .map((rule) => ({
+            rule,
+            reason: `rule ${rule.id} has the id of a built-in or private rule`,
+          })),
+        ...softRules(parsed.rules, floors, shown),
+      ];
       problems.push(...soft.map((entry) => `${name}: ${entry.reason}, so that rule was left out.`));
       const rules = parsed.rules.filter((rule) => !soft.some((entry) => entry.rule === rule));
       if (rules.length === 0) return false;
