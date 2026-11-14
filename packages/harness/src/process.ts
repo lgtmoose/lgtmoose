@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { HeadTail } from "./headtail.js";
 import { StreamRedactor } from "./redact.js";
 
@@ -77,12 +77,26 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
     let spawnError: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
 
-    const child = spawn(options.command, options.args, {
-      cwd: options.cwd,
-      env: options.env,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(options.command, options.args, {
+        cwd: options.cwd,
+        env: options.env,
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      // spawn throws at once for arguments it can't pass (a NUL in one, say): report it like a
+      // process that couldn't start, never as an exception the caller didn't expect.
+      resolve({
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        signal: null,
+        spawnError: error instanceof Error ? error : new Error(String(error)),
+      });
+      return;
+    }
 
     const stop = (reason: NonNullable<ProcessResult["stopped"]>): void => {
       if (stopped || child.pid === undefined) return;

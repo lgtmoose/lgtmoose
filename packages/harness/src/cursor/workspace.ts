@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { copyFile, mkdir, realpath } from "node:fs/promises";
-import { join } from "node:path";
-import { isUnreadable, walkTree } from "../tree.js";
+import { isUnreadable, joinBytes, walkTree } from "../tree.js";
 
 /**
  * Directories left out of the copy the CLI runs on, at any depth, compared without case:
@@ -55,11 +54,13 @@ export async function copyWorkspace(source: string, dest: string): Promise<Works
   const root = await realpath(source);
   await mkdir(dest);
   const copy: WorkspaceCopy = { links: 0, unreadable: 0 };
+  const destBytes = Buffer.from(dest);
   await walkTree(
     root,
-    async ({ entry, path, rel }) => {
-      const name = entry.name.toLowerCase();
-      const out = join(dest, rel);
+    async ({ entry, name: decoded, path, rel }) => {
+      const name = decoded.toLowerCase();
+      // Built from the raw name bytes, so a name that isn't UTF-8 is copied as it is.
+      const out = joinBytes(destBytes, rel);
       if (entry.isDirectory()) {
         if (CURSOR_SKIPPED_DIRS.includes(name)) return "skip";
         await mkdir(out);

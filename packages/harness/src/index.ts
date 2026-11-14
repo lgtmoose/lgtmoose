@@ -79,7 +79,14 @@ export { classifyCursorFailure } from "./cursor/result.js";
 export { statusesIn } from "./status.js";
 export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
 export { isInside } from "./paths.js";
-export { isUnreadable, walkTree, type TreeEntry, type WalkOptions } from "./tree.js";
+export {
+  isGone,
+  isUnreadable,
+  joinBytes,
+  walkTree,
+  type TreeEntry,
+  type WalkOptions,
+} from "./tree.js";
 export {
   CLAUDE_CODE_VERSION,
   CODEX_VERSION,

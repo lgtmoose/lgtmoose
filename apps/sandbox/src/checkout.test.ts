@@ -55,6 +55,21 @@ describe("dropSymlinks", () => {
     expect(await exists(join(root, "outside", "inner"))).toBe(true);
   });
 
+  it.skipIf(process.platform !== "linux")(
+    "removes links under names that aren't valid UTF-8, and walks such directories",
+    async () => {
+      const dir = Buffer.concat([Buffer.from(join(checkout, "d")), Buffer.from([0xff])]);
+      await mkdir(dir);
+      const link = Buffer.concat([dir, Buffer.from("/l"), Buffer.from([0xfe])]);
+      await symlink("/proc/self/environ", link);
+      await writeFile(Buffer.concat([dir, Buffer.from("/f")]), "x");
+      const dropped = await dropSymlinks(checkout);
+      expect(dropped).toHaveLength(1);
+      await expect(lstat(link)).rejects.toThrow(/ENOENT/);
+      await expect(lstat(Buffer.concat([dir, Buffer.from("/f")]))).resolves.toBeDefined();
+    },
+  );
+
   it("leaves a checkout without links alone", async () => {
     expect(await dropSymlinks(checkout)).toEqual([]);
   });

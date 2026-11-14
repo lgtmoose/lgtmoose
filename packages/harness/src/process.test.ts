@@ -59,6 +59,25 @@ describe("HeadTail", () => {
   });
 });
 
+describe("runProcess arguments", () => {
+  it("reports an argument spawn refuses (a NUL) as a start failure, not a throw", async () => {
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "1", "a\0b"],
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? "" },
+      input: "",
+      timeoutMs: 5000,
+      killGraceMs: 100,
+      maxOutputBytes: 1024,
+    });
+    expect(result.spawnError?.message).toMatch(
+      /null bytes|ERR_INVALID_ARG_VALUE|must be a string without null bytes/i,
+    );
+    expect(result.exitCode).toBeNull();
+  });
+});
+
 describe("runProcess stderr", () => {
   it("keeps the final error line after chatty output", async () => {
     const script = [

@@ -281,6 +281,16 @@ describe("CursorHarness", () => {
     expect((await readdir(join(cwd, "docs"))).sort()).toEqual(["env", "readme"]);
   });
 
+  it("puts a prompt with a NUL in a task file, since no argument can carry one", async () => {
+    const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
+    const prompt = "Review this batch.\0 The diff has a NUL.";
+    const result = await run(harness, { prompt });
+    expect(result.output.findings).toHaveLength(1);
+    const [call] = await fake!.calls();
+    expect(call?.argv.at(-1)).toMatch(/lgtmoose-task-[\w-]+\/prompt-1\.md/);
+    expect(call?.taskFile?.startsWith(prompt)).toBe(true);
+  });
+
   it("puts a prompt too long for one argument in a task file in the workspace", async () => {
     const harness = await harnessFor([{ stdout: cursorResult(ANSWER) }]);
     const prompt = "x".repeat(MAX_CURSOR_ARG_PROMPT_BYTES + 1);

@@ -275,12 +275,16 @@ function checkPromptSize(prompt: string, keys: readonly string[]): void {
 
 /**
  * What goes on the command line for attempt `n`: the prompt itself when it fits in one argument
- * (`MAX_CURSOR_ARG_PROMPT_BYTES`), otherwise a pointer to a task file holding it, which the
+ * (`MAX_CURSOR_ARG_PROMPT_BYTES`) and has no NUL, otherwise a pointer to a task file holding it, which the
  * model reads with its Read tool. The file sits in the workspace, where reads are allowed, in
  * the run's own task directory (`freeTaskDir`).
  */
 async function deliver(workspace: string, taskDir: string, n: number, prompt: string) {
-  if (Buffer.byteLength(prompt) <= MAX_CURSOR_ARG_PROMPT_BYTES) return prompt;
+  // A NUL can't be passed in an argument at all (spawn refuses it), so such a prompt goes in the
+  // task file whatever its size.
+  if (Buffer.byteLength(prompt) <= MAX_CURSOR_ARG_PROMPT_BYTES && !prompt.includes("\0")) {
+    return prompt;
+  }
   const file = `${taskDir}/prompt-${n}.md`;
   await mkdir(join(workspace, taskDir), { recursive: true });
   await writeFile(join(workspace, file), prompt);

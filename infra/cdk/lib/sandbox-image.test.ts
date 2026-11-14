@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { STACK_NAMES, parseDeployConfig, type DeployConfig } from "@lgtmoose/config";
 import { CURSOR_AGENT_SHA256, CURSOR_AGENT_VERSION } from "@lgtmoose/harness";
 import { AssetManifestArtifact } from "aws-cdk-lib/cx-api";
@@ -87,4 +88,13 @@ describe("the Workflow stack's sandbox image", () => {
       ALLOW_UNVERIFIED_CURSOR: "1",
     });
   }, 120_000);
+});
+
+describe("turbo's synth task", () => {
+  it(`passes ${ALLOW_UNVERIFIED_CURSOR_ENV} through to synth`, async () => {
+    const turbo = JSON.parse(
+      await readFile(new URL("../../../turbo.json", import.meta.url), "utf8"),
+    ) as { tasks: Record<string, { env?: string[] }> };
+    expect(turbo.tasks.synth?.env).toContain(ALLOW_UNVERIFIED_CURSOR_ENV);
+  });
 });

@@ -94,6 +94,20 @@ describe("copyWorkspace", () => {
     }
   });
 
+  it.skipIf(process.platform !== "linux")(
+    "copies names that aren't valid UTF-8 as they are",
+    async () => {
+      const name = Buffer.from([0x66, 0xff, 0x2e, 0x74, 0x73]); // "f\xff.ts"
+      const dir = Buffer.from([0x64, 0xc3]); // "d\xc3"
+      const at = (base: string, ...parts: Buffer[]) =>
+        Buffer.concat([Buffer.from(base), ...parts.flatMap((part) => [Buffer.from("/"), part])]);
+      await mkdir(at(source, dir));
+      await writeFile(at(source, dir, name), "body");
+      await copyWorkspace(source, dest);
+      expect(await readFile(at(dest, dir, name), "utf8")).toBe("body");
+    },
+  );
+
   it("fails on anything else, such as a destination that already exists", async () => {
     await mkdir(dest);
     await expect(copyWorkspace(source, dest)).rejects.toThrow(/EEXIST/);
