@@ -257,7 +257,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       );
     },
     async saveFindings(_pr, _run, headSha, posted) {
-      for (const { finding, fingerprint, githubCommentId, basePath, lineText } of posted) {
+      for (const { finding, fingerprint, githubCommentId, basePath } of posted) {
         const row: StoredFinding = {
           id: `f${rows.length}`,
           fingerprint,
@@ -273,7 +273,6 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
           status: "open",
           githubCommentId,
           basePath,
-          lineText,
         };
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
         const known = rows[at];
@@ -288,7 +287,6 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
                 ? known.severity
                 : row.severity,
             basePath: basePath ?? known.basePath,
-            lineText: lineText ?? known.lineText,
             // Reopened from outdated: the new comment or none; still open: kept unless new.
             githubCommentId:
               known.status === "open"
@@ -769,7 +767,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open", raisedAtSha: headSha }]);
   });
 
-  it("falls back to a full review after a force-push, skipping files whose blob didn't change", async () => {
+  it("reviews every file afresh after a force-push loses the earlier review's commit", async () => {
     const h = harness();
     await addOther();
     const { prepared: first } = await review(h, 1);
@@ -790,8 +788,10 @@ describe("later runs", { timeout: 30_000 }, () => {
 
     expect(h.runs.runs.get(prepared.runId)).toMatchObject({ kind: "full", fromSha: undefined });
     expect(h.logs).toContain("prepared");
+    // As on a first review: src/total.ts is the same blob as reviewed, but its earlier review
+    // can't be compared with.
     expect(promptOf(h, prepared.runId)).toContain("src/other.ts");
-    expect(promptOf(h, prepared.runId)).not.toContain("src/total.ts");
+    expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
     expect(
       h.runs.runs
         .get(first.runId)
@@ -801,7 +801,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(old).not.toBe(headSha);
   });
 
-  it("matches a re-raise to a finding kept at its place after a force-push", async () => {
+  it("outdates a finding whose commit is gone after a force-push, and reopens it if raised again", async () => {
     const h = harness();
     await review(h, 1, [finding({ severity: "should_fix" })]);
     // Rewrite the branch: the commit the finding was raised at is gone, the loop line stays.
@@ -815,11 +815,22 @@ describe("later runs", { timeout: 30_000 }, () => {
     await git(remote, "reflog", "expire", "--expire=now", "--all");
     await git(remote, "gc", "--quiet", "--prune=now");
 
-    // Its line can't be followed, so it's kept where it was; the code there is still its code,
-    // so a reworded re-raise is matched to it (and raises its severity) rather than posted.
-    const again = await review(h, 2, [finding({ title: "Loop skips the final item" })]);
-    expect(again.posted).toMatchObject({ findings: 0 });
+    // Its line can't be followed exactly, so it doesn't stand; the PR is reviewed afresh.
+    const second = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(second.posted).toMatchObject({ event: "APPROVE" });
+
+    // Raised again (the same finding): reopened at its new place, not a second row, and at the
+    // more severe of the two severities.
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 1;"),
+      },
+      "touch total",
+    );
+    const third = await review(h, 3, [finding()]);
     expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
+    expect(third.posted).toMatchObject({ event: "REQUEST_CHANGES" });
   });
 
   it("doesn't follow a closed finding on a file the PR no longer changes", async () => {
@@ -1056,7 +1067,7 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
-  it("keeps an old-side finding whose raised-at commit shares no history with the base", async () => {
+  it("outdates an old-side finding whose raised-at commit shares no history with the base", async () => {
     const h = harness();
     const left = finding({
       side: "LEFT",
@@ -1074,8 +1085,9 @@ describe("later runs", { timeout: 30_000 }, () => {
     row.raisedAtSha = orphan;
     headSha = await commit({ "src/other.ts": "export const rate = 4;\n" }, "unrelated push");
 
+    // Its lines can't be followed exactly: it doesn't stand.
     await expect(review(h, 2)).resolves.toBeDefined();
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
   });
 
   it("reviews a push that only deletes a base line, instead of approving it as covered", async () => {
@@ -1194,25 +1206,6 @@ describe("later runs", { timeout: 30_000 }, () => {
     const again = await review(h, 2, [{ ...left, path: "src/sum.ts" }]);
     expect(again.posted).toMatchObject({ findings: 0 });
     expect(h.findings.rows).toMatchObject([{ status: "open", path: "src/total.ts" }]);
-  });
-
-  it("keeps a finding under the file's new name when its commit is gone and the PR renamed it", async () => {
-    const h = harness();
-    await review(h, 1, [finding({ severity: "should_fix" })]);
-    // Rewrite the branch: the commit the finding was raised at is gone, and the PR now renames
-    // the file (same change otherwise).
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    await git(work, "mv", "src/total.ts", "src/sum.ts");
-    headSha = await commit({ "src/sum.ts": HEAD_TOTAL }, "rewritten with a rename");
-    await git(remote, "reflog", "expire", "--expire=now", "--all");
-    await git(remote, "gc", "--quiet", "--prune=now");
-
-    // Kept at its line under the new name: a reworded re-raise there is matched to it.
-    const again = await review(h, 2, [
-      finding({ path: "src/sum.ts", title: "Loop skips the final item" }),
-    ]);
-    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
-    expect(again.posted).toMatchObject({ findings: 0 });
   });
 
   it("follows an old-side finding when the base renames the file and the PR is rebased", async () => {
@@ -1354,41 +1347,6 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
   });
 
-  it("keeps an old-side finding whose commit is gone on its base file, not a head-only one", async () => {
-    const h = harness();
-    // Raised at a commit that's then force-pushed away.
-    headSha = await commit({ "src/total.ts": REWRITTEN }, "rewrite total");
-    await review(h, 1, [droppedReturn]);
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    // Not quite the same file, so it's read again.
-    headSha = await commit({ "src/total.ts": `${REWRITTEN}// End.\n` }, "rewrite total, again");
-    await git(remote, "reflog", "expire", "--expire=now", "--all");
-    await git(remote, "gc", "--quiet", "--prune=now");
-    // A new-side finding at this commit, which stays: following it learns the rename below.
-    const average = finding({
-      line: 6,
-      title: "Average divides by zero for no orders",
-      evidence: "grandTotal(orders) / orders.length",
-    });
-    await review(h, 2, [average]);
-    await git(work, "mv", "src/total.ts", "src/orders.ts");
-    headSha = await commit(
-      { "src/orders.ts": `// Order totals.\n${REWRITTEN}// End.\n` },
-      "rename",
-    );
-
-    const third = await review(h, 3);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }, { status: "open" }]);
-    expect(third.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-    // Listed on the deleted base file, where its line is; not on the file the rename added.
-    const summaries = shadowRecords(h.objects, "summary-comment");
-    const last = summaries.at(-1)?.body;
-    const summary = typeof last === "string" ? last : "";
-    const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
-    expect(row).toContain("total");
-    expect(row).not.toContain("orders");
-  });
-
   /** The PR renames src/total.ts to src/sum.ts and drops its return: an old-side finding on it. */
   async function renamedWithDroppedReturn() {
     await git(work, "mv", "src/total.ts", "src/sum.ts");
@@ -1415,29 +1373,6 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
   });
 
-  it("keeps an old-side finding whose commit is gone after the base renames its file too", async () => {
-    const h = harness();
-    const left = await renamedWithDroppedReturn();
-    await review(h, 1, [left]);
-    // Main renames src/total.ts to src/amount.ts; the PR is redone on it (its rename now from
-    // src/amount.ts), and the commit the finding was raised at is gone.
-    await git(work, "checkout", "--quiet", "main");
-    await git(work, "mv", "src/total.ts", "src/amount.ts");
-    baseSha = await commit({}, "main: rename");
-    await git(work, "checkout", "--quiet", "feature");
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    await git(work, "mv", "src/amount.ts", "src/sum.ts");
-    headSha = await commit({ "src/sum.ts": HEAD_TOTAL.replace("  return sum;\n", "") }, "redone");
-    await git(remote, "reflog", "expire", "--expire=now", "--all");
-    await git(remote, "gc", "--quiet", "--prune=now");
-
-    // Its recorded base file (src/total.ts) isn't in the PR any more; through its head name,
-    // its base file is src/amount.ts, whose return the PR still deletes.
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-  });
-
   /** The PR deletes src/total.ts's return: an old-side finding on it, then its commit is gone. */
   async function droppedReturnThenForcePushed(
     h: ReturnType<typeof harness>,
@@ -1460,128 +1395,6 @@ describe("later runs", { timeout: 30_000 }, () => {
       await git(work, "reset", "--quiet", "--hard", baseSha);
       headSha = await commit({ "src/total.ts": HEAD_TOTAL }, "redone, return kept");
     });
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
-    expect(again.posted).toMatchObject({ event: "APPROVE" });
-  });
-
-  it("finds an old-side finding whose commit is gone on its moved line after base edits", async () => {
-    const h = harness();
-    await droppedReturnThenForcePushed(h, async () => {
-      // Main adds two lines at the top; the PR is redone on it, still deleting the return,
-      // now two lines further down.
-      await git(work, "checkout", "--quiet", "main");
-      baseSha = await commit({ "src/total.ts": `// header\n// more\n${TOTAL}` }, "main edit");
-      await git(work, "checkout", "--quiet", "feature");
-      await git(work, "reset", "--quiet", "--hard", baseSha);
-      headSha = await commit(
-        { "src/total.ts": `// header\n// more\n${HEAD_TOTAL.replace("  return sum;\n", "")}` },
-        "redone",
-      );
-    });
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-    const last = shadowRecords(h.objects, "summary-comment").at(-1)?.body;
-    const summary = typeof last === "string" ? last : "";
-    const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
-    expect(row).toContain("total\\.ts:8");
-  });
-
-  /** Main changes src/total.ts to `base`; the PR is redone on it, still deleting the return. */
-  const redoneOnBase = (base: string) => async () => {
-    await git(work, "checkout", "--quiet", "main");
-    baseSha = await commit({ "src/total.ts": base }, "main edit");
-    await git(work, "checkout", "--quiet", "feature");
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    headSha = await commit(
-      {
-        "src/total.ts": base
-          .replace("i < items.length; i++", "i < items.length - 1; i++")
-          .replace("  return sum;\n}", "}"),
-      },
-      "redone",
-    );
-  };
-
-  it("keeps an old-side finding whose commit is gone after a base edit next to its line", async () => {
-    const h = harness();
-    // The line right above the return (the loop's end) changes: the return is still the only
-    // line the PR deletes that reads `return sum;`.
-    await droppedReturnThenForcePushed(h, redoneOnBase(TOTAL.replace("  }\n", "  } // loop\n")));
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-  });
-
-  it("keeps an old-side finding whose commit is gone after the base adds a same-shaped line above", async () => {
-    const h = harness();
-    // A copy of the function above it: the same lines, return included, that the PR leaves.
-    const copy = `${TOTAL.replace("function total", "function subtotal")}\n`;
-    await droppedReturnThenForcePushed(h, async () => {
-      await git(work, "checkout", "--quiet", "main");
-      baseSha = await commit({ "src/total.ts": `${copy}${TOTAL}` }, "main: subtotal");
-      await git(work, "checkout", "--quiet", "feature");
-      await git(work, "reset", "--quiet", "--hard", baseSha);
-      headSha = await commit(
-        { "src/total.ts": `${copy}${HEAD_TOTAL.replace("  return sum;\n", "")}` },
-        "redone",
-      );
-    });
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-  });
-
-  it("finds an old-side finding whose commit is gone however far a rebase moved its line", async () => {
-    const h = harness();
-    const header = Array.from({ length: 80 }, (_, i) => `// note ${i}`).join("\n");
-    await droppedReturnThenForcePushed(h, redoneOnBase(`${header}\n${TOTAL}`));
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
-  });
-
-  it("doesn't take a lone closing brace for a finding on one whose code around it is gone", async () => {
-    const h = harness();
-    // On the loop's `}`.
-    await review(h, 1, [finding({ line: 5, title: "Loop body skips discounts", evidence: "}" })]);
-    // Redone: the loop body is written another way; a `}` is still on line 5.
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    headSha = await commit(
-      { "src/total.ts": TOTAL.replace("sum += items[i].price;", "sum += discounted(items[i]);") },
-      "redone",
-    );
-    await git(remote, "reflog", "expire", "--expire=now", "--all");
-    await git(remote, "gc", "--quiet", "--prune=now");
-
-    const again = await review(h, 2);
-    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
-    expect(again.posted).toMatchObject({ event: "APPROVE" });
-  });
-
-  it("outdates a new-side finding whose commit is gone once its line holds other code", async () => {
-    const h = harness();
-    await review(h, 1, [finding()]);
-    // Redone: the loop is written another way, so its line is gone; the PR still changes the
-    // file.
-    await git(work, "reset", "--quiet", "--hard", baseSha);
-    headSha = await commit(
-      {
-        "src/total.ts": TOTAL.replace(
-          "  for (let i = 0; i < items.length; i++) {\n    sum += items[i].price;\n  }\n",
-          "  for (const item of items.slice(0, -1)) {\n    sum += item.price;\n  }\n",
-        ),
-      },
-      "redone",
-    );
-    await git(remote, "reflog", "expire", "--expire=now", "--all");
-    await git(remote, "gc", "--quiet", "--prune=now");
 
     const again = await review(h, 2);
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);

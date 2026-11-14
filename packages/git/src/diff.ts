@@ -2,7 +2,6 @@ import type { Repo } from "./clone.js";
 import { importLines, languageOf } from "./imports.js";
 import { parsePatch, type FilePatch, type Hunk } from "./patch.js";
 import { pool } from "./pool.js";
-import { normaliseLine } from "./span.js";
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed" | "type-changed";
 
@@ -57,6 +56,12 @@ export interface ReviewDiff {
   lastReviewed?: string;
   /** Why an incremental review fell back to a full one, for some files or all. */
   fallbackReason?: string;
+  /**
+   * Files whose last reviewed commit is gone (force-pushed away), so their earlier review can't
+   * be compared with: they're reviewed afresh, as on a first review. Every planned file when no
+   * earlier review's commit is here.
+   */
+  baselineGone?: string[];
   files: FileDiff[];
   /**
    * Every file the PR changes against the merge base, whatever the kind: `files` itself for a
@@ -359,7 +364,7 @@ const TRIVIAL = /^[\s{}()[\];,.]*$/;
 export const REMOVED_LINES_SHOWN = 200;
 
 /** A line's text for comparing: re-indenting or re-spacing it doesn't change what it says. */
-const normalised = normaliseLine;
+const normalised = (text: string) => text.trim().replace(/\s+/g, " ");
 
 /** Copies of each added line, by normalised text, with the first original text seen. */
 function addedCopies(file: FileDiff | undefined): Map<string, { text: string; n: number }> {
@@ -719,9 +724,11 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     return file !== undefined && readingDepth(file) === "full";
   });
   const anyBaseline = [...baselines.values()].some((base) => base !== undefined);
+  const baselineGone = anyBaseline ? [...gone] : [...planned.keys()];
   return {
     ...result,
     kind: anyBaseline ? "incremental" : "full",
+    ...(reviewedAt.size > 0 && baselineGone.length > 0 ? { baselineGone } : {}),
     files: [...planned.values()],
     unchanged: [...unchanged],
     noLongerChanged,

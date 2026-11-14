@@ -34,15 +34,6 @@ export {
 export { trackLine, trackLines, type LineRef } from "./track.js";
 export { pool } from "./pool.js";
 export {
-  decodeSpan,
-  encodeSpan,
-  fileLines,
-  findSpan,
-  lineSpan,
-  normaliseLine,
-  type LineSpan,
-} from "./span.js";
-export {
   commentTarget,
   hunkFor,
   type CommentPosition,

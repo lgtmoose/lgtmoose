@@ -17,7 +17,7 @@ import {
   type Severity,
 } from "@lgtmoose/core";
 import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
-import { encodeSpan, fileLines, lineSpan, reviewDiff } from "@lgtmoose/git";
+import { reviewDiff } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness";
 import {
   planReview,
@@ -103,11 +103,8 @@ export interface ReviewReport {
   summary: string;
   /** Whether the run reviewed only what changed since the last review. */
   kind: "full" | "incremental";
-  /**
-   * This run's new findings (`inline` and `body`), each with its fingerprint and its lines (a
-   * `LineSpan`, encoded; undefined for a blank line or one outside its file), to record.
-   */
-  posted: { finding: Finding; fingerprint: string; lineText?: string }[];
+  /** This run's new findings (`inline` and `body`), each with its fingerprint, to record. */
+  posted: { finding: Finding; fingerprint: string }[];
   /**
    * Earlier findings the reviewer raised again at a higher severity (a duplicate matched to
    * the finding itself): counted at that severity, and to store with it.
@@ -135,9 +132,8 @@ export interface EarlierFinding {
   /**
    * False when its place at this head isn't known: its line is gone, or it wasn't followed (a
    * closed finding on a file the PR no longer changes). Today's code at its recorded place says
-   * nothing about it, so it's only matched by its stored fingerprint and comment ID. A finding
-   * whose commit is gone, found again by its recorded lines (its file still in the PR), counts as
-   * placed there.
+   * nothing about it, so it's only matched by its stored fingerprint and comment ID. That's
+   * also so for one whose commit is gone: it can't be followed exactly.
    */
   followed?: boolean;
 }
@@ -322,7 +318,7 @@ function lineReader(repo: Repo): (blob: string | undefined) => Promise<string[]>
     if (lines === undefined) {
       lines = repo
         .readBlobs([blob])
-        .then((blobs) => fileLines(blobs.get(blob)?.toString("utf8") ?? ""));
+        .then((blobs) => (blobs.get(blob)?.toString("utf8") ?? "").split("\n"));
       cache.set(blob, lines);
     }
     return lines;
@@ -453,7 +449,14 @@ export async function prepareReview(
     globs: config.conventions,
   });
   const rulePacks = await loadRulePacks(config.rulepacks);
-  const { done, carried } = doneFiles(plan, options);
+  // A file whose earlier review can't be compared with (its commit is gone) is reviewed afresh,
+  // as on a first review: an earlier record of its blob doesn't make it done. Duplicates of what
+  // that review posted are dropped against our comments on the PR.
+  const gone = new Set(diff.baselineGone ?? []);
+  const { done, carried } = doneFiles(plan, {
+    ...options,
+    reviewed: (options.reviewed ?? []).filter((entry) => !gone.has(entry.path)),
+  });
   deps.progress(
     `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}.`,
   );
@@ -774,19 +777,7 @@ export async function finishReview(
     }
   }
   const final = (finding: Finding) => raised.get(finding) ?? finding;
-  // Each new finding's lines, to find it again should its commit go.
-  const posted = await Promise.all(
-    deduped.kept.map(async (entry) => {
-      const file = byPath.get(entry.finding.path);
-      const lines = await readLines(entry.finding.side === "LEFT" ? file?.oldBlob : file?.newBlob);
-      const span = lineSpan(lines, entry.finding.line, entry.finding.start_line);
-      return {
-        ...entry,
-        finding: final(entry.finding),
-        ...(span === undefined ? {} : { lineText: encodeSpan(span) }),
-      };
-    }),
-  );
+  const posted = deduped.kept.map((entry) => ({ ...entry, finding: final(entry.finding) }));
   const kept = new Set(deduped.kept.map((entry) => entry.finding));
   const keptOf = (findings: readonly Finding[]) =>
     findings.filter((finding) => kept.has(finding)).map(final);

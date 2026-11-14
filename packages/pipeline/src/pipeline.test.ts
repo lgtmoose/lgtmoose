@@ -276,8 +276,6 @@ describe("runReview", () => {
 describe("prepareReview and finishReview with earlier runs", () => {
   const ALL = ["src/total.ts", "CLAUDE.md", ".lgtmoose.yaml"];
   const FULL = "full" as const;
-  /** A last reviewed commit that's gone (force-pushed away): files are reviewed in full. */
-  const GONE = "e".repeat(40);
 
   async function setUp() {
     const repo = await cloneAtSha({
@@ -309,7 +307,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       blobSha: blobs.get(path) ?? "",
       baseBlobSha: baseBlobs.get(path),
       depth: FULL,
-      reviewedAt: GONE,
+      reviewedAt: baseSha,
     }));
 
     const partly = await prepare({ reviewed: reviewed.slice(1) });
@@ -398,7 +396,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
           // Read against another base version: what the PR changes isn't the same.
           baseBlobSha: "f".repeat(40),
           depth: FULL,
-          reviewedAt: GONE,
+          reviewedAt: baseSha,
         },
       ],
     });
@@ -416,7 +414,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
             blobSha: blobs.get("src/total.ts") ?? "",
             baseBlobSha: baseBlobs.get("src/total.ts"),
             depth,
-            reviewedAt: GONE,
+            reviewedAt: baseSha,
           },
         ],
       });
@@ -550,7 +548,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
           blobSha: blobs.get("src/imports.ts") ?? "",
           baseBlobSha: baseBlobs.get("src/imports.ts"),
           depth: FULL,
-          reviewedAt: GONE,
+          reviewedAt: baseSha,
         },
       ],
     });

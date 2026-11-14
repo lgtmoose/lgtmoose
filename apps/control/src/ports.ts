@@ -61,12 +61,6 @@ export interface FindingRecord {
    * line is in. Undefined for rows recorded before it was kept.
    */
   basePath: string | undefined;
-  /**
-   * Its lines on its side when it was raised (a `LineSpan` from @lgtmoose/git, encoded): to find
-   * them again when its commit is gone. Undefined only for rows recorded before migration 0003,
-   * which exist in tests alone: those stand at their recorded line.
-   */
-  lineText: string | undefined;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -76,8 +70,6 @@ export interface FindingToSave {
   githubCommentId?: number;
   /** Its file's base-side name in the PR's diff (see `FindingRecord.basePath`). */
   basePath?: string;
-  /** Its lines (see `FindingRecord.lineText`). */
-  lineText?: string;
 }
 
 /** `findings` and `finding_events`, for our own findings. */

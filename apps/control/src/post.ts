@@ -2,10 +2,7 @@ import { statusLabels } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import {
   changedPaths,
-  decodeSpan,
   diffCommits,
-  fileLines,
-  findSpan,
   pathsOf,
   pool,
   rawDiff,
@@ -67,11 +64,9 @@ type TrackedRecord = Omit<FindingRecord, "status"> & { status?: FindingRecord["s
 interface Names {
   nameAtHead: (path: string) => string;
   /**
-   * An old-side finding's file at today's merge base. With the base its commit had: its
-   * recorded base-side name followed through the base's renames since. Without one (its commit
-   * is gone, or shares no history, or history isn't read yet): the recorded name if the PR
-   * still changes a file by it, else its head name's base side under the PR's own renames
-   * (`baseFallback`). Rows recorded without a base-side name go through their head name.
+   * An old-side finding's file at today's merge base: its recorded base-side name, followed
+   * through the base's renames since the base its commit had, when that's known. Rows recorded
+   * without a base-side name go through their head name.
    */
   baseNow: (record: TrackedRecord) => string;
 }
@@ -150,28 +145,13 @@ function prBaseNames(changes: readonly ChangedPath[]): Map<string, string> {
   return names;
 }
 
-/**
- * An old-side finding's base file when the base's renames since it was raised aren't known: its
- * recorded base-side name if the PR still changes a file by it, else its head name's base side
- * under the PR's own renames (`prBase`, from `prBaseNames`). The same before and after history
- * is read, so both passes agree.
- */
-function baseFallback(
-  record: TrackedRecord,
-  prBase: ReadonlyMap<string, string>,
-  { changedBase }: PrPaths,
-): string {
-  if (record.basePath !== undefined && changedBase.has(record.basePath)) return record.basePath;
-  return prBase.get(record.path) ?? record.path;
-}
-
 /** The PR's diff alone, as `Names`: before any history is read. */
-function prOnlyNames(changes: readonly ChangedPath[], paths: PrPaths): Names {
+function prOnlyNames(changes: readonly ChangedPath[]): Names {
   const head = prNames(changes);
   const base = prBaseNames(changes);
   return {
     nameAtHead: (path) => head.get(path) ?? path,
-    baseNow: (record) => baseFallback(record, base, paths),
+    baseNow: (record) => record.basePath ?? base.get(record.path) ?? record.path,
   };
 }
 
@@ -186,7 +166,6 @@ async function readHistory(
   repo: Repo,
   records: readonly TrackedRecord[],
   changes: readonly ChangedPath[],
-  paths: PrPaths,
   mergeBase: string,
   headSha: string,
 ): Promise<History> {
@@ -195,10 +174,9 @@ async function readHistory(
   const learn = (from: string, to: string) => {
     if (!names.has(from)) names.set(from, to);
   };
-  // The PR's own base-side names, for the fallback; and, for rows recorded without a base-side
-  // name, the same with the base's renames learned below (legacy).
-  const prBase = prBaseNames(changes);
-  const baseNames = new Map(prBase);
+  // For rows recorded without a base-side name: the PR's base-side names, with the base's
+  // renames learned below.
+  const baseNames = prBaseNames(changes);
   const nameAtMergeBase = (path: string) => baseNames.get(path) ?? path;
   // For each finding's base, a name there's name at today's merge base.
   const movedSince = new Map<string, Map<string, string>>();
@@ -243,12 +221,11 @@ async function readHistory(
     movedSince.set(base, later);
   }
   // Its recorded base-side name, followed through the base's renames since the base it was
-  // raised on. Without that base (its commit is gone, or shares no history), those renames
-  // aren't known: `baseFallback`.
+  // raised on. Without that base (its commit is gone, or shares no history), it can't be
+  // followed anyway: as recorded.
   const baseNow = (record: TrackedRecord) => {
     if (record.basePath === undefined) return nameAtMergeBase(record.path);
-    const base = raisedBase.get(record.raisedAtSha);
-    if (base === undefined || base === "") return baseFallback(record, prBase, paths);
+    const base = raisedBase.get(record.raisedAtSha) ?? "";
     return movedSince.get(base)?.get(record.basePath) ?? record.basePath;
   };
   return { present, raisedBase, nameAtHead, baseNow, nameAtBase, since };
@@ -333,28 +310,23 @@ const FOLLOW_AT_ONCE = 4;
  * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
  * when it was raised (its merge base with today's) to today's merge base, and stands while the
  * PR still deletes that line. When the commit a finding was raised at is gone (force-pushed
- * away), its lines can't be followed: one `keepInPlace` picks is looked for by its recorded lines
- * anywhere in its file, nearest its recorded line first (`findLine`): in its base file on a line
- * the PR deletes (old side), or in its file at head (new side), while the PR still changes that
- * file. Found, it stands there; not found, it doesn't. The others don't stand. Only open ones go `outdated`
- * and only outdated ones are `reopened`; a record with no status (a closed one) just stands or
- * not.
+ * away) or shares no history with the base, its lines can't be followed exactly, so it doesn't
+ * stand: an open one goes outdated. Only open ones go `outdated` and only outdated ones are
+ * `reopened`; a record with no status (a closed one) just stands or not.
  */
 async function standing(
   repo: Repo,
   records: readonly TrackedRecord[],
-  changes: readonly ChangedPath[],
   mergeBase: string,
   headSha: string,
-  keepInPlace: (record: TrackedRecord) => boolean,
   history: History,
-  { atHead, changedBase }: PrPaths,
+  { atHead }: PrPaths,
   prDiff: RawDiff,
 ): Promise<{ open: (EarlierFinding & { id: string })[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
   // A base-side file's name at head (a deleted one keeps its own).
   const fromBase = new Map(
-    changes.flatMap((file) =>
+    pathsOf(prDiff).flatMap((file) =>
       file.status === "added" ? [] : [[file.oldPath ?? file.path, file.path]],
     ),
   );
@@ -405,28 +377,9 @@ async function standing(
       for (const [i, record] of group.entries()) leftPlaces.set(record, moved[i]);
     },
   );
-  // Findings that can't be followed but may be kept in place, if the PR still changes their
-  // file: an old-side one's base file, a new-side one's file at head. Their patches are read
-  // too, to look for their lines.
-  const keptLeft = new Map(
-    records.flatMap((record) => {
-      if (record.side !== "LEFT" || at.has(record) || leftPlaces.has(record)) return [];
-      if (!keepInPlace(record)) return [];
-      const base = baseNow(record);
-      return changedBase.has(base) ? [[record, base] as const] : [];
-    }),
+  const leftPaths = [...leftPlaces.values()].flatMap((place) =>
+    place === undefined ? [] : [place.path, fromBase.get(place.path) ?? place.path],
   );
-  const keptRight = new Map(
-    records.flatMap((record) => {
-      if (record.side !== "RIGHT" || at.has(record) || !keepInPlace(record)) return [];
-      const head = nameAtHead(record.path);
-      return atHead.has(head) ? [[record, head] as const] : [];
-    }),
-  );
-  const leftPaths = [
-    ...[...leftPlaces.values()].flatMap((place) => (place === undefined ? [] : [place.path])),
-    ...keptLeft.values(),
-  ].flatMap((path) => [path, fromBase.get(path) ?? path]);
   const patches =
     leftPaths.length === 0
       ? []
@@ -457,86 +410,23 @@ async function standing(
         : undefined,
     );
   }
-  // Kept in place, its commit gone: its line can't be followed, and edits since may have moved
-  // it, so it's looked for by its recorded lines anywhere in the file, nearest first: an
-  // old-side one in its base file, on a line the PR still deletes; a new-side one in its file
-  // at head. One blob read for all, one split per file; the blobs come from the PR's file list.
-  if (keptLeft.size + keptRight.size > 0) {
-    const baseBlob = new Map<string, string>();
-    const headBlob = new Map<string, string>();
-    for (const entry of prDiff.entries) {
-      if (entry.status !== "added" && entry.oldBlob !== undefined) {
-        baseBlob.set(entry.oldPath, entry.oldBlob);
-      }
-      if (entry.status !== "deleted" && entry.newBlob !== undefined) {
-        headBlob.set(entry.newPath, entry.newBlob);
-      }
-    }
-    const wanted = [
-      ...[...keptLeft.values()].flatMap((base) => baseBlob.get(base) ?? []),
-      ...[...keptRight.values()].flatMap((head) => headBlob.get(head) ?? []),
-    ];
-    const blobs = await repo.readBlobs([...new Set(wanted)]);
-    const split = new Map<string, string[]>();
-    const linesOf = (blob: string | undefined) => {
-      if (blob === undefined) return [];
-      let lines = split.get(blob);
-      if (lines === undefined) {
-        lines = fileLines(blobs.get(blob)?.toString("utf8") ?? "");
-        split.set(blob, lines);
-      }
-      return lines;
-    };
-    for (const [record, base] of keptLeft) {
-      const deleted = deletedLines.get(base);
-      const line = findLine(record, linesOf(baseBlob.get(base)), (n) => deleted?.has(n) === true);
-      at.set(record, line === undefined ? undefined : { path: fromBase.get(base) ?? base, line });
-    }
-    for (const [record, head] of keptRight) {
-      const line = findLine(record, linesOf(headBlob.get(head)), () => true);
-      at.set(record, line === undefined ? undefined : { path: head, line });
-    }
-  }
-
   const open: (EarlierFinding & { id: string })[] = [];
   const outdated: string[] = [];
   const reopened: string[] = [];
   for (const record of records) {
     const isLeft = record.side === "LEFT";
-    let place: LineRef | undefined;
-    if (at.has(record)) {
-      place = at.get(record);
-      if (place !== undefined && !isLeft && !atHead.has(place.path)) place = undefined;
-    } else {
-      // Not followable, and not kept in place (those were looked for above).
-      place = undefined;
-    }
+    // Not in `at`: it can't be followed exactly, so it doesn't stand.
+    let place = at.get(record);
+    if (place !== undefined && !isLeft && !atHead.has(place.path)) place = undefined;
     if (place === undefined) {
       if (record.status === "open") outdated.push(record.id);
       continue;
     }
     if (record.status === "outdated") reopened.push(record.id);
-    // Followed to its place now, or found by its recorded lines (its commit is gone, its file
-    // still in the PR): either way, that's where it is.
+    // Followed to its place now.
     open.push({ ...recordToEarlier(record, place), id: record.id });
   }
   return { open, outdated, reopened };
-}
-
-/**
- * Where a finding whose commit is gone is now in its file's `lines`: where its recorded lines are
- * (`findSpan`), on a line `allowed` takes, nearest its recorded line. Undefined: not found. A row
- * recorded without its lines (before migration 0003: tests only) stands at its recorded line if
- * `allowed` takes it.
- */
-function findLine(
-  record: TrackedRecord,
-  lines: readonly string[],
-  allowed: (line: number) => boolean,
-): number | undefined {
-  if (record.lineText === undefined) return allowed(record.line) ? record.line : undefined;
-  const span = decodeSpan(record.lineText);
-  return span === undefined ? undefined : findSpan(lines, span, record.line, allowed);
 }
 
 function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
@@ -640,10 +530,9 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       const prDiff = await rawDiff(repo, prepared.mergeBase, pr.headSha);
       const changes = pathsOf(prDiff);
       // Open ones are always followed; outdated and closed ones only while the PR still changes
-      // their file (a new-side one's at head, an old-side one's base file). When its commit is
-      // gone, an open or closed one is looked for by its recorded lines, nearest its recorded
-      // line, and stands only where they're found; closed ones are never marked outdated or
-      // reopened.
+      // their file (a new-side one's at head, an old-side one's base file). One whose commit is
+      // gone can't be followed exactly and doesn't stand; closed ones are never marked outdated
+      // or reopened.
       const followAll = (record: TrackedRecord) => record.status === "open";
       const candidates: TrackedRecord[] = [...records, ...closedRecords];
       // The PR's own renames tell most findings' files apart. One whose recorded file is neither
@@ -652,7 +541,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       const paths = prPaths(changes);
       const { changedBase } = paths;
       const known = prNames(changes);
-      const prOnly = prOnlyNames(changes, paths);
+      const prOnly = prOnlyNames(changes);
       // The file a finding is on: at head for a new-side one, on the base side for an old-side.
       const fileOf = (record: TrackedRecord) =>
         record.side === "RIGHT" ? record.path : (record.basePath ?? record.path);
@@ -667,15 +556,13 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       const read = [...new Set([...byName, ...needHistory])];
       // The commits those findings were raised at: one request.
       await repo.fetchCommits(read.map((record) => record.raisedAtSha));
-      const history = await readHistory(repo, read, changes, paths, prepared.mergeBase, pr.headSha);
+      const history = await readHistory(repo, read, changes, prepared.mergeBase, pr.headSha);
       const tracked = toTrack(read, paths, followAll, history);
       const all = await standing(
         repo,
         tracked,
-        changes,
         prepared.mergeBase,
         pr.headSha,
-        (record) => record.status === "open" || closedIds.has(record.id),
         history,
         paths,
         prDiff,
