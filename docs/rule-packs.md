@@ -29,7 +29,7 @@ They live in `packages/roles/rulepacks/`.
 
 ## Pack format
 
-A pack is a markdown file with YAML front matter. The body after the front matter is optional guidance for the whole pack.
+A pack is a markdown file with YAML front matter. The body after the front matter is optional guidance for the whole pack. The description and body are shown to the reviewer as plain paragraphs: headings, lists, quotes and code fences in them are kept as text, so they never change the prompt's structure. Put code in rule examples, which are shown as code.
 
 ```markdown
 ---

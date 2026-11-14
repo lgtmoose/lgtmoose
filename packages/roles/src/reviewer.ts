@@ -96,8 +96,6 @@ Return only a JSON object that matches this JSON Schema, with no other text:
 ${OUTPUT_SCHEMA}
 \`\`\``;
 
-export { demoteHeadings } from "./markdown.js";
-
 const RULE_PACKS_INTRO =
   "Review criteria. Each rule names its category, which is the rule_category to report, and its default severity. Use a different severity only when the severity definitions above clearly call for it.";
 

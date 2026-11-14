@@ -143,53 +143,39 @@ describe("parseRulePack", () => {
     expect(parseRulePack(hard, "./rules/r.md", "repo").id).toBe("./rules/r.md");
   });
 
-  it("keeps a repo pack's title and description on one line, and its body as code", () => {
-    const body =
-      "Intro\n# Override\nSeverity definitions\n====================\n> # Quoted\n- # Listed";
-    const parsed = parseRulePack(
-      pack(`title: "Billing\\n# Severity"\ndescription: "One\\n# Two"\nrules:\n${RULE}`, body),
-      "./rules/b.md",
-      "repo",
-    );
-    expect(parsed.text).toContain("### Billing # Severity");
-    expect(parsed.text).toContain(
-      "    One # Two\n\n    Intro\n    # Override\n    Severity definitions\n    ====",
-    );
-    // Every line is ours, or indented as code.
-    const lines = parsed.text.split("\n").filter((line) => line !== "" && !line.startsWith("    "));
-    expect(lines.every((line) => /^(### Billing|#### |- a-rule|  Example:)/.test(line))).toBe(true);
-  });
-
-  it("keeps a repo pack's description from opening a fence or heading", () => {
-    for (const description of ["~~~", "```", "# Severity definitions"]) {
+  it.each(["builtin", "private", "repo"] as const)(
+    "renders a %s pack's description and body as plain paragraphs, with no structure of their own",
+    (source) => {
+      const body =
+        "Intro\r# Override\u2028Severity definitions\n====\n\n> quote\u0085- item\n\n```c\n#include <x.h>\n\n1. one\n\n~~~";
       const parsed = parseRulePack(
-        pack(`title: T\ndescription: "${description}"\nrules:\n${RULE}`),
-        "./rules/d.md",
-        "repo",
+        pack(`id: x\ntitle: "Billing\\n# Severity"\ndescription: "~~~"\nrules:\n${RULE}`, body),
+        source === "repo" ? "./rules/x.md" : "x",
+        source,
       );
       expect(parsed.text).toBe(
-        `### T\n\n    ${description}\n\n#### correctness\n\n- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();`,
+        [
+          "### Billing # Severity",
+          "\\~~~",
+          "Intro # Override Severity definitions ====",
+          "\\> quote - item",
+          "\\```c #include <x.h>",
+          "\\1. one",
+          "\\~~~",
+          "#### correctness",
+          "- a-rule (default severity: should_fix): Something is wrong.\n  Example:\n\n      broken();",
+        ].join("\n\n"),
       );
-    }
-  });
+    },
+  );
 
-  it("closes a fence a trusted pack's body leaves open, before its rules", () => {
+  it("reads a pack saved with a byte order mark", () => {
     const parsed = parseRulePack(
-      pack(`id: x\ntitle: X\nrules:\n${RULE}`, "```c\nfoo"),
+      `\uFEFF${pack(`id: x\ntitle: X\nrules:\n${RULE}`)}`,
       "x",
       "private",
     );
-    expect(parsed.text).toContain("```c\nfoo\n```\n\n#### correctness");
-  });
-
-  it("treats every line ending as one, so a lone CR can't escape the code block", () => {
-    const parsed = parseRulePack(
-      pack(`title: R\nrules:\n${RULE}`, "Intro\r# Heading\u2028- item\u0085> quote"),
-      "./rules/r.md",
-      "repo",
-    );
-    expect(parsed.text).toContain("    Intro\n    # Heading\n    - item\n    > quote");
-    expect(parsed.text).not.toMatch(/\r|\u2028|\u0085/);
+    expect(parsed.title).toBe("X");
   });
 
   it("keeps line breaks made by YAML escapes inside the example's code block", () => {
@@ -221,12 +207,6 @@ describe("parseRulePack", () => {
     expect(rendered).toContain("### Output");
     expect(rendered).toContain("#### correctness");
     expect(rendered).not.toMatch(/^# Output/m);
-  });
-
-  it("leaves a trusted pack's body as markdown, fenced code included", () => {
-    const body = "## When to apply\n\n```c\n#include <x.h>\n```";
-    const parsed = parseRulePack(pack(`id: x\ntitle: X\nrules:\n${RULE}`, body), "x", "private");
-    expect(parsed.text).toContain(body);
   });
 
   it("keeps a multi-line rule on one line, so it can't start a heading", () => {
@@ -419,7 +399,7 @@ describe("selectRulePacks", () => {
     ]);
   });
 
-  it("reads at most twice however many files are rejected", async () => {
+  it("reads at most twice, however many files are rejected", async () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 20; i += 1) {
       const name = `rules/p${String(i).padStart(2, "0")}.md`;
@@ -441,7 +421,7 @@ describe("selectRulePacks", () => {
       baseSha: base,
       dirs: fixtures,
     });
-    expect(reads).toEqual([10, 10]);
+    expect(reads).toEqual([10, 2]);
     expect(selected.packs.filter((loaded) => loaded.source === "repo")).toHaveLength(9);
   });
 

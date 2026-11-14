@@ -3,7 +3,6 @@ import { PROTECTED_CATEGORIES, SEVERITIES, severityRank } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { closeOpenFence, demoteHeadings } from "./markdown.js";
 
 /**
  * Rule packs are markdown files with YAML front matter: the pack's id, title and rules, each
@@ -99,7 +98,7 @@ class UnknownRulePackError extends RulePackError {
 function splitFrontMatter(text: string): { front: string; body: string } | undefined {
   // Only CR and CRLF, which YAML also reads as line breaks. NEL and the Unicode separators are
   // plain characters to YAML, so they're handled where text is rendered (see `lines`).
-  const normalised = text.replace(/\r\n?/g, "\n");
+  const normalised = text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const match = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/.exec(normalised);
   return match === null ? undefined : { front: match[1] ?? "", body: (match[2] ?? "").trim() };
 }
@@ -120,20 +119,36 @@ function oneLine(text: string): string {
   return text.replace(/[\s\u0085]+/g, " ").trim();
 }
 
+/** A character that can start a markdown block (heading, quote, list, fence, rule, HTML). */
+const BLOCK_START = /^([#>*+\-=_`~<|]|\d+[.)])/;
+
+/**
+ * Turns pack text into plain paragraphs: each paragraph on one line, and a character that
+ * would start a markdown block escaped. Pack text is guidance, never structure, so a heading,
+ * fence, list or quote in it can't change the prompt's sections, whoever wrote the pack.
+ */
+function plainParagraphs(text: string): string {
+  return text
+    .split(LINE_BREAK)
+    .join("\n")
+    .split(/\n[ \t]*\n/)
+    .map((paragraph) => oneLine(paragraph))
+    .filter((paragraph) => paragraph !== "")
+    .map((paragraph) => paragraph.replace(BLOCK_START, "\\$1"))
+    .join("\n\n");
+}
+
 /**
  * Renders a pack for the prompt, at its final levels: the title under `### `, each category
- * under `#### `, so the pack nests under the prompt's `## Rule pack` sections. Rules are grouped
- * by category in the order they first appear, kept on one line, with examples indented as code.
- * A trusted pack's body is markdown: its headings are demoted and a fence it leaves open is
- * closed, so neither touches the headings that follow. Repo text adds no structure at all: its
- * description and body are indented as code.
+ * under `#### `, so the pack nests under the prompt's `## Rule pack` sections. The headings are
+ * the only structure: the description and body become plain paragraphs, rules stay on one
+ * line, and examples are indented as code.
  */
 function renderPack(
   title: string,
   description: string | undefined,
   body: string,
   rules: readonly PackRule[],
-  source: RulePackSource,
 ): string {
   const byCategory = new Map<string, PackRule[]>();
   for (const rule of rules) {
@@ -150,13 +165,12 @@ function renderPack(
       ),
     ].join("\n\n"),
   );
-  const intro = description === undefined ? "" : oneLine(description);
-  const text = body.split(LINE_BREAK).join("\n");
-  const guidance =
-    source === "repo"
-      ? indent([intro, text].filter((part) => part !== "").join("\n\n"), "    ")
-      : [intro, closeOpenFence(demoteHeadings(text))].filter((part) => part !== "").join("\n\n");
-  return [`### ${oneLine(title)}`, guidance, ...sections]
+  return [
+    `### ${oneLine(title)}`,
+    plainParagraphs(description ?? ""),
+    plainParagraphs(body),
+    ...sections,
+  ]
     .filter((part) => part !== "")
     .join("\n\n");
 }
@@ -210,7 +224,7 @@ function toPack(parsed: ParsedPack, id: string, source: RulePackSource): RulePac
     title: parsed.title,
     source,
     rules: parsed.rules,
-    text: renderPack(parsed.title, parsed.description, parsed.body, parsed.rules, source),
+    text: renderPack(parsed.title, parsed.description, parsed.body, parsed.rules),
   };
 }
 
@@ -453,10 +467,11 @@ async function readRepoPacks(
   const chosen: { path: string; text: string }[] = [];
   let total = 0;
   let next = 0;
-  while (next < entries.length && chosen.length < maxFiles && next < MAX_REPO_PACK_READS) {
-    // First as many as can be used, so a folder of valid packs is one read; then, if some were
-    // left out, the rest up to the cap in one more. At most two reads, whatever is rejected.
-    const size = next === 0 ? maxFiles : MAX_REPO_PACK_READS - next;
+  // At most two reads: first as many files as can be used, so a folder of valid packs is one
+  // read; then, if some were rejected, twice as many as the slots left (within the read cap).
+  for (let round = 0; round < 2; round += 1) {
+    if (next >= entries.length || chosen.length >= maxFiles || next >= MAX_REPO_PACK_READS) break;
+    const size = round === 0 ? maxFiles : 2 * (maxFiles - chosen.length);
     const batch = entries.slice(next, Math.min(next + size, MAX_REPO_PACK_READS));
     next += batch.length;
     const blobs = await readBatch(repo, batch, warnings);
@@ -486,7 +501,7 @@ async function readRepoPacks(
     problems.push(
       chosen.length >= maxFiles
         ? `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`
-        : `./${entry.path} was left out: only the first ${MAX_REPO_PACK_READS} pack files in rules/ are read.`,
+        : `./${entry.path} was left out: only the first ${next} pack files in rules/ were read.`,
     );
   }
   return chosen;
