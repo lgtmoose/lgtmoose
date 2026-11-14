@@ -418,7 +418,10 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 // Never lowered: the enum runs from blocking to nit, so the least is the most
                 // severe.
                 severity: sql`least(${findings.severity}, excluded.severity)`,
-                githubCommentId: sql`coalesce(excluded.github_comment_id, ${findings.githubCommentId})`,
+                // Reopened (from outdated): the new comment's ID, or none if it wasn't posted
+                // inline, since the old comment is on code that's gone. Still open: kept unless
+                // there's a new one.
+                githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
@@ -617,7 +620,10 @@ export async function awsControlDeps(
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         // GitHub Apps can call GraphQL with the installation token.
-        threads: graphQlThreadReader((query, variables) => client.graphql(query, variables)),
+        threads: graphQlThreadReader(
+          (query, variables) => client.graphql(query, variables),
+          (errors) => log("review threads partly unread", { errors }),
+        ),
         token,
         poster: (runId, pull) =>
           options.shadow

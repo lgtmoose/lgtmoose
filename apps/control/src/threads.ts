@@ -4,7 +4,10 @@ import { z } from "zod";
 /** One review thread on a PR: whether it's resolved, and its first comment's ID. */
 export interface ReviewThread {
   resolved: boolean;
-  /** The REST ID (`databaseId`) of the thread's first comment; undefined if it was deleted. */
+  /**
+   * The REST ID of the thread's first comment (GraphQL's `fullDatabaseId`: review-comment IDs
+   * are past 2^31, too big for `databaseId`); undefined if it was deleted.
+   */
   firstCommentId: number | undefined;
 }
 
@@ -21,7 +24,7 @@ const QUERY = `query ($owner: String!, $repo: String!, $number: Int!, $after: St
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { isResolved comments(first: 1) { nodes { databaseId } } }
+        nodes { isResolved comments(first: 1) { nodes { fullDatabaseId } } }
       }
     }
   }
@@ -42,7 +45,12 @@ const replySchema = z.object({
                       isResolved: z.boolean(),
                       comments: z.object({
                         nodes: z.array(
-                          z.object({ databaseId: z.number().int().nullable() }).nullable(),
+                          z
+                            .object({
+                              // A BigInt, sent as a string (a number from some servers).
+                              fullDatabaseId: z.union([z.string(), z.number()]).nullable(),
+                            })
+                            .nullable(),
                         ),
                       }),
                     })
@@ -59,11 +67,29 @@ const replySchema = z.object({
   errors: z.array(z.object({ message: z.string() })).optional(),
 });
 
+/**
+ * A comment ID from `fullDatabaseId`: a whole number within JavaScript's exact range (2^53;
+ * GitHub's IDs are in the billions), else undefined. `github_comment_id` is a Postgres bigint.
+ */
+function commentId(value: string | number | null | undefined): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" && !/^[1-9][0-9]*$/.test(value)) return undefined;
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
 /** Most pages read: 100 threads each. A PR with more is unusual; the rest are left alone. */
 const MAX_PAGES = 20;
 
-/** Reads review threads through GitHub GraphQL, 100 at a time. */
-export function graphQlThreadReader(graphql: GraphQl): ReviewThreadReader {
+/**
+ * Reads review threads through GitHub GraphQL, 100 at a time. A reply with errors but data
+ * (some threads unreadable) is used as far as it goes: the failed nodes come back null and are
+ * skipped, and the errors go to `onErrors`. Only a reply with no threads at all fails.
+ */
+export function graphQlThreadReader(
+  graphql: GraphQl,
+  onErrors: (messages: string[]) => void = () => {},
+): ReviewThreadReader {
   return {
     async reviewThreads(target) {
       const threads: ReviewThread[] = [];
@@ -77,17 +103,22 @@ export function graphQlThreadReader(graphql: GraphQl): ReviewThreadReader {
             after,
           }),
         );
-        if (reply.errors !== undefined && reply.errors.length > 0) {
+        const errors = (reply.errors ?? []).map((error) => error.message);
+        const list = reply.data?.repository?.pullRequest?.reviewThreads;
+        if (list === undefined) {
           throw new Error(
-            `GitHub GraphQL: ${reply.errors.map((error) => error.message).join("; ")}`,
+            errors.length > 0
+              ? `GitHub GraphQL: ${errors.join("; ")}`
+              : "GitHub GraphQL: no such pull request.",
           );
         }
-        const list = reply.data?.repository?.pullRequest?.reviewThreads;
-        if (list === undefined) throw new Error("GitHub GraphQL: no such pull request.");
+        if (errors.length > 0) onErrors(errors);
         for (const node of list.nodes) {
           if (node === null) continue;
-          const id = node.comments.nodes[0]?.databaseId ?? undefined;
-          threads.push({ resolved: node.isResolved, firstCommentId: id });
+          threads.push({
+            resolved: node.isResolved,
+            firstCommentId: commentId(node.comments.nodes[0]?.fullDatabaseId),
+          });
         }
         if (!list.pageInfo.hasNextPage || list.pageInfo.endCursor === null) break;
         after = list.pageInfo.endCursor;

@@ -295,6 +295,17 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["should_fix", 501]]);
     await save("blocking", 502);
     expect(await stored()).toEqual([["blocking", 502]]);
+
+    // Reopened from outdated without an inline comment: the old comment is on code that's gone,
+    // so it no longer stands for the finding.
+    const [record] = await findingStore.trackedFindings(run.pullRequestId);
+    await findingStore.markOutdated([record?.id ?? ""], sha("2"));
+    await save("blocking");
+    expect(await stored()).toEqual([["blocking", undefined]]);
+    // Reopened with one: that one.
+    await findingStore.markOutdated([record?.id ?? ""], sha("3"));
+    await save("blocking", 503);
+    expect(await stored()).toEqual([["blocking", 503]]);
   });
 
   it("follows review threads: resolved by a person, and open again when unresolved", async () => {

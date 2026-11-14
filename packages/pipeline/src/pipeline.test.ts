@@ -919,6 +919,46 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect((await once([other], { closed: [resolved] })).posted).toHaveLength(1);
   });
 
+  it("matches a closed finding that couldn't be followed by its stored fingerprint only", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const once = (findings: Finding[], options: Parameters<typeof finishReview>[4]) =>
+      finishReview(repo, prepared, [{ index: 0, findings, transcriptKeys: [] }], headSha, options);
+    const [resolved] = (await once([finding()], {})).posted;
+    if (resolved === undefined) throw new Error("expected a posted finding");
+    // A new problem on today's line 3, alike enough to the closed one to pass for it there.
+    const fresh = finding({ title: "Loop skips the first item" });
+
+    // Followed to line 3: the same place, so it's taken for the closed one.
+    expect((await once([fresh], { closed: [resolved] })).posted).toEqual([]);
+    // Not followed: line 3 is only where it was, not where it is. Today's code there says
+    // nothing about it, so the new problem is posted.
+    const unfollowed = { ...resolved, followed: false };
+    expect((await once([fresh], { closed: [unfollowed] })).posted).toHaveLength(1);
+    // Its stored fingerprint still matches exactly.
+    expect((await once([finding()], { closed: [unfollowed] })).posted).toEqual([]);
+  });
+
+  it("counts a new finding at the severity its fingerprint is stored at, when that's higher", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const once = (findings: Finding[], options: Parameters<typeof finishReview>[4]) =>
+      finishReview(repo, prepared, [{ index: 0, findings, transcriptKeys: [] }], headSha, options);
+    const [blocking] = (await once([finding()], {})).posted;
+    if (blocking === undefined) throw new Error("expected a posted finding");
+    // Stored blocking (outdated since); raised again as a nit.
+    const stored = [{ fingerprint: blocking.fingerprint, severity: "blocking" as const }];
+    const report = await once([finding({ severity: "nit" })], { stored });
+    expect(report.posted.map((entry) => entry.finding.severity)).toEqual(["blocking"]);
+    expect(report.inline.map((finding) => finding.severity)).toEqual(["blocking"]);
+    expect(report.decision.counts).toMatchObject({ blocking: 1, nit: 0 });
+    // Stored lower: its own severity.
+    const lower = await once([finding()], {
+      stored: [{ fingerprint: blocking.fingerprint, severity: "nit" }],
+    });
+    expect(lower.decision.counts).toMatchObject({ blocking: 1, nit: 0 });
+  });
+
   it("records a done file in a skipped batch at the closer depth it was read at", async () => {
     const { repo, prepare } = await setUp();
     const planned = await prepare({});

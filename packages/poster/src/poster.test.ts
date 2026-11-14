@@ -103,6 +103,25 @@ describe("GitHubPoster", () => {
     ]);
     const posted = await p.submitReview(PULL, "abc", review);
     expect(posted.commentIds).toEqual([901]);
+
+    // Outdated already (the PR moved on): no line, only the original one.
+    const { poster: o } = poster([
+      { status: 200, body: { id: 13 } },
+      {
+        status: 200,
+        body: [
+          {
+            id: 902,
+            path: comment.path,
+            side: null,
+            line: null,
+            original_side: comment.side,
+            original_line: comment.line,
+          },
+        ],
+      },
+    ]);
+    expect((await o.submitReview(PULL, "abc", review)).commentIds).toEqual([902]);
     expect(calls[1]).toMatchObject({
       method: "GET",
       url: "https://api.github.com/repos/acme/app/pulls/7/reviews/11/comments?per_page=100&page=1",

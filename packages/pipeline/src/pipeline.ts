@@ -11,6 +11,7 @@ import {
   severityRank,
   type Finding,
   type HoldReason,
+  type FingerprintParts,
   type KnownFinding,
   type ReviewDecision,
   type Severity,
@@ -128,6 +129,18 @@ export interface EarlierFinding {
   fingerprint: string;
   /** Its inline review comment's GitHub ID, when it has one: that comment stands for it. */
   commentId?: number;
+  /**
+   * False when its line couldn't be followed to this head (the commit it was raised at is gone,
+   * or the PR no longer changes its file): its place is the recorded one, which today's code
+   * may not match, so it's only matched by its stored fingerprint and comment ID.
+   */
+  followed?: boolean;
+}
+
+/** A fingerprint and severity we have stored for one of our findings on the PR. */
+export interface StoredSeverity {
+  fingerprint: string;
+  severity: Severity;
 }
 
 export interface FinishOptions {
@@ -137,11 +150,18 @@ export interface FinishOptions {
    */
   earlier?: readonly EarlierFinding[];
   /**
-   * Findings a person resolved or declined, at their recorded place. The person's decision
-   * wins: a re-raise matching one (its fingerprint, stored or at that place, or a duplicate of
-   * its comment) is dropped, and doesn't count.
+   * Findings a person resolved or declined, followed to this head where their lines can be
+   * (see `EarlierFinding.followed`). The person's decision wins: a re-raise matching one (its
+   * fingerprint, stored or at its place now, or a duplicate of its comment) is dropped, and
+   * doesn't count.
    */
   closed?: readonly EarlierFinding[];
+  /**
+   * The severity each of our recorded findings is stored at. A new finding with one's
+   * fingerprint (an outdated one raised again) is counted at the more severe of the two, as
+   * it's stored.
+   */
+  stored?: readonly StoredSeverity[];
 }
 
 /**
@@ -343,6 +363,35 @@ async function knownFindings(
     known.push({ fingerprint: own?.fingerprint ?? fingerprint(parts), parts });
   }
   return known;
+}
+
+/**
+ * Our recorded findings as known findings for the duplicate check. Each is known under its
+ * stored fingerprint, and, when its line was followed to this head, under the one at its place
+ * now (a rename changes it), with its code there for fuzzy matches; protected categories only
+ * ever match exactly. One that couldn't be followed is known by its stored fingerprint only:
+ * the code at its recorded place may be something else now. `storedOf` gets each current
+ * fingerprint that differs from the stored one, mapped to the stored one.
+ */
+async function recordedKnown(
+  entries: readonly EarlierFinding[],
+  partsOf: (finding: Finding) => Promise<FingerprintParts>,
+  storedOf: Map<string, string>,
+): Promise<KnownFinding[]> {
+  const known = await Promise.all(
+    entries.map(async (entry): Promise<KnownFinding[]> => {
+      if (entry.followed === false) return [{ fingerprint: entry.fingerprint }];
+      const parts = await partsOf(entry.finding);
+      const here = fingerprint(parts);
+      if (here === entry.fingerprint) return [{ fingerprint: here, parts }];
+      storedOf.set(here, entry.fingerprint);
+      return [
+        { fingerprint: entry.fingerprint, parts },
+        { fingerprint: here, parts },
+      ];
+    }),
+  );
+  return known.flat();
 }
 
 function count(n: number, one: string, many = `${one}s`): string {
@@ -670,35 +719,11 @@ export async function finishReview(
   // Our earlier open findings join the duplicate check ahead of the PR's comments, and our own
   // comment on one stands for it, so a re-raise is matched to the finding itself.
   const ours = options.earlier ?? [];
-  // Each under its stored fingerprint and under the one at its place now (after a rename or a
-  // shift), so an exact re-raise matches either way; protected categories only match exactly.
-  const storedOf = new Map<string, string>();
-  const oursKnown = (
-    await Promise.all(
-      ours.map(async (entry) => {
-        const parts = await partsOf(entry.finding);
-        const here = fingerprint(parts);
-        if (here !== entry.fingerprint) storedOf.set(here, entry.fingerprint);
-        return [
-          { fingerprint: entry.fingerprint, parts },
-          ...(here === entry.fingerprint ? [] : [{ fingerprint: here, parts }]),
-        ];
-      }),
-    )
-  ).flat();
   const closed = options.closed ?? [];
-  const closedKnown = (
-    await Promise.all(
-      closed.map(async (entry) => {
-        const parts = await partsOf(entry.finding);
-        const here = fingerprint(parts);
-        return [
-          { fingerprint: entry.fingerprint, parts },
-          ...(here === entry.fingerprint ? [] : [{ fingerprint: here, parts }]),
-        ];
-      }),
-    )
-  ).flat();
+  // A re-raise is matched to the fingerprint it's stored under (`storedOf` maps the others).
+  const storedOf = new Map<string, string>();
+  const oursKnown = await recordedKnown(ours, partsOf, storedOf);
+  const closedKnown = await recordedKnown(closed, partsOf, storedOf);
   const comments = await knownFindings(prepared.comments, byPath, readLines, [...ours, ...closed]);
   const candidates = await Promise.all(
     [...inline, ...body].map(async (finding) => ({ finding, parts: await partsOf(finding) })),
@@ -731,10 +756,25 @@ export async function finishReview(
     const severity = severityOf.get(entry.fingerprint);
     return severity === undefined ? entry.finding : { ...entry.finding, severity };
   });
-  const posted = deduped.kept;
-  const kept = new Set(posted.map((entry) => entry.finding));
+  // A new finding with the fingerprint of one we recorded before (outdated, say) is stored at
+  // the more severe of the two, never lower: it's posted and counted at that severity too.
+  const storedSeverity = new Map(
+    (options.stored ?? []).map((entry) => [entry.fingerprint, entry.severity]),
+  );
+  const raised = new Map<Finding, Finding>();
+  for (const { finding, fingerprint: print } of deduped.kept) {
+    const severity = storedSeverity.get(print);
+    if (severity !== undefined && severityRank(severity) < severityRank(finding.severity)) {
+      raised.set(finding, { ...finding, severity });
+    }
+  }
+  const final = (finding: Finding) => raised.get(finding) ?? finding;
+  const posted = deduped.kept.map((entry) => ({ ...entry, finding: final(entry.finding) }));
+  const kept = new Set(deduped.kept.map((entry) => entry.finding));
+  const keptOf = (findings: readonly Finding[]) =>
+    findings.filter((finding) => kept.has(finding)).map(final);
   // The earlier ones count once, as themselves.
-  const open = [...[...inline, ...body].filter((finding) => kept.has(finding)), ...earlier];
+  const open = [...keptOf(inline), ...keptOf(body), ...earlier];
 
   const unreviewed = unreviewedReasons(plan.skipped);
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
@@ -782,8 +822,8 @@ export async function finishReview(
       baseRef: pr.baseRef,
       headRef: pr.headRef,
     },
-    inline: inline.filter((finding) => kept.has(finding)),
-    body: body.filter((finding) => kept.has(finding)),
+    inline: keptOf(inline),
+    body: keptOf(body),
     dropped: [
       ...misplaced.map((finding) => ({ finding, reason: "misplaced" as const })),
       ...deduped.dropped.map(({ finding }) => ({

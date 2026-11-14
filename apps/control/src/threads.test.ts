@@ -21,25 +21,26 @@ function page(
   };
 }
 
-const thread = (isResolved: boolean, databaseId: number | null) => ({
+const thread = (isResolved: boolean, fullDatabaseId: string | null) => ({
   isResolved,
-  comments: { nodes: databaseId === undefined ? [] : [{ databaseId }] },
+  comments: { nodes: [{ fullDatabaseId }] },
 });
 
 describe("graphQlThreadReader", () => {
   it("reads every page of the PR's threads, with each first comment's ID", async () => {
     const calls: Record<string, unknown>[] = [];
     const replies = [
-      page([thread(true, 11), thread(false, 12)], "cursor-1"),
+      // Past 2^31, as review-comment IDs are now.
+      page([thread(true, "3000000011"), thread(false, "12")], "cursor-1"),
       page([thread(true, null), { isResolved: false, comments: { nodes: [] } }, null]),
     ];
     const graphql: GraphQl = async (query, variables) => {
-      expect(query).toContain("reviewThreads");
+      expect(query).toContain("fullDatabaseId");
       calls.push(variables);
       return replies.shift();
     };
     expect(await graphQlThreadReader(graphql).reviewThreads(TARGET)).toEqual([
-      { resolved: true, firstCommentId: 11 },
+      { resolved: true, firstCommentId: 3_000_000_011 },
       { resolved: false, firstCommentId: 12 },
       { resolved: true, firstCommentId: undefined },
       { resolved: false, firstCommentId: undefined },
@@ -48,6 +49,22 @@ describe("graphQlThreadReader", () => {
       { owner: "acme", repo: "shop", number: 7, after: null },
       { owner: "acme", repo: "shop", number: 7, after: "cursor-1" },
     ]);
+  });
+
+  it("uses what came back when some threads fail, and reports the errors", async () => {
+    const reported: string[][] = [];
+    const reader = graphQlThreadReader(
+      async () => ({
+        ...page([thread(true, "21"), null, thread(true, "not-a-number")]),
+        errors: [{ message: "Something went wrong reading a thread" }],
+      }),
+      (messages) => reported.push(messages),
+    );
+    expect(await reader.reviewThreads(TARGET)).toEqual([
+      { resolved: true, firstCommentId: 21 },
+      { resolved: true, firstCommentId: undefined },
+    ]);
+    expect(reported).toEqual([["Something went wrong reading a thread"]]);
   });
 
   it("fails on GraphQL errors and on a missing pull request", async () => {

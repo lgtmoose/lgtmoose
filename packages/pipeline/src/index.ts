@@ -20,6 +20,7 @@ export {
   type PrepareOptions,
   type PreparedReview,
   type ResumedWork,
+  type StoredSeverity,
   type ReviewedBlob,
   type ReviewedFile,
   type ReviewDeps,

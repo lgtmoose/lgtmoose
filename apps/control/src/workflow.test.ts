@@ -285,7 +285,11 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
               severityRank(known.severity) < severityRank(row.severity)
                 ? known.severity
                 : row.severity,
-            githubCommentId: githubCommentId ?? known.githubCommentId,
+            // Reopened from outdated: the new comment or none; still open: kept unless new.
+            githubCommentId:
+              known.status === "open"
+                ? (githubCommentId ?? known.githubCommentId)
+                : githubCommentId,
           };
         }
       }
@@ -683,10 +687,19 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(reraised.posted).toMatchObject({ event: "APPROVE", findings: 0 });
     expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
 
+    // Still after the file is renamed: it's followed to the new name, and matched there.
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit({}, "rename");
+    const renamed = await review(h, 4, [finding({ path: "src/sum.ts" })]);
+    expect(renamed.posted).toMatchObject({ event: "APPROVE", findings: 0 });
+    expect(h.findings.rows).toHaveLength(1);
+    await git(work, "mv", "src/sum.ts", "src/total.ts");
+    headSha = await commit({}, "rename back");
+
     // Unresolved again: back in the decision.
     threads = [{ resolved: false, firstCommentId: 1000 }];
     headSha = await commit({ "src/other.ts": "export const rate = 7;\n" }, "unrelated again");
-    const reopened = await review(h, 4);
+    const reopened = await review(h, 5);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
     expect(reopened.posted).toMatchObject({ event: "REQUEST_CHANGES" });
   });

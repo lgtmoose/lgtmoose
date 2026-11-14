@@ -75,6 +75,36 @@ function prPaths(changes: readonly ChangedPath[]): { changed: Set<string>; atHea
   };
 }
 
+/**
+ * One of our recorded findings as an earlier finding at `place` (its recorded one by default),
+ * `followed` there from the commit it was raised at, or not.
+ */
+function recordToEarlier(
+  record: Omit<FindingRecord, "status">,
+  place: LineRef = { path: record.path, line: record.line },
+  followed = true,
+): EarlierFinding {
+  const shift = place.line - record.line;
+  const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
+  return {
+    finding: {
+      rule_category: record.ruleCategory,
+      severity: record.severity,
+      path: place.path,
+      line: place.line,
+      side: record.side,
+      ...(startLine === undefined || startLine < 1 ? {} : { start_line: startLine }),
+      title: record.title,
+      body: record.body,
+      // Not kept: earlier findings are only counted, listed and matched, never posted again.
+      evidence: record.title,
+    },
+    fingerprint: record.fingerprint,
+    ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
+    ...(followed ? {} : { followed: false }),
+  };
+}
+
 /** How many commits' lines are followed at once. */
 const FOLLOW_AT_ONCE = 4;
 
@@ -96,7 +126,7 @@ async function standing(
   changes: readonly ChangedPath[],
   mergeBase: string,
   headSha: string,
-): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
+): Promise<{ open: (EarlierFinding & { id: string })[]; outdated: string[]; reopened: string[] }> {
   if (records.length === 0) return { open: [], outdated: [], reopened: [] };
   const { atHead } = prPaths(changes);
   // Old-side lines are keyed by the file's path on the base side, which differs for renames.
@@ -164,7 +194,7 @@ async function standing(
     });
   }
 
-  const open: EarlierFinding[] = [];
+  const open: (EarlierFinding & { id: string })[] = [];
   const outdated: string[] = [];
   const reopened: string[] = [];
   for (const record of records) {
@@ -184,27 +214,13 @@ async function standing(
       continue;
     }
     if (record.status === "outdated") reopened.push(record.id);
-    const shift = place.line - record.line;
-    const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
-    const finding: Finding = {
-      rule_category: record.ruleCategory,
-      severity: record.severity,
-      path: place.path,
-      line: place.line,
-      side: record.side,
-      ...(startLine === undefined || startLine < 1 ? {} : { start_line: startLine }),
-      title: record.title,
-      body: record.body,
-      // Not kept: earlier findings are only counted and listed, never posted again.
-      evidence: record.title,
-    };
-    open.push({
-      finding,
-      fingerprint: record.fingerprint,
-      ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
-    });
+    open.push({ ...recordToEarlier(record, place, at.has(record)), id: record.id });
   }
   return { open, outdated, reopened };
+}
+
+function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
+  return entry;
 }
 
 /**
@@ -291,34 +307,47 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       checkout: "none",
     });
     let earlier: Awaited<ReturnType<typeof standing>> = { open: [], outdated: [], reopened: [] };
-    if (records.length > 0) {
+    // Findings a person resolved or declined: followed to this head like the others (renames
+    // included), so a re-raise is matched at their place now. Those whose line is gone or can't
+    // be followed are matched by fingerprint and comment ID only.
+    const closedRecords = await deps.findings.closedFindings(run.pullRequestId);
+    const closedIds = new Set(closedRecords.map((record) => record.id));
+    let closed: EarlierFinding[] = closedRecords.map((record) =>
+      recordToEarlier(record, undefined, false),
+    );
+    if (records.length + closedRecords.length > 0) {
       // Which files the PR changes: names only, no patches or contents.
       const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
-      const tracked = toTrack(records, changes);
+      // Closed ones go in as outdated, whatever the PR changes: one whose line is gone stays out.
+      const tracked = [
+        ...toTrack(records, changes),
+        ...closedRecords.map((record) => ({ ...record, status: "outdated" as const })),
+      ];
       // The commits those findings were raised at, to follow their lines: one request.
       await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
-      earlier = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
+      const all = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
+      const followed = new Map(
+        all.open.filter((entry) => closedIds.has(entry.id)).map((entry) => [entry.id, entry]),
+      );
+      closed = closedRecords.map((record, i) => {
+        const entry = followed.get(record.id);
+        return entry === undefined ? (closed[i] as EarlierFinding) : withoutId(entry);
+      });
+      earlier = {
+        open: all.open.filter((entry) => !closedIds.has(entry.id)),
+        outdated: all.outdated,
+        reopened: all.reopened.filter((id) => !closedIds.has(id)),
+      };
     }
     ({ outdated, reopened } = earlier);
     const latest = await github.reader.pull(target);
-    const closed = (await deps.findings.closedFindings(run.pullRequestId)).map((record) => ({
-      finding: {
-        rule_category: record.ruleCategory,
-        severity: record.severity,
-        path: record.path,
-        line: record.line,
-        side: record.side,
-        ...(record.startLine === undefined ? {} : { start_line: record.startLine }),
-        title: record.title,
-        body: record.body,
-        evidence: record.title,
-      },
-      fingerprint: record.fingerprint,
-      ...(record.githubCommentId === undefined ? {} : { commentId: record.githubCommentId }),
-    }));
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
-      earlier: earlier.open,
+      earlier: earlier.open.map(withoutId),
       closed,
+      stored: records.map((record) => ({
+        fingerprint: record.fingerprint,
+        severity: record.severity,
+      })),
     });
   } finally {
     await work.remove();
