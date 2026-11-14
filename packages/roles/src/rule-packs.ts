@@ -3,6 +3,7 @@ import { PROTECTED_CATEGORIES, SEVERITIES, severityRank } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { byCodeUnit, REGULAR_FILE } from "./conventions.js";
 
 /**
  * Rule packs are markdown files with YAML front matter: the pack's id, title and rules, each
@@ -253,37 +254,34 @@ function toPack(parsed: ParsedPack, id: string, source: RulePackSource): RulePac
 }
 
 /**
- * Parses and checks one pack file. `name` is what the pack is called in messages and its id;
- * for built-in and private packs, the id its front matter must have.
+ * Parses and checks one pack file's format. `name` is what the pack is called in messages and
+ * its id; for built-in and private packs, the id its front matter must have. A repo pack's
+ * rules are checked against the trusted packs by `selectRulePacks`, which has them.
  */
-export function parseRulePack(
-  text: string,
-  name: string,
-  source: RulePackSource,
-  floors?: ReadonlyMap<string, number>,
-): RulePack {
-  const parsed = parsePackFile(text, name, source);
-  if (source === "repo") {
-    const soft = softRules(parsed.rules, floors ?? severityFloors([]));
-    if (soft.length > 0) {
-      const reasons = soft.map((entry) => entry.reason);
-      throw new RulePackError(
-        `Rule pack ${name} was rejected: ${reasons.join("; ")}.`,
-        reasons.map((reason) => `Rule pack ${name} was rejected: ${reason}.`),
-      );
-    }
-  }
-  return toPack(parsed, name, source);
+export function parseRulePack(text: string, name: string, source: RulePackSource): RulePack {
+  return toPack(parsePackFile(text, name, source), name, source);
 }
 
-/** The rules softer than their category's floor, with the reason for each. */
+/**
+ * The repo rules that break the floors, with the reason for each: a rule in a category no
+ * trusted pack uses (it could relabel, say, a missing permission check so it's reported softly
+ * outside `authz`), or one softer than its category's floor.
+ */
 function softRules(
   rules: readonly PackRule[],
   floors: ReadonlyMap<string, number>,
 ): { rule: PackRule; reason: string }[] {
   return rules.flatMap((rule) => {
     const floor = floors.get(rule.category);
-    if (floor === undefined || severityRank(rule.severity) <= floor) return [];
+    if (floor === undefined) {
+      return [
+        {
+          rule,
+          reason: `rule ${rule.id} is in ${rule.category}, which isn't a category of the packs in use (${[...floors.keys()].sort().join(", ")})`,
+        },
+      ];
+    }
+    if (severityRank(rule.severity) <= floor) return [];
     return [
       {
         rule,
@@ -296,9 +294,10 @@ function softRules(
 /**
  * The least severe a repo pack's rule may be, per category: blocking in a protected category,
  * and elsewhere the least severe the trusted packs already use for that category. A repo pack
- * can add rules and make them stricter, but can't add a softer rule next to a built-in one.
+ * can add rules and make them stricter, but can't add a softer rule next to a built-in one, or
+ * use a category the trusted packs don't.
  */
-export function severityFloors(trusted: readonly RulePack[]): Map<string, number> {
+function severityFloors(trusted: readonly RulePack[]): Map<string, number> {
   const floors = new Map<string, number>();
   for (const pack of trusted) {
     for (const rule of pack.rules) {
@@ -350,13 +349,18 @@ function available(index: PackIndex): string[] {
 }
 
 async function loadIndexed(id: string, index: PackIndex): Promise<RulePack> {
-  if (RULE_PACK_ID.test(id) && index.builtin.includes(id)) {
-    const text = await readFile(new URL(`${id}.md`, index.dirs.builtin), "utf8");
-    return parseRulePack(text, id, "builtin");
-  }
-  if (RULE_PACK_ID.test(id) && index.private.includes(id)) {
-    const text = await readFile(new URL(`${id}.md`, index.dirs.private), "utf8");
-    return parseRulePack(text, id, "private");
+  // A built-in id wins over a private one.
+  const source = (["builtin", "private"] as const).find(
+    (where) => RULE_PACK_ID.test(id) && index[where].includes(id),
+  );
+  if (source !== undefined) {
+    let text: string;
+    try {
+      text = await readFile(new URL(`${id}.md`, index.dirs[source]), "utf8");
+    } catch (error) {
+      throw new RulePackError(`Rule pack ${id} couldn't be read: ${reasonOf(error)}`);
+    }
+    return parseRulePack(text, id, source);
   }
   // Only the built-in ids are listed: the deployment's private pack names stay private.
   throw new UnknownRulePackError(
@@ -404,8 +408,8 @@ export interface SelectedRulePacks {
   warnings: string[];
 }
 
-/** A regular file directly in the repo's `rules` folder. */
-const RULES_ENTRY = /^(100644|100755) blob ([0-9a-f]{40,64})\t(rules\/[^/]+)$/;
+/** A path directly in the repo's `rules` folder. */
+const RULES_CHILD = /^rules\/[^/]+$/;
 /** A file name a pack id allows. */
 const RULES_PACK_PATH = /^rules\/[a-z0-9][a-z0-9-]*\.md$/;
 /** Files read at most, so a `rules` folder full of packs can't make the review fetch them all. */
@@ -414,11 +418,6 @@ const MAX_REPO_PACK_READS = 2 * REPO_RULE_PACK_LIMITS.maxFiles;
 /** A short reason for the operator's log. Git errors never carry the token. */
 function reasonOf(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
-}
-
-/** Code-unit order, as convention files are sorted, so it doesn't depend on the locale. */
-function byCodeUnit(a: string, b: string): number {
-  return Number(a > b) - Number(a < b);
 }
 
 /**
@@ -465,23 +464,36 @@ async function readRepoPacks(
   warnings: string[],
   accept: (path: string, text: string) => boolean,
 ): Promise<{ path: string; text: string }[]> {
-  const listing = await repo.git(["ls-tree", "-z", sha, "--", "rules/"]);
+  let listing: string;
+  try {
+    listing = await repo.git(["ls-tree", "-z", sha, "--", "rules/"]);
+  } catch (error) {
+    warnings.push(`Listing rules/ at the base commit failed: ${reasonOf(error)}`);
+    problems.push("Repo rule packs couldn't be read from the base branch, so they were left out.");
+    return [];
+  }
   const all = wanted.has("rules/*.md");
   const entries: { path: string; blob: string }[] = [];
+  let globbed = 0;
   for (const line of listing.split("\0")) {
-    const [, , blob, path] = RULES_ENTRY.exec(line) ?? [];
-    if (blob === undefined || path === undefined) continue;
+    const [, , blob, path] = REGULAR_FILE.exec(line) ?? [];
+    if (blob === undefined || path === undefined || !RULES_CHILD.test(path)) continue;
     const readme = /^rules\/readme\.md$/i.test(path);
     if (RULES_PACK_PATH.test(path)) {
       // The glob skips a README; naming one explicitly reads it.
       if (wanted.has(path) || (all && !readme)) entries.push({ path, blob });
+      if (all && !readme) globbed += 1;
     } else if (all && !readme && /\.md$/i.test(path)) {
+      globbed += 1;
       problems.push(
         `./${path} was left out: name repo rule packs with lowercase letters, digits and hyphens, ending in .md.`,
       );
     }
   }
   entries.sort((a, b) => byCodeUnit(a.path, b.path));
+  if (all && globbed === 0) {
+    problems.push("./rules/*.md matched no files: the base branch has no .md files in rules/.");
+  }
   for (const path of wanted) {
     if (path !== "rules/*.md" && !entries.some((entry) => entry.path === path)) {
       problems.push(`./${path} isn't in the base branch, or isn't a regular file.`);
@@ -540,7 +552,8 @@ async function readRepoPacks(
  * The packs for one review, from the `rulepacks` list in the base branch's `.lgtmoose.yaml`:
  * the mandatory packs first, then built-in and private packs by id, then repo packs. A bad
  * entry never fails the review: it's left out and reported in `problems`, and so is a repo
- * rule softer than the trusted packs allow (see `severityFloors`).
+ * rule softer than the trusted packs allow (see `severityFloors`). Only a mandatory pack that
+ * can't be loaded throws, as the review would otherwise run without its rules.
  */
 export async function selectRulePacks(
   entries: readonly string[],
@@ -581,8 +594,11 @@ export async function selectRulePacks(
   const packs: RulePack[] = [];
   for (const [i, result] of loaded.entries()) {
     if (!(result instanceof RulePackError)) packs.push(result);
-    else if (i < MANDATORY_RULE_PACKS.length) warnings.push(result.message);
-    else if (result instanceof UnknownRulePackError) problems.push(result.message);
+    else if (i < MANDATORY_RULE_PACKS.length) {
+      // Reviewing without them would drop the always-on rules and the floors they set, so
+      // this is the one failure that stops the review.
+      throw new RulePackError(`A mandatory rule pack couldn't be loaded. ${result.message}`);
+    } else if (result instanceof UnknownRulePackError) problems.push(result.message);
     else {
       // A broken built-in or private pack is the deployment's to fix, and its details stay in
       // the log. The repo only learns that a pack it asked for couldn't be used.

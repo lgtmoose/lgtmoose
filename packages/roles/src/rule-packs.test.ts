@@ -134,15 +134,6 @@ describe("parseRulePack", () => {
     expect(() => parseRulePack(text, "x", "builtin")).toThrow(RulePackError);
   });
 
-  it("checks a repo pack's protected-category rules when parsed on its own", () => {
-    const soft = pack(`title: R\nrules:\n${RULE.replace("correctness", "authz")}`);
-    expect(() => parseRulePack(soft, "./rules/r.md", "repo")).toThrow(
-      /r\.md was rejected: rule a-rule is should_fix, but a repo rule in authz can't be softer than blocking/,
-    );
-    const hard = soft.replace("should_fix", "blocking");
-    expect(parseRulePack(hard, "./rules/r.md", "repo").id).toBe("./rules/r.md");
-  });
-
   it.each(["builtin", "private", "repo"] as const)(
     "renders a %s pack's description and body as plain paragraphs, with no structure of their own",
     (source) => {
@@ -542,11 +533,47 @@ describe("selectRulePacks", () => {
     expect(selected.problems).toEqual([expect.stringMatching(/a\.md couldn't be read/)]);
   });
 
-  it("sends a missing or broken mandatory pack to the operator, not the repo", async () => {
-    await rm(new URL("security.md", fixtures.builtin));
-    const selected = await selectRulePacks([], { dirs: fixtures });
-    expect(selected.problems).toEqual([]);
-    expect(selected.warnings).toEqual([expect.stringMatching(/Unknown rule pack "security"/)]);
+  it("stops the review when a mandatory pack can't be loaded", async () => {
+    await writeFile(new URL("security.md", fixtures.builtin), "no front matter");
+    await expect(selectRulePacks([], { dirs: fixtures })).rejects.toThrow(
+      /A mandatory rule pack couldn't be loaded\. Rule pack security has no front matter/,
+    );
+  });
+
+  it("reports a trusted pack that can't be read like a broken one", async () => {
+    await mkdir(new URL("folder.md", fixtures.private));
+    const selected = await selectRulePacks(["folder"], { dirs: fixtures });
+    expect(selected.problems).toEqual([
+      'Rule pack "folder" couldn\'t be loaded; ask whoever runs LGTMoose.',
+    ]);
+    expect(selected.warnings).toEqual([expect.stringMatching(/Rule pack folder couldn't be read/)]);
+  });
+
+  it("reports repo packs it can't list, and goes on", async () => {
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo,
+      baseSha: "0".repeat(40),
+      dirs: fixtures,
+    });
+    expect(selected.packs.map((loaded) => loaded.id)).toEqual([...MANDATORY_RULE_PACKS]);
+    expect(selected.problems).toEqual([
+      "Repo rule packs couldn't be read from the base branch, so they were left out.",
+    ]);
+    expect(selected.warnings).toEqual([
+      expect.stringMatching(/Listing rules\/ at the base commit failed/),
+    ]);
+  });
+
+  it("says when ./rules/*.md matches nothing in the base branch", async () => {
+    const base = await commit({ "rules/nested/a.md": repoPack("A"), "rules/readme.md": "x" });
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(selected.problems).toEqual([
+      "./rules/*.md matched no files: the base branch has no .md files in rules/.",
+    ]);
   });
 
   it("reads a README named explicitly", async () => {
@@ -672,17 +699,16 @@ describe("selectRulePacks", () => {
       dirs: fixtures,
     });
     const mixed = selected.packs.find((loaded) => loaded.id === "./rules/mixed.md");
-    expect(mixed?.rules.map((kept) => kept.id)).toEqual([
-      "same-correctness",
-      "new-category",
-      "hard-money",
-    ]);
+    expect(mixed?.rules.map((kept) => kept.id)).toEqual(["same-correctness", "hard-money"]);
     expect(selected.problems).toEqual([
       expect.stringMatching(
         /soft-money is should_fix, but a repo rule in money can't be softer than blocking, so that rule was left out/,
       ),
       expect.stringMatching(
         /soft-correctness is nit, but a repo rule in correctness can't be softer than should_fix/,
+      ),
+      expect.stringMatching(
+        /new-category is in style, which isn't a category of the packs in use \(authz, correctness, money, secrets, tenant_scoping\)/,
       ),
     ]);
   });
