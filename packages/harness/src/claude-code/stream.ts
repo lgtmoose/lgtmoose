@@ -1,6 +1,7 @@
 import { z } from "zod";
-import type { HarnessUsage } from "../harness.js";
-import { parseAnswer } from "../answer.js";
+import { HarnessError, type HarnessUsage } from "../harness.js";
+import { parseAnswer, truncate } from "../answer.js";
+import { redact } from "../redact.js";
 import {
   classifyFailure,
   classifyReportedFailure,
@@ -126,4 +127,42 @@ export function claudeLimitFailure(result: ResultEvent, stderr: string): LimitFa
     return plan?.kind === "plan_limit" ? plan : { kind: "rate_limit", ...limitTimes(reported) };
   }
   return classifyReportedFailure(reported, stderr, classifyClaudeFailure);
+}
+
+/** Stop after this many API retries caused by the credential: retrying won't fix it. */
+export const MAX_AUTH_RETRIES = 2;
+
+/** Parses a message already in hand as a result event, as `findResult` does for a line. */
+export function asResult(message: unknown): ResultEvent | undefined {
+  const event = resultEvent.safeParse(message);
+  return event.success ? event.data : undefined;
+}
+
+/**
+ * Throws the HarnessError for a result that isn't an answer: a refused credential, a rate or
+ * plan limit, or any other error, worded with `name` (the CLI or SDK that ran). Returns for a
+ * success, and for running out of structured output retries, which a repair turn can fix.
+ */
+export function failIfResultFailed(
+  result: ResultEvent,
+  stderr: string,
+  secrets: readonly string[],
+  keys: readonly string[],
+  name: string,
+): void {
+  const fail = (kind: HarnessError["kind"], message: string, extra: object = {}): HarnessError =>
+    new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys, ...extra });
+  if (result.api_error_status === 401 || result.api_error_status === 403) {
+    throw fail("auth", `The model API rejected the credential (HTTP ${result.api_error_status}).`);
+  }
+  if (result.subtype === "error_max_structured_output_retries") return;
+  if (result.is_error === true || result.subtype !== "success") {
+    const detail = result.result ?? result.errors?.join("; ") ?? "no detail";
+    const limit = claudeLimitFailure(result, stderr);
+    if (limit !== undefined) {
+      const { kind, ...extra } = limit;
+      throw fail(kind, `${name} stopped: ${detail}`, extra);
+    }
+    throw fail("process", `${name} reported ${result.subtype}: ${detail}`);
+  }
 }

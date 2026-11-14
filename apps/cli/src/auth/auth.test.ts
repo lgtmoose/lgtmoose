@@ -312,6 +312,30 @@ describe("auth", () => {
       expect(h.puts).toEqual([]);
       for (const out of [notJson.all, user.all]) expect(out).not.toContain("SECRET-PEM");
     });
+
+    it("needs a project: the config's or the key's", async () => {
+      const noProject: Partial<typeof key> = { ...key };
+      delete noProject.project_id;
+      const files = { "key.json": JSON.stringify(noProject) };
+      const refused = harness({ config: vertexConfig, files });
+      expect((await refused.go(["vertex", "key.json"])).stderr).toContain(
+        "Set vertex.vertex.projectId",
+      );
+      expect(refused.puts).toEqual([]);
+      const withProject = {
+        ...baseConfig,
+        providers: [
+          {
+            id: "vertex",
+            harness: "claude-code",
+            auth: "vertex",
+            vertex: { projectId: "acme-reviews" },
+          },
+        ],
+      };
+      const stored = harness({ config: withProject, files });
+      expect((await stored.go(["vertex", "key.json"])).exitCode).toBe(0);
+    });
   });
 
   it("tells the store the exact command, so its messages can say to run it again", async () => {

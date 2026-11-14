@@ -81,5 +81,6 @@ describe("reviewerModel", () => {
     ).toBe("opus");
     expect(reviewerModel({ id: "c", harness: "claude-code", auth: "api-key" })).toBe("sonnet");
     expect(reviewerModel({ id: "x", harness: "codex", auth: "api-key" })).toBe("");
+    expect(reviewerModel({ id: "s", harness: "agent-sdk", auth: "bedrock" })).toBe("sonnet");
   });
 });

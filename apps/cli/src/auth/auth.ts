@@ -504,6 +504,12 @@ async function authVertex(flags: Flags, deps: AuthDeps): Promise<string> {
       `${path} isn't a service-account key: it needs type "service_account", client_email and private_key.`,
     );
   }
+  // Runs need a project: the config's, else the key's own.
+  if (provider.vertex?.projectId === undefined && typeof fields.project_id !== "string") {
+    throw new AuthError(
+      `${path} has no project_id. Set ${provider.id}.vertex.projectId in lgtmoose.config.ts.`,
+    );
+  }
   return store(config, provider, JSON.stringify(key), deps, flags);
 }
 

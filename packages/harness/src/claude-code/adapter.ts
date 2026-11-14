@@ -21,7 +21,8 @@ import { claudeAuthEnv } from "./auth.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, TOOLS } from "./policy.js";
 import { prepareClaudeSession } from "./session.js";
 import {
-  claudeLimitFailure,
+  MAX_AUTH_RETRIES,
+  failIfResultFailed,
   findResult,
   isAuthRetry,
   outputOf,
@@ -52,8 +53,6 @@ export interface ClaudeCodeHarnessOptions {
 
 /** Stop a run whose stream-json passes this size. */
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
-/** Stop after this many API retries caused by the credential: retrying won't fix it. */
-const MAX_AUTH_RETRIES = 2;
 
 type Attempt<T> =
   | { kind: "ok"; output: T; usage: HarnessUsage; key: string }
@@ -181,23 +180,7 @@ function failIfUnusable(
     const detail = proc.stderr.trim() || "no output";
     throw fail("process", `claude exited (${exitText(proc)}) without a result: ${detail}`);
   }
-  if (result.api_error_status === 401 || result.api_error_status === 403) {
-    throw fail("auth", `The model API rejected the credential (HTTP ${result.api_error_status}).`);
-  }
-  // Running out of structured output retries is invalid output, which a repair retry can fix.
-  if (result.subtype === "error_max_structured_output_retries") return;
-  if (result.is_error || result.subtype !== "success") {
-    const detail = result.result ?? result.errors?.join("; ") ?? "no detail";
-    const limit = claudeLimitFailure(result, proc.stderr);
-    if (limit !== undefined) {
-      const { kind, ...extra } = limit;
-      throw new HarnessError(kind, truncate(redact(`claude stopped: ${detail}`, secrets)), {
-        transcriptKeys: keys,
-        ...extra,
-      });
-    }
-    throw fail("process", `claude reported ${result.subtype}: ${detail}`);
-  }
+  failIfResultFailed(result, proc.stderr, secrets, keys, "claude");
 }
 
 export interface ClaudeArgsOptions {

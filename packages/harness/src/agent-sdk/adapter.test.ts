@@ -183,6 +183,37 @@ describe("AgentSdkHarness", () => {
     });
   });
 
+  it("stops as auth after repeated credential retries", async () => {
+    const retry = {
+      type: "system",
+      subtype: "api_retry",
+      error: "authentication_failed",
+    } as unknown as SDKMessage;
+    let aborted = false;
+    const { query } = fakeQuery([
+      (call) => {
+        call.options.abortController?.signal.addEventListener("abort", () => (aborted = true));
+        return [retry, retry, result({ structured_output: { findings: [] } })];
+      },
+    ]);
+    await expect(run(harness(query).harness)).rejects.toMatchObject({ kind: "auth" });
+    expect(aborted).toBe(true);
+  });
+
+  it("keeps an answer that arrived before the deadline", async () => {
+    const query: AgentQuery = ({ options }) =>
+      (async function* () {
+        yield result({ structured_output: { findings: ["late"] } });
+        // The SDK is still shutting down when the deadline passes.
+        await new Promise((resolve) => {
+          options.abortController?.signal.addEventListener("abort", resolve);
+        });
+        throw new Error("aborted");
+      })();
+    const out = await run(harness(query).harness, { timeoutMs: 50 });
+    expect(out.output).toEqual({ findings: ["late"] });
+  });
+
   it("fails as process when the SDK throws before a result", async () => {
     const query: AgentQuery = () => ({
       [Symbol.asyncIterator]: () => ({

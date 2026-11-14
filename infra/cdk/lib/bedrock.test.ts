@@ -44,6 +44,14 @@ describe("bedrockStatements", () => {
     ]);
   });
 
+  it("allows a tier pinned to an application inference profile ARN as given", () => {
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+    const [invoke, , get] = json({ standard: arn });
+    expect(invoke?.Resource).toContain(arn);
+    expect(invoke?.Resource).toContain("arn:aws:bedrock:*::foundation-model/anthropic.*");
+    expect(get?.Resource).toContain(arn);
+  });
+
   it("falls back to Anthropic's models when one tier is still an alias", () => {
     const [invoke] = json({ fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
     expect(invoke?.Resource).toContain("arn:aws:bedrock:*::foundation-model/anthropic.*");

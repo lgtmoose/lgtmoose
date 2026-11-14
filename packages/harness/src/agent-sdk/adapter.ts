@@ -32,8 +32,10 @@ import {
 } from "../claude-code/policy.js";
 import { prepareClaudeSession } from "../claude-code/session.js";
 import {
-  claudeLimitFailure,
-  findResult,
+  MAX_AUTH_RETRIES,
+  asResult,
+  failIfResultFailed,
+  isAuthRetry,
   outputOf,
   usageOf,
   type ResultEvent,
@@ -145,7 +147,7 @@ export class AgentSdkHarness implements Harness {
         const run = await collect(query, prompt, sdkOptions, timeoutMs, secrets);
         const key = transcriptKey(runId, n);
         await saveAttemptTranscript(this.options.transcripts, key, run.proc, n, secrets, keys);
-        const result = findResult(run.proc.stdout);
+        const { result } = run;
         failIfUnusable(run, result, secrets, keys, options.timeoutMs);
         const usage = usageOf(result);
         if (result.subtype === "error_max_structured_output_retries") {
@@ -227,6 +229,8 @@ export function gitGuardHook(): HookCallbackMatcher {
 
 interface CollectedRun {
   proc: ProcessResult;
+  /** The last result message, if one arrived. */
+  result?: ResultEvent;
   /** The SDK threw, or the run was stopped: why. */
   error?: unknown;
 }
@@ -245,13 +249,16 @@ async function collect(
 ): Promise<CollectedRun> {
   const controller = new AbortController();
   let stopped: ProcessResult["stopped"];
+  let result: ResultEvent | undefined;
   const timer = setTimeout(() => {
-    stopped = "timeout";
+    // An answer that arrived before the deadline counts, even if the SDK hadn't finished.
+    if (result === undefined) stopped = "timeout";
     controller.abort();
   }, timeoutMs);
   let stderr = "";
   const lines: string[] = [];
   let bytes = 0;
+  let authRetries = 0;
   let error: unknown;
   try {
     const messages = query({
@@ -269,8 +276,15 @@ async function collect(
       const line = JSON.stringify(message);
       bytes += Buffer.byteLength(line) + 1;
       lines.push(line);
+      result = asResult(message) ?? result;
       if (bytes > MAX_OUTPUT_BYTES) {
         stopped = "output_limit";
+        controller.abort();
+        break;
+      }
+      // As the claude-code harness does: retries the credential caused won't get better.
+      if (isAuthRetry(line) && ++authRetries >= MAX_AUTH_RETRIES) {
+        stopped = "requested";
         controller.abort();
         break;
       }
@@ -289,6 +303,7 @@ async function collect(
       signal: null,
       ...(stopped === undefined ? {} : { stopped }),
     },
+    ...(result === undefined ? {} : { result }),
     ...(error === undefined ? {} : { error }),
   };
 }
@@ -305,26 +320,12 @@ function failIfUnusable(
     new HarnessError(kind, truncate(redact(message, secrets)), { transcriptKeys: keys });
   const { proc } = run;
   if (proc.stopped === "timeout") throw fail("timeout", `Timed out after ${timeoutMs} ms.`);
+  if (proc.stopped === "requested") throw fail("auth", "The model API rejected the credential.");
   if (proc.stopped === "output_limit")
     throw fail("process", "The run wrote more output than allowed.");
   if (!result) {
     const why = run.error instanceof Error ? run.error.message : proc.stderr.trim() || "no output";
     throw fail("process", `The Agent SDK run ended without a result: ${why}`);
   }
-  if (result.api_error_status === 401 || result.api_error_status === 403) {
-    throw fail("auth", `The model API rejected the credential (HTTP ${result.api_error_status}).`);
-  }
-  if (result.subtype === "error_max_structured_output_retries") return;
-  if (result.is_error || result.subtype !== "success") {
-    const detail = result.result ?? result.errors?.join("; ") ?? "no detail";
-    const limit = claudeLimitFailure(result, proc.stderr);
-    if (limit !== undefined) {
-      const { kind, ...extra } = limit;
-      throw new HarnessError(kind, truncate(redact(`The model stopped: ${detail}`, secrets)), {
-        transcriptKeys: keys,
-        ...extra,
-      });
-    }
-    throw fail("process", `The Agent SDK run reported ${result.subtype}: ${detail}`);
-  }
+  failIfResultFailed(result, proc.stderr, secrets, keys, "The Agent SDK run");
 }

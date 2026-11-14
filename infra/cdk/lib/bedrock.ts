@@ -26,6 +26,11 @@ export function bedrockStatements(
       model.replace(PROFILE_PREFIX, "").startsWith("anthropic."),
   );
   const models = exact ? [...new Set(pinned as string[])] : [];
+  // A tier pinned to a Bedrock ARN, such as an application inference profile, is allowed as
+  // given; the model it routes to is covered by the Anthropic foundation-model wildcard below.
+  const arns = [
+    ...new Set(pinned.filter((model): model is string => model?.startsWith("arn:") === true)),
+  ];
   const profiles = exact
     ? [
         ...new Set(
@@ -34,7 +39,7 @@ export function bedrockStatements(
             .map((model) => `arn:${partition}:bedrock:*:${account}:inference-profile/${model}`),
         ),
       ]
-    : [`arn:${partition}:bedrock:*:${account}:inference-profile/*anthropic.*`];
+    : [`arn:${partition}:bedrock:*:${account}:inference-profile/*anthropic.*`, ...arns];
   const foundation = exact
     ? [
         ...new Set(
