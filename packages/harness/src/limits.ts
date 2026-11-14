@@ -1,5 +1,5 @@
 import type { HarnessErrorKind } from "./harness.js";
-import { statusesIn } from "./status.js";
+import { classifiedPart, statusesIn } from "./status.js";
 
 /**
  * Failure wording the CLIs share: plan and spend limits, throttling and refused credentials, with
@@ -58,7 +58,8 @@ function resetsAt(message: string): string | undefined {
  * Whether a failure message is a plan limit, a rate limit or a refused credential, so the
  * fallback chain can react. Undefined for any other failure.
  */
-export function classifyFailure(message: string): LimitFailure | undefined {
+export function classifyFailure(whole: string): LimitFailure | undefined {
+  const message = classifiedPart(whole);
   let kind: LimitFailure["kind"];
   const statuses = statusesIn(message);
   if (PLAN_LIMIT.test(message)) kind = "plan_limit";

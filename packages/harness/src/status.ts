@@ -66,6 +66,21 @@ function fromObject(value: unknown, found: Set<number>): void {
 
 /** How many closed `{...}` spans the scan records before it stops. */
 const MAX_CLOSED = 1000;
+/** Deeper nesting than this isn't an error body: braces past it are ignored. */
+const MAX_DEPTH = 64;
+
+/** How much of each end of a message the classifiers read. */
+const CLASSIFIED_END = 32 * 1024;
+
+/**
+ * The part of a message the classifiers read: all of it up to 64 KB, else its first and last
+ * 32 KB. A CLI's error, its status and its JSON body sit at one end or the other (stderr is
+ * capped at 64 KB anyway), and a bound keeps classifying any message cheap.
+ */
+export function classifiedPart(message: string): string {
+  if (message.length <= 2 * CLASSIFIED_END) return message;
+  return `${message.slice(0, CLASSIFIED_END)}\n${message.slice(-CLASSIFIED_END)}`;
+}
 
 /**
  * The outermost closed `{...}` spans in a text, found in one pass that tracks nesting and skips
@@ -76,6 +91,8 @@ const MAX_CLOSED = 1000;
 function objectSpans(text: string): string[] {
   const closed: { start: number; end: number }[] = [];
   const open: number[] = [];
+  /** Braces opened past `MAX_DEPTH` and not closed yet. */
+  let tooDeep = 0;
   let inString = false;
   for (let i = 0; i < text.length && closed.length < MAX_CLOSED; i++) {
     const c = text[i];
@@ -86,8 +103,12 @@ function objectSpans(text: string): string[] {
       continue;
     }
     if (c === '"' && open.length > 0) inString = true;
-    else if (c === "{") open.push(i);
-    else if (c === "}") {
+    else if (c === "{") {
+      if (open.length < MAX_DEPTH) open.push(i);
+      else tooDeep++;
+    } else if (c === "}" && tooDeep > 0) {
+      tooDeep--;
+    } else if (c === "}") {
       const start = open.pop();
       if (start !== undefined) closed.push({ start, end: i + 1 });
     }
@@ -106,7 +127,8 @@ function objectSpans(text: string): string[] {
 }
 
 /** Every status the text reports, JSON fields first, then the text forms. */
-export function statusesIn(text: string): Set<number> {
+export function statusesIn(message: string): Set<number> {
+  const text = classifiedPart(message);
   const found = new Set<number>();
   for (const span of objectSpans(text)) {
     try {

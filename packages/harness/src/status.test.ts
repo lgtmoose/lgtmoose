@@ -72,6 +72,18 @@ describe("statusesIn", () => {
     expect(statuses('warning: {can\'t "parse\n{"status":401}')).toEqual([401]);
   });
 
+  it("reads both ends of a long message", () => {
+    const filler = "x".repeat(200 * 1024);
+    expect(statuses(`HTTP 429\n${filler}`)).toEqual([429]);
+    expect(statuses(`${filler}\n{"status":401}`)).toEqual([401]);
+    expect(statuses(`${filler}HTTP 429${filler}`)).toEqual([]);
+  });
+
+  it("finds an error body nested deeper than the brace limit cares about", () => {
+    const deep = `${"{".repeat(100)}${"}".repeat(100)}`;
+    expect(statuses(`${deep}\n{"status":429}`)).toEqual([429]);
+  });
+
   it("isn't fooled by braces inside JSON strings", () => {
     expect(statuses('{"message": "a } brace", "status": 429}')).toEqual([429]);
   });

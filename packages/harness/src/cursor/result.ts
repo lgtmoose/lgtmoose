@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { classifyFailure, limitTimes, type LimitFailure } from "../limits.js";
-import { statusesIn } from "../status.js";
+import { classifiedPart, statusesIn } from "../status.js";
 import type { HarnessUsage } from "../harness.js";
 
 /**
@@ -88,7 +88,8 @@ const AUTH_FAILURE =
  * `[resource_exhausted]` too; then the statuses and wording shared with Codex (`classifyFailure`);
  * then Cursor's auth wording. Undefined for any other failure.
  */
-export function classifyCursorFailure(message: string): LimitFailure | undefined {
+export function classifyCursorFailure(whole: string): LimitFailure | undefined {
+  const message = classifiedPart(whole);
   if (PLAN_LIMIT.test(message)) return { kind: "plan_limit", ...limitTimes(message) };
   return classifyFailure(message) ?? (AUTH_FAILURE.test(message) ? { kind: "auth" } : undefined);
 }
@@ -98,7 +99,8 @@ export function classifyCursorFailure(message: string): LimitFailure | undefined
  * connect-rpc codes, HTTP statuses in their HTTP forms and JSON status fields. Never wording a
  * banner or warning could contain. For stderr behind a generic error result.
  */
-export function classifyStrictCursorFailure(message: string): LimitFailure | undefined {
+export function classifyStrictCursorFailure(whole: string): LimitFailure | undefined {
+  const message = classifiedPart(whole);
   const statuses = statusesIn(message);
   if (statuses.has(429)) return { kind: "rate_limit", ...limitTimes(message) };
   if (statuses.has(401)) return { kind: "auth" };
