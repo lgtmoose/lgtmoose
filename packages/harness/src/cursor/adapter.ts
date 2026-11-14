@@ -229,9 +229,15 @@ async function setAsideHookFiles(
   }
 }
 
-/** Puts back what `setAsideHookFiles` moved. */
+/** Puts back what `setAsideHookFiles` moved, all it can, then reports any it couldn't. */
 async function restoreHookFiles(moved: readonly { from: string; to: string }[]): Promise<void> {
-  for (const { from, to } of moved) await rename(to, from);
+  const results = await Promise.allSettled(moved.map(({ from, to }) => rename(to, from)));
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) {
+    throw new HarnessError("process", "Could not put the checkout's hook configs back.", {
+      cause: failed.reason,
+    });
+  }
 }
 
 /** Refuses a prompt longer than `limit` bytes, which the kernel may not pass as one argument. */
