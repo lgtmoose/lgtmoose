@@ -15,7 +15,7 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 | Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                  |
 | Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch |
 | Credential broker | Control plane + Secrets Manager       | No                       | Hand each sandbox task one model credential; write back refreshed tokens |
-| Reconciler        | Scheduled Lambda                      | Yes (read)               | Re-queue anything missed. No model calls.                                |
+| Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs, re-sync status labels. No model calls.              |
 | State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                            |
 
 ## Harnesses

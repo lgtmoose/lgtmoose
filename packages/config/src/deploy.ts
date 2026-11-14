@@ -154,6 +154,19 @@ export const deployConfigSchema = z
     roles: z.partialRecord(z.enum(ROLES), z.string()).default({}),
     maxConcurrency: z.number().int().min(1).max(64).default(4),
     /**
+     * How often the reconciler compares open PRs with what the database recorded, catching
+     * missed webhooks and drifted status labels. It makes no model calls.
+     */
+    reconcileIntervalMinutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(1440)
+      .default(30)
+      .describe(
+        "Minutes between reconciler runs, which catch missed webhooks and drifted status labels.",
+      ),
+    /**
      * Shadow mode: the review workflow records what it would post (the review, check run,
      * summary comment and labels) to the artifact bucket and the log instead of posting it to
      * GitHub. On by default until reviews have been checked on real PRs (M1).

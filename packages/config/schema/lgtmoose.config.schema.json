@@ -116,6 +116,13 @@
       "minimum": 1,
       "maximum": 64
     },
+    "reconcileIntervalMinutes": {
+      "default": 30,
+      "description": "Minutes between reconciler runs, which catch missed webhooks and drifted status labels.",
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 1440
+    },
     "shadow": {
       "default": true,
       "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",
