@@ -346,6 +346,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 raisedAtSha: row.raisedAtSha,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
+                lineText: row.lineText ?? undefined,
               },
             ],
       );
@@ -384,6 +385,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
+                lineText: row.lineText ?? undefined,
               },
             ],
       );
@@ -397,7 +399,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             .values(
               posted
                 .slice(i, i + INSERT_CHUNK)
-                .map(({ finding, fingerprint, githubCommentId, basePath }) => ({
+                .map(({ finding, fingerprint, githubCommentId, basePath, lineText }) => ({
                   pullRequestId,
                   runId,
                   fingerprint,
@@ -412,6 +414,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   raisedAtSha: headSha,
                   githubCommentId: githubCommentId ?? null,
                   basePath: basePath ?? null,
+                  lineText: lineText ?? null,
                 })),
             )
             .onConflictDoUpdate({
@@ -427,6 +430,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
+                lineText: sql`coalesce(excluded.line_text, ${findings.lineText})`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
                 side: sql`excluded.side`,

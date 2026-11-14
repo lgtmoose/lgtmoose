@@ -257,7 +257,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       );
     },
     async saveFindings(_pr, _run, headSha, posted) {
-      for (const { finding, fingerprint, githubCommentId, basePath } of posted) {
+      for (const { finding, fingerprint, githubCommentId, basePath, lineText } of posted) {
         const row: StoredFinding = {
           id: `f${rows.length}`,
           fingerprint,
@@ -273,6 +273,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
           status: "open",
           githubCommentId,
           basePath,
+          lineText,
         };
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
         const known = rows[at];
@@ -287,6 +288,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
                 ? known.severity
                 : row.severity,
             basePath: basePath ?? known.basePath,
+            lineText: lineText ?? known.lineText,
             // Reopened from outdated: the new comment or none; still open: kept unless new.
             githubCommentId:
               known.status === "open"
@@ -1486,6 +1488,74 @@ describe("later runs", { timeout: 30_000 }, () => {
     const summary = typeof last === "string" ? last : "";
     const row = summary.split("\n").find((line) => line.includes("Return was removed")) ?? "";
     expect(row).toContain("total\\.ts:8");
+  });
+
+  /** Main changes src/total.ts to `base`; the PR is redone on it, still deleting the return. */
+  const redoneOnBase = (base: string) => async () => {
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit({ "src/total.ts": base }, "main edit");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": base
+          .replace("i < items.length; i++", "i < items.length - 1; i++")
+          .replace("  return sum;\n}", "}"),
+      },
+      "redone",
+    );
+  };
+
+  it("keeps an old-side finding whose commit is gone after a base edit next to its line", async () => {
+    const h = harness();
+    await droppedReturnThenForcePushed(h, redoneOnBase(TOTAL.replace("  }\n", "  } // loop\n")));
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("keeps an old-side finding whose commit is gone after the base adds a same-shaped line above", async () => {
+    const h = harness();
+    // A copy of the function above it: the same lines, return included, that the PR leaves.
+    const copy = `${TOTAL.replace("function total", "function subtotal")}\n`;
+    await droppedReturnThenForcePushed(h, async () => {
+      await git(work, "checkout", "--quiet", "main");
+      baseSha = await commit({ "src/total.ts": `${copy}${TOTAL}` }, "main: subtotal");
+      await git(work, "checkout", "--quiet", "feature");
+      await git(work, "reset", "--quiet", "--hard", baseSha);
+      headSha = await commit(
+        { "src/total.ts": `${copy}${HEAD_TOTAL.replace("  return sum;\n", "")}` },
+        "redone",
+      );
+    });
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("outdates a new-side finding whose commit is gone once its line holds other code", async () => {
+    const h = harness();
+    await review(h, 1, [finding()]);
+    // Redone: the loop is written another way, so its line is gone; the PR still changes the
+    // file.
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": TOTAL.replace(
+          "  for (let i = 0; i < items.length; i++) {\n    sum += items[i].price;\n  }\n",
+          "  for (const item of items.slice(0, -1)) {\n    sum += item.price;\n  }\n",
+        ),
+      },
+      "redone",
+    );
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    const again = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(again.posted).toMatchObject({ event: "APPROVE" });
   });
 
   it("keeps a resolved old-side finding resolved through a second rename by the PR", async () => {

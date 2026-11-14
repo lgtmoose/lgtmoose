@@ -160,6 +160,9 @@ export const findings = pgTable(
     // The file's name on the base side of the PR's diff when the finding was raised: the file an
     // old-side (LEFT) line is in. Followed through the base's renames, never the head's.
     basePath: text("base_path"),
+    // The text of the finding's line (on its side) when it was raised, whitespace collapsed: to
+    // find the line again when the commit it was raised at is gone.
+    lineText: text("line_text"),
     line: integer("line"),
     startLine: integer("start_line"),
     side: diffSide("side"),

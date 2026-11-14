@@ -61,6 +61,11 @@ export interface FindingRecord {
    * line is in. Undefined for rows recorded before it was kept.
    */
   basePath: string | undefined;
+  /**
+   * Its line's text on its side when it was raised, whitespace collapsed (`normaliseLine`): to
+   * find the line again when its commit is gone. Undefined for rows recorded before it was kept.
+   */
+  lineText: string | undefined;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -70,6 +75,13 @@ export interface FindingToSave {
   githubCommentId?: number;
   /** Its file's base-side name in the PR's diff (see `FindingRecord.basePath`). */
   basePath?: string;
+  /** Its line's text (see `FindingRecord.lineText`). */
+  lineText?: string;
+}
+
+/** A line's text with its whitespace collapsed, for `FindingRecord.lineText`. */
+export function normaliseLine(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
 }
 
 /** `findings` and `finding_events`, for our own findings. */

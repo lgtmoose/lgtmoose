@@ -1,5 +1,5 @@
 {
-  "id": "871c796b-5ea0-4492-afd8-a9a9e48b5c62",
+  "id": "a717e49c-b841-4418-bdf8-63dc1fe9dd55",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -318,6 +318,12 @@
         },
         "base_path": {
           "name": "base_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "line_text": {
+          "name": "line_text",
           "type": "text",
           "primaryKey": false,
           "notNull": false

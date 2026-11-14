@@ -308,24 +308,28 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["blocking", 503]]);
   });
 
-  it("keeps a finding's base-side name, unless a new one is given", async () => {
+  it("keeps a finding's base-side name and line text, unless new ones are given", async () => {
     const run = await start("arn:exec:findings:5", 44);
-    const save = (basePath?: string) =>
+    const save = (basePath?: string, lineText?: string) =>
       findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
         {
           finding: { ...finding("Based"), side: "LEFT" },
           fingerprint: "fp1:based",
           ...(basePath === undefined ? {} : { basePath }),
+          ...(lineText === undefined ? {} : { lineText }),
         },
       ]);
-    const basePaths = async () =>
-      (await findingStore.trackedFindings(run.pullRequestId)).map((record) => record.basePath);
-    await save("src/total.ts");
-    expect(await basePaths()).toEqual(["src/total.ts"]);
+    const stored = async () =>
+      (await findingStore.trackedFindings(run.pullRequestId)).map((record) => [
+        record.basePath,
+        record.lineText,
+      ]);
+    await save("src/total.ts", "return sum;");
+    expect(await stored()).toEqual([["src/total.ts", "return sum;"]]);
     await save();
-    expect(await basePaths()).toEqual(["src/total.ts"]);
-    await save("src/sum.ts");
-    expect(await basePaths()).toEqual(["src/sum.ts"]);
+    expect(await stored()).toEqual([["src/total.ts", "return sum;"]]);
+    await save("src/sum.ts", "return total;");
+    expect(await stored()).toEqual([["src/sum.ts", "return total;"]]);
   });
 
   it("follows review threads: resolved by a person, and open again when unresolved", async () => {
