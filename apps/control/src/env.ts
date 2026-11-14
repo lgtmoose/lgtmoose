@@ -19,17 +19,42 @@ const VARIABLES = {
 
 type Env = Readonly<Record<string, string | undefined>>;
 
+/** Reads the named variables, trimmed, or says which are missing (blank counts). */
+function readVariables<K extends string>(
+  env: Env,
+  variables: Record<K, string>,
+): Record<K, string> | { missing: string[] } {
+  const missing = Object.values<string>(variables).filter((name) => !env[name]?.trim());
+  if (missing.length > 0) return { missing };
+  const entries = Object.entries<string>(variables).map(([key, name]) => [
+    key,
+    env[name]?.trim() ?? "",
+  ]);
+  return Object.fromEntries(entries) as Record<K, string>;
+}
+
 /** Reads the control task's settings, or says which variables are missing (blank counts). */
 export function readControlEnv(env: Env): ControlEnv | { missing: string[] } {
-  const missing = Object.values(VARIABLES).filter((name) => !env[name]?.trim());
-  if (missing.length > 0) return { missing };
-  const read = (name: string) => env[name]?.trim() ?? "";
-  return {
-    artifactBucket: read(VARIABLES.artifactBucket),
-    databaseSecretArn: read(VARIABLES.databaseSecretArn),
-    databaseName: read(VARIABLES.databaseName),
-    githubAppSecretArn: read(VARIABLES.githubAppSecretArn),
-  };
+  return readVariables(env, VARIABLES);
+}
+
+/** What the dispatcher Lambda reads from its environment, set by the Workflow stack. */
+export interface DispatchEnv {
+  stateMachineArn: string;
+  /** Where messages that aren't valid jobs go. */
+  deadLetterQueueUrl: string;
+  databaseSecretArn: string;
+  databaseName: string;
+}
+
+/** Reads the dispatcher's settings, or says which variables are missing (blank counts). */
+export function readDispatchEnv(env: Env): DispatchEnv | { missing: string[] } {
+  return readVariables(env, {
+    stateMachineArn: "STATE_MACHINE_ARN",
+    deadLetterQueueUrl: "DEAD_LETTER_QUEUE_URL",
+    databaseSecretArn: VARIABLES.databaseSecretArn,
+    databaseName: VARIABLES.databaseName,
+  });
 }
 
 /** How the review runs, from the deploy config. The Workflow stack sets these on the task. */
@@ -64,7 +89,7 @@ export function readReviewSettings(env: Env): ReviewSettings {
  */
 export type ControlCommand =
   | { command: "prepare"; executionArn: string; job: string; taskToken: string }
-  | { command: "post"; executionArn: string; runId: string }
+  | { command: "post"; executionArn: string; runId: string; taskToken: string }
   | { command: "fail"; executionArn: string; error: string };
 
 export function readCommand(env: Env): ControlCommand {
@@ -84,7 +109,12 @@ export function readCommand(env: Env): ControlCommand {
         taskToken: need("LGTMOOSE_TASK_TOKEN"),
       };
     case "post":
-      return { command, executionArn, runId: need("LGTMOOSE_RUN_ID") };
+      return {
+        command,
+        executionArn,
+        runId: need("LGTMOOSE_RUN_ID"),
+        taskToken: need("LGTMOOSE_TASK_TOKEN"),
+      };
     case "fail":
       return { command, executionArn, error: env.LGTMOOSE_ERROR?.trim() || "unknown error" };
     default:

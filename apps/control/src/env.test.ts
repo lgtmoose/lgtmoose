@@ -3,6 +3,7 @@ import {
   DEFAULT_BATCH_TIMEOUT_MS,
   readCommand,
   readControlEnv,
+  readDispatchEnv,
   readReviewSettings,
 } from "./env.js";
 
@@ -39,11 +40,14 @@ describe("readCommand", () => {
         LGTMOOSE_TASK_TOKEN: "t",
       }),
     ).toEqual({ command: "prepare", executionArn: "arn:exec", job: "{}", taskToken: "t" });
-    expect(readCommand({ ...base, LGTMOOSE_COMMAND: "post", LGTMOOSE_RUN_ID: "r" })).toEqual({
-      command: "post",
-      executionArn: "arn:exec",
-      runId: "r",
-    });
+    expect(
+      readCommand({
+        ...base,
+        LGTMOOSE_COMMAND: "post",
+        LGTMOOSE_RUN_ID: "r",
+        LGTMOOSE_TASK_TOKEN: "t",
+      }),
+    ).toEqual({ command: "post", executionArn: "arn:exec", runId: "r", taskToken: "t" });
     expect(readCommand({ ...base, LGTMOOSE_COMMAND: "fail" })).toEqual({
       command: "fail",
       executionArn: "arn:exec",
@@ -53,6 +57,9 @@ describe("readCommand", () => {
 
   it("names what's missing", () => {
     expect(() => readCommand({ ...base, LGTMOOSE_COMMAND: "post" })).toThrow("LGTMOOSE_RUN_ID");
+    expect(() => readCommand({ ...base, LGTMOOSE_COMMAND: "post", LGTMOOSE_RUN_ID: "r" })).toThrow(
+      "LGTMOOSE_TASK_TOKEN",
+    );
     expect(() => readCommand({ LGTMOOSE_COMMAND: "post" })).toThrow("LGTMOOSE_EXECUTION_ARN");
     expect(() => readCommand({ ...base, LGTMOOSE_COMMAND: "deploy" })).toThrow("Unknown");
   });
@@ -78,6 +85,27 @@ describe("readControlEnv", () => {
   it("names the missing ones, counting blank as missing", () => {
     expect(readControlEnv({ ARTIFACT_BUCKET: " " })).toEqual({
       missing: ["ARTIFACT_BUCKET", "DATABASE_SECRET_ARN", "DATABASE_NAME", "GITHUB_APP_SECRET_ARN"],
+    });
+  });
+});
+
+describe("readDispatchEnv", () => {
+  it("reads the dispatcher's variables, trimmed, or names the missing ones", () => {
+    expect(
+      readDispatchEnv({
+        STATE_MACHINE_ARN: " arn:sm ",
+        DEAD_LETTER_QUEUE_URL: "https://sqs/dlq",
+        DATABASE_SECRET_ARN: "arn:secret",
+        DATABASE_NAME: "lgtmoose",
+      }),
+    ).toEqual({
+      stateMachineArn: "arn:sm",
+      deadLetterQueueUrl: "https://sqs/dlq",
+      databaseSecretArn: "arn:secret",
+      databaseName: "lgtmoose",
+    });
+    expect(readDispatchEnv({ STATE_MACHINE_ARN: "arn:sm", DATABASE_NAME: " " })).toEqual({
+      missing: ["DEAD_LETTER_QUEUE_URL", "DATABASE_SECRET_ARN", "DATABASE_NAME"],
     });
   });
 });

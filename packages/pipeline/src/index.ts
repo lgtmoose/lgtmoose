@@ -31,6 +31,7 @@ export {
   batchRunId,
   batchTranscriptKeys,
   batchUrlsSchema,
+  headKeys,
   runKeys,
   type BatchInput,
   type BatchOutput,

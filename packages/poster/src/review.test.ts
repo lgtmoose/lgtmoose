@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { formatComment, suggestionBlock } from "./format.js";
-import { buildReview, withCommentsInBody } from "./review.js";
+import { buildReview, reviewMarkerComment, withCommentsInBody } from "./review.js";
 import { fileDiff, finding } from "./testing/fixtures.js";
 
 describe("formatComment", () => {
@@ -110,6 +110,20 @@ describe("buildReview", () => {
       intro: "See the summary comment.",
     });
     expect(withCommentsInBody(review).body.startsWith("See the summary comment.")).toBe(true);
+  });
+
+  it("ends the body with its marker, and keeps it when the retry rebuilds the body", () => {
+    const review = buildReview({
+      event: "COMMENT",
+      inline: [finding()],
+      outsideDiff: [],
+      files,
+      nitCap: 10,
+      marker: "lgtmoose-run:abc-123",
+    });
+    expect(review.body.endsWith("\n\n<!-- lgtmoose-run:abc-123 -->")).toBe(true);
+    expect(withCommentsInBody(review).body.endsWith("<!-- lgtmoose-run:abc-123 -->")).toBe(true);
+    expect(() => reviewMarkerComment("--> injected")).toThrow();
   });
 
   it("always has a body", () => {

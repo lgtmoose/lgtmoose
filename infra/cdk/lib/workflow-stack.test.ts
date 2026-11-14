@@ -178,6 +178,8 @@ interface State {
   ResultPath?: string | null;
   MaxConcurrency?: number;
   ItemsPath?: string;
+  SecondsPath?: string;
+  HeartbeatSeconds?: number;
   Parameters?: Record<string, unknown>;
   Retry?: { ErrorEquals: string[]; MaxAttempts?: number; BackoffRate?: number }[];
   Catch?: { ErrorEquals: string[]; Next: string }[];
@@ -221,9 +223,14 @@ function overrides(state: State | undefined): Record<string, unknown> {
 }
 
 describe("review state machine", () => {
-  it("prepares, maps the batches, then posts", () => {
+  it("debounces, prepares, maps the batches, then posts", () => {
     const { StartAt, States } = definition();
-    expect(StartAt).toBe("Prepare");
+    expect(StartAt).toBe("Debounce");
+    expect(States.Debounce).toMatchObject({
+      Type: "Wait",
+      SecondsPath: "$.debounceSeconds",
+      Next: "Prepare",
+    });
     expect(States.Prepare?.Resource).toContain("ecs:runTask.waitForTaskToken");
     expect(States.Prepare?.Next).toBe("Superseded?");
     expect(States["Superseded?"]).toMatchObject({
@@ -233,7 +240,35 @@ describe("review state machine", () => {
     expect(States.Batches).toMatchObject({ Type: "Map", ItemsPath: "$.prepared.batches" });
     expect(States.Batches?.Next).toBe("Post");
     expect(States.Post).toMatchObject({ End: true });
-    expect(States.Post?.Resource).toContain("ecs:runTask.sync");
+    // A stop mustn't cut a post short: post reports on a task token instead of `.sync`.
+    expect(States.Post?.Resource).toContain("ecs:runTask.waitForTaskToken");
+    // A control task that dies before reporting fails the step in minutes, not half an hour,
+    // with room for a cold Fargate start before the first heartbeat.
+    expect(States.Post?.HeartbeatSeconds).toBe(300);
+    // Post resumes from its recorded progress, so a failed write or a dead task is retried,
+    // without jitter, for longer in all than the heartbeat timeout.
+    const retry = States.Post?.Retry?.[1] as
+      | {
+          IntervalSeconds?: number;
+          MaxAttempts?: number;
+          BackoffRate?: number;
+          JitterStrategy?: string;
+        }
+      | undefined;
+    expect(retry?.JitterStrategy ?? "NONE").toBe("NONE");
+    const waits = Array.from(
+      { length: retry?.MaxAttempts ?? 0 },
+      (_, i) => (retry?.IntervalSeconds ?? 0) * (retry?.BackoffRate ?? 1) ** i,
+    );
+    expect(waits.reduce((sum, wait) => sum + wait, 0)).toBeGreaterThan(
+      States.Post?.HeartbeatSeconds ?? Infinity,
+    );
+    expect(States.Post?.Retry?.map((retry) => retry.ErrorEquals)).toEqual([
+      ["ECS.AmazonECSException", "ECS.ServerException"],
+      ["Lgtmoose.PostFailed", "States.HeartbeatTimeout"],
+    ]);
+    expect(States.Prepare?.HeartbeatSeconds).toBe(300);
+    expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 
     const items = States.Batches?.ItemProcessor;
     // Each attempt presigns afresh: Presign and Review run inside one retried Parallel.
@@ -378,7 +413,12 @@ describe("review state machine", () => {
     }
     const control = statements(getAttId(taskDefinition("control").TaskRoleArn));
     expect(actions(control)).toEqual(
-      expect.arrayContaining(["states:SendTaskSuccess", "states:SendTaskFailure"]),
+      expect.arrayContaining([
+        "states:SendTaskSuccess",
+        "states:SendTaskFailure",
+        "states:DescribeExecution",
+        "ecs:DescribeTasks",
+      ]),
     );
   });
 
@@ -392,5 +432,61 @@ describe("review state machine", () => {
       LGTMOOSE_SHADOW: "true",
       LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
     });
+  });
+});
+
+describe("dispatcher", () => {
+  function dispatcher() {
+    const entry = Object.entries(resources).find(
+      ([, r]) =>
+        r.Type === "AWS::Lambda::Function" &&
+        JSON.stringify(r.Properties.Environment).includes("STATE_MACHINE_ARN"),
+    );
+    if (entry === undefined) throw new Error("no dispatcher function");
+    return entry;
+  }
+
+  it("consumes the job queue in batches with partial failures", () => {
+    const [id] = dispatcher();
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      FunctionName: { Ref: id },
+      BatchSize: 10,
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+      ScalingConfig: { MaximumConcurrency: 5 },
+    });
+  });
+
+  it("runs in the VPC with the control security group, inside the queue's visibility", () => {
+    const [, fn] = dispatcher();
+    expect(fn.Properties.VpcConfig).toBeDefined();
+    expect(fn.Properties.Timeout).toBeLessThanOrEqual(50);
+  });
+
+  it("may start, list and stop review executions and read only the database secret", () => {
+    const [, fn] = dispatcher();
+    const granted = statements(getAttId(fn.Properties.Role));
+    expect(actions(granted)).toEqual(
+      expect.arrayContaining([
+        "states:StartExecution",
+        "states:StopExecution",
+        "states:DescribeExecution",
+        "secretsmanager:GetSecretValue",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:SendMessage",
+      ]),
+    );
+    // It sends only to the dead-letter queue, never to the job queue it consumes.
+    const sends = granted.filter((s) => actions([s]).includes("sqs:SendMessage"));
+    expect(sends.map((s) => JSON.stringify(s.Resource))).toEqual([
+      expect.stringContaining("JobDeadLetterQueue"),
+    ]);
+    const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(secrets).toHaveLength(1);
+    expect(actions(granted).some((a) => a.startsWith("s3:"))).toBe(false);
+    const stop = granted.find((s) => actions([s]).includes("states:StopExecution"));
+    expect(JSON.stringify(stop?.Resource)).toContain(":execution:");
+    // It finds a PR's executions in the database, never by listing the state machine's.
+    expect(actions(granted)).not.toContain("states:ListExecutions");
   });
 });

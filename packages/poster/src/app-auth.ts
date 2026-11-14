@@ -26,6 +26,8 @@ export interface InstallationTokenOptions {
   apiUrl?: string;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** Gives up on the token request after this long (an AbortSignal timeout). */
+  timeoutMs?: number;
 }
 
 const tokenReply = z.object({ token: z.string().min(1), expires_at: z.string() });
@@ -57,6 +59,9 @@ export function installationTokenProvider(options: InstallationTokenOptions): To
         "user-agent": "lgtmoose",
         authorization: `Bearer ${appJwt(options.appId, options.privateKey, at)}`,
       },
+      ...(options.timeoutMs === undefined
+        ? {}
+        : { signal: AbortSignal.timeout(options.timeoutMs) }),
     });
     if (!response.ok) {
       const reply = (await response.json().catch(() => ({}))) as { message?: unknown };

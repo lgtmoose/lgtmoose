@@ -96,6 +96,9 @@ importers:
 
   apps/control:
     dependencies:
+      '@aws-sdk/client-ecs':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-s3':
         specifier: ^3.1167.0
         version: 3.1169.0
@@ -105,6 +108,9 @@ importers:
       '@aws-sdk/client-sfn':
         specifier: ^3.1167.0
         version: 3.1169.0
+      '@aws-sdk/client-sqs':
+        specifier: ^3.1167.0
+        version: 3.1167.0
       '@aws-sdk/client-sts':
         specifier: ^3.1167.0
         version: 3.1167.0
@@ -535,6 +541,10 @@ packages:
 
   '@aws-sdk/client-cloudformation@3.1167.0':
     resolution: {integrity: sha512-9SBR977+mOB1RaFyPNIXkxq1m4mTTf+UUu9+nMUe/ZtLOhIJhP05UL/sHQzUhve2P0vBy/oDtzynQMcd5xsxJQ==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-ecs@3.1169.0':
+    resolution: {integrity: sha512-Jr6Sb7wwysnkdZMRC7CYz23NZq8JfjnGXtUzTXW02fGpx+x5x2QfBODWpzw6/uJbFi/mIqlV23fgnCtrk+qDGw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-rds@3.1167.0':
@@ -2816,6 +2826,17 @@ snapshots:
       tslib: 2.9.1
 
   '@aws-sdk/client-cloudformation@3.1167.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@aws-sdk/client-ecs@3.1169.0':
     dependencies:
       '@aws-sdk/core': 3.981.0
       '@aws-sdk/credential-provider-node': 3.972.97
