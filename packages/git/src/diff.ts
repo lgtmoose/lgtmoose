@@ -534,10 +534,13 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
   for (const file of files) {
     const base = baseOf(file.path);
     // Names involved: ones it was renamed from since a review, and the PR's own rename's
-    // old name when that has a record.
+    // old name when that has a record and this name has none (the rename came after it; once
+    // both are recorded, the PR's rename is just part of what was reviewed).
+    const prRenameIsNew =
+      file.oldPath !== undefined && reviewedAt.has(file.oldPath) && !reviewedAt.has(file.path);
     const otherNames = [
       ...(renamedFrom.get(file.path) ?? []),
-      ...(file.oldPath !== undefined && reviewedAt.has(file.oldPath) ? [file.oldPath] : []),
+      ...(prRenameIsNew && file.oldPath !== undefined ? [file.oldPath] : []),
     ];
     const renamedSince = base?.since.get(file.path)?.oldPath !== undefined;
     if (otherNames.length > 0 || renamedSince) {

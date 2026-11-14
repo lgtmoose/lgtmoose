@@ -522,6 +522,26 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.unchanged).toEqual([]);
   });
 
+  it("leaves a renamed file alone once both its names are recorded", async () => {
+    const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
+    await fixture.move("a.ts", "b.ts");
+    await fixture.write({ "b.ts": lines(10).replace("line 2\n", "edited\n") });
+    const reviewed = await fixture.commit("rename and edit");
+    await fixture.write({ "z.ts": lines(4) });
+    const head = await fixture.commit("unrelated");
+
+    // A run reviewed b.ts in full and recorded both names at its head.
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      reviewedAt: new Map([
+        ["a.ts", reviewed],
+        ["b.ts", reviewed],
+      ]),
+    });
+    expect(diff.files.map((file) => file.path)).toEqual(["z.ts"]);
+    expect(diff.unchanged.toSorted()).toEqual(["a.ts", "b.ts"]);
+  });
+
   it("covers nothing of a rename whose earlier review is gone, and says so", async () => {
     const base = await setUp({ "old.ts": lines(10) });
     await fixture.move("old.ts", "new.ts");

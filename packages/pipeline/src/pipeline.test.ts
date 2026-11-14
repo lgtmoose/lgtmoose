@@ -589,6 +589,28 @@ describe("prepareReview and finishReview with earlier runs", () => {
       depth: "full",
     });
     expect(succeeded.reviewedFiles.map((file) => file.path)).toContain("src/sum.ts");
+
+    // Once both names are recorded at this head, the next run leaves the file alone.
+    headSha = await commit({ "CLAUDE.md": "Use pnpm, still.\n" }, "unrelated");
+    const nextRepo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha, prepared.pr.headSha],
+    });
+    const next = await prepareReview(
+      { github: deps().deps.github, progress: () => {} },
+      OPTIONS.target,
+      nextRepo,
+      pull(),
+      {
+        reviewed: succeeded.reviewedFiles.map((file) => ({
+          ...file,
+          reviewedAt: prepared.pr.headSha,
+        })),
+      },
+    );
+    expect(next.files.map((file) => file.path)).toEqual(["CLAUDE.md"]);
   });
 
   it("counts earlier open findings once and doesn't post them again", async () => {
