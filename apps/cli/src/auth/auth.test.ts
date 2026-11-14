@@ -116,6 +116,12 @@ describe("auth", () => {
     const extra = await runAuth(["list", "more"], getDeps);
     expect(extra.stderr).toContain('Unexpected argument "more"');
     expect((await runAuth(["remove"], getDeps)).stderr).toContain("needs the provider id");
+    expect((await runAuth(["remove", "../x"], getDeps)).stderr).toContain("isn't a provider id");
+    expect((await runAuth(["cursor", "--id", "A"], getDeps)).stderr).toContain(
+      "isn't a provider id",
+    );
+    const vendor = await runAuth(["api-key", "--provider", "google"], getDeps);
+    expect(vendor.stderr).toContain("--provider anthropic or --provider openai");
     expect(getDeps).not.toHaveBeenCalled();
   });
 
@@ -337,7 +343,7 @@ describe("auth", () => {
     const result = await harness({ stored }).go(["list"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("claude-code/oauth-token  stored, changed 2026-11-01");
-    expect(result.stdout).toContain("stored for api-key auth, not chatgpt-login");
+    expect(result.stdout).toContain("stored for codex/api-key, not codex/chatgpt-login");
     expect(result.stdout).toMatch(/anthropic .*missing/);
     expect(result.stdout).toMatch(/bedrock .*no secret needed/);
     expect(result.stdout).toContain("lgtmoose/provider/old (codex/api-key)");

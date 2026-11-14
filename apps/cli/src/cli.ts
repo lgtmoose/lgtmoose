@@ -6,7 +6,7 @@ import type { SetupDeps } from "./setup/setup.js";
 
 export const VERSION = "0.0.0";
 
-/** Commands planned for M1–M3. Each one is a stub until its ticket lands. */
+/** Every command, with the one-line summary help shows. */
 export const COMMANDS = {
   setup: "Create the GitHub App and write lgtmoose.config.ts",
   auth: "Store a model provider's credential: claude, codex, cursor, bedrock, api-key, list, remove",
@@ -99,9 +99,10 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     };
   }
 
+  // Every command is handled above when it comes first, so options came before it.
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `"${command}" isn't built yet. ${COMMANDS[command as Command]}\n`,
+    stderr: `Put options after the command: lgtmoose ${command} --help\n`,
   };
 }

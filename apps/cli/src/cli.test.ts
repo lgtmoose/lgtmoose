@@ -21,6 +21,12 @@ describe("lgtmoose CLI", () => {
     expect(result.stderr).toContain('Unknown command "frobnicate"');
   });
 
+  it("asks for options after the command", async () => {
+    const result = await run(["--verbose", "auth"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("lgtmoose auth --help");
+  });
+
   it("hands auth its own flags and help, without loading AWS", async () => {
     const authDeps = vi.fn();
     const result = await run(["auth", "--help"], { authDeps });

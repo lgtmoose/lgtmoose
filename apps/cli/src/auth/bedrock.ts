@@ -56,42 +56,39 @@ export function awsBedrockAccess(client: BedrockSender, region: string): Bedrock
         (model): model is typeof model & { modelId: string } =>
           model.modelId !== undefined && model.modelLifecycle?.status !== "LEGACY",
       );
-      return Promise.all(
-        active.map(async (model): Promise<ModelAccess> => {
-          let availability;
-          try {
-            availability = await client.send(
-              new GetFoundationModelAvailabilityCommand({ modelId: model.modelId }),
-            );
-          } catch (error) {
-            throw awsError("Bedrock", region, model.modelId, error);
-          }
-          const problems: string[] = [];
-          if (availability.regionAvailability !== "AVAILABLE") {
-            problems.push("not offered in this region");
-          }
-          if (availability.authorizationStatus !== "AUTHORIZED") {
-            problems.push("IAM doesn't allow it");
-          }
-          if (availability.entitlementAvailability !== "AVAILABLE") {
-            problems.push("model access not granted");
-          }
-          const agreement = availability.agreementAvailability?.status;
-          if (agreement !== "AVAILABLE") {
-            problems.push(
-              agreement === "PENDING"
-                ? "agreement pending"
-                : `agreement ${agreement?.toLowerCase().replace("_", " ") ?? "unknown"}`,
-            );
-          }
-          return {
-            modelId: model.modelId,
-            name: model.modelName ?? model.modelId,
-            usable: problems.length === 0,
-            problems,
-          };
-        }),
-      );
+      // One at a time: Bedrock's control plane throttles bursts, and there are only a few dozen.
+      const results: ModelAccess[] = [];
+      for (const model of active) {
+        let availability;
+        try {
+          availability = await client.send(
+            new GetFoundationModelAvailabilityCommand({ modelId: model.modelId }),
+          );
+        } catch (error) {
+          throw awsError("Bedrock", region, model.modelId, error);
+        }
+        const problems: string[] = [];
+        if (availability.regionAvailability !== "AVAILABLE") {
+          problems.push("not offered in this region");
+        }
+        if (availability.authorizationStatus !== "AUTHORIZED") {
+          problems.push("IAM doesn't allow it");
+        }
+        if (availability.entitlementAvailability !== "AVAILABLE") {
+          problems.push("model access not granted");
+        }
+        const agreement = availability.agreementAvailability?.status ?? "UNKNOWN";
+        if (agreement !== "AVAILABLE") {
+          problems.push(`agreement ${agreement.toLowerCase().replaceAll("_", " ")}`);
+        }
+        results.push({
+          modelId: model.modelId,
+          name: model.modelName ?? model.modelId,
+          usable: problems.length === 0,
+          problems,
+        });
+      }
+      return results;
     },
   };
 }

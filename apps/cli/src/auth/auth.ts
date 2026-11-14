@@ -62,8 +62,8 @@ go on. An API key, Bedrock or a team service account avoids the question.
 export const AUTH_HELP = `Usage: lgtmoose auth <method> [options]
 
 Stores a model provider's credential in AWS Secrets Manager, in the region from
-lgtmoose.config.ts, as lgtmoose/provider/<id>. Values are read without echo and never printed
-or saved to disk.
+lgtmoose.config.ts, as lgtmoose/provider/<id>. Values are read without echo, never printed,
+and not kept on disk (codex's temporary sign-in directory is deleted straight after).
 
 Methods:
   claude                    Run \`claude setup-token\`, then paste the token it prints
@@ -218,6 +218,9 @@ const FLAG_NAMES: Partial<Record<keyof Flags, string>> = {
   yes: "--yes",
 };
 
+/** The same rule as a provider `id` in lgtmoose.config.ts. */
+const PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
+
 function checkFlags(method: string, flags: Flags): void {
   const allowed = METHOD_FLAGS[method];
   if (allowed === undefined) throw new UsageError(`Unknown auth method "${method}".`);
@@ -232,6 +235,14 @@ function checkFlags(method: string, flags: Flags): void {
   if (extra.length > 0) throw new UsageError(`Unexpected argument "${extra[0]}".`);
   if (method === "remove" && flags.positionals[1] === undefined) {
     throw new UsageError("auth remove needs the provider id: lgtmoose auth remove <id>.");
+  }
+  for (const id of [flags.id, method === "remove" ? flags.positionals[1] : undefined]) {
+    if (id !== undefined && !PROVIDER_ID.test(id)) {
+      throw new UsageError(`"${id}" isn't a provider id: lowercase letters, digits and hyphens.`);
+    }
+  }
+  if (method === "api-key" && flags.provider !== "anthropic" && flags.provider !== "openai") {
+    throw new UsageError("auth api-key needs --provider anthropic or --provider openai.");
   }
   if (flags.deviceAuth && flags.accessToken) {
     throw new UsageError("--device-auth signs in; --access-token pastes a token. Pick one.");
@@ -404,10 +415,8 @@ async function authCursor(flags: Flags, deps: AuthDeps): Promise<string> {
 }
 
 async function authApiKey(flags: Flags, deps: AuthDeps): Promise<string> {
-  const vendor = flags.provider;
-  if (vendor !== "anthropic" && vendor !== "openai") {
-    throw new UsageError("auth api-key needs --provider anthropic or --provider openai.");
-  }
+  // checkFlags allows only these two.
+  const vendor = flags.provider === "openai" ? "openai" : "anthropic";
   const config = await loadConfig(deps);
   const targets: Target[] =
     vendor === "anthropic"
@@ -477,9 +486,13 @@ async function authList(deps: AuthDeps): Promise<string> {
     const secret = byName.get(SECRET_NAMES.provider(provider.id));
     if (secret === undefined) {
       lines.push(`${head}  missing: run pnpm lgtmoose auth (see --help)`);
-    } else if (secret.auth !== undefined && secret.auth !== provider.auth) {
+    } else if (
+      (secret.auth !== undefined && secret.auth !== provider.auth) ||
+      (secret.harness !== undefined && secret.harness !== provider.harness)
+    ) {
       lines.push(
-        `${head}  stored for ${secret.auth} auth, not ${provider.auth}: run auth for it again`,
+        `${head}  stored for ${secret.harness ?? "?"}/${secret.auth ?? "?"}, not ` +
+          `${provider.harness}/${provider.auth}: run auth for it again`,
       );
     } else {
       lines.push(`${head}  stored${date(secret.lastChanged)}`);
