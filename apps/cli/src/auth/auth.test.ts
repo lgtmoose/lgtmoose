@@ -177,9 +177,15 @@ describe("auth", () => {
     expect(cursor).toContain('"service-account"');
     for (const text of [claude, login, token, cursor]) {
       expect(text).toContain("docs/providers.md");
-      expect(text).toContain("Bedrock, or an Anthropic or OpenAI API key");
+      // Each names a way out that needs no plan credential.
+      expect(text).toMatch(/Bedrock|API key/);
     }
     expect(claude).not.toContain("Codex");
+    expect(claude).toContain("Ultra plans fall under Anthropic's consumer terms");
+    // The suggested commands say which config change they need first.
+    expect(claude).toContain('auth to "api-key"');
+    expect(login).toContain('auth "access-token"');
+    expect(token).toContain("dedicated bot user");
   });
 
   it("gives advice for every plan credential isPlanCredential recognises", () => {
@@ -191,7 +197,7 @@ describe("auth", () => {
         if (!isPlanCredential({ harness, auth })) continue;
         const text = planCredentialWarning({ harness, auth });
         // The vendor advice sits between the shared opening and closing lines.
-        const middle = text.split("installed on.\n")[1]?.split("Bedrock, or an")[0] ?? "";
+        const middle = text.split("installed on.\n")[1]?.split("Details and sources")[0] ?? "";
         expect(middle.trim(), `${harness}/${auth}`).not.toBe("");
       }
     }

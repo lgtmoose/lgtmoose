@@ -70,35 +70,41 @@ type PlanCredentialKind =
   "claude-code/oauth-token" | "codex/chatgpt-login" | "codex/access-token" | "cursor-agent/api-key";
 
 const PLAN_CREDENTIAL_ADVICE: Record<PlanCredentialKind, string> = {
-  "claude-code/oauth-token": `Pro and Max plans fall under Anthropic's consumer terms, which forbid making your
+  "claude-code/oauth-token": `Pro, Max and Ultra plans fall under Anthropic's consumer terms, which forbid making your
 account available to anyone else; Team and Enterprise fall under its commercial terms.
 Neither says a bot may review other people's pull requests on one person's seat. Anthropic
 documents API keys for automation. On a Max, Ultra or Team plan, a key from the plan's linked
-Console organization draws on the plan's monthly API credits first:
-  ${CLI} auth api-key --provider anthropic`,
+Console organization draws on the plan's monthly API credits first. To use one, set this
+provider's auth to "api-key" in lgtmoose.config.ts, then run:
+  ${CLI} auth api-key --provider anthropic
+Bedrock (auth "bedrock") needs no key at all.`,
   "codex/chatgpt-login": `OpenAI's terms forbid sharing account credentials or making your account available to
-others. OpenAI recommends an API key for automation:
+others. OpenAI recommends an API key for automation: set this provider's auth to "api-key"
+in lgtmoose.config.ts, then run:
   ${CLI} auth api-key --provider openai
-On ChatGPT Business or Enterprise, a Codex access token created for the bot is the documented
-alternative (${CLI} auth codex --access-token).`,
+On ChatGPT Business or Enterprise, a Codex access token is the documented alternative
+(auth "access-token", then ${CLI} auth codex --access-token).`,
   "codex/access-token": `A Codex access token acts as the workspace user who created it. OpenAI documents it for
-trusted runners on Business and Enterprise workspaces: create it for the bot, not a person,
-and keep the deployment private. An API key avoids the question:
+trusted runners on Business and Enterprise workspaces. Create it while signed in as a
+dedicated bot user in the workspace, not as a person, and keep the deployment private.
+An OpenAI API key avoids the question: set this provider's auth to "api-key", then run:
   ${CLI} auth api-key --provider openai`,
   "cursor-agent/api-key": `A user API key bills to that person's Cursor plan, and Cursor says logins mustn't be
-shared. Cursor's service accounts (Enterprise) are made for automation: set the provider's
-auth to "service-account".`,
+shared. Cursor's service accounts (Enterprise) are made for automation: set this provider's
+auth to "service-account" in lgtmoose.config.ts and store a service-account key. Without
+Enterprise, a claude-code provider on Bedrock or an API key avoids the question.`,
 };
 
 /** The warning for one plan credential. */
 export function planCredentialWarning(provider: Pick<ProviderConfig, "harness" | "auth">): string {
   const kind = `${provider.harness}/${provider.auth}`;
   const advice =
-    kind in PLAN_CREDENTIAL_ADVICE ? `${PLAN_CREDENTIAL_ADVICE[kind as PlanCredentialKind]}\n` : "";
+    kind in PLAN_CREDENTIAL_ADVICE
+      ? PLAN_CREDENTIAL_ADVICE[kind as PlanCredentialKind]
+      : "Bedrock, or an Anthropic or OpenAI API key, avoids the question.";
   return (
     `\n${PLAN_CREDENTIAL_HEADER}\nLGTMoose will use it to review everyone's pull requests in ` +
-    `the repositories the App is installed on.\n${advice}` +
-    "Bedrock, or an Anthropic or OpenAI API key, avoids the question.\n" +
+    `the repositories the App is installed on.\n${advice}\n` +
     "Details and sources: docs/providers.md. Go on only if your plan's terms allow this use.\n\n"
   );
 }

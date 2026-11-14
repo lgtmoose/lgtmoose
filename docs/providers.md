@@ -38,7 +38,7 @@ Sources were read on 2026-11-14:
 
 The earlier announced change to Agent SDK billing was paused on 2026-06-15 ("for now, nothing has changed").
 
-**Consumer terms (Pro and Max).** Effective 2025-10-08 ([Consumer Terms](https://www.anthropic.com/legal/consumer-terms)):
+**Consumer terms (Pro, Max and Ultra).** Effective 2025-10-08 ([Consumer Terms](https://www.anthropic.com/legal/consumer-terms)):
 
 > You may not share your Account login information, Anthropic API key, or Account credentials with anyone else. You also may not make your Account available to anyone else.
 
@@ -91,5 +91,5 @@ The earlier announced change to Agent SDK billing was paused on 2026-06-15 ("for
 
 ## What LGTMoose does with this
 
-- Before storing a plan credential, `lgtmoose auth` shows a short warning that matches the vendor and names its documented alternative, then asks for confirmation; `--accept-vendor-terms` answers yes. Plan credentials are a Claude `oauth-token`, a ChatGPT `chatgpt-login`, a Codex `access-token` and a Cursor user `api-key`. The warning links this page.
+- Before storing a plan credential, `lgtmoose auth` shows a short warning that matches the credential (harness and auth method), names the vendor's documented alternative and the config change it needs, then asks for confirmation; `--accept-vendor-terms` answers yes. Plan credentials are a Claude `oauth-token`, a ChatGPT `chatgpt-login`, a Codex `access-token` and a Cursor user `api-key`. The warning links this page.
 - `lgtmoose setup` starts with a Bedrock provider, which needs no stored credential. A plan credential is opt-in.
