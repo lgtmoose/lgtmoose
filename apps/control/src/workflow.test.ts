@@ -594,6 +594,26 @@ describe("post", () => {
     expect(calls).toEqual(["submitReview"]);
   });
 
+  it("takes a 412 on a write S3 already applied as its own", async () => {
+    const h = harness();
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
+    const { store } = h.deps;
+    // The SDK retries each conditional write once after S3 applied it: the retry gets a 412.
+    const createText = store.createText.bind(store);
+    const replaceText = store.replaceText.bind(store);
+    store.createText = async (key, body) => {
+      await createText(key, body);
+      return undefined;
+    };
+    store.replaceText = async (key, body, etag) => {
+      await replaceText(key, body, etag);
+      return undefined;
+    };
+    expect(await post(h.deps, RUN_ID, as(TASK_A))).toMatchObject({ posted: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
+  });
+
   it("creates its check run and summary comment idempotently", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);

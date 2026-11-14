@@ -181,6 +181,8 @@ async function claimReview(
     throw new Error("Another attempt claimed this run's review just now.");
   }
   const holder = claimSchema.safeParse(parseJson(current.text));
+  // Our own create, applied by S3 but answered 412 to the SDK's retry of it.
+  if (holder.success && holder.data.attempt === options.attempt.id) return { etag: current.etag };
   const holderTask = holder.success ? holder.data.taskArn : undefined;
   if (holder.success && holderTask === undefined) {
     throw new Error("Another attempt, off ECS, holds this run's review claim.");
@@ -292,9 +294,16 @@ export async function post(
       progressEtag === undefined
         ? await deps.store.createText(keys.posted, body)
         : await deps.store.replaceText(keys.posted, body, progressEtag);
-    if (etag === undefined)
+    if (etag !== undefined) {
+      progressEtag = etag;
+      return;
+    }
+    // A 412 can answer the SDK's retry of a write S3 already applied: then what's there is ours.
+    const now = await deps.store.getTagged(keys.posted);
+    if (now?.text !== body) {
       throw new Error("Another attempt saved this post's progress meanwhile.");
-    progressEtag = etag;
+    }
+    progressEtag = now.etag;
   };
 
   let stale: string | undefined;

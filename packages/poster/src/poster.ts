@@ -1,5 +1,11 @@
 import type { LabelClient } from "@lgtmoose/summary";
-import { CHECK_NAME, annotationPages, checkOutput, type CheckRunInput } from "./check-run.js";
+import {
+  ANNOTATIONS_PER_REQUEST,
+  CHECK_NAME,
+  annotationPages,
+  checkOutput,
+  type CheckRunInput,
+} from "./check-run.js";
 import { GitHubError, repoPath, type GitHubClient, type PullRef } from "./github.js";
 import { GITHUB_BODY_LIMIT } from "./format.js";
 import { reviewMarkerComment, withCommentsInBody, type ReviewPayload } from "./review.js";
@@ -86,9 +92,43 @@ export class GitHubLabelClient implements LabelClient {
   }
 }
 
+/** A comment as the comments endpoint lists it. */
+interface ListedComment {
+  id: number;
+  body?: string | null;
+  user?: { type?: string } | null;
+  performed_via_github_app?: { id?: number } | null;
+}
+
+/** A check run as the check-runs endpoint lists it. */
+interface ListedCheckRun {
+  id: number;
+  external_id?: string | null;
+  output?: { annotations_count?: number } | null;
+}
+
+export interface GitHubPosterOptions {
+  /**
+   * The App's ID. A summary comment found by its marker must be the App's own: anyone can
+   * quote a marker, and editing their comment would fail on every run.
+   */
+  appId?: number;
+}
+
 /** Posts to GitHub with an installation token. */
 export class GitHubPoster implements Poster {
-  constructor(private readonly github: GitHubClient) {}
+  constructor(
+    private readonly github: GitHubClient,
+    private readonly options: GitHubPosterOptions = {},
+  ) {}
+
+  /** Whether the App wrote the comment (or, without its ID, a bot did). */
+  private ours(comment: ListedComment): boolean {
+    if (this.options.appId !== undefined) {
+      return comment.performed_via_github_app?.id === this.options.appId;
+    }
+    return comment.user?.type === "Bot";
+  }
 
   async submitReview(
     pull: PullRef,
@@ -126,20 +166,27 @@ export class GitHubPoster implements Poster {
   }
 
   async completeCheckRun(pull: PullRef, input: CheckRunInput): Promise<number> {
-    if (input.existingId === undefined && input.externalId !== undefined) {
-      // Created by an earlier attempt: done. Completing it again would add its annotations twice.
+    const pages = annotationPages(input.annotations);
+    let runId = input.existingId;
+    let sent = 0;
+    if (runId === undefined && input.externalId !== undefined) {
+      // Created by an earlier attempt: carry on from the annotations it got in. GitHub
+      // counts them, and every page but the last is full, so the count says how many pages.
       const existing = await this.findCheckRun(pull, input.headSha, input.externalId);
-      if (existing !== undefined) return existing;
+      if (existing !== undefined) {
+        runId = existing.id;
+        sent = Math.ceil((existing.output?.annotations_count ?? 0) / ANNOTATIONS_PER_REQUEST);
+        if (sent >= pages.length) return existing.id;
+      }
     }
-    const [first = [], ...rest] = annotationPages(input.annotations);
     const fields = {
       status: "completed",
       conclusion: input.conclusion,
       ...(input.detailsUrl === undefined ? {} : { details_url: input.detailsUrl }),
-      output: checkOutput(input, first),
+      output: checkOutput(input, pages[sent] ?? []),
     };
     const run =
-      input.existingId === undefined
+      runId === undefined
         ? await this.github.request<{ id: number }>("POST", `${repoPath(pull)}/check-runs`, {
             name: CHECK_NAME,
             head_sha: input.headSha,
@@ -148,11 +195,11 @@ export class GitHubPoster implements Poster {
           })
         : await this.github.request<{ id: number }>(
             "PATCH",
-            `${repoPath(pull)}/check-runs/${input.existingId}`,
+            `${repoPath(pull)}/check-runs/${runId}`,
             fields,
           );
     // GitHub appends each update's annotations to the run's, 50 at a time.
-    for (const page of rest) {
+    for (const page of pages.slice(sent + 1)) {
       await this.github.request("PATCH", `${repoPath(pull)}/check-runs/${run.id}`, {
         output: checkOutput(input, page),
       });
@@ -165,13 +212,14 @@ export class GitHubPoster implements Poster {
     pull: PullRef,
     headSha: string,
     externalId: string,
-  ): Promise<number | undefined> {
-    const runs = await this.github.list<{ id: number; external_id?: string | null }>(
-      `${repoPath(pull)}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}`,
-      (page) =>
-        (page as { check_runs?: { id: number; external_id?: string | null }[] }).check_runs ?? [],
+  ): Promise<ListedCheckRun | undefined> {
+    // `filter=all`: by default GitHub lists only the latest run of each name.
+    const name = encodeURIComponent(CHECK_NAME);
+    const runs = await this.github.list<ListedCheckRun>(
+      `${repoPath(pull)}/commits/${headSha}/check-runs?check_name=${name}&filter=all`,
+      (page) => (page as { check_runs?: ListedCheckRun[] }).check_runs ?? [],
     );
-    return runs.find((run) => run.external_id === externalId)?.id;
+    return runs.find((run) => run.external_id === externalId);
   }
 
   async upsertSummaryComment(
@@ -181,18 +229,22 @@ export class GitHubPoster implements Poster {
     marker?: string,
   ): Promise<SummaryCommentResult> {
     if (marker !== undefined) {
-      // The marker must survive GitHub's limit: a body already at it gives up its last bytes.
-      const tail = `\n\n${reviewMarkerComment(marker)}`;
-      body = `${body.slice(0, GITHUB_BODY_LIMIT - tail.length)}${tail}`;
+      // Callers leave room for it (`SUMMARY_MARKER_ROOM` in @lgtmoose/summary).
+      body = `${body}\n\n${reviewMarkerComment(marker)}`;
+      if (body.length > GITHUB_BODY_LIMIT) {
+        throw new Error("The summary comment is too long to add its marker.");
+      }
     }
     if (commentId === undefined && marker !== undefined) {
       // No stored ID (a first review, or an attempt that didn't get to store it): find the
       // comment by its marker, so a retry edits the one an earlier attempt made.
       const comment = reviewMarkerComment(marker);
-      const comments = await this.github.list<{ id: number; body?: string | null }>(
+      const comments = await this.github.list<ListedComment>(
         `${repoPath(pull)}/issues/${pull.pull}/comments`,
       );
-      commentId = comments.find((candidate) => candidate.body?.includes(comment) === true)?.id;
+      commentId = comments.find(
+        (candidate) => this.ours(candidate) && candidate.body?.includes(comment) === true,
+      )?.id;
     }
     if (commentId !== undefined) {
       try {
@@ -201,8 +253,9 @@ export class GitHubPoster implements Poster {
         });
         return { id: commentId, created: false };
       } catch (error) {
-        // Deleted by someone: post a new one, and the caller stores the new ID.
-        if (!isStatus(error, 404)) throw error;
+        // Deleted by someone (404), or not ours to edit (403): post a new one, and the caller
+        // stores the new ID.
+        if (!isStatus(error, 403, 404)) throw error;
       }
     }
     const comment = await this.github.request<{ id: number }>(

@@ -42,6 +42,7 @@ export {
 export {
   GitHubLabelClient,
   GitHubPoster,
+  type GitHubPosterOptions,
   type PostedReview,
   type Poster,
   type SummaryCommentResult,

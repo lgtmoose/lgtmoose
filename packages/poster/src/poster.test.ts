@@ -172,7 +172,7 @@ describe("GitHubPoster", () => {
     ]);
     expect(await found.poster.completeCheckRun(PULL, input)).toBe(4);
     expect(found.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
-      "GET https://api.github.com/repos/acme/app/commits/abc/check-runs?check_name=LGTMoose&per_page=100&page=1",
+      "GET https://api.github.com/repos/acme/app/commits/abc/check-runs?check_name=LGTMoose&filter=all&per_page=100&page=1",
     ]);
     const created = poster([
       { status: 200, body: { check_runs: [] } },
@@ -182,13 +182,51 @@ describe("GitHubPoster", () => {
     expect(created.calls[1]).toMatchObject({ method: "POST", body: { external_id: "run-1" } });
   });
 
+  it("sends the annotation pages an earlier attempt didn't get to", async () => {
+    const annotations = Array.from({ length: 120 }, (_, i) => ({
+      path: "a.ts",
+      start_line: i + 1,
+      end_line: i + 1,
+      annotation_level: "warning" as const,
+      title: "t",
+      message: `m${i}`,
+    }));
+    const { poster: p, calls } = poster([
+      // The earlier attempt created the run with its first page, then died.
+      {
+        status: 200,
+        body: { check_runs: [{ id: 4, external_id: "run-1", output: { annotations_count: 50 } }] },
+      },
+      { status: 200, body: { id: 4 } },
+      { status: 200, body: { id: 4 } },
+    ]);
+    await p.completeCheckRun(PULL, {
+      headSha: "abc",
+      conclusion: "neutral",
+      title: "t",
+      summary: "s",
+      annotations,
+      externalId: "run-1",
+    });
+    const sent = calls.slice(1).map((c) => {
+      const output = (c.body as { output: { annotations: { message: string }[] } }).output;
+      return [c.method, output.annotations[0]?.message, output.annotations.length];
+    });
+    expect(sent).toEqual([
+      ["PATCH", "m50", 50],
+      ["PATCH", "m100", 20],
+    ]);
+  });
+
   it("finds the summary comment by its marker when there's no stored ID", async () => {
     const { poster: p, calls } = poster([
       {
         status: 200,
         body: [
           { id: 5, body: "someone else" },
-          { id: 6, body: "x\n\n<!-- lgtmoose-summary -->" },
+          // Someone quoting the marker: not ours, so never edited.
+          { id: 8, body: "> <!-- lgtmoose-summary -->", user: { type: "User" } },
+          { id: 6, body: "x\n\n<!-- lgtmoose-summary -->", user: { type: "Bot" } },
         ],
       },
       { status: 200, body: { id: 6 } },
@@ -210,12 +248,56 @@ describe("GitHubPoster", () => {
     });
   });
 
-  it("keeps the summary comment's marker within GitHub's limit", async () => {
+  it("matches only the App's own comment when it knows the App's ID", async () => {
+    const fake = fakeFetch([
+      {
+        status: 200,
+        body: [
+          {
+            id: 5,
+            body: "<!-- lgtmoose-summary -->",
+            user: { type: "Bot" },
+            performed_via_github_app: { id: 1 },
+          },
+          {
+            id: 6,
+            body: "<!-- lgtmoose-summary -->",
+            user: { type: "Bot" },
+            performed_via_github_app: { id: 42 },
+          },
+        ],
+      },
+      { status: 200, body: { id: 6 } },
+    ]);
+    const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
+    const p = new GitHubPoster(github, { appId: 42 });
+    expect(await p.upsertSummaryComment(PULL, "b", undefined, "lgtmoose-summary")).toEqual({
+      id: 6,
+      created: false,
+    });
+  });
+
+  it("creates a new summary comment when editing the old one is refused", async () => {
+    const { poster: p, calls } = poster([
+      { status: 403, body: { message: "Forbidden" } },
+      { status: 201, body: { id: 9 } },
+    ]);
+    expect(await p.upsertSummaryComment(PULL, "b", 5, "lgtmoose-summary")).toEqual({
+      id: 9,
+      created: true,
+    });
+    expect(calls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
+  });
+
+  it("fits the summary comment's marker in the room the summary leaves", async () => {
     const { poster: p, calls } = poster([{ status: 200, body: { id: 1 } }]);
-    await p.upsertSummaryComment(PULL, "x".repeat(65_536), 1, "lgtmoose-summary");
+    await p.upsertSummaryComment(PULL, "x".repeat(65_536 - 100), 1, "lgtmoose-summary");
     const body = (calls[0]?.body as { body: string } | undefined)?.body ?? "";
-    expect(body.length).toBe(65_536);
     expect(body.endsWith("<!-- lgtmoose-summary -->")).toBe(true);
+    // A body with no room for it is a caller's bug, not something to cut silently.
+    await expect(
+      p.upsertSummaryComment(PULL, "x".repeat(65_536), 1, "lgtmoose-summary"),
+    ).rejects.toThrow("too long");
   });
 
   it("edits the summary comment in place, or creates it when it's gone", async () => {

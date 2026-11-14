@@ -404,15 +404,19 @@ export async function awsControlDeps(
                 log,
                 labelReader: new GitHubLabelClient(client, pull),
               })
-            : new GitHubPoster(client),
+            : new GitHubPoster(client, { appId: app.appId }),
         async reviewPosted(pull, marker) {
           if (options.shadow) return false;
           const comment = reviewMarkerComment(marker);
-          const reviews = await client.list<{ body?: unknown }>(
+          const reviews = await client.list<{ body?: unknown; user?: { type?: string } | null }>(
             `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
           );
+          // A bot's review only: anyone can quote the marker in theirs.
           return reviews.some(
-            (review) => typeof review.body === "string" && review.body.includes(comment),
+            (review) =>
+              review.user?.type === "Bot" &&
+              typeof review.body === "string" &&
+              review.body.includes(comment),
           );
         },
       };

@@ -5,6 +5,7 @@
 export {
   GITHUB_COMMENT_LIMIT,
   GROUP_FILES_OVER,
+  SUMMARY_MARKER_ROOM,
   renderSummary,
   type ProviderUsage,
   type RenderOptions,
