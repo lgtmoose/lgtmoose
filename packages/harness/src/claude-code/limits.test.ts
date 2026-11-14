@@ -102,6 +102,21 @@ describe("claudeLimitFailure", () => {
     ).toEqual({ kind: "plan_limit", resetsAt: expect.stringMatching(/T15:00:00\.000Z$/) });
   });
 
+  it("leaves context and per-minute limits alone, and reads decimal resets", () => {
+    for (const message of [
+      "Context limit reached · /compact or /clear to continue",
+      "You've hit your context limit",
+    ]) {
+      expect(claudeLimitFailure(result({ result: message }), ""), message).toBeUndefined();
+    }
+    expect(
+      claudeLimitFailure(result({ result: "Tokens per minute limit reached" }), ""),
+    ).not.toMatchObject({ kind: "plan_limit" });
+    expect(
+      claudeLimitFailure(result({ result: "You've hit your limit · resets in 2.5 hours" }), ""),
+    ).toEqual({ kind: "plan_limit", retryAfterSeconds: 9000 });
+  });
+
   it("treats an overloaded API (529) as throttling, and reads hrs and mins", () => {
     expect(
       claudeLimitFailure(result({ api_error_status: 529, result: "API Error: 529" }), ""),
