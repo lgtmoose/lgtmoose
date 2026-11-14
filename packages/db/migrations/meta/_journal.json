@@ -15,6 +15,13 @@
       "when": 1794500071900,
       "tag": "0001_initial-schema",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794610803707,
+      "tag": "0002_provider-cooldowns",
+      "breakpoints": true
     }
   ]
 }

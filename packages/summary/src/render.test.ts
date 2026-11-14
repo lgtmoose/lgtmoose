@@ -125,6 +125,37 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).toMatchSnapshot();
   });
 
+  it("ends with model usage per provider, escaped", () => {
+    const text = renderSummary(
+      input({
+        usage: [
+          {
+            providerId: "claude-max",
+            runs: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+            limitHits: 1,
+            fallbacks: 3,
+          },
+          {
+            providerId: "api_key*",
+            runs: 4,
+            inputTokens: 123_456,
+            outputTokens: 7_890,
+            costUsd: 0.4213,
+            limitHits: 0,
+            fallbacks: 0,
+          },
+        ],
+      }),
+    );
+    expect(text.trimEnd().split("\n").at(-1)).toBe(
+      "_Model usage: claude\\-max (0 in, 0 out, 1 limit hit, 3 fallbacks) · api\\_key\\* (123.5k in, 7.9k out, $0.42)_",
+    );
+    expect(renderSummary(input())).not.toContain("Model usage");
+  });
+
   it("says the label is unchanged when the decision was skipped for an older commit", () => {
     const text = renderSummary(
       input({ decision: { event: "COMMENT", reasons: ["the head moved during the run"] } }),

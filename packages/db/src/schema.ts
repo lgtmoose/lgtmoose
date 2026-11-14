@@ -232,6 +232,19 @@ export const providerUsage = pgTable(
   (t) => [index("provider_usage_provider_idx").on(t.providerId, t.createdAt)],
 );
 
+/**
+ * Providers sitting out after a rate limit, a used-up plan or a rejected credential, until
+ * `until`. One row per provider, shared by every run, so a limit one batch hits is skipped by
+ * the next batch and the next run without another call.
+ */
+export const providerCooldowns = pgTable("provider_cooldowns", {
+  providerId: text("provider_id").primaryKey(),
+  until: timestamp("until", { withTimezone: true }).notNull(),
+  /** rate_limit, plan_limit or auth. */
+  reason: text("reason").notNull(),
+  updatedAt: updatedAt(),
+});
+
 export const feedback = pgTable(
   "feedback",
   {

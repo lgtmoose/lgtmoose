@@ -58,6 +58,7 @@ describe.skipIf(adminUrl === undefined)("runMigrations on Postgres", () => {
       "finding_events",
       "findings",
       "learnings",
+      "provider_cooldowns",
       "provider_usage",
       "pull_requests",
       "review_runs",
