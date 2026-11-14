@@ -78,7 +78,8 @@ export interface ReviewWorkflowProps {
  *    and the status label (or records them in shadow mode).
  *
  * Any step failing for good runs the control task's fail step, which marks the run failed and
- * posts nothing, and the execution fails.
+ * posts nothing more, and the execution fails. An execution stopped from outside (StopExecution)
+ * skips it: whatever stops one must mark its run itself.
  *
  * Extension points (M4): the cross-file and verify passes go between the batches and post, as
  * steps in `afterBatches`; each reads and writes the run's objects like the batches do.
@@ -291,7 +292,8 @@ export class ReviewWorkflow extends Construct {
     });
     this.stateMachine = new StateMachine(this, "StateMachine", {
       definitionBody: DefinitionBody.fromChainable(definition),
-      timeout: Duration.hours(4),
+      // No execution timeout: one would stop the execution without running the fail step, and
+      // leave the run "running". Every task has its own timeout, so an execution still ends.
       tracingEnabled: false,
       logs: {
         destination: logs,

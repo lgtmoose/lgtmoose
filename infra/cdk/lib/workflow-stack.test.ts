@@ -292,7 +292,8 @@ describe("review state machine", () => {
 
   it("times out and retries with backoff; post retries only tasks that never started", () => {
     const { States, TimeoutSeconds } = definition();
-    expect(TimeoutSeconds).toBe(4 * 3600);
+    // No execution timeout: it would skip the fail step. Each task bounds its own time.
+    expect(TimeoutSeconds).toBeUndefined();
     const review = States.Batches?.ItemProcessor?.States.Review;
     for (const state of [States.Prepare, States.Post, review, States.MarkFailed]) {
       expect(state?.TimeoutSeconds).toBeGreaterThan(0);

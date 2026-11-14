@@ -49,7 +49,7 @@ Each review job is one execution of the review state machine (`StateMachineArn` 
 2. **Batches** (sandbox tasks, `maxConcurrency` at once): each runs the reviewer on one batch. Sandbox tasks have no S3 access of their own; a small Lambda hands each one presigned URLs for its own batch.
 3. **Post** (control task): reads the batches' outputs and posts one review, the check run, the summary comment and the status label. A batch without a valid output makes the review incomplete, so it can't approve.
 
-A step that fails for good marks the run failed and posts nothing. With `shadow: true` in `lgtmoose.config.ts` (the default for now), post records what it would post to `shadow/` in the bucket and the log instead.
+A step that fails for good marks the run failed and posts nothing more: a failure before post leaves the PR untouched. With `shadow: true` in `lgtmoose.config.ts` (the default for now), post records what it would post to `shadow/` in the bucket and the log instead.
 
 ## Repository layout
 
