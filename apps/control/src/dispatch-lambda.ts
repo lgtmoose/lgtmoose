@@ -32,6 +32,9 @@ function dispatchDeps(): Promise<DispatchDeps> {
       required("DATABASE_NAME"),
       1,
     );
+    // An idle connection can drop while the container is frozen. Without a listener, the
+    // pool's error event would crash the process; the next query reconnects instead.
+    pool.on("error", (error) => log("database connection dropped", { error: error.message }));
     return {
       executions: sfnExecutions(new SFNClient({}), required("STATE_MACHINE_ARN")),
       runs: drizzleRunStore(drizzle({ client: pool })),

@@ -8,7 +8,9 @@ import type { RunStore } from "./ports.js";
  * executions. It never calls GitHub or a model; the workflow's prepare step does that.
  *
  * - A push, open or ready job starts an execution named after the PR and its head
- *   (`executionName`), so a second start for the same head is a no-op.
+ *   (`executionName`), so a second start for the same head is a no-op. An open or ready job
+ *   whose head's execution ended without succeeding (stopped when the PR closed, or failed)
+ *   starts a retry instead: a PR reopened at the same head is reviewed again.
  * - Once that execution exists, running executions for an older head of the same PR are
  *   stopped, and their runs marked superseded: StopExecution skips the workflow's fail step.
  * - Pushes are debounced: the execution waits `PUSH_DEBOUNCE_SECONDS` before it does anything,
@@ -26,6 +28,12 @@ const MAX_NAME = 80;
 const NAME_SHA_LENGTH = 40;
 /** Hex digits of the repository hash that keeps names of different repositories apart. */
 const REPO_HASH_LENGTH = 12;
+/** Hex digits of the delivery hash that names a retry: `-` and these follow the SHA. */
+const RETRY_HASH_LENGTH = 8;
+
+function hex(text: string, length: number): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, length);
+}
 
 /** The queue message, validated: the gateway wrote it, but it's still read from the network. */
 export const reviewJobSchema = z.object({
@@ -58,15 +66,23 @@ export interface WorkflowInput extends ReviewJob {
  */
 export function executionPrefix(repo: string, prNumber: number): string {
   const name = repo.toLowerCase();
-  const hash = createHash("sha256").update(name).digest("hex").slice(0, REPO_HASH_LENGTH);
-  const tail = `-${hash}-${prNumber}-`;
-  const room = MAX_NAME - NAME_SHA_LENGTH - tail.length;
+  const tail = `-${hex(name, REPO_HASH_LENGTH)}-${prNumber}-`;
+  const room = MAX_NAME - NAME_SHA_LENGTH - (1 + RETRY_HASH_LENGTH) - tail.length;
   return `${name.replace("/", "_").slice(0, Math.max(room, 0))}${tail}`;
 }
 
-/** The execution for a PR at a head: the same name for the same head, so starts dedupe. */
-export function executionName(repo: string, prNumber: number, headSha: string): string {
-  return `${executionPrefix(repo, prNumber)}${headSha.slice(0, NAME_SHA_LENGTH)}`;
+/**
+ * The execution for a PR at a head: the same name for the same head, so starts dedupe. A retry
+ * adds a hash of the delivery that asked for it, so a redelivery of that job dedupes too.
+ */
+export function executionName(
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  retryFor?: string,
+): string {
+  const name = `${executionPrefix(repo, prNumber)}${headSha.slice(0, NAME_SHA_LENGTH)}`;
+  return retryFor === undefined ? name : `${name}-${hex(retryFor, RETRY_HASH_LENGTH)}`;
 }
 
 /**
@@ -91,6 +107,8 @@ export interface Executions {
    * duplicate. Starting a running execution again with the same input returns it.
    */
   start(name: string, input: WorkflowInput): Promise<{ started: boolean; executionArn: string }>;
+  /** The status of the named execution (RUNNING, SUCCEEDED, ABORTED…), if there is one. */
+  status(name: string): Promise<string | undefined>;
   /** Running executions whose name starts with `prefix`. */
   running(prefix: string): Promise<RunningExecution[]>;
   /** Stops an execution; one that already ended is left as it is. */
@@ -112,6 +130,7 @@ export interface DispatchDeps {
 /** What the dispatcher did with a job; for logs and tests. */
 export type DispatchResult =
   | { action: "started"; executionArn: string; stopped: string[] }
+  | { action: "retried"; executionArn: string }
   | { action: "duplicate"; name: string }
   | { action: "stopped"; stopped: string[] }
   | { action: "deferred"; reason: string }
@@ -134,16 +153,39 @@ async function stopOthers(
 
 async function review(deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
   if (job.headSha === undefined) return { action: "ignored", reason: "no head SHA" };
+  const input: WorkflowInput = { ...job, debounceSeconds: debounceSeconds(job) };
   const name = executionName(job.repo, job.prNumber, job.headSha);
-  const { started, executionArn } = await deps.executions.start(name, {
-    ...job,
-    debounceSeconds: debounceSeconds(job),
-  });
-  // A duplicate can be a late redelivery of an old push: superseding then would stop the
-  // review of the PR's real head.
-  if (!started) return { action: "duplicate", name };
-  const stopped = await stopOthers(deps, job, `Superseded by ${job.headSha}.`, name);
-  return { action: "started", executionArn, stopped };
+  const { started, executionArn } = await deps.executions.start(name, input);
+  if (started) {
+    const stopped = await stopOthers(deps, job, `Superseded by ${job.headSha}.`, name);
+    return { action: "started", executionArn, stopped };
+  }
+  // A push for a head that already has an execution is a duplicate. So is a late redelivery
+  // of an old push, and superseding then would stop the review of the PR's real head.
+  if (job.kind === "pr_updated") return { action: "duplicate", name };
+  return retry(deps, job.headSha, job, input, name);
+}
+
+/**
+ * An open or ready job for a head whose execution ended without succeeding: the PR was closed
+ * mid-review and then reopened, or the review failed. It runs again, superseding nothing: if
+ * the job is old, the PR's real head has its own execution, and this one's prepare step finds
+ * the head moved on and stops.
+ */
+async function retry(
+  deps: DispatchDeps,
+  headSha: string,
+  job: ReviewJob,
+  input: WorkflowInput,
+  name: string,
+): Promise<DispatchResult> {
+  const status = await deps.executions.status(name);
+  if (status === undefined || status === "RUNNING" || status === "SUCCEEDED") {
+    return { action: "duplicate", name };
+  }
+  const retryName = executionName(job.repo, job.prNumber, headSha, job.deliveryId);
+  const { started, executionArn } = await deps.executions.start(retryName, input);
+  return started ? { action: "retried", executionArn } : { action: "duplicate", name: retryName };
 }
 
 /**

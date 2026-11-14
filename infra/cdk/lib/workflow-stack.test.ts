@@ -435,6 +435,7 @@ describe("dispatcher", () => {
         "states:StartExecution",
         "states:ListExecutions",
         "states:StopExecution",
+        "states:DescribeExecution",
         "secretsmanager:GetSecretValue",
         "sqs:ReceiveMessage",
         "sqs:DeleteMessage",

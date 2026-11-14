@@ -1,4 +1,5 @@
 import {
+  DescribeExecutionCommand,
   ListExecutionsCommand,
   StartExecutionCommand,
   StopExecutionCommand,
@@ -29,6 +30,20 @@ export function sfnExecutions(
         return { started: false, executionArn: executionArnOf(stateMachineArn, name) };
       }
     },
+    async status(name) {
+      try {
+        const reply = await client.send(
+          new DescribeExecutionCommand({ executionArn: executionArnOf(stateMachineArn, name) }),
+        );
+        return reply.status;
+      } catch (error) {
+        if (errorName(error) === "ExecutionDoesNotExist") return undefined;
+        throw error;
+      }
+    },
+    // ListExecutions is eventually consistent, so an execution started moments ago can be
+    // missing. That one is still in its debounce wait, and its prepare step finds the head
+    // moved on and stops.
     async running(prefix) {
       const found: RunningExecution[] = [];
       let nextToken: string | undefined;
