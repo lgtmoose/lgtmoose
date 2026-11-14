@@ -45,10 +45,12 @@ const RUN_PREFIX = "runs/";
 export const CONTROL_STEP_TIMEOUT = Duration.minutes(30);
 /**
  * Prepare and post wait for a task token, so a control task that died without reporting would
- * hold its step for the whole timeout. They send a heartbeat every 30 s (`HEARTBEAT_INTERVAL_MS`
- * in @lgtmoose/control); this long without one fails the step.
+ * hold its step for the whole timeout. They send a heartbeat as soon as they start and then
+ * every 30 s (`HEARTBEAT_INTERVAL_MS` in @lgtmoose/control); this long without one fails the
+ * step. The clock starts when the task is scheduled, so it covers a cold Fargate start too
+ * (pulling the image, starting the container).
  */
-export const TASK_HEARTBEAT = Duration.minutes(2);
+export const TASK_HEARTBEAT = Duration.minutes(5);
 /** The model's own limit on one batch, which the control task passes to the sandbox. */
 export const BATCH_TIMEOUT = Duration.minutes(20);
 /** Image pull, checkout download and extraction on top of the model's limit. */

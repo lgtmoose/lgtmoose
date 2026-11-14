@@ -4,6 +4,7 @@ import { parseJob } from "./job.js";
 import type { ControlDeps } from "./ports.js";
 import { post } from "./post.js";
 import { prepare } from "./prepare.js";
+import { errorName } from "./sfn.js";
 
 /** The task-token error for a prepare step that failed, as the state machine's catch sees it. */
 export const PREPARE_FAILED = "Lgtmoose.PrepareFailed";
@@ -34,8 +35,10 @@ export interface StepDeps extends ControlDeps {
 }
 
 /**
- * Runs `work` while sending heartbeats on its task token. A heartbeat that fails is logged and
- * the beats stop: the step's outcome is reported (or found dead) on the token afterwards.
+ * Runs `work` while sending heartbeats on its task token: one at once, then every interval. A
+ * failed heartbeat (throttling, a network blip) is logged and the beats go on; only a dead
+ * token stops them, since then nothing is waiting for this step. Its outcome is still reported
+ * (or found dead) on the token afterwards.
  */
 async function withHeartbeat<T>(
   deps: StepDeps,
@@ -43,13 +46,15 @@ async function withHeartbeat<T>(
   work: () => Promise<T>,
 ): Promise<T> {
   let beating = true;
-  const timer = setInterval(() => {
+  const beat = () => {
     if (!beating) return;
     deps.heartbeat(taskToken).catch((error: unknown) => {
-      beating = false;
-      deps.log("heartbeat failed", { error: causeOf(error) });
+      if (DEAD_TOKEN_ERRORS.has(errorName(error) ?? "")) beating = false;
+      deps.log("heartbeat failed", { error: causeOf(error), stopping: !beating });
     });
-  }, deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
+  };
+  beat();
+  const timer = setInterval(beat, deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
   timer.unref();
   try {
     return await work();
@@ -79,7 +84,7 @@ async function report(
   try {
     await send();
   } catch (error) {
-    if (!(error instanceof Error && DEAD_TOKEN_ERRORS.has(error.name))) throw error;
+    if (!DEAD_TOKEN_ERRORS.has(errorName(error) ?? "")) throw error;
     const status = await deps.executionStatus(executionArn);
     if (status !== "ABORTED") {
       // Running: this attempt timed out and a retry reports. Ended any other way: the

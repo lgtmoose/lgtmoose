@@ -70,6 +70,13 @@ function withoutUndefined<T extends object>(
   };
 }
 
+/** Why a run for `headSha` no longer counts, given the PR as GitHub has it now. */
+function staleReason(now: { state: string; headSha: string }, headSha: string): string | undefined {
+  if (now.state !== "open") return "the PR is closed";
+  if (now.headSha !== headSha) return "the PR's head moved on";
+  return undefined;
+}
+
 function costOf(report: ReviewReport): number | undefined {
   const costs = report.batches.flatMap((batch) =>
     batch.usage?.costUsd === undefined ? [] : [batch.usage.costUsd],
@@ -83,9 +90,10 @@ function costOf(report: ReviewReport): number | undefined {
  * summary comment and the status label. In shadow mode the poster records instead.
  *
  * A stopped execution's post task keeps running (it waits for a task token, so a stop can't
- * cut it short). So it checks, before posting and again before recording, that the run still
- * counts: `running()` (its execution isn't stopped), and the PR still open at the run's head.
- * If not, it posts nothing and leaves the PR's record alone for the run that replaced it.
+ * cut it short). So before its first write to GitHub it checks that the run still counts:
+ * `running()` (its execution isn't stopped), and the PR still open at the run's head. If not,
+ * it posts nothing and marks the run superseded. Once it has written anything it records what
+ * it posted; `succeedRun` leaves the PR's record to a newer run that has already posted.
  */
 export async function post(
   deps: ControlDeps,
@@ -131,24 +139,15 @@ export async function post(
     await work.remove();
   }
 
-  /** Why the run no longer counts, if it doesn't, given the PR as GitHub has it now. */
-  const stale = async (now: typeof latest): Promise<string | undefined> => {
-    if (!(await running())) return "its execution was stopped";
-    if (now.state !== "open") return "the PR is closed";
-    if (now.headSha !== pr.headSha) return "the PR's head moved on";
-    return undefined;
-  };
-  // The run won't post: it's superseded, by the run for the new head, or by nothing if the PR
-  // closed. Marked here, since the dispatcher may not stop this execution (it may never see
-  // the event that made it stale).
-  const skip = async (reason: string): Promise<PostOutput> => {
+  // Why the run no longer counts, if it doesn't. Marked superseded here, since the dispatcher
+  // may never stop this execution (it may not have seen the event that made it stale).
+  const stale = (await running()) ? staleReason(latest, pr.headSha) : "its execution was stopped";
+  if (stale !== undefined) {
     await deps.runs.supersedeRun(runId);
-    deps.log("not posted", { runId, reason });
+    deps.log("not posted", { runId, reason: stale });
     const findings = report.inline.length + report.body.length;
     return { runId, posted: false, event: report.decision.event, complete: false, findings };
-  };
-  const before = await stale(latest);
-  if (before !== undefined) return skip(before);
+  }
 
   const { decision } = report;
   const payload = buildReview({
@@ -177,9 +176,6 @@ export async function post(
     if (!labels.ok) deps.log("label sync", { runId, problem: labels.problem });
   }
 
-  // Posting takes a while: a stop or a push in the meantime means a newer run records the PR.
-  const after = await stale(await github.reader.pull(target));
-  if (after !== undefined) return skip(after);
   await deps.runs.succeedRun(runId, {
     filesDone: report.plan.reviewed,
     costUsd: costOf(report),

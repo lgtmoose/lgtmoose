@@ -141,7 +141,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
     },
     async succeedRun(runId, result) {
       const run = runs.get(runId);
-      if (run?.status === "running") Object.assign(run, { status: "succeeded", result });
+      if (run) Object.assign(run, { status: "succeeded", result });
     },
     async failRun(executionArn, error) {
       for (const run of runs.values()) {
@@ -152,7 +152,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run> } {
     },
     async supersedeRun(runId) {
       const run = runs.get(runId);
-      if (run) run.status = "superseded";
+      if (run?.status === "running") run.status = "superseded";
     },
   };
 }
@@ -306,7 +306,7 @@ describe("post", () => {
     expect(reason).toBeTruthy();
   });
 
-  it("leaves the record to the newer run when it's stopped while posting", async () => {
+  it("records what it posted when it's stopped while posting", async () => {
     const h = harness();
     await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     h.objects.set(runKeys(RUN_ID).batchOutput(0), JSON.stringify(output()));
@@ -315,10 +315,11 @@ describe("post", () => {
       checks += 1;
       return checks === 1;
     });
-    expect(result).toMatchObject({ posted: false });
+    // Checked once, before the first write; after that it records what it posted.
+    expect(checks).toBe(1);
+    expect(result).toMatchObject({ posted: true });
     expect(shadowed(h).length).toBeGreaterThan(0);
-    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
-    expect(h.runs.runs.get(RUN_ID)).not.toHaveProperty("result");
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("succeeded");
   });
 
   it("posts the batches' findings as one review and records the run", async () => {
@@ -444,6 +445,25 @@ describe("runCommand", () => {
     };
     await runCommand(h.deps, { ...prepareCommand, job: "{}" }, { ...SETTINGS, shadow: true });
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: PREPARE_FAILED });
+  });
+
+  it("beats at once, keeps beating after a failed beat, and stops on a dead token", async () => {
+    const h = harness();
+    h.deps.heartbeatIntervalMs = 5;
+    const errors = [new Error("throttled"), dead()];
+    let beats = 0;
+    h.deps.heartbeat = async () => {
+      beats += 1;
+      const error = errors.shift();
+      if (error) throw error;
+    };
+    const running = runCommand(h.deps, prepareCommand, { ...SETTINGS, shadow: true });
+    const atStart = beats;
+    await running;
+    // One beat before any work, a throttled beat that didn't stop them, then the dead token.
+    expect(atStart).toBe(1);
+    expect(beats).toBe(2);
+    expect(h.logs.filter((line) => line === "heartbeat failed")).toHaveLength(2);
   });
 
   it("sends heartbeats while a step runs, and stops when it's done", async () => {

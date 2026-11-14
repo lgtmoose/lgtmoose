@@ -4,6 +4,11 @@ import {
   type SFNClient,
 } from "@aws-sdk/client-sfn";
 
+/** An AWS SDK error's name (`ExecutionDoesNotExist`, `TaskTimedOut`…), if it is an error. */
+export function errorName(error: unknown): string | undefined {
+  return error instanceof Error ? error.name : undefined;
+}
+
 /** The status of an execution by ARN, or undefined when there's no such execution. */
 export async function describeStatus(
   client: Pick<SFNClient, "send">,
@@ -13,7 +18,7 @@ export async function describeStatus(
     const reply = await client.send(new DescribeExecutionCommand({ executionArn }));
     return reply.status;
   } catch (error) {
-    if (error instanceof Error && error.name === "ExecutionDoesNotExist") return undefined;
+    if (errorName(error) === "ExecutionDoesNotExist") return undefined;
     throw error;
   }
 }

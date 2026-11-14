@@ -379,22 +379,48 @@ describe("dispatch", () => {
     expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
+  const untimed = (overrides: Partial<ReviewJob> = {}) => {
+    const value = job(overrides);
+    delete value.eventAt;
+    return value;
+  };
+
   it("orders a job without an event time behind every job with one", async () => {
     const f = fakeDeps();
-    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1, deliveryId: "d-old" }));
-    // Queued before jobs carried a time, received later than T1 by the gateway's clock.
-    const untimed = job({ deliveryId: "d-untimed" });
-    delete untimed.eventAt;
-    expect(await dispatch(f.deps, untimed)).toMatchObject({ action: "started", stopped: [] });
-    expect(f.status(nameOf(OLD))).toBe("RUNNING");
-    expect(f.recorded.get(arn(nameOf(NEW)))?.eventAt).toEqual(new Date(0));
-    // It doesn't move the PR's newest event on, so a timed job right after isn't stale, and
-    // that job stops it.
-    const next = job({ headSha: "c".repeat(40), eventAt: T1, deliveryId: "d-next" });
-    expect(await dispatch(f.deps, next)).toMatchObject({
+    // Queued before jobs carried a time: it starts, and stops nothing.
+    const first = untimed({ headSha: OLD, deliveryId: "d-untimed" });
+    expect(await dispatch(f.deps, first)).toMatchObject({ action: "started", stopped: [] });
+    expect(f.recorded.get(arn(nameOf(OLD)))?.eventAt).toEqual(new Date(0));
+    // It doesn't move the PR's newest event on, so the next timed job isn't stale, and stops it.
+    expect(await dispatch(f.deps, job({ eventAt: T1, deliveryId: "d-next" }))).toMatchObject({
       action: "started",
-      stopped: [arn(nameOf(NEW))],
+      stopped: [arn(nameOf(OLD))],
     });
+    // Once the PR has timed events, an untimed job is older than all of them.
+    const late = untimed({ headSha: "c".repeat(40), deliveryId: "d-late" });
+    expect(await dispatch(f.deps, late)).toMatchObject({ action: "stale" });
+    expect(f.status(nameOf(NEW))).toBe("RUNNING");
+  });
+
+  it("stops every execution on an untimed close", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, untimed({ headSha: OLD, deliveryId: "d-1" }));
+    await dispatch(f.deps, untimed({ deliveryId: "d-2" }));
+    const result = await dispatch(f.deps, untimed({ kind: "pr_closed", deliveryId: "d-3" }));
+    expect(result).toMatchObject({ action: "stopped" });
+    expect(f.status(nameOf(OLD))).toBe("ABORTED");
+    expect(f.status(nameOf(NEW))).toBe("ABORTED");
+  });
+
+  it("never retries for an untimed job", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, untimed({ headSha: OLD, deliveryId: "d-1" }));
+    await dispatch(f.deps, untimed({ deliveryId: "d-2" }));
+    must(f.executions.get(nameOf(OLD))).status = "ABORTED";
+    // An untimed redelivery for the old head: its execution was aborted, never reviewed.
+    const again = untimed({ kind: "pr_opened", headSha: OLD, deliveryId: "d-3" });
+    expect(await dispatch(f.deps, again)).toMatchObject({ action: "duplicate" });
+    expect(f.executions.has(nameOf(OLD, "d-3"))).toBe(false);
   });
 
   it("defers comment jobs to M5 and ignores a push without a head", async () => {

@@ -101,6 +101,9 @@ export function debounceSeconds(job: Pick<ReviewJob, "kind">): number {
  */
 export const UNTIMED = new Date(0);
 
+/** Later than any event: an untimed close stops every execution. */
+const END = new Date(8.64e15);
+
 /** The review state machine, as the dispatcher uses it. */
 export interface Executions {
   /** The ARN the named execution has, or will have once started. */
@@ -161,21 +164,22 @@ export type DispatchResult =
   | { action: "ignored"; reason: string };
 
 /**
- * Stops the PR's executions from jobs before `before` (up to and including it with
- * `inclusive`), except those for `keepHead`: they review the head this job is for. Each run is marked superseded before its execution is stopped,
- * and the execution marked stopped after: a failure in between leaves it for the retried job
- * to stop again, never a stopped run still marked running. Executions are stopped in parallel;
- * if any fails, the others still finish, then the first error is thrown.
+ * Stops the PR's `unstopped` executions from jobs before `before` (up to and including it with
+ * `inclusive`), except those for `keepHead`: they review the head this job is for. Each run is
+ * marked superseded before its execution is stopped, and the execution marked stopped after: a
+ * failure in between leaves it for the retried job to stop again, never a stopped run still
+ * marked running. Executions are stopped in parallel; if any fails, the others still finish,
+ * then the first error is thrown.
  */
 async function stopOlder(
   deps: DispatchDeps,
-  job: ReviewJob,
+  unstopped: readonly DispatchedExecution[],
   cause: string,
   before: Date,
   options: { inclusive?: boolean; keepHead?: string } = {},
 ): Promise<string[]> {
   const cutoff = before.getTime();
-  const stale = (await deps.store.unstopped(job.repo, job.prNumber)).filter((execution) => {
+  const stale = unstopped.filter((execution) => {
     if (execution.headSha === options.keepHead) return false;
     const at = execution.eventAt.getTime();
     return options.inclusive ? at <= cutoff : at < cutoff;
@@ -219,15 +223,17 @@ async function review(
   let name = executionName(job.repo, job.prNumber, job.headSha);
   let { started, executionArn } = await startExecution(deps, job, name, eventAt);
   let action: "started" | "retried" = "started";
-  // A job for a head that was reviewed, or is being, is a duplicate.
-  if (!started && (await needsRetry(deps, job, name))) {
+  const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
+  // A job for a head that was reviewed, or is being, is a duplicate. So is an untimed one: it
+  // can't be told from a late redelivery of an old push.
+  if (!started && timed !== undefined && (await needsRetry(deps, job, name, unstopped))) {
     name = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
     ({ started, executionArn } = await startExecution(deps, job, name, eventAt));
     action = "retried";
   }
   // This job is the PR's newest, so what older jobs started for other heads can go, duplicate
   // or not. Those for this head (this one, or a retry still running) are its review.
-  const stopped = await stopOlder(deps, job, `Superseded by ${job.headSha}.`, eventAt, {
+  const stopped = await stopOlder(deps, unstopped, `Superseded by ${job.headSha}.`, eventAt, {
     keepHead: job.headSha,
   });
   return started ? { action, executionArn, stopped } : { action: "duplicate", name, stopped };
@@ -243,10 +249,11 @@ async function needsRetry(
   deps: DispatchDeps,
   job: ReviewJob & { headSha: string },
   name: string,
+  unstopped: readonly DispatchedExecution[],
 ): Promise<boolean> {
   if (await deps.store.reviewed(job.repo, job.prNumber, job.headSha)) return false;
   const candidates = new Set([deps.executions.arnOf(name)]);
-  for (const execution of await deps.store.unstopped(job.repo, job.prNumber)) {
+  for (const execution of unstopped) {
     if (execution.headSha === job.headSha) candidates.add(execution.executionArn);
   }
   const statuses = await Promise.all([...candidates].map((arn) => deps.executions.status(arn)));
@@ -277,8 +284,11 @@ export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<Disp
       break;
   }
   const eventAt = job.eventAt === undefined ? undefined : new Date(job.eventAt);
-  const latest =
-    eventAt === undefined ? undefined : await deps.store.latest(job.repo, job.prNumber);
+  const latest = await deps.store.latest(job.repo, job.prNumber);
+  // An untimed job was queued before jobs carried a time, so before every timed job of its PR.
+  if (eventAt === undefined && latest !== undefined) {
+    return { action: "stale", reason: "untimed, and the PR has newer timed events" };
+  }
   if (eventAt !== undefined && latest !== undefined) {
     const last = latest.eventAt.getTime();
     const at = eventAt.getTime();
@@ -291,10 +301,11 @@ export async function dispatch(deps: DispatchDeps, job: ReviewJob): Promise<Disp
     }
   }
   if (job.kind === "pr_closed") {
-    // Untimed, it can only be ordered against other untimed jobs. Post checks the PR is still
-    // open before it posts, so the others' reviews don't land on a closed PR.
+    // Untimed (with no timed events seen), it's the newest thing known about the PR: stop
+    // everything. Stopping is safe even if it's wrong, since post checks the PR is open.
     if (eventAt !== undefined) await deps.store.advance(job.repo, job.prNumber, eventAt, true);
-    const stopped = await stopOlder(deps, job, "Pull request closed.", eventAt ?? UNTIMED, {
+    const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
+    const stopped = await stopOlder(deps, unstopped, "Pull request closed.", eventAt ?? END, {
       inclusive: true,
     });
     return { action: "stopped", stopped };

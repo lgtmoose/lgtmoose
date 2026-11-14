@@ -16,7 +16,7 @@ import {
   ShadowPoster,
   installationTokenProvider,
 } from "@lgtmoose/poster";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gt, inArray, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
@@ -191,8 +191,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
       const run = await record(runId);
       if (run === undefined) throw new Error(`No review run ${runId}.`);
       await db.transaction(async (tx) => {
-        // Only a run still running: one superseded or failed meanwhile keeps its status, and
-        // the PR keeps what a newer run records.
+        // It posted, so it succeeded, even if it was superseded or failed while posting.
         const [updated] = await tx
           .update(reviewRuns)
           .set({
@@ -201,9 +200,24 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             finishedAt: now(),
           })
-          .where(and(eq(reviewRuns.id, runId), eq(reviewRuns.status, "running")))
-          .returning({ id: reviewRuns.id });
+          .where(eq(reviewRuns.id, runId))
+          .returning({ createdAt: reviewRuns.createdAt });
         if (updated === undefined) return;
+        // The PR's record is the newest posted run's: an older run that finished posting later
+        // (stopped mid-post, say) leaves it to the newer one.
+        const [newer] = await tx
+          .select({ id: reviewRuns.id })
+          .from(reviewRuns)
+          .where(
+            and(
+              eq(reviewRuns.pullRequestId, run.pullRequestId),
+              eq(reviewRuns.status, "succeeded"),
+              ne(reviewRuns.id, runId),
+              gt(reviewRuns.createdAt, updated.createdAt),
+            ),
+          )
+          .limit(1);
+        if (newer !== undefined) return;
         await tx
           .update(pullRequests)
           .set({
@@ -228,10 +242,11 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         );
     },
     async supersedeRun(runId) {
+      // A run that already finished (or failed) keeps its status.
       await db
         .update(reviewRuns)
         .set({ status: "superseded", finishedAt: now() })
-        .where(eq(reviewRuns.id, runId));
+        .where(and(eq(reviewRuns.id, runId), inArray(reviewRuns.status, ["queued", "running"])));
     },
   };
 }

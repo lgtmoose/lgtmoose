@@ -242,9 +242,10 @@ describe("review state machine", () => {
     expect(States.Post).toMatchObject({ End: true });
     // A stop mustn't cut a post short: post reports on a task token instead of `.sync`.
     expect(States.Post?.Resource).toContain("ecs:runTask.waitForTaskToken");
-    // A control task that dies before reporting fails the step in minutes, not half an hour.
-    expect(States.Post?.HeartbeatSeconds).toBe(120);
-    expect(States.Prepare?.HeartbeatSeconds).toBe(120);
+    // A control task that dies before reporting fails the step in minutes, not half an hour,
+    // with room for a cold Fargate start before the first heartbeat.
+    expect(States.Post?.HeartbeatSeconds).toBe(300);
+    expect(States.Prepare?.HeartbeatSeconds).toBe(300);
     expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 
     const items = States.Batches?.ItemProcessor;

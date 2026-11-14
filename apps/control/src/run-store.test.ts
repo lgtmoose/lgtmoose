@@ -75,19 +75,49 @@ describe("drizzleRunStore", () => {
     expect(await runRow(next.runId)).toMatchObject({ kind: "full" });
   });
 
-  it("doesn't succeed a run superseded meanwhile, or touch its PR", async () => {
+  const posted = (sha: string, comment: number) => ({
+    filesDone: 1,
+    costUsd: undefined,
+    headSha: sha,
+    statusLabel: `label ${sha.slice(0, 1)}`,
+    summaryCommentId: comment,
+  });
+  const prRow = async (id: string) =>
+    (await db.select().from(pullRequests).where(eq(pullRequests.id, id)))[0];
+
+  it("records a run that posted even if it was superseded while posting", async () => {
     const run = await start("arn:exec:9", 9);
     await store.supersedeRun(run.runId);
-    await store.succeedRun(run.runId, {
-      filesDone: 1,
-      costUsd: undefined,
-      headSha: "a".repeat(40),
-      statusLabel: "lgtmoose: approved",
+    await store.succeedRun(run.runId, posted("a".repeat(40), 5));
+    expect(await runRow(run.runId)).toMatchObject({ status: "succeeded" });
+    expect(await prRow(run.pullRequestId)).toMatchObject({
+      lastReviewedSha: "a".repeat(40),
       summaryCommentId: 5,
     });
-    expect(await runRow(run.runId)).toMatchObject({ status: "superseded" });
-    const [pr] = await db.select().from(pullRequests).where(eq(pullRequests.id, run.pullRequestId));
-    expect(pr).toMatchObject({ lastReviewedSha: null, statusLabel: null, summaryCommentId: null });
+  });
+
+  it("leaves the PR to a newer run that already posted", async () => {
+    const older = await start("arn:exec:10", 10);
+    const newer = await start("arn:exec:11", 10);
+    await store.succeedRun(newer.runId, posted("b".repeat(40), 7));
+    await store.succeedRun(older.runId, posted("a".repeat(40), 6));
+    expect(await runRow(older.runId)).toMatchObject({ status: "succeeded" });
+    expect(await prRow(newer.pullRequestId)).toMatchObject({
+      lastReviewedSha: "b".repeat(40),
+      statusLabel: "label b",
+      summaryCommentId: 7,
+    });
+    // A newer run posting after an older one does take the PR over.
+    const newest = await start("arn:exec:12", 10);
+    await store.succeedRun(newest.runId, posted("c".repeat(40), 7));
+    expect(await prRow(newer.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
+  });
+
+  it("supersedes only a queued or running run", async () => {
+    const failed = await start("arn:exec:13", 13);
+    await store.failRun("arn:exec:13", "States.TaskFailed");
+    await store.supersedeRun(failed.runId);
+    expect(await runRow(failed.runId)).toMatchObject({ status: "failed" });
   });
 
   it("fails only an unfinished run of the execution", async () => {

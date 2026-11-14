@@ -34,8 +34,8 @@ export interface RunStore {
   getRun(runId: string): Promise<RunRecord | undefined>;
   setFilesTotal(runId: string, filesTotal: number): Promise<void>;
   /**
-   * Marks the run finished and records what it set on the PR, if the run is still running: a
-   * run superseded or failed meanwhile is left as it is, and so is the PR.
+   * Marks the run succeeded (it posted) and records what it set on the PR, unless a newer run
+   * of the PR has already succeeded: the PR's record is the newest posted run's.
    */
   succeedRun(
     runId: string,
@@ -49,7 +49,7 @@ export interface RunStore {
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */
   failRun(executionArn: string, error: string): Promise<void>;
-  /** Marks a run superseded: a newer head was pushed before it started. */
+  /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
 }
 

@@ -1,6 +1,6 @@
 import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
-import { describeStatus, sendHeartbeat } from "./sfn.js";
+import { describeStatus, errorName, sendHeartbeat } from "./sfn.js";
 import { readCommand, readControlEnv, readReviewSettings } from "./env.js";
 import { runCommand } from "./run.js";
 
@@ -16,9 +16,16 @@ async function main(): Promise<void> {
   }
   const command = readCommand(process.env);
   const settings = readReviewSettings(process.env);
+  const sfn = new SFNClient({});
+  // The heartbeat clock started when the step scheduled the task: beat before the slow setup
+  // (secrets, the database) so a cold start doesn't use it up. The step beats on from there.
+  if (command.command !== "fail") {
+    await sendHeartbeat(sfn, command.taskToken).catch((error: unknown) => {
+      process.stderr.write(`early heartbeat failed: ${errorName(error) ?? "unknown"}\n`);
+    });
+  }
   const deps = await awsControlDeps(env, { shadow: settings.shadow });
   try {
-    const sfn = new SFNClient({});
     await runCommand(
       {
         ...deps,

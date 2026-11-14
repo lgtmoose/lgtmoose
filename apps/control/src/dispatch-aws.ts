@@ -8,12 +8,8 @@ import {
 } from "@lgtmoose/db";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "./database.js";
-import { describeStatus } from "./sfn.js";
+import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
-
-function errorName(error: unknown): string | undefined {
-  return error instanceof Error ? error.name : undefined;
-}
 
 /** `arn:…:states:region:account:stateMachine:Name` → `…:execution:Name:<name>`. */
 export function executionArnOf(stateMachineArn: string, name: string): string {
