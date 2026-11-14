@@ -12,5 +12,8 @@ coverage/
 # Written by `lgtmoose setup`; contains account-specific settings.
 lgtmoose.config.ts
 
+# Eval reports and matrix results (`pnpm evals`): model output about fixture code.
+eval-report/
+
 # Scratch folder for packages/db check-migrations
 .migrations-check/

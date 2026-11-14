@@ -310,6 +310,9 @@ importers:
 
   packages/evals:
     dependencies:
+      '@lgtmoose/config':
+        specifier: workspace:*
+        version: link:../config
       '@lgtmoose/core':
         specifier: workspace:*
         version: link:../core

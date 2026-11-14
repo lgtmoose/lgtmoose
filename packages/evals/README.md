@@ -45,6 +45,37 @@ The run writes `report.md` and `report.json`, and exits 1 when recall is more th
 
 After a change that's meant to move the numbers, run it with `--update-baseline` and commit `baseline.json`. The committed baseline starts at 0, because no real run has been measured yet, so the gate passes until the first one is.
 
+## Provider matrix
+
+To compare providers on the same fixtures, name them with `--providers`:
+
+```bash
+pnpm evals --providers claude,chatgpt,cursor
+```
+
+`pnpm evals` builds the package and runs it from the repository root. Each provider reviews every fixture in turn:
+
+| Provider    | Runs                         | Credential (from the environment)                                                                  |
+| ----------- | ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `claude`    | Claude Code (`claude -p`)    | `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, Bedrock or Vertex                                  |
+| `agent-sdk` | the Claude Agent SDK         | `ANTHROPIC_API_KEY`, Bedrock or Vertex (not a claude.ai sign-in)                                   |
+| `chatgpt`   | the Codex CLI (`codex exec`) | `CODEX_AUTH_JSON` (a ChatGPT sign-in), `CODEX_ACCESS_TOKEN`, or `CODEX_API_KEY` / `OPENAI_API_KEY` |
+| `cursor`    | the Cursor CLI (`agent`)     | `CURSOR_API_KEY`                                                                                   |
+
+A provider without a credential is skipped, and the table says why. A rate or plan limit fails that batch: it's counted under "Limit hits", and the run goes on.
+
+- `--roles reviewer=claude` sets a provider per role, one configuration per flag (repeatable). Only the reviewer can be set today: the cross-file pass and the verifier have prompts but no step that runs them yet, so the flag refuses them rather than report numbers for a role that didn't run.
+- `--model chatgpt=gpt-5-codex` sets one provider's model (repeatable). A bare `--model opus` is Claude Code's, as before. Without one, Claude Code runs `sonnet` and the others their own default.
+- `--claude`, `--codex` and `--cursor` point at the binaries when they aren't on `PATH`.
+
+A matrix run isn't gated on the baseline. It writes to `--out` (default `./eval-report`, which git ignores):
+
+- `matrix.md`: the side-by-side table, with recall, false-positive rate, cost, time, limit hits and failed runs per configuration.
+- `matrix.json`: the same numbers per configuration and per fixture, with no finding text. It's versioned (`matrixResultsSchema`), so runs kept with `--results <dir>`, which adds a timestamped copy there, can be read back when choosing role defaults.
+- A folder per configuration with its `report.md`, `report.json` and transcripts.
+
+It exits 2 when no configuration could run (no credentials), and 0 otherwise.
+
 ## Private fixtures
 
 A fork can keep fixtures from its own code outside this repository and run them with the public ones. Put them in a directory with the same layout as `fixtures/`, for example a private repository checked out next to this one, and pass it with `--fixtures` (repeatable) or `LGTMOOSE_EVAL_FIXTURES` (directories separated by `:`, or `;` on Windows):

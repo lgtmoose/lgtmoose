@@ -4,9 +4,17 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { ClaudeCodeHarness } from "@lgtmoose/harness";
 import { FileTranscriptStore } from "@lgtmoose/pipeline";
-import { loadFixtures } from "./fixture.js";
+import { loadFixtures, type Fixture } from "./fixture.js";
+import {
+  matrixAssignments,
+  matrixRan,
+  modelsFrom,
+  renderMatrixMarkdown,
+  runMatrix,
+  type Assignment,
+} from "./matrix.js";
+import { EVAL_PROVIDERS } from "./providers.js";
 import {
   baselineFrom,
   buildReport,
@@ -38,10 +46,25 @@ Options:
   --out <dir>          Where to write the report and transcripts (default: ./eval-report)
   --baseline <file>    Baseline to compare with (default: this package's baseline.json)
   --update-baseline    Write this run's numbers to the baseline file instead of gating
-  --model <name>       Reviewer model (default: sonnet)
+  --model <name>       Reviewer model for Claude Code (default: sonnet). In a matrix run,
+                       --model <provider>=<name> sets one provider's model (repeatable)
   --timeout <minutes>  Time limit for each batch (default: 15)
-  --claude <path>      The claude binary (default: claude on PATH)
+  --claude <path>      The claude binary (default: claude on PATH), also for agent-sdk
+  --codex <path>       The codex binary (default: codex on PATH)
+  --cursor <path>      The Cursor agent binary (default: agent on PATH)
   -h, --help
+
+Provider matrix (instead of the single Claude Code run and its baseline gate):
+  --providers <ids>    Run every fixture with the reviewer on each provider in turn, such as
+                       claude,chatgpt,cursor. Providers: ${Object.keys(EVAL_PROVIDERS).join(", ")}
+  --roles <spec>       One configuration with a provider per role, such as reviewer=claude
+                       (repeatable). Only roles the pipeline runs today can be set: reviewer
+  --results <dir>      Also keep a timestamped copy of matrix.json here, to compare runs later
+
+A matrix run writes matrix.md (the side-by-side table) and matrix.json to --out, and each
+configuration's report.md, report.json and transcripts to a folder of its own. A provider
+without a credential is skipped, and limit hits are counted, not fatal. It exits 2 when no
+configuration could run, and 0 otherwise.
 `;
 
 /**
@@ -71,9 +94,14 @@ async function main(argv: readonly string[]): Promise<number> {
       out: { type: "string" },
       baseline: { type: "string" },
       "update-baseline": { type: "boolean" },
-      model: { type: "string" },
+      model: { type: "string", multiple: true },
       timeout: { type: "string" },
       claude: { type: "string" },
+      codex: { type: "string" },
+      cursor: { type: "string" },
+      providers: { type: "string" },
+      roles: { type: "string", multiple: true },
+      results: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -83,8 +111,26 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const minutes = Number(values.timeout ?? "15");
   if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("--timeout is minutes per batch.");
-  const model = values.model ?? "sonnet";
+  const models = modelsFrom(values.model);
   const out = resolve(values.out ?? "eval-report");
+  const matrix = values.providers !== undefined || values.roles !== undefined;
+  if (matrix && (values["update-baseline"] || values.baseline !== undefined)) {
+    throw new Error(
+      "A matrix run (--providers, --roles) isn't compared with a baseline: leave out --baseline and --update-baseline.",
+    );
+  }
+  if (!matrix && values.results !== undefined) {
+    throw new Error("--results is for matrix runs: add --providers or --roles.");
+  }
+  const assignments = matrix
+    ? matrixAssignments({ providers: values.providers, roles: values.roles }, EVAL_PROVIDERS)
+    : [];
+  const binaries: Record<string, string | undefined> = {
+    claude: values.claude,
+    "agent-sdk": values.claude,
+    chatgpt: values.codex,
+    cursor: values.cursor,
+  };
   const baselinePath = resolve(values.baseline ?? join(PACKAGE_DIR, "baseline.json"));
 
   if (values["update-baseline"] && values.only !== undefined) {
@@ -116,8 +162,22 @@ async function main(argv: readonly string[]): Promise<number> {
   const workRoot = await mkdtemp(join(tmpdir(), "lgtmoose-evals-"));
   const startedAt = new Date();
   try {
-    const harness = new ClaudeCodeHarness({
+    if (matrix) {
+      return await runMatrixMode(fixtures, assignments, {
+        out,
+        workRoot,
+        models,
+        binaries,
+        batchTimeoutMs: Math.round(minutes * 60_000),
+        results: values.results === undefined ? undefined : resolve(values.results),
+      });
+    }
+    const model = models.claude ?? "sonnet";
+    const claude = EVAL_PROVIDERS.claude;
+    if (claude === undefined) throw new Error("The claude provider is missing.");
+    const harness = claude.create({
       transcripts: new FileTranscriptStore(join(out, "transcripts")),
+      env: process.env,
       ...(values.claude === undefined ? {} : { binaryPath: values.claude }),
     });
     const scores = await runFixtures(fixtures, {
@@ -157,6 +217,62 @@ async function main(argv: readonly string[]): Promise<number> {
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }
+}
+
+/** A configuration's folder name under --out. */
+function folderOf(assignment: Assignment): string {
+  return assignment.label.replace(/[^A-Za-z0-9-]+/g, "_");
+}
+
+/** Runs the fixtures on each configuration and writes the table, the results and the reports. */
+async function runMatrixMode(
+  fixtures: readonly Fixture[],
+  assignments: readonly Assignment[],
+  run: {
+    out: string;
+    workRoot: string;
+    models: Record<string, string>;
+    binaries: Record<string, string | undefined>;
+    batchTimeoutMs: number;
+    results: string | undefined;
+  },
+): Promise<number> {
+  const results = await runMatrix(fixtures, assignments, {
+    providers: EVAL_PROVIDERS,
+    env: process.env,
+    harnessFor: (provider, assignment) => {
+      const binaryPath = run.binaries[provider.id];
+      return provider.create({
+        transcripts: new FileTranscriptStore(join(run.out, folderOf(assignment), "transcripts")),
+        env: process.env,
+        ...(binaryPath === undefined ? {} : { binaryPath }),
+      });
+    },
+    models: run.models,
+    batchTimeoutMs: run.batchTimeoutMs,
+    workRoot: run.workRoot,
+    progress: (line) => process.stderr.write(`${line}\n`),
+    onReport: async (assignment, report) => {
+      const dir = join(run.out, folderOf(assignment));
+      await mkdir(dir, { recursive: true });
+      const gate = { ok: true, message: `Configuration ${assignment.label}.` };
+      await writeFile(join(dir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+      await writeFile(join(dir, "report.md"), renderMarkdown(report, undefined, gate));
+    },
+  });
+  const json = `${JSON.stringify(results, null, 2)}\n`;
+  await writeFile(join(run.out, "matrix.json"), json);
+  await writeFile(join(run.out, "matrix.md"), renderMatrixMarkdown(results));
+  if (run.results !== undefined) {
+    await mkdir(run.results, { recursive: true });
+    const stamp = results.startedAt.replace(/[:.]/g, "-");
+    await writeFile(join(run.results, `matrix-${stamp}.json`), json);
+  }
+  const ran = matrixRan(results);
+  process.stderr.write(
+    `${ran ? "Matrix done." : "No configuration could run."}\nReport: ${join(run.out, "matrix.md")}\n`,
+  );
+  return ran ? 0 : 2;
 }
 
 main(process.argv.slice(2)).then(
