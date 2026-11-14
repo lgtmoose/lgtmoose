@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   HarnessError,
+  fullPrompt,
   type Harness,
   type HarnessResult,
   type HarnessRunOptions,
@@ -277,14 +278,16 @@ export class CodexHarness implements Harness {
         return { kind: "ok", output: checked.data, usage: run.usage, key };
       };
 
-      const first = await attempt(1, options.prompt + schema.promptSuffix);
+      const first = await attempt(1, fullPrompt(options) + schema.promptSuffix);
       if (first.kind === "ok") return success(first, first.usage, keys);
       // Resume the same thread so the model sees its answer; without a thread id (it never
       // started properly) a fresh run with the problems appended is the best there is.
       const repair = repairPrompt(first.problems);
       const second = await attempt(
         2,
-        threadId === undefined ? `${options.prompt}${schema.promptSuffix}\n\n${repair}` : repair,
+        threadId === undefined
+          ? `${fullPrompt(options)}${schema.promptSuffix}\n\n${repair}`
+          : repair,
       );
       if (second.kind === "ok") return success(second, addUsage(first.usage, second.usage), keys);
       throw new HarnessError(

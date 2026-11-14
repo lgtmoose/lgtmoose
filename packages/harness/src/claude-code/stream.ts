@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { HarnessUsage } from "../harness.js";
 import { parseAnswer } from "../answer.js";
+import {
+  classifyFailure,
+  classifyReportedFailure,
+  limitTimes,
+  type LimitFailure,
+} from "../limits.js";
 
 /** The last line of `--output-format stream-json`. Only the fields used here. */
 const resultEvent = z.looseObject({
@@ -11,6 +17,8 @@ const resultEvent = z.looseObject({
   structured_output: z.unknown().optional(),
   session_id: z.string().optional(),
   api_error_status: z.number().nullable().optional(),
+  /** Error results (`error_during_execution` and the like) list what went wrong here. */
+  errors: z.array(z.string()).optional(),
   total_cost_usd: z.number().optional(),
   usage: z
     .looseObject({
@@ -86,4 +94,36 @@ export function outputOf(
 ): { ok: true; value: unknown } | { ok: false; error: string } {
   if (result.structured_output !== undefined) return { ok: true, value: result.structured_output };
   return parseAnswer(result.result);
+}
+
+/**
+ * Claude's own plan-limit wording: "You've hit your 5-hour limit · resets 3:10pm (UTC)", "Claude
+ * AI usage limit reached|1763125800". The shared patterns cover the rest.
+ */
+const CLAUDE_PLAN_LIMIT = /hit your (?:[\w-]+ )?limit|usage limit reached/i;
+/** "resets 3:10pm (UTC)": the reset time as Claude Code wrote it. */
+const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·]{1,60}?)\s*(?:$|\n|·)/i;
+
+/** Classifies a Claude failure message: Claude's plan wording first, then the shared patterns. */
+export function classifyClaudeFailure(message: string): LimitFailure | undefined {
+  if (CLAUDE_PLAN_LIMIT.test(message)) {
+    const at = CLAUDE_RESETS.exec(message)?.[1]?.trim();
+    return { kind: "plan_limit", ...limitTimes(message), ...(at ? { resetsAt: at } : {}) };
+  }
+  return classifyFailure(message);
+}
+
+/**
+ * Whether a failed result is a plan limit, a rate limit or a refused credential, for the
+ * fallback chain. The API's status decides first (429 is throttling); then the error the CLI
+ * reported (its result text or error list), and stderr for machine signals only when that
+ * report is generic (`classifyReportedFailure`).
+ */
+export function claudeLimitFailure(result: ResultEvent, stderr: string): LimitFailure | undefined {
+  const reported = [result.result, ...(result.errors ?? [])].filter(Boolean).join("\n");
+  if (result.api_error_status === 429) {
+    const plan = reported === "" ? undefined : classifyClaudeFailure(reported);
+    return plan?.kind === "plan_limit" ? plan : { kind: "rate_limit", ...limitTimes(reported) };
+  }
+  return classifyReportedFailure(reported, stderr, classifyClaudeFailure);
 }

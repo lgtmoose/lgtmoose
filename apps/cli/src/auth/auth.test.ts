@@ -54,6 +54,8 @@ function harness(
     profilesFail?: boolean;
     remove?: RemoveResult;
     put?: PutResult;
+    /** Files `auth vertex` can read. */
+    files?: Record<string, string>;
   } = {},
 ) {
   const puts: { label: CredentialLabel; value: string }[] = [];
@@ -119,6 +121,12 @@ function harness(
     trapSignals: () => () => {},
     tmpRoot,
     out: (text) => out.push(text),
+    readKeyFile: (path) => {
+      const text = options.files?.[path];
+      return text === undefined
+        ? Promise.reject(new Error("ENOENT: no such file"))
+        : Promise.resolve(text);
+    },
   };
   const go = async (argv: string[]) => {
     const result = await runAuth(argv, () => Promise.resolve(deps));
@@ -137,8 +145,8 @@ describe("auth", () => {
     const getDeps = vi.fn();
     expect((await runAuth(["--help"], getDeps)).stdout).toBe(AUTH_HELP);
     expect((await runAuth([], getDeps)).exitCode).toBe(1);
-    const unknown = await runAuth(["vertex"], getDeps);
-    expect(unknown.stderr).toContain('Unknown auth method "vertex"');
+    const unknown = await runAuth(["azure"], getDeps);
+    expect(unknown.stderr).toContain('Unknown auth method "azure"');
     const stray = await runAuth(["cursor", "--paste"], getDeps);
     expect(stray.stderr).toContain("auth cursor doesn't take --paste");
     const extra = await runAuth(["list", "more"], getDeps);
@@ -261,6 +269,51 @@ describe("auth", () => {
     expectNoSecrets(result.all);
   });
 
+  describe("vertex", () => {
+    const vertexConfig = {
+      ...baseConfig,
+      providers: [{ id: "vertex", harness: "claude-code", auth: "vertex" }],
+    };
+    const key = {
+      type: "service_account",
+      project_id: "acme-reviews",
+      client_email: "reviewer@acme-reviews.iam.gserviceaccount.com",
+      private_key: "-----BEGIN PRIVATE KEY-----\nSECRET-PEM\n-----END PRIVATE KEY-----\n",
+    };
+
+    it("stores a service-account key file as one line of JSON", async () => {
+      const h = harness({
+        config: vertexConfig,
+        files: { "key.json": JSON.stringify(key, null, 2) },
+      });
+      const result = await h.go(["vertex", "key.json"]);
+      expect(result.exitCode).toBe(0);
+      expect(h.puts).toEqual([
+        {
+          label: { providerId: "vertex", harness: "claude-code", auth: "vertex" },
+          value: JSON.stringify(key),
+        },
+      ]);
+      expect(result.all).not.toContain("SECRET-PEM");
+    });
+
+    it("refuses a missing path, an unreadable file and anything but a service-account key", async () => {
+      const files = {
+        "notes.txt": "SECRET-PEM is not JSON",
+        "user.json": JSON.stringify({ type: "authorized_user", refresh_token: "SECRET-PEM" }),
+      };
+      const h = harness({ config: vertexConfig, files });
+      expect((await h.go(["vertex"])).stderr).toContain("auth vertex needs the key file");
+      expect((await h.go(["vertex", "gone.json"])).stderr).toContain("Could not read gone.json");
+      const notJson = await h.go(["vertex", "notes.txt"]);
+      expect(notJson.stderr).toContain("isn't JSON");
+      const user = await h.go(["vertex", "user.json"]);
+      expect(user.stderr).toContain("isn't a service-account key");
+      expect(h.puts).toEqual([]);
+      for (const out of [notJson.all, user.all]) expect(out).not.toContain("SECRET-PEM");
+    });
+  });
+
   it("tells the store the exact command, so its messages can say to run it again", async () => {
     const h = harness({ answers: [ANTHROPIC_KEY] });
     await h.go(["api-key", "--provider", "anthropic", "--id", "anthropic"]);
@@ -341,6 +394,7 @@ describe("auth", () => {
         run: h.run,
         trapSignals: () => () => {},
         out: () => {},
+        readKeyFile: () => Promise.reject(new Error("unused")),
       } satisfies AuthDeps);
       return deps;
     });

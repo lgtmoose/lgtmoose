@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
   HarnessError,
+  fullPrompt,
   type Harness,
   type HarnessResult,
   type HarnessRunOptions,
@@ -12,14 +13,21 @@ import {
 } from "../harness.js";
 import { exitText, saveAttemptTranscript, success } from "../attempt.js";
 import { repairPrompt, schemaJson, schemaPromptSuffix, truncate } from "../answer.js";
-import { isolatedEnv, networkEnv } from "../env.js";
 import { runProcess, type ProcessResult } from "../process.js";
 import { redact, valueContainsSecret } from "../redact.js";
 import { transcriptKey, type TranscriptStore } from "../transcript.js";
 import { addUsage } from "../usage.js";
 import { claudeAuthEnv } from "./auth.js";
-import { ALLOWED_TOOLS, DISALLOWED_TOOLS, guardScript, sessionSettings, TOOLS } from "./policy.js";
-import { findResult, isAuthRetry, outputOf, usageOf, type ResultEvent } from "./stream.js";
+import { ALLOWED_TOOLS, DISALLOWED_TOOLS, TOOLS } from "./policy.js";
+import { prepareClaudeSession } from "./session.js";
+import {
+  claudeLimitFailure,
+  findResult,
+  isAuthRetry,
+  outputOf,
+  usageOf,
+  type ResultEvent,
+} from "./stream.js";
 
 export interface ClaudeCodeHarnessOptions {
   /** Where each attempt's stream-json transcript is saved. */
@@ -68,19 +76,16 @@ export class ClaudeCodeHarness implements Harness {
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-claude-"));
     const keys: string[] = [];
     try {
-      const guardPath = join(home, "guard.cjs");
-      await writeFile(guardPath, guardScript());
-      await mkdir(join(home, ".claude"));
-      await mkdir(join(home, "tmp"));
-      const settings = JSON.stringify(
-        sessionSettings(`${shellQuote(process.execPath)} ${shellQuote(guardPath)}`),
+      const session = await prepareClaudeSession(
+        home,
+        source,
+        auth,
+        this.options.scrubSubprocessEnv === undefined
+          ? {}
+          : { scrubSubprocessEnv: this.options.scrubSubprocessEnv },
       );
-      const env: Record<string, string> = {
-        PATH: source.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        ...networkEnv(source),
-        ...auth.env,
-        ...hardeningEnv(home, this.options.scrubSubprocessEnv ?? false),
-      };
+      const settings = JSON.stringify(session.settings);
+      const env = session.env;
       const schema = jsonSchemaFor(options.schema);
       const sessionId = randomUUID();
       const secrets = auth.secrets;
@@ -138,7 +143,7 @@ export class ClaudeCodeHarness implements Harness {
         return { kind: "ok", output: checked.data, usage, key };
       };
 
-      const first = await attempt(1, options.prompt + schema.promptSuffix);
+      const first = await attempt(1, fullPrompt(options) + schema.promptSuffix);
       if (first.kind === "ok") return success(first, first.usage, keys);
 
       const second = await attempt(2, repairPrompt(first.problems));
@@ -182,33 +187,17 @@ function failIfUnusable(
   // Running out of structured output retries is invalid output, which a repair retry can fix.
   if (result.subtype === "error_max_structured_output_retries") return;
   if (result.is_error || result.subtype !== "success") {
-    throw fail("process", `claude reported ${result.subtype}: ${result.result ?? "no detail"}`);
+    const detail = result.result ?? result.errors?.join("; ") ?? "no detail";
+    const limit = claudeLimitFailure(result, proc.stderr);
+    if (limit !== undefined) {
+      const { kind, ...extra } = limit;
+      throw new HarnessError(kind, truncate(redact(`claude stopped: ${detail}`, secrets)), {
+        transcriptKeys: keys,
+        ...extra,
+      });
+    }
+    throw fail("process", `claude reported ${result.subtype}: ${detail}`);
   }
-}
-
-/** Quotes a path for the shell that runs hook commands. */
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-/**
- * Variables that keep the CLI and git from reading anything but the checkout: a fresh home and
- * config directory, no CLAUDE.md or memory, no updates or telemetry, and git without user or
- * system config, pager, prompts or lazy fetches.
- */
-function hardeningEnv(home: string, scrub: boolean): Record<string, string> {
-  return {
-    ...isolatedEnv(home),
-    CLAUDE_CONFIG_DIR: join(home, ".claude"),
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: scrub ? "1" : "0",
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    DISABLE_AUTOUPDATER: "1",
-    DISABLE_TELEMETRY: "1",
-    DISABLE_ERROR_REPORTING: "1",
-    CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
-    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-    CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1",
-  };
 }
 
 export interface ClaudeArgsOptions {

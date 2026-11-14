@@ -8,6 +8,7 @@ import { exitText, saveAttemptTranscript, success } from "../attempt.js";
 import { isolatedEnv, networkEnv } from "../env.js";
 import {
   HarnessError,
+  fullPrompt,
   type Harness,
   type HarnessResult,
   type HarnessRunOptions,
@@ -127,11 +128,11 @@ export class CursorHarness implements Harness {
     // No structured-output flag: the schema is described in the prompt, and checked with zod.
     const schemaSuffix = schemaPromptSuffix(schemaJson(options.schema));
     // Before copying anything; the note about the copy adds a sentence, checked again below.
-    checkPromptSize(options.prompt + schemaSuffix, keys);
+    checkPromptSize(fullPrompt(options) + schemaSuffix, keys);
     const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
     try {
       const { dir: workspace, copy } = await copyCheckout(options.cwd, root, keys);
-      const firstPrompt = options.prompt + copyNote(copy) + schemaSuffix;
+      const firstPrompt = fullPrompt(options) + copyNote(copy) + schemaSuffix;
       checkPromptSize(firstPrompt, keys);
       const taskDir = await freeTaskDir(workspace);
       const home = join(root, "home");

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { configPath, nodeFiles } from "../paths.js";
 import type { AuthDeps, AuthPrompter } from "./auth.js";
 import { createBedrockAccess } from "./bedrock.js";
@@ -24,5 +25,6 @@ export async function defaultAuthDeps(): Promise<AuthDeps> {
     run: spawnInteractive,
     trapSignals: trapProcessSignals,
     out: (text) => process.stdout.write(text),
+    readKeyFile: (path) => readFile(path, "utf8"),
   };
 }

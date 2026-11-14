@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { accessSync, constants, createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
-import { ClaudeCodeHarness, CodexHarness, CursorHarness, type Harness } from "@lgtmoose/harness";
+import {
+  AgentSdkHarness,
+  ClaudeCodeHarness,
+  CodexHarness,
+  CursorHarness,
+  type Harness,
+} from "@lgtmoose/harness";
 import { runSandboxBatch } from "./batch.js";
 import { dropSymlinks } from "./checkout.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
@@ -26,6 +33,21 @@ function extract(archive: string, dir: string): Promise<void> {
       );
     }, reject);
   });
+}
+
+/** The first executable named `name` on `path`, if any. */
+function onPath(name: string, path: string | undefined): string | undefined {
+  for (const dir of (path ?? "").split(":")) {
+    if (dir === "") continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here.
+    }
+  }
+  return undefined;
 }
 
 function log(message: string, fields: Record<string, unknown> = {}): void {
@@ -56,6 +78,11 @@ async function main(): Promise<void> {
         const options = { transcripts, env: harnessVars, tmpRoot: TMP };
         if (env.harness === "codex") return new CodexHarness(options);
         if (env.harness === "cursor-agent") return new CursorHarness(options);
+        if (env.harness === "agent-sdk") {
+          // The image's pinned claude (CLAUDE_CODE_VERSION), which the SDK version tracks.
+          const claude = onPath("claude", process.env.PATH);
+          return new AgentSdkHarness({ ...options, ...(claude ? { binaryPath: claude } : {}) });
+        }
         return new ClaudeCodeHarness(options);
       },
       workDir: WORK,

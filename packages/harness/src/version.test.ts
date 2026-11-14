@@ -28,6 +28,19 @@ describe("CLAUDE_CODE_VERSION", () => {
   });
 });
 
+describe("the Claude Agent SDK pin", () => {
+  it("tracks the pinned Claude Code version", async () => {
+    // The SDK's patch number is the Claude Code version it bundles: 0.3.311 is Claude Code
+    // 2.1.311 (https://code.claude.com/docs/en/agent-sdk/typescript#installation).
+    const pkg = JSON.parse(
+      await readFile(join(import.meta.dirname, "../package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const sdk = pkg.dependencies["@anthropic-ai/claude-agent-sdk"];
+    expect(sdk).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(sdk?.split(".")[2]).toBe(CLAUDE_CODE_VERSION.split(".")[2]);
+  });
+});
+
 describe("CODEX_VERSION", () => {
   it("is an exact version that matches the sandbox image", async () => {
     expect(CODEX_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
