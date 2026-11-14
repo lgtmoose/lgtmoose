@@ -639,6 +639,27 @@ describe("auth", () => {
     );
   });
 
+  it("bedrock: a pinned id without access still has its pin checked, in the same run", async () => {
+    const config = pinned({ fast: HAIKU, standard: SONNET, deep: OPUS });
+    const result = await harness({
+      config,
+      models: [
+        model(HAIKU),
+        model(SONNET, { usable: false, inferenceTypes: ["INFERENCE_PROFILE"] }),
+        model(OPUS),
+      ],
+      profiles: [profile(`eu.${SONNET}`)],
+    }).go(["bedrock"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      `standard (${SONNET}): ${SONNET}: model access not granted, can only be called through an inference profile; use eu.${SONNET}`,
+    );
+    expect(fixesOf(result.stderr)).toEqual([
+      ACCESS_FIX,
+      "  - Fix the id in bedrock.models.standard.",
+    ]);
+  });
+
   it("bedrock: a pinned usable legacy model passes, and is the only legacy model checked", async () => {
     const LEGACY = "anthropic.claude-3-opus-20240229-v1:0";
     const config = pinned({
@@ -653,7 +674,11 @@ describe("auth", () => {
     const result = await h.go(["bedrock"]);
     // Only pinned ids are asked for among legacy models.
     expect(h.legacyAsked).toEqual([[HAIKU, LEGACY]]);
-    expect(result.stderr).toContain(`fast (eu.${HAIKU}:200k): ${HAIKU}: model access`);
+    // Access and the wrong profile prefix, both in one run.
+    expect(result.stderr).toContain(
+      `fast (eu.${HAIKU}:200k): eu.${HAIKU}: model access not granted, isn't an inference profile eu-west-2 can call; use ${HAIKU}`,
+    );
+    expect(fixesOf(result.stderr)).toEqual([ACCESS_FIX, "  - Fix the id in bedrock.models.fast."]);
     const pinnedLegacyOnly = pinned({ deep: LEGACY, fast: "arn:aws:x", standard: "arn:aws:y" });
     // The only current model isn't usable: the pinned tier still decides.
     const legacy = await harness({

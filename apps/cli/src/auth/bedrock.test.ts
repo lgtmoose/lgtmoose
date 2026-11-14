@@ -103,7 +103,12 @@ describe("awsBedrockAccess", () => {
                 entitlementAvailability: "NOT_AVAILABLE",
                 agreementAvailability: { status: "NOT_AVAILABLE" },
               }
-            : { ...AVAILABLE, agreementAvailability: { status: "PENDING" } },
+            : {
+                ...AVAILABLE,
+                // Access isn't granted yet either: the pending agreement is the one thing to wait on.
+                entitlementAvailability: "NOT_AVAILABLE",
+                agreementAvailability: { status: "PENDING" },
+              },
         );
       },
     };

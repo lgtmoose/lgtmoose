@@ -814,34 +814,36 @@ function idVerdict(
   if (access === undefined) {
     return blocked(id, [{ text: `isn't offered in ${facts.region}`, fix: { kind: "region" } }]);
   }
-  if (!access.usable) return blocked(id, reachProblems(access, facts));
-  const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
+  const subject = prefix === undefined ? id : `${prefix}.${id}`;
   const ids = facts.reach.get(access.modelId);
-  /** Pinned in a way this region can't call: name the ids that work, or say there are none. */
-  const wrongPin = (subject: string, text: string): Verdict => {
+  // Not offered here, or no way to call it here: that alone decides, whatever else is wrong.
+  const route = reachProblems(access, facts).filter((problem) => problem.fix.kind === "region");
+  if (route.length > 0) return blocked(subject, route);
+
+  // The pin is checked whether or not access is granted, so both show in one run.
+  const pin: Problem[] = [];
+  const wrongPin = (text: string) => {
     if (ids === undefined) {
-      return blocked(subject, [
-        { text, fix: idFix },
-        { text: NEEDS_PROFILE_LIST, fix: { kind: "profiles" } },
-      ]);
+      pin.push({ text, fix: idFix }, { text: NEEDS_PROFILE_LIST, fix: { kind: "profiles" } });
+    } else {
+      pin.push({ text: `${text}; use ${ids.join(" or ")}`, fix: idFix });
     }
-    if (ids.length === 0) return blocked(subject, [{ text: NO_ROUTE, fix: { kind: "region" } }]);
-    return blocked(subject, [{ text: `${text}; use ${ids.join(" or ")}`, fix: idFix }]);
   };
+  let unchecked = false;
   if (prefix === undefined) {
-    if (!supports(access, "ON_DEMAND")) {
-      return wrongPin(id, "can only be called through an inference profile");
-    }
-    return { state: "ok", detail: `${id}${legacy}` };
+    if (!supports(access, "ON_DEMAND")) wrongPin("can only be called through an inference profile");
+  } else if (facts.profiles === undefined) {
+    unchecked = true;
+  } else if (!facts.profiles.some((profile) => profile.id === subject && profile.modelId === id)) {
+    wrongPin(`isn't an inference profile ${facts.region} can call`);
   }
-  const profileId = `${prefix}.${id}`;
-  if (facts.profiles === undefined) {
-    return { state: "not checked", detail: `${profileId}${legacy}: ${NEEDS_PROFILE_LIST}` };
-  }
-  if (!facts.profiles.some((profile) => profile.id === profileId && profile.modelId === id)) {
-    return wrongPin(profileId, `isn't an inference profile ${facts.region} can call`);
-  }
-  return { state: "ok", detail: `${profileId}${legacy}` };
+
+  const problems = [...(access.usable ? [] : modelProblems(access)), ...pin];
+  if (problems.length > 0) return blocked(subject, problems);
+  const legacy = access.legacy ? " (legacy: Bedrock is retiring it)" : "";
+  if (unchecked)
+    return { state: "not checked", detail: `${subject}${legacy}: ${NEEDS_PROFILE_LIST}` };
+  return { state: "ok", detail: `${subject}${legacy}` };
 }
 
 async function authList(deps: AuthDeps): Promise<string> {
