@@ -50,6 +50,21 @@ export function runKeys(runId: string) {
   };
 }
 
+/**
+ * Keys shared by every run of a PR at one head, under `runs/heads/`. `repo` is owner/name,
+ * lowercased here (GitHub's names are case-insensitive).
+ */
+export function headKeys(repo: string, prNumber: number, headSha: string) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error(`Not owner/name: ${repo}`);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("Not a PR number.");
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headSha)) throw new Error("Not a commit SHA.");
+  const root = `${RUN_PREFIX}heads/${repo.toLowerCase()}/${prNumber}/${headSha}/`;
+  return {
+    /** Held while a run checks the head for our review and submits one, so runs take turns. */
+    reviewClaim: `${root}review-claim.json`,
+  };
+}
+
 /** The harness run ID for a batch: its transcripts are grouped under it. */
 export function batchRunId(runId: string, index: number): string {
   return `${assertRunId(runId)}-batch-${assertIndex(index)}`;

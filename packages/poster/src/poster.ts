@@ -51,11 +51,11 @@ export interface Poster {
   /** Status label calls for this PR, for `syncStatusLabel`. */
   labels(pull: PullRef): LabelClient;
   /**
-   * Whether the PR has a review by us on `commitId` whose body carries a marker starting with
-   * `markerPrefix` (see `reviewMarkerComment`): from any run. Always false in shadow mode,
-   * where reviews are recorded, not posted.
+   * The markers starting with `markerPrefix` (see `reviewMarkerComment`) in our reviews on
+   * `commitId`, from any run. Always none in shadow mode, where reviews are recorded, not
+   * posted.
    */
-  reviewedAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<boolean>;
+  markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<string[]>;
 }
 
 function rateLimited(error: unknown): boolean {
@@ -150,7 +150,7 @@ export class GitHubPoster implements Poster {
     return comment.user?.type === "Bot";
   }
 
-  async reviewedAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<boolean> {
+  async markersAt(pull: PullRef, commitId: string, markerPrefix: string): Promise<string[]> {
     // The opening of a marker comment with this prefix (the prefix must be a marker's start).
     const opening = reviewMarkerComment(markerPrefix).replace(/ -->$/, "");
     // The App's bot (or, without its slug, any bot): anyone can quote a marker.
@@ -159,13 +159,17 @@ export class GitHubPoster implements Poster {
     const reviews = await this.github.list<ListedReview>(
       `${repoPath(pull)}/pulls/${pull.pull}/reviews`,
     );
-    return reviews.some(
-      (review) =>
-        review.commit_id === commitId &&
-        review.user?.type === "Bot" &&
-        (bot === undefined || review.user.login === bot) &&
-        review.body?.includes(opening) === true,
-    );
+    const markers: string[] = [];
+    for (const review of reviews) {
+      if (review.commit_id !== commitId || review.user?.type !== "Bot") continue;
+      if (bot !== undefined && review.user.login !== bot) continue;
+      const body = review.body ?? "";
+      for (let at = body.indexOf(opening); at >= 0; at = body.indexOf(opening, at + 1)) {
+        const end = body.indexOf(" -->", at);
+        if (end > at) markers.push(body.slice(at + "<!-- ".length, end));
+      }
+    }
+    return markers;
   }
 
   async submitReview(

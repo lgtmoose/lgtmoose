@@ -4,6 +4,7 @@ import type { ReviewEvent } from "@lgtmoose/core";
 import {
   batchOutputSchema,
   finishReview,
+  headKeys,
   runKeys,
   type BatchOutcome,
   type ReviewReport,
@@ -124,9 +125,21 @@ function parseJson(text: string | undefined): unknown {
 /** How every run's review marker starts. */
 export const REVIEW_MARKER_PREFIX = "lgtmoose-run:";
 
-/** The hidden marker in a run's review, by which a later post finds it on GitHub. */
-export function reviewMarker(runId: string): string {
-  return `${REVIEW_MARKER_PREFIX}${runId}`;
+/**
+ * The hidden marker in a run's review, by which a later post finds it on GitHub: the run, and
+ * whether the review covered the whole PR (an incomplete one, after failed batches, mustn't
+ * keep a complete one from being posted).
+ */
+export function reviewMarker(runId: string, complete: boolean): string {
+  return `${REVIEW_MARKER_PREFIX}${runId}:${complete ? "complete" : "incomplete"}`;
+}
+
+/** Whether our reviews on the head (their markers) make another review from this run moot. */
+export function headCovered(markers: readonly string[], complete: boolean): boolean {
+  const complete_ = markers.some((marker) => marker.endsWith(":complete"));
+  // An incomplete review covers only a run that would be incomplete too. A complete run posts
+  // over it; GitHub counts each reviewer's latest review, so the earlier one stops counting.
+  return complete_ || (!complete && markers.some((marker) => marker.endsWith(":incomplete")));
 }
 
 /** Who a post attempt is, for the review claim. */
@@ -160,10 +173,12 @@ const HOLDER_GONE = new Set(["DEPROVISIONING", "STOPPED", "DELETED", TASK_MISSIN
 export const SUMMARY_MARKER = "lgtmoose-summary";
 
 /**
- * Claims the run's post for this attempt before it writes anything to GitHub, so two attempts
- * (a retry and the attempt it replaced, still alive) never write at once: only the holder
- * posts the review, sends check-run annotations, or saves progress. The claim names the
- * attempt's ECS task. Returns the claim's ETag. When another attempt holds it:
+ * Takes a claim for this attempt. The run's claim is held before the post writes anything to
+ * GitHub, so two attempts (a retry and the attempt it replaced, still alive) never write at
+ * once: only the holder posts the review, sends check-run annotations, or saves progress. The
+ * head's claim is held around checking the head for our review and submitting one, so two
+ * runs at one head take turns there. The claim names the attempt's ECS task. Returns the
+ * claim's ETag. When another attempt holds it:
  * - its task has stopped (or is gone): the claim is taken over, with a write conditional on
  *   the claim being unchanged, so two attempts can't both take it over;
  * - its task is still running, or can't be told: the step fails, and its retry tries later.
@@ -174,6 +189,7 @@ async function holdClaim(
   deps: ControlDeps,
   options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
   claimKey: string,
+  what = "this run's post",
 ): Promise<{ etag: string; tookOver: boolean }> {
   const mine = JSON.stringify({
     attempt: options.attempt.id,
@@ -186,7 +202,7 @@ async function holdClaim(
   if (current === undefined) {
     const again = await deps.store.createText(claimKey, mine);
     if (again !== undefined) return { etag: again, tookOver: false };
-    throw new Error("Another attempt claimed this run's post just now.");
+    throw new Error(`Another attempt claimed ${what} just now.`);
   }
   const holder = claimSchema.safeParse(parseJson(current.text));
   const holderTask = holder.success ? holder.data.taskArn : undefined;
@@ -194,18 +210,18 @@ async function holdClaim(
   // parallel retries, so it's an earlier run of this one that ended: take it over. On ECS, a
   // claim from off ECS is someone else's run of the same post: leave it be.
   if (holder.success && holderTask === undefined && options.attempt.taskArn !== undefined) {
-    throw new Error("Another attempt, off ECS, holds this run's post claim.");
+    throw new Error(`Another attempt, off ECS, holds the claim on ${what}.`);
   }
   // An unreadable claim has no holder to wait for.
   if (holderTask !== undefined) {
     const status = await options.taskStatus(holderTask);
     if (!HOLDER_GONE.has(status)) {
-      throw new Error(`Another attempt (task ${status}) holds this run's post claim.`);
+      throw new Error(`Another attempt (task ${status}) holds the claim on ${what}.`);
     }
   }
   const taken = await deps.store.replaceText(claimKey, mine, current.etag);
-  if (taken === undefined) throw new Error("Another attempt took over this run's post claim.");
-  deps.log("took over the post claim of a stopped attempt", { holderTask });
+  if (taken === undefined) throw new Error(`Another attempt took over the claim on ${what}.`);
+  deps.log("took over a stopped attempt's claim", { claimKey, holderTask });
   return { etag: taken, tookOver: true };
 }
 
@@ -315,20 +331,14 @@ export async function post(
     progressEtag = etag;
   };
 
-  // Whether the head already has a review by us, from this run or any other (a stopped run
-  // whose post finished, a retry, an overlapping execution). Then none is submitted: it's this
-  // head's review, and the run records it and carries on. Looked up once, when needed.
-  let reviewed: Promise<boolean> | undefined;
-  const headReviewed = () => {
-    reviewed ??= poster.reviewedAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
-    return reviewed;
-  };
-
   // On a takeover, the earlier holder may have posted and stopped before saving that. Then
   // it's posted, whatever has happened to the PR since: record it, never supersede.
-  if (claim.tookOver && !progress.review && (await headReviewed())) {
-    progress.review = true;
-    await save();
+  if (claim.tookOver && !progress.review) {
+    const markers = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+    if (markers.some((marker) => marker.startsWith(`${REVIEW_MARKER_PREFIX}${runId}:`))) {
+      progress.review = true;
+      await save();
+    }
   }
 
   let stale: string | undefined;
@@ -349,8 +359,49 @@ export async function post(
     outsideDiff: report.body,
     files: prepared.files,
     nitCap: config.gate.nit_cap,
-    marker: reviewMarker(runId),
+    marker: reviewMarker(runId, report.complete),
   });
+  const releaseLogged = (key: string, etag: string) =>
+    deps.store.deleteIfMatch(key, etag).catch((release: unknown) => {
+      deps.log("releasing a claim failed", {
+        runId,
+        key,
+        error: release instanceof Error ? release.message : String(release),
+      });
+    });
+  /**
+   * Submits the review unless our reviews on the head already cover it, from this run or any
+   * other (a stopped run whose post finished, a retry, an overlapping execution): then that's
+   * the head's review, and the run records it and carries on. Done holding the head's claim, so
+   * two runs at one head can't both find nothing and both submit.
+   */
+  const submitOnce = async () => {
+    const headClaim = headKeys(
+      `${target.owner}/${target.repo}`,
+      target.number,
+      pr.headSha,
+    ).reviewClaim;
+    const head = await holdClaim(deps, { attempt, taskStatus }, headClaim, "this head's review");
+    try {
+      const markers = await poster.markersAt(pull, pr.headSha, REVIEW_MARKER_PREFIX);
+      if (headCovered(markers, report.complete)) {
+        deps.log("the head already has our review; not posting another", { runId, markers });
+      } else {
+        await poster.submitReview(pull, pr.headSha, payload);
+      }
+    } catch (error) {
+      // Refused, it's not on GitHub: let the next attempt claim both at once. Otherwise (a
+      // timeout, a 5xx) it may be, and the claims stay until this task has stopped, when the
+      // next attempt takes them over and looks.
+      if (refused(error)) {
+        await releaseLogged(keys.reviewClaim, claim.etag);
+        await releaseLogged(headClaim, head.etag);
+      }
+      throw error;
+    }
+    // Done at this head: the next run's check finds the review.
+    await releaseLogged(headClaim, head.etag);
+  };
   const record = () =>
     deps.runs.succeedRun(runId, {
       filesDone: report.plan.reviewed,
@@ -362,27 +413,7 @@ export async function post(
     });
   try {
     if (!progress.review) {
-      if (await headReviewed()) {
-        deps.log("the head already has our review; not posting another", { runId });
-      } else {
-        try {
-          await poster.submitReview(pull, pr.headSha, payload);
-        } catch (error) {
-          // Refused, it's not on GitHub: let the next attempt claim it at once. Otherwise (a
-          // timeout, a 5xx) it may be, and the next attempt's lookup will tell.
-          if (refused(error)) {
-            await deps.store
-              .deleteIfMatch(keys.reviewClaim, claim.etag)
-              .catch((release: unknown) => {
-                deps.log("releasing the review claim failed", {
-                  runId,
-                  error: release instanceof Error ? release.message : String(release),
-                });
-              });
-          }
-          throw error;
-        }
-      }
+      await submitOnce();
       progress.review = true;
       await save();
     }

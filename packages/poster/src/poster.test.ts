@@ -326,11 +326,11 @@ describe("GitHubPoster", () => {
     const fake = fakeFetch(Array.from({ length: 5 }, () => ({ status: 200, body: reviews })));
     const github = new GitHubClient({ token: async () => TOKEN, fetch: fake.fetch });
     const p = new GitHubPoster(github, { appSlug: async () => "lgtmoose" });
-    expect(await p.reviewedAt(PULL, "c1", "lgtmoose-run:")).toBe(false);
-    expect(await p.reviewedAt(PULL, "c2", "lgtmoose-run:")).toBe(false);
-    expect(await p.reviewedAt(PULL, "c3", "lgtmoose-run:")).toBe(true);
-    expect(await p.reviewedAt(PULL, "c4", "lgtmoose-run:")).toBe(false);
-    expect(await p.reviewedAt(PULL, "c9", "lgtmoose-run:")).toBe(false);
+    expect(await p.markersAt(PULL, "c1", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c2", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c3", "lgtmoose-run:")).toEqual(["lgtmoose-run:r3"]);
+    expect(await p.markersAt(PULL, "c4", "lgtmoose-run:")).toEqual([]);
+    expect(await p.markersAt(PULL, "c9", "lgtmoose-run:")).toEqual([]);
   });
 
   it("leaves room in the summary for the longest marker", async () => {
