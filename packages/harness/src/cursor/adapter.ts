@@ -132,7 +132,10 @@ export class CursorHarness implements Harness {
     this.options = options;
   }
 
-  /** Removes every checkout copy this harness made. Later runs make new ones. */
+  /**
+   * Removes every checkout copy this harness made, once its runs are done (a run still going
+   * would lose its workspace). Later runs make new ones.
+   */
   async dispose(): Promise<void> {
     const all = [...this.workspaces.values()];
     this.workspaces.clear();
