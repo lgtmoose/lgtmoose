@@ -4,22 +4,29 @@ import {
   forgetLearning,
   mayLearningSuppress,
   proposeLearning,
+  toCheckedPermission,
   toPermission,
   type LearningDeps,
 } from "./policy.js";
-import { memoryLearningStore, type Permission } from "./store.js";
+import { memoryLearningStore, type OrgRole, type Permission } from "./store.js";
 
-function deps(permissions: Record<string, Permission>) {
+/** Repo permissions by login, and org roles by login (everyone else: none). */
+function deps(permissions: Record<string, Permission>, orgRoles: Record<string, OrgRole> = {}) {
   const store = memoryLearningStore();
   const asked: [string, string][] = [];
+  const askedOrg: [string, string][] = [];
   const value: LearningDeps = {
     store,
     permissions: async (repo, login) => {
       asked.push([repo, login]);
       return permissions[login] ?? "none";
     },
+    orgRoles: async (org, login) => {
+      askedOrg.push([org, login]);
+      return orgRoles[login] ?? "none";
+    },
   };
-  return { ...value, store, asked };
+  return { ...value, store, asked, askedOrg };
 }
 
 const source = { repo: "Acme/Shop", pr: 7, commentId: 101, author: "dana" };
@@ -68,15 +75,32 @@ describe("proposeLearning", () => {
     },
   );
 
-  it("needs admin to apply an org-wide learning", async () => {
-    const proposal = { ...repoScoped, scope: { level: "org" } };
-    expect(await proposeLearning(deps({ dana: "maintain" }), proposal, source)).toMatchObject({
+  it("keeps an org-wide learning from a repo admin who isn't an org owner pending", async () => {
+    // Anyone who creates a repo in the org is admin on it.
+    const d = deps({ dana: "admin" }, { dana: "member" });
+    const result = await proposeLearning(d, { ...repoScoped, scope: { level: "org" } }, source);
+    expect(result).toMatchObject({
       outcome: "pending",
-      learning: { repo: undefined, org: "acme" },
+      learning: { repo: undefined, org: "acme", authorPermission: "org:member" },
     });
-    expect(await proposeLearning(deps({ dana: "admin" }), proposal, source)).toMatchObject({
+    expect(d.askedOrg).toEqual([["acme", "dana"]]);
+    expect(d.asked).toEqual([]);
+  });
+
+  it("applies an org-wide learning at once for an owner of the org", async () => {
+    const d = deps({}, { dana: "admin" });
+    const result = await proposeLearning(d, { ...repoScoped, scope: { level: "org" } }, source);
+    expect(result).toMatchObject({
       outcome: "active",
+      learning: { authorPermission: "org:admin" },
     });
+    if (result.outcome === "refused") throw new Error("refused");
+    expect(
+      (await d.store.events(result.learning.id)).map((e) => [e.type, e.actorPermission]),
+    ).toEqual([
+      ["proposed", "org:admin"],
+      ["applied", "org:admin"],
+    ]);
   });
 
   it("scopes a path learning to the source repo", async () => {
@@ -204,16 +228,32 @@ describe("approveLearning and forgetLearning", () => {
     const id = await pending(d);
     expect(await approveLearning(d, id, { login: "lee" })).toMatchObject({ outcome: "refused" });
     expect((await d.store.get(id))?.status).toBe("pending");
-    // An org-wide one needs admin.
-    const d2 = deps({ dana: "read", ana: "write", root: "admin" });
-    const wide = await proposeLearning(d2, { ...repoScoped, scope: { level: "org" } }, source);
-    if (wide.outcome !== "pending") throw new Error("expected pending");
-    expect(await approveLearning(d2, wide.learning.id, { login: "ana" })).toMatchObject({
+  });
+
+  it("lets only an org owner approve or forget an org-wide learning", async () => {
+    const d = deps(
+      { dana: "read", ana: "admin", root: "read" },
+      { dana: "member", ana: "member", root: "admin" },
+    );
+    const id = await pending(d, { level: "org" });
+    // Admin on the repo isn't enough.
+    expect(await approveLearning(d, id, { login: "ana" })).toMatchObject({
       outcome: "refused",
+      reason: "needs an owner of acme (has org:member)",
     });
-    expect(await approveLearning(d2, wide.learning.id, { login: "root" })).toMatchObject({
+    expect(await forgetLearning(d, id, { login: "ana" })).toMatchObject({ outcome: "refused" });
+    expect((await d.store.get(id))?.status).toBe("pending");
+    expect(await approveLearning(d, id, { login: "root", commentId: 9 })).toMatchObject({
       outcome: "done",
+      learning: { status: "active" },
     });
+    expect(await forgetLearning(d, id, { login: "ana" })).toMatchObject({ outcome: "refused" });
+    expect(await forgetLearning(d, id, { login: "root" })).toMatchObject({ outcome: "done" });
+    expect((await d.store.events(id)).map((e) => [e.type, e.actor, e.actorPermission])).toEqual([
+      ["proposed", "dana", "org:member"],
+      ["approved", "root", "org:admin"],
+      ["retired", "root", "org:admin"],
+    ]);
   });
 
   it("retires a learning on forget and keeps its row and history", async () => {
@@ -266,5 +306,8 @@ describe("mayLearningSuppress and toPermission", () => {
     expect(toPermission("maintain")).toBe("maintain");
     expect(toPermission("superuser")).toBe("none");
     expect(toPermission(undefined)).toBe("none");
+    expect(toCheckedPermission("org:admin")).toBe("org:admin");
+    expect(toCheckedPermission("org:owner")).toBe("org:none");
+    expect(toCheckedPermission("write")).toBe("write");
   });
 });

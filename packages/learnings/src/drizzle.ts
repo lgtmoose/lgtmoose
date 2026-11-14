@@ -1,6 +1,6 @@
 import { learningEvents, learnings, type Database } from "@lgtmoose/db";
 import { and, asc, desc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
-import { toPermission } from "./policy.js";
+import { toCheckedPermission } from "./policy.js";
 import type { Learning, LearningEvent, LearningStore, NewLearningEvent } from "./store.js";
 
 type Row = typeof learnings.$inferSelect;
@@ -20,7 +20,7 @@ function toLearning(row: Row): Learning {
     sourcePr: row.sourcePr ?? undefined,
     sourceCommentId: row.sourceCommentId ?? undefined,
     author: row.author,
-    authorPermission: toPermission(row.authorPermission),
+    authorPermission: toCheckedPermission(row.authorPermission),
     createdAt: row.createdAt,
     retiredAt: row.retiredAt ?? undefined,
   };
@@ -120,7 +120,7 @@ export function drizzleLearningStore(
         learningId: row.learningId,
         type: row.type,
         actor: row.actor,
-        actorPermission: toPermission(row.actorPermission),
+        actorPermission: toCheckedPermission(row.actorPermission),
         githubCommentId: row.githubCommentId ?? undefined,
         createdAt: row.createdAt,
       }));

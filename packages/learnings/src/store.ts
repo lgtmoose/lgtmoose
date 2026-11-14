@@ -14,6 +14,16 @@ export type LearningEventType = "proposed" | "applied" | "approved" | "retired";
 export const PERMISSIONS = ["admin", "maintain", "write", "triage", "read", "none"] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
+/** A login's role in a GitHub org, as the org memberships API gives it. */
+export const ORG_ROLES = ["admin", "member", "none"] as const;
+export type OrgRole = (typeof ORG_ROLES)[number];
+
+/**
+ * The access that was checked for someone, as recorded: their repo permission for a repo or
+ * path learning, `org:<role>` for an org-wide one.
+ */
+export type CheckedPermission = Permission | `org:${OrgRole}`;
+
 export interface Learning {
   id: string;
   /** The GitHub org or user it belongs to. */
@@ -32,9 +42,12 @@ export interface Learning {
   sourceRepo: string;
   sourcePr: number | undefined;
   sourceCommentId: number | undefined;
-  /** Who proposed it, and their permission on `sourceRepo` then, both from GitHub. */
+  /**
+   * Who proposed it, and the access checked for them then, both from GitHub: their permission
+   * on `sourceRepo`, or their org role for an org-wide learning.
+   */
   author: string;
-  authorPermission: Permission;
+  authorPermission: CheckedPermission;
   createdAt: Date;
   retiredAt: Date | undefined;
 }
@@ -45,7 +58,8 @@ export interface LearningEvent {
   learningId: string;
   type: LearningEventType;
   actor: string;
-  actorPermission: Permission;
+  /** The access checked for the actor (see `Learning.authorPermission`). */
+  actorPermission: CheckedPermission;
   githubCommentId: number | undefined;
   createdAt: Date;
 }

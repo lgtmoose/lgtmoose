@@ -3,10 +3,13 @@ import { z } from "zod";
 import { redactSensitive, type RedactionKind } from "./redact.js";
 import {
   LEARNING_KINDS,
+  ORG_ROLES,
   PERMISSIONS,
+  type CheckedPermission,
   type Learning,
   type LearningKind,
   type LearningStore,
+  type OrgRole,
   type Permission,
 } from "./store.js";
 
@@ -17,13 +20,17 @@ import {
  * - **Only a proposal comes from the model** (or a comment): its kind, text, category and how
  *   wide it applies. Who proposed it, where, and their permission come from GitHub
  *   (`LearningSource`, `PermissionReader`), never from the proposal.
- * - **Applied only with write access.** A repo or path learning is active at once when its
- *   author has write access or higher on the repo; an org-wide one needs admin. Otherwise it
- *   waits as `pending` until someone with that access approves it.
+ * - **Applied only with the access its scope needs.** A repo or path learning is active at once
+ *   when its author has write access or higher on the repo. An org-wide one changes every repo
+ *   in the org, so it needs an owner of the org (`OrgRoleReader`): admin on one repo isn't
+ *   enough, since anyone who creates a repo is admin on it. Otherwise it waits as `pending`
+ *   until someone with that access approves it. Approving and forgetting need the same access.
  * - **Protected categories can't be suppressed.** A learning of a kind that can quiet findings
  *   (`accepted_pattern`, `scoping`, `correction`) can't name a protected category. Retrieval
  *   (NIC-837) must also never let a learning suppress a protected-category finding:
- *   `mayLearningSuppress`.
+ *   `mayLearningSuppress`, for every finding, learnings with no category included.
+ * - **Learning text stays untrusted.** It's proposal text from a comment or the model, so
+ *   retrieval puts it in an untrusted block in the prompt, never with the instructions.
  * - **Redacted before it's stored**, pending ones included: credentials and personal data in the
  *   text are replaced (`redactSensitive`).
  * - **`forget` retires**, it never deletes: the row and its history stay.
@@ -32,9 +39,17 @@ import {
 /** Reads a GitHub login's permission on a repo (the collaborators API), from GitHub. */
 export type PermissionReader = (repo: string, login: string) => Promise<Permission>;
 
+/**
+ * Reads a GitHub login's role in an org (the org memberships API: `admin` is an owner), from
+ * GitHub. For an account that's a user, not an org, only that user counts as `admin`; anyone
+ * else is `none`.
+ */
+export type OrgRoleReader = (org: string, login: string) => Promise<OrgRole>;
+
 export interface LearningDeps {
   store: LearningStore;
   permissions: PermissionReader;
+  orgRoles: OrgRoleReader;
 }
 
 /** Where a proposal came from: GitHub's facts about the comment, never the model's. */
@@ -124,9 +139,40 @@ export function toPermission(value: string | undefined): Permission {
   return (PERMISSIONS as readonly string[]).includes(value ?? "") ? (value as Permission) : "none";
 }
 
-/** The permission needed to apply, approve or forget a learning of this scope. */
-function needed(learning: { repo: string | undefined }): Permission {
-  return learning.repo === undefined ? "admin" : "write";
+/** A recorded permission (`Permission` or `org:<role>`); anything unknown counts as `none`. */
+export function toCheckedPermission(value: string | undefined): CheckedPermission {
+  if (value?.startsWith("org:") === true) {
+    const role = value.slice(4);
+    return (ORG_ROLES as readonly string[]).includes(role)
+      ? (`org:${role}` as CheckedPermission)
+      : "org:none";
+  }
+  return toPermission(value);
+}
+
+/**
+ * Whether `login` has the access a learning of this scope needs, read from GitHub: write on the
+ * repo it was proposed on for a repo or path learning, an owner of the org for an org-wide one.
+ */
+async function access(
+  deps: LearningDeps,
+  learning: { org: string; repo: string | undefined; sourceRepo: string },
+  login: string,
+): Promise<{ checked: CheckedPermission; ok: boolean; required: string }> {
+  if (learning.repo === undefined) {
+    const role = await deps.orgRoles(learning.org, login);
+    return {
+      checked: `org:${role}`,
+      ok: role === "admin",
+      required: `an owner of ${learning.org}`,
+    };
+  }
+  const permission = await deps.permissions(learning.sourceRepo, login);
+  return {
+    checked: permission,
+    ok: atLeast(permission, "write"),
+    required: `write access on ${learning.sourceRepo}`,
+  };
 }
 
 function atLeast(permission: Permission, required: Permission): boolean {
@@ -180,8 +226,11 @@ export async function proposeLearning(
   const pathGlob = scope.level === "path" ? scope.pathGlob : undefined;
   const redacted = redactSensitive(text);
   // From GitHub, at the time it's proposed.
-  const authorPermission = await deps.permissions(full, source.author);
-  const active = atLeast(authorPermission, needed({ repo }));
+  const { checked: authorPermission, ok: active } = await access(
+    deps,
+    { org: owner, repo, sourceRepo: full },
+    source.author,
+  );
   const { learning, created } = await deps.store.insert(
     {
       org: owner,
@@ -236,8 +285,8 @@ export type ChangeResult =
   | { outcome: "unchanged"; learning: Learning | undefined };
 
 /**
- * Makes a pending learning active, for someone with the access its scope needs on the repo it
- * was proposed on (write, or admin for an org-wide one).
+ * Makes a pending learning active, for someone with the access its scope needs: write on the
+ * repo it was proposed on, or an owner of the org for an org-wide one.
  */
 export async function approveLearning(
   deps: LearningDeps,
@@ -269,14 +318,8 @@ async function change(
 ): Promise<ChangeResult> {
   const learning = await deps.store.get(id);
   if (learning === undefined) return { outcome: "refused", reason: "no such learning" };
-  const permission = await deps.permissions(learning.sourceRepo, actor.login);
-  const required = needed(learning);
-  if (!atLeast(permission, required)) {
-    return {
-      outcome: "refused",
-      reason: `needs ${required} access on ${learning.sourceRepo} (has ${permission})`,
-    };
-  }
+  const { checked: permission, ok, required } = await access(deps, learning, actor.login);
+  if (!ok) return { outcome: "refused", reason: `needs ${required} (has ${permission})` };
   if (!(from as readonly string[]).includes(learning.status)) {
     return { outcome: "unchanged", learning };
   }

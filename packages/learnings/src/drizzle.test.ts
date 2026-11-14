@@ -102,7 +102,11 @@ describe("drizzleLearningStore", () => {
   });
 
   it("keeps a forgotten learning's row and history", async () => {
-    const deps: LearningDeps = { store, permissions: async () => "write" };
+    const deps: LearningDeps = {
+      store,
+      permissions: async () => "write",
+      orgRoles: async () => "member",
+    };
     const result = await proposeLearning(
       deps,
       { kind: "correction", text: "That helper is safe here.", scope: { level: "repo" } },

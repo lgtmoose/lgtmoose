@@ -6,12 +6,14 @@ export {
   MAX_LEARNING_TEXT,
   mayLearningSuppress,
   proposeLearning,
+  toCheckedPermission,
   toPermission,
   type ChangeResult,
   type LearningActor,
   type LearningDeps,
   type LearningProposal,
   type LearningSource,
+  type OrgRoleReader,
   type PermissionReader,
   type ProposeResult,
 } from "./policy.js";
@@ -30,4 +32,7 @@ export {
   type NewLearning,
   type NewLearningEvent,
   type Permission,
+  ORG_ROLES,
+  type CheckedPermission,
+  type OrgRole,
 } from "./store.js";
