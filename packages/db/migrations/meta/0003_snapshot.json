@@ -1,5 +1,5 @@
 {
-  "id": "3ef0cb0b-916f-407f-88fd-48cab538f89d",
+  "id": "6fbbee26-8200-4d2c-8b4e-e4c89a053e58",
   "prevId": "bba13a05-1f5a-4601-9ba2-b34bd72ea99d",
   "version": "7",
   "dialect": "postgresql",
@@ -1079,7 +1079,7 @@
         "dispute_answered",
         "resolved",
         "outdated",
-        "cleared"
+        "escalated"
       ]
     },
     "public.finding_source": {
@@ -1090,15 +1090,7 @@
     "public.finding_status": {
       "name": "finding_status",
       "schema": "public",
-      "values": [
-        "open",
-        "fixed",
-        "declined",
-        "disputed",
-        "resolved_by_human",
-        "outdated",
-        "cleared"
-      ]
+      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
     },
     "public.learning_kind": {
       "name": "learning_kind",

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Finding } from "@lgtmoose/core";
+import { severityRank, type Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
 import { runKeys, type BatchOutput, type PullReader, type PullRequest } from "@lgtmoose/pipeline";
 import { ShadowPoster } from "@lgtmoose/poster";
@@ -233,7 +233,7 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-/** A stored finding: tracked while open, outdated or cleared. */
+/** A stored finding: tracked while open or outdated. */
 type StoredFinding = FindingRecord;
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
@@ -269,15 +269,17 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
       for (const row of rows)
         if (ids.includes(row.id) && row.status === "open") row.status = "outdated";
     },
-    async markCleared(ids) {
-      for (const row of rows)
-        if (ids.includes(row.id) && row.status === "open") row.status = "cleared";
-    },
     async reopen(ids) {
       for (const row of rows)
-        if (ids.includes(row.id) && (row.status === "outdated" || row.status === "cleared")) {
-          row.status = "open";
+        if (ids.includes(row.id) && row.status === "outdated") row.status = "open";
+    },
+    async escalate(changes) {
+      for (const { id, severity } of changes) {
+        const row = rows.find((known) => known.id === id && known.status === "open");
+        if (row !== undefined && severityRank(severity) < severityRank(row.severity)) {
+          row.severity = severity;
         }
+      }
     },
   };
 }
@@ -601,10 +603,10 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(reviews(h)).toBe(2);
   });
 
-  it("clears a finding the reviewer doesn't raise again when it reads the file again", async () => {
+  it("keeps a finding open when the reviewer is quiet about it after a nearby edit", async () => {
     const h = harness();
-    await review(h, 1, [finding()]);
-    // Another line of the file changes, so it's read again; the loop line is untouched.
+    await review(h, 1, [finding({ severity: "should_fix" })]);
+    // Another line of the block changes, so the file is read again; the loop line is untouched.
     headSha = await commit(
       {
         "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 0;"),
@@ -612,22 +614,21 @@ describe("later runs", { timeout: 30_000 }, () => {
       "touch another line",
     );
 
-    const { posted } = await review(h, 2);
+    // Told not to repeat our comments, the reviewer says nothing: that doesn't clear it.
+    const quiet = await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "should_fix" }]);
+    expect(quiet.posted).not.toMatchObject({ event: "APPROVE" });
 
-    expect(h.findings.rows).toMatchObject([{ status: "cleared" }]);
-    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
-
-    // The next push touches the block again and the reviewer raises it again: reopened in
-    // place, not posted again, and it holds the decision.
+    // Raised again more severely: not posted again, stored and counted as blocking.
     headSha = await commit(
       {
         "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 1;"),
       },
       "touch it again",
     );
-    const reraised = await review(h, 3, [finding()]);
-    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-    expect(reraised.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
+    const again = await review(h, 3, [finding()]);
+    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
+    expect(again.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
   });
 
   it("reopens a finding raised again where its line moved to", async () => {

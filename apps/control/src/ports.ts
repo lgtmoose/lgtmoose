@@ -51,16 +51,13 @@ export interface FindingRecord {
   body: string;
   /** The head the finding was raised at: its line numbers are for that commit. */
   raisedAtSha: string;
-  /**
-   * Outdated findings are followed too: one whose line comes back (a reverted fix) reopens.
-   * So are cleared ones: one the reviewer raises again reopens.
-   */
-  status: "open" | "outdated" | "cleared";
+  /** Outdated findings are followed too: one whose line comes back (a reverted fix) reopens. */
+  status: "open" | "outdated";
 }
 
 /** `findings` and `finding_events`, for our own findings. */
 export interface FindingStore {
-  /** Our findings on the PR that are open, outdated or cleared, oldest first. */
+  /** Our findings on the PR that are open or outdated, oldest first. */
   trackedFindings(pullRequestId: string): Promise<FindingRecord[]>;
   /**
    * Records a run's new findings as open, raised at `headSha`. A fingerprint already on the PR
@@ -74,17 +71,16 @@ export interface FindingStore {
   ): Promise<void>;
   /** Marks open findings outdated at `sha`: the lines they're on no longer exist. */
   markOutdated(ids: readonly string[], sha: string): Promise<void>;
-  /**
-   * Reopens outdated or cleared findings at `sha`: the lines they're on exist again, or the
-   * reviewer raised them again.
-   */
+  /** Reopens outdated findings at `sha`: the lines they're on exist again. */
   reopen(ids: readonly string[], sha: string): Promise<void>;
   /**
-   * Marks open findings cleared at `sha`: the reviewer read their file again and didn't raise
-   * them again. That's the model's judgement, not a fix, so it's kept apart from `fixed`.
-   * Raising one later reopens it (see `saveFindings`).
+   * Raises open findings' severity at `sha`, with an `escalated` event: the reviewer raised them
+   * again more severely. Only ever upwards; a finding no longer open is left as it is.
    */
-  markCleared(ids: readonly string[], sha: string): Promise<void>;
+  escalate(
+    changes: readonly { id: string; severity: FindingRecord["severity"] }[],
+    sha: string,
+  ): Promise<void>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

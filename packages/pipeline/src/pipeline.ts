@@ -8,10 +8,12 @@ import {
   fingerprint,
   fingerprintParts,
   reviewerOutputSchema,
+  severityRank,
   type Finding,
   type HoldReason,
   type KnownFinding,
   type ReviewDecision,
+  type Severity,
 } from "@lgtmoose/core";
 import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
 import { reviewDiff } from "@lgtmoose/git";
@@ -103,12 +105,10 @@ export interface ReviewReport {
   /** This run's new findings (`inline` and `body`), each with its fingerprint, to record. */
   posted: { finding: Finding; fingerprint: string }[];
   /**
-   * Fingerprints of earlier open findings on files this run read again that weren't raised
-   * again: the reviewer looked and didn't find them, so they're resolved.
+   * Earlier findings the reviewer raised again at a higher severity (a duplicate matched to
+   * the finding itself): counted at that severity, and to store with it.
    */
-  resolved: string[];
-  /** Fingerprints of cleared findings (`FinishOptions.cleared`) raised again: reopen them. */
-  reopened: string[];
+  escalated: { fingerprint: string; severity: Severity }[];
   /** File versions this run reviewed, to record so a later run can skip them. */
   reviewedFiles: ReviewedFile[];
 }
@@ -134,12 +134,6 @@ export interface FinishOptions {
    * listed in the summary; a new finding with the same fingerprint isn't posted again.
    */
   earlier?: readonly EarlierFinding[];
-  /**
-   * Findings an earlier re-review cleared (read again, not raised again) whose lines are still
-   * in the PR. One the reviewer raises again (its fingerprint, a duplicate of it, or a duplicate
-   * on its line) is reopened and counts towards the decision.
-   */
-  cleared?: readonly EarlierFinding[];
 }
 
 /**
@@ -320,8 +314,9 @@ async function knownFindings(
   comments: readonly PullComment[],
   files: ReadonlyMap<string, FileDiff>,
   readLines: (blob: string | undefined) => Promise<string[]>,
-): Promise<{ known: KnownFinding; at: string }[]> {
-  const known: { known: KnownFinding; at: string }[] = [];
+  ours: readonly EarlierFinding[],
+): Promise<KnownFinding[]> {
+  const known: KnownFinding[] = [];
   for (const comment of comments) {
     if (comment.path === undefined || comment.line === undefined) continue;
     const file = files.get(comment.path);
@@ -334,10 +329,13 @@ async function knownFindings(
       code: citedCode(lines, comment.line, start),
       occurrence: codeOccurrence(lines, comment.line, start),
     });
-    known.push({
-      known: { fingerprint: fingerprint(parts), parts },
-      at: lineKey({ path: comment.path, side: comment.side ?? "RIGHT", line: comment.line }),
-    });
+    // Our comment on an earlier finding (at its place, with its title) stands for it.
+    const at = lineKey({ path: comment.path, side: comment.side ?? "RIGHT", line: comment.line });
+    const text = letters(comment.body);
+    const own = ours.find(
+      (entry) => lineKey(entry.finding) === at && text.includes(letters(entry.finding.title)),
+    );
+    known.push({ fingerprint: own?.fingerprint ?? fingerprint(parts), parts });
   }
   return known;
 }
@@ -664,77 +662,49 @@ export async function finishReview(
       occurrence: codeOccurrence(lines, finding.line, start),
     });
   };
-  // Our earlier findings come first, so a duplicate of one matches it rather than its comment.
-  const ours = [...(options.earlier ?? []), ...(options.cleared ?? [])];
+  // Our earlier open findings join the duplicate check ahead of the PR's comments, and our own
+  // comment on one stands for it, so a re-raise is matched to the finding itself.
+  const ours = options.earlier ?? [];
   const oursKnown = await Promise.all(
     ours.map(async (entry) => ({
-      known: { fingerprint: entry.fingerprint, parts: await partsOf(entry.finding) },
-      at: lineKey(entry.finding),
+      fingerprint: entry.fingerprint,
+      parts: await partsOf(entry.finding),
     })),
   );
-  const comments = await knownFindings(prepared.comments, byPath, readLines);
-  const known = [...oursKnown, ...comments];
+  const comments = await knownFindings(prepared.comments, byPath, readLines, ours);
   const candidates = await Promise.all(
     [...inline, ...body].map(async (finding) => ({ finding, parts: await partsOf(finding) })),
   );
-  const deduped = dedupeFindings(
-    candidates,
-    known.map((entry) => entry.known),
-  );
-  // What the reviewer raised this run: every candidate's fingerprint and line, and for one
-  // dropped as a duplicate, the fingerprint and line of what it duplicates (one of our earlier
-  // findings, or a comment on the PR).
-  const knownAt = new Map(known.map((entry) => [entry.known.fingerprint, entry.at]));
-  const keptPrints = new Set(deduped.kept.map((entry) => entry.fingerprint));
-  const matchedPrints = new Set(deduped.dropped.map((entry) => entry.matched));
-  const keptLines = new Set(deduped.kept.map((entry) => lineKey(entry.finding)));
-  const duplicateLines = new Set(
-    deduped.dropped.flatMap((entry) => {
-      const at = knownAt.get(entry.matched);
-      return at === undefined ? [lineKey(entry.finding)] : [lineKey(entry.finding), at];
-    }),
-  );
-  const reread = rereadFiles(statuses, unsettled);
-  const raisedAgain = (entry: EarlierFinding, lines: ReadonlySet<string>) => {
-    const path = reread.get(entry.finding.path) ?? entry.finding.path;
-    return (
-      keptPrints.has(entry.fingerprint) ||
-      matchedPrints.has(entry.fingerprint) ||
-      lines.has(lineKey({ ...entry.finding, path }))
-    );
-  };
-  // Our earlier open findings. One is cleared only when the reviewer had reason to look at it
-  // again and didn't raise it: its file was read again this run (in a batch that kept all its
-  // findings), its own lines or the block of changed lines they sit in changed since the last
-  // review (the prompt points the reviewer at those, and tells it not to repeat our comments),
-  // and nothing raised this run is it, a duplicate of it, or on its line. Everything else
-  // stands as it is.
-  const allLines = new Set([...keptLines, ...duplicateLines]);
-  const clears = (entry: EarlierFinding) => {
-    // One recorded under an earlier name of a renamed file is on that file now.
-    const path = reread.get(entry.finding.path);
-    const file = path === undefined ? undefined : byPath.get(path);
-    return (
-      file !== undefined &&
-      touchedSinceLastReview(file, entry.finding) &&
-      !raisedAgain(entry, allLines)
-    );
-  };
-  const earlier = (options.earlier ?? []).filter((entry) => !clears(entry));
-  const resolved = (options.earlier ?? []).filter(clears);
-  // Cleared findings raised again reopen: the same fingerprint, a duplicate of it, or a
-  // duplicate on its line. (A new finding on its line that isn't a duplicate is posted as new.)
-  const reopened = (options.cleared ?? []).filter((entry) => raisedAgain(entry, duplicateLines));
-  // The ones still open count once, as the earlier ones.
-  const earlierPrints = new Set([...earlier, ...reopened].map((entry) => entry.fingerprint));
-  const repeated = deduped.kept.filter((entry) => earlierPrints.has(entry.fingerprint));
-  const posted = deduped.kept.filter((entry) => !earlierPrints.has(entry.fingerprint));
+  const deduped = dedupeFindings(candidates, [...oursKnown, ...comments]);
+  // Earlier findings stay open until their lines go (outdated) or a person resolves or declines
+  // them: the reviewer is told not to repeat our comments, so its silence doesn't clear one.
+  // One raised again more severely (dedupe matched it to the finding itself, never by line
+  // alone) counts at the higher severity.
+  const ourPrints = new Set(ours.map((entry) => entry.fingerprint));
+  const raisedTo = new Map<string, Severity>();
+  for (const { finding, matched } of deduped.dropped) {
+    if (!ourPrints.has(matched)) continue;
+    const known =
+      raisedTo.get(matched) ?? ours.find((e) => e.fingerprint === matched)?.finding.severity;
+    if (known === undefined || severityRank(finding.severity) < severityRank(known)) {
+      raisedTo.set(matched, finding.severity);
+    }
+  }
+  const escalated = ours.flatMap((entry) => {
+    const severity = raisedTo.get(entry.fingerprint);
+    return severity === undefined || severity === entry.finding.severity
+      ? []
+      : [{ fingerprint: entry.fingerprint, severity }];
+  });
+  const severityOf = new Map(escalated.map((entry) => [entry.fingerprint, entry.severity]));
+  const earlier = ours.map((entry) => {
+    const severity = severityOf.get(entry.fingerprint);
+    return severity === undefined ? entry.finding : { ...entry.finding, severity };
+  });
+  const posted = deduped.kept;
   const kept = new Set(posted.map((entry) => entry.finding));
-  const open = [
-    ...[...inline, ...body].filter((finding) => kept.has(finding)),
-    ...earlier.map((entry) => entry.finding),
-    ...reopened.map((entry) => entry.finding),
-  ];
+  // The earlier ones count once, as themselves.
+  const open = [...[...inline, ...body].filter((finding) => kept.has(finding)), ...earlier];
 
   const unreviewed = unreviewedReasons(plan.skipped);
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
@@ -786,7 +756,7 @@ export async function finishReview(
     body: body.filter((finding) => kept.has(finding)),
     dropped: [
       ...misplaced.map((finding) => ({ finding, reason: "misplaced" as const })),
-      ...[...deduped.dropped, ...repeated].map(({ finding }) => ({
+      ...deduped.dropped.map(({ finding }) => ({
         finding,
         reason: "duplicate" as const,
       })),
@@ -799,8 +769,7 @@ export async function finishReview(
     summary,
     kind: prepared.kind,
     posted,
-    resolved: resolved.map((entry) => entry.fingerprint),
-    reopened: reopened.map((entry) => entry.fingerprint),
+    escalated,
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
   };
 }
@@ -810,35 +779,9 @@ function lineKey(finding: Pick<Finding, "path" | "side" | "line">): string {
   return `${finding.path}\0${finding.side}\0${finding.line}`;
 }
 
-/**
- * Whether a finding's lines, or the block of changed lines they sit in (changed lines between
- * two context lines), changed since the last review: new-side lines for a RIGHT finding,
- * old-side ones for a LEFT one. Never on a full review, which has no last review to compare.
- */
-function touchedSinceLastReview(file: FileDiff, finding: Finding): boolean {
-  const left = finding.side === "LEFT";
-  const changed = new Set((left ? file.deletedSinceLastReview : file.changedSinceLastReview) ?? []);
-  if (changed.size === 0) return false;
-  const start = Math.min(finding.start_line ?? finding.line, finding.line);
-  const own = (line: number) => line >= start && line <= finding.line;
-  const blocks: number[][] = [];
-  for (const hunk of file.hunks) {
-    let block: number[] = [];
-    for (const line of hunk.lines) {
-      if (line.kind === "context") {
-        if (block.length > 0) blocks.push(block);
-        block = [];
-        continue;
-      }
-      const at = left ? line.oldLine : line.newLine;
-      if (line.kind === (left ? "del" : "add") && at !== undefined) block.push(at);
-    }
-    if (block.length > 0) blocks.push(block);
-  }
-  const span = new Set<number>();
-  for (let line = start; line <= finding.line; line++) span.add(line);
-  for (const block of blocks) if (block.some(own)) for (const line of block) span.add(line);
-  return [...span].some((line) => changed.has(line));
+/** Letters and digits only, lower case: to find a title in a comment's Markdown. */
+function letters(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 /** A planned file, with how its batch went: `failed` when it produced no result. */
@@ -864,29 +807,12 @@ function batchFileStatuses(
     return batch.files.map(({ file, depth }): BatchFileStatus => {
       const done = doneDepth.get(file.path);
       if (failed) return { file, depth, status: "failed" };
-      if (report.skipped === true) return { file, depth, status: "skipped" };
+      // A done file keeps the closer depth it was read at before, also in a skipped batch.
       if (done !== undefined) return { file, depth: done, status: "done" };
+      if (report.skipped === true) return { file, depth, status: "skipped" };
       return { file, depth, status: report.done === true ? "done" : "reviewed" };
     });
   });
-}
-
-/**
- * Files this run read again: reviewed in a batch that produced a result, at more than move
- * depth, and with all their findings kept. Maps each of their names, the current one and those
- * they had at earlier reviews, to the current one.
- */
-function rereadFiles(
-  statuses: readonly BatchFileStatus[],
-  unsettled: ReadonlySet<string>,
-): Map<string, string> {
-  return new Map(
-    statuses.flatMap(({ file, depth, status }) =>
-      status !== "reviewed" || depth === "move" || unsettled.has(file.path)
-        ? []
-        : [file.path, ...(file.alsoReviewedAs ?? [])].map((name) => [name, file.path] as const),
-    ),
-  );
 }
 
 /**

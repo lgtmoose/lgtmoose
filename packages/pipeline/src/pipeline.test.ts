@@ -634,34 +634,15 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(prepared.files.map((file) => file.path)).toEqual(["src/sum.ts"]);
     expect(prepared.unchanged.map((file) => file.path)).not.toContain("src/util.ts");
     const index = prepared.jobs[0]?.index ?? 0;
-    // A finding recorded under the old name is on the renamed file.
-    const earlier = {
-      finding: finding({ path: "src/util.ts", line: 1 }),
-      fingerprint: "fp1:util",
-    };
-    const failed = await finishReview(repo, prepared, [], headSha, { earlier: [earlier] });
+    const failed = await finishReview(repo, prepared, [], headSha);
     expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/util.ts");
     expect(failed.reviewedFiles.map((file) => file.path)).not.toContain("src/sum.ts");
-    expect(failed.resolved).toEqual([]);
-    // Raised again on the same line under the new name: it stands.
-    const raised = await finishReview(
-      repo,
-      prepared,
-      [{ index, findings: [finding({ path: "src/sum.ts", line: 1 })], transcriptKeys: [] }],
-      headSha,
-      { earlier: [earlier] },
-    );
-    expect(raised.resolved).toEqual([]);
     const succeeded = await finishReview(
       repo,
       prepared,
       [{ index, findings: [], transcriptKeys: [] }],
       headSha,
-      { earlier: [earlier] },
     );
-    // Read in full under its new name, but with no lines marked as changed since the last
-    // review: nothing on it is cleared.
-    expect(succeeded.resolved).toEqual([]);
     expect(succeeded.reviewedFiles).toContainEqual({
       path: "src/util.ts",
       blobSha: "not-changed",
@@ -705,8 +686,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(again.inline).toEqual([]);
     expect(again.dropped).toEqual([{ finding: finding(), reason: "duplicate" }]);
     expect(again.decision.counts.blocking).toBe(1);
-
-    expect(again.resolved).toEqual([]);
+    expect(again.escalated).toEqual([]);
   });
 
   /**
@@ -757,7 +737,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
     return { posts, prepared, finish };
   }
 
-  it("clears an earlier finding whose lines changed when it isn't raised again", async () => {
+  it("keeps an earlier finding open when the reviewer is quiet about it after a nearby edit", async () => {
     // The loop line stays; the line under it, in the same block of PR lines, changes.
     const { posts, prepared, finish } = await reviewedThenPushed({
       "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++").replace(
@@ -770,142 +750,145 @@ describe("prepareReview and finishReview with earlier runs", () => {
     });
     const posted = await posts(finding());
 
-    const clean = await finish([], { earlier: [posted] });
-    expect(clean.resolved).toEqual([posted.fingerprint]);
-    expect(clean.decision.event).toBe("APPROVE");
-
-    // Raised again on the same line in other words: it stands.
-    const again = await finish([finding({ title: "Off by one in the loop bound" })], {
-      earlier: [posted],
-    });
-    expect(again.resolved).toEqual([]);
-    expect(again.decision.event).toBe("REQUEST_CHANGES");
-  });
-
-  it("keeps an earlier finding on lines that didn't change, though its file is read again", async () => {
-    // Only `return sum;` changes, in a block of its own: the loop line and its block don't.
-    const { posts, finish } = await reviewedThenPushed({
-      "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++").replace(
-        "return sum;",
-        "return Math.round(sum);",
-      ),
-    });
-    const posted = await posts(finding());
-
-    // The reviewer is told to look at what changed and not to repeat our comments: its silence
-    // about the loop says nothing.
+    // Told not to repeat our comments, the reviewer says nothing: that clears nothing.
     const report = await finish([], { earlier: [posted] });
-    expect(report.resolved).toEqual([]);
     expect(report.decision.event).toBe("REQUEST_CHANGES");
     expect(report.summary).toContain("Loop skips the last item");
   });
 
-  it("clears nothing after a base merge that only changes the PR's context lines", async () => {
-    const first = await setUp();
-    const lastReviewed = headSha;
-    const reviewed = ALL.map((path) => ({
-      path,
-      blobSha: first.blobs.get(path) ?? "",
-      baseBlobSha: first.baseBlobs.get(path),
-      depth: FULL,
-      reviewedAt: lastReviewed,
-    }));
+  it("counts an earlier finding raised again more severely at the higher severity", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const first = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: [finding({ severity: "nit" })], transcriptKeys: [] }],
+      headSha,
+    );
+    const [posted] = first.posted;
+    if (posted === undefined) throw new Error("expected a posted finding");
+    const finish = (findings: Finding[]) =>
+      finishReview(repo, prepared, [{ index: 0, findings, transcriptKeys: [] }], headSha, {
+        earlier: [posted],
+      });
+
+    // The same finding, now blocking: a duplicate of it, not posted, counted and stored as blocking.
+    const blocking = await finish([finding()]);
+    expect(blocking.posted).toEqual([]);
+    expect(blocking.escalated).toEqual([{ fingerprint: posted.fingerprint, severity: "blocking" }]);
+    expect(blocking.decision.counts).toMatchObject({ blocking: 1, nit: 0 });
+    expect(blocking.decision.event).toBe("REQUEST_CHANGES");
+
+    // Reworded but the same problem: the same.
+    const reworded = await finish([finding({ title: "Loop skips the last item entirely" })]);
+    expect(reworded.escalated).toEqual([{ fingerprint: posted.fingerprint, severity: "blocking" }]);
+
+    // Raised again less severely or the same: it keeps its own.
+    expect((await finish([finding({ severity: "nit" })])).escalated).toEqual([]);
+  });
+
+  it("doesn't take a finding's severity from another problem on its line", async () => {
+    const { repo, prepare } = await setUp();
+    const comments: PullComment[] = [
+      {
+        author: "alice",
+        body: "Price can be undefined here.",
+        path: "src/total.ts",
+        line: 3,
+        side: "RIGHT",
+      },
+    ];
+    const prepared = { ...(await prepare({})), comments };
+    const earlier = finding({ severity: "nit" });
     const [posted] = (
       await finishReview(
-        first.repo,
-        await first.prepare({}),
-        [{ index: 0, findings: [finding()], transcriptKeys: [] }],
-        lastReviewed,
+        repo,
+        { ...prepared, comments: [] },
+        [{ index: 0, findings: [earlier], transcriptKeys: [] }],
+        headSha,
       )
     ).posted;
     if (posted === undefined) throw new Error("expected a posted finding");
-    // The base changes a context line of the PR's hunk, and the PR merges it in.
-    await git(work, "checkout", "--quiet", "main");
-    baseSha = await commit(
-      { "src/total.ts": TOTAL.replace("return sum;", "return sum; // the total") },
-      "base: comment",
-    );
-    await git(work, "checkout", "--quiet", "feature");
-    await git(work, "merge", "--quiet", "--no-edit", "main");
-    await git(work, "push", "--quiet", "--force", "--all", "origin");
-    headSha = await git(work, "rev-parse", "HEAD");
-    const repo = await cloneAtSha({
-      url: pathToFileURL(remote).href,
-      dir: await mkdtemp(join(root, "checkout-")),
-      headSha,
-      otherShas: [baseSha, lastReviewed],
-    });
-    const prepared = await prepareReview(
-      { github: deps().deps.github, progress: () => {} },
-      OPTIONS.target,
-      repo,
-      pull(),
-      { reviewed },
-    );
-    // Read again (its hunk's context changed), with no PR line changed since the last review.
-    expect(prepared.files.find((file) => file.path === "src/total.ts")).toMatchObject({
-      changedSinceLastReview: [],
-      deletedSinceLastReview: [],
-    });
 
+    // Blocking, on the same line, about something else: a duplicate of Alice's comment, not of
+    // our finding. Ours stays a nit.
+    const other = finding({ title: "Price can be undefined", body: "No default for price." });
     const report = await finishReview(
       repo,
       prepared,
-      [{ index: 0, findings: [], transcriptKeys: [] }],
+      [{ index: 0, findings: [other], transcriptKeys: [] }],
       headSha,
       { earlier: [posted] },
     );
-    expect(report.resolved).toEqual([]);
-    expect(report.decision.event).toBe("REQUEST_CHANGES");
+    expect(report.dropped).toContainEqual({ finding: other, reason: "duplicate" });
+    expect(report.escalated).toEqual([]);
+    expect(report.decision.counts).toMatchObject({ blocking: 0, nit: 1 });
   });
 
-  it("keeps an earlier finding the reviewer raised again on another line, dropped as a duplicate", async () => {
-    // Lines 4 and 6 change; the `}` between them stays.
-    const { posts, finish } = await reviewedThenPushed({
-      "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++")
-        .replace("sum += items[i].price;", "sum += items[i].price ?? 0;")
-        .replace("return sum;", "return sum + 0;"),
-    });
-    const title = "Total ignores the discount";
-    const posted = await posts(finding({ start_line: 4, line: 6, title, evidence: "return sum;" }));
+  it("matches a re-raise to an earlier finding through our own comment on it", async () => {
+    const { repo, prepare } = await setUp();
+    // Over lines 1-3; our comment on it sits at line 3 alone, with its title.
+    const earlier = finding({ severity: "nit", start_line: 1, line: 3 });
+    const comments: PullComment[] = [
+      {
+        author: "lgtmoose[bot]",
+        body: "**Nit:** Loop skips the last item\n\nThe bound drops the last item from the total.",
+        path: "src/total.ts",
+        line: 3,
+        side: "RIGHT",
+      },
+    ];
+    const prepared = { ...(await prepare({})), comments };
+    const [posted] = (
+      await finishReview(
+        repo,
+        { ...prepared, comments: [] },
+        [{ index: 0, findings: [earlier], transcriptKeys: [] }],
+        headSha,
+      )
+    ).posted;
+    if (posted === undefined) throw new Error("expected a posted finding");
 
-    // On the `}` alone, whose cited code widens to the same lines: a duplicate of it.
-    const reraised = finding({ line: 5, title: `${title} entirely`, evidence: "}" });
-    const report = await finish([reraised], { earlier: [posted] });
-    expect(report.posted).toEqual([]);
+    // On line 3 alone: a duplicate of our comment (the same code), standing for the finding.
+    const reraised = finding({ title: "Loop skips the final item" });
+    const report = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: [reraised], transcriptKeys: [] }],
+      headSha,
+      { earlier: [posted] },
+    );
     expect(report.dropped).toContainEqual({ finding: reraised, reason: "duplicate" });
-    expect(report.resolved).toEqual([]);
-    expect(report.decision.event).toBe("REQUEST_CHANGES");
+    expect(report.escalated).toEqual([{ fingerprint: posted.fingerprint, severity: "blocking" }]);
   });
 
-  it("reopens a cleared finding the reviewer raises again, and counts it", async () => {
-    const { posts, finish } = await reviewedThenPushed({
-      "src/total.ts": TOTAL.replace("i < items.length; i++", "i < items.length - 1; i++").replace(
-        "sum += items[i].price;",
-        "sum += items[i].price ?? 0;",
-      ),
+  it("records a done file in a skipped batch at the closer depth it was read at", async () => {
+    const { repo, prepare } = await setUp();
+    const planned = await prepare({});
+    // Every file only moved (a skipped batch), and src/total.ts read in full before.
+    const prepared = {
+      ...planned,
+      plan: {
+        ...planned.plan,
+        batches: planned.plan.batches.map((batch) => ({
+          ...batch,
+          files: batch.files.map((file) => ({ ...file, depth: "move" as const })),
+        })),
+      },
+      jobs: planned.jobs.map((job) => ({
+        index: job.index,
+        files: job.files,
+        skipped: true as const,
+      })),
+      done: [{ path: "src/total.ts", depth: FULL }],
+    };
+    const report = await finishReview(repo, prepared, [], headSha);
+    expect(report.reviewedFiles.find((file) => file.path === "src/total.ts")).toMatchObject({
+      depth: "full",
     });
-    const posted = await posts(finding());
-
-    // The same finding: reopened, not posted again, and it holds the decision.
-    const same = await finish([finding()], { cleared: [posted] });
-    expect(same.reopened).toEqual([posted.fingerprint]);
-    expect(same.posted).toEqual([]);
-    expect(same.decision.event).toBe("REQUEST_CHANGES");
-    expect(same.summary).toContain("Loop skips the last item");
-
-    // In other words on its line, a duplicate of it: reopened too.
-    const reworded = await finish([finding({ title: "Loop skips the last item entirely" })], {
-      cleared: [posted],
+    expect(report.reviewedFiles.find((file) => file.path === "CLAUDE.md")).toMatchObject({
+      depth: "move",
     });
-    expect(reworded.reopened).toEqual([posted.fingerprint]);
-    expect(reworded.posted).toEqual([]);
-    expect(reworded.decision.event).toBe("REQUEST_CHANGES");
-
-    // Not raised again: it stays cleared, and doesn't count.
-    const quiet = await finish([], { cleared: [posted] });
-    expect(quiet.reopened).toEqual([]);
-    expect(quiet.decision.event).toBe("APPROVE");
   });
 
   it("unsettles only an over-limit resumed batch's own files", async () => {

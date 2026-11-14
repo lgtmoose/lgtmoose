@@ -272,35 +272,35 @@ describe("drizzleFindingStore", () => {
       "raised",
       "raised",
     ]);
+  });
 
-    // Cleared (not fixed) when read again and not raised again. Still tracked, so raising it
-    // again can reopen it: in place (`reopen`), or at a new place (`saveFindings`).
-    await findingStore.markCleared([first?.id ?? ""], sha("6"));
-    expect(await open()).toEqual([]);
-    expect(await findingStore.trackedFindings(run.pullRequestId)).toMatchObject([
-      { fingerprint: "fp1:a", status: "cleared" },
+  it("escalates an open finding's severity upwards only, with an event", async () => {
+    const run = await start("arn:exec:findings:2", 41);
+    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("1"), [
+      { finding: { ...finding("Minor"), severity: "nit" }, fingerprint: "fp1:nit" },
     ]);
-    await findingStore.reopen([first?.id ?? ""], sha("7"));
-    expect(await open()).toMatchObject([{ fingerprint: "fp1:a" }]);
-    await findingStore.markCleared([first?.id ?? ""], sha("8"));
-    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("9"), [
-      { finding: finding("First"), fingerprint: "fp1:a" },
-    ]);
-    expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("9") }]);
-    const later = await db
+    const [saved] = await findingStore.trackedFindings(run.pullRequestId);
+    const id = saved?.id ?? "";
+    const stored = async () =>
+      (await findingStore.trackedFindings(run.pullRequestId)).map((record) => record.severity);
+
+    await findingStore.escalate([{ id, severity: "should_fix" }], sha("2"));
+    expect(await stored()).toEqual(["should_fix"]);
+    // Never downwards, and not to the level it has.
+    await findingStore.escalate([{ id, severity: "nit" }], sha("3"));
+    await findingStore.escalate([{ id, severity: "should_fix" }], sha("4"));
+    expect(await stored()).toEqual(["should_fix"]);
+    // Only while open.
+    await findingStore.markOutdated([id], sha("5"));
+    await findingStore.escalate([{ id, severity: "blocking" }], sha("6"));
+    expect(await stored()).toEqual(["should_fix"]);
+
+    const events = await db
       .select({ type: findingEvents.type, sha: findingEvents.sha })
       .from(findingEvents)
-      .where(eq(findingEvents.findingId, first?.id ?? ""));
-    const since = new Set(["6", "7", "8", "9"].map(sha));
-    expect(
-      later
-        .filter((event) => event.sha !== null && since.has(event.sha))
-        .toSorted((a, b) => (a.sha ?? "").localeCompare(b.sha ?? "")),
-    ).toEqual([
-      { type: "cleared", sha: sha("6") },
-      { type: "raised", sha: sha("7") },
-      { type: "cleared", sha: sha("8") },
-      { type: "raised", sha: sha("9") },
+      .where(eq(findingEvents.findingId, id));
+    expect(events.filter((event) => event.type === "escalated")).toEqual([
+      { type: "escalated", sha: sha("2") },
     ]);
   });
 });

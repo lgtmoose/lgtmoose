@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
-import type { ReviewEvent } from "@lgtmoose/core";
+import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
 import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
@@ -322,7 +322,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         .where(
           and(
             eq(findings.pullRequestId, pullRequestId),
-            inArray(findings.status, ["open", "outdated", "cleared"]),
+            inArray(findings.status, ["open", "outdated"]),
             eq(findings.source, "self"),
           ),
         )
@@ -331,7 +331,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         row.path === null ||
         row.line === null ||
         row.side === null ||
-        (row.status !== "open" && row.status !== "outdated" && row.status !== "cleared")
+        (row.status !== "open" && row.status !== "outdated")
           ? []
           : [
               {
@@ -389,7 +389,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 updatedAt: now(),
               },
               // A finding someone declined, disputed or resolved stays that way.
-              setWhere: inArray(findings.status, ["open", "outdated", "fixed", "cleared"]),
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
             })
             .returning({ id: findings.id });
           // Every row may have hit a declined, disputed or resolved finding, left as it was.
@@ -405,17 +405,41 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         }
       });
     },
-    markOutdated: (ids, sha) => moveStatus(ids, ["open"], "outdated", "outdated", sha),
-    reopen: (ids, sha) => moveStatus(ids, ["outdated", "cleared"], "open", "raised", sha),
-    markCleared: (ids, sha) => moveStatus(ids, ["open"], "cleared", "cleared", sha),
+    markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
+    reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
+    async escalate(changes, sha) {
+      if (changes.length === 0) return;
+      await db.transaction(async (tx) => {
+        for (const { id, severity } of changes) {
+          // Upwards only: from a less severe level than the new one.
+          const lower = SEVERITIES.slice(severityRank(severity) + 1);
+          if (lower.length === 0) continue;
+          const rows = await tx
+            .update(findings)
+            .set({ severity, updatedAt: now() })
+            .where(
+              and(
+                eq(findings.id, id),
+                eq(findings.status, "open"),
+                inArray(findings.severity, lower),
+              ),
+            )
+            .returning({ id: findings.id });
+          if (rows.length === 0) continue;
+          await tx
+            .insert(findingEvents)
+            .values({ findingId: id, type: "escalated", actor: "self", sha });
+        }
+      });
+    },
   };
 
-  /** Moves findings still in a status of `from` to `to`, with an event for each one that moved. */
+  /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
   async function moveStatus(
     ids: readonly string[],
-    from: readonly ("open" | "outdated" | "cleared")[],
-    to: "open" | "outdated" | "cleared",
-    event: "outdated" | "raised" | "cleared",
+    from: "open" | "outdated",
+    to: "open" | "outdated",
+    event: "outdated" | "raised",
     sha: string,
   ): Promise<void> {
     if (ids.length === 0) return;
@@ -425,10 +449,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           .update(findings)
           .set({ status: to, updatedAt: now() })
           .where(
-            and(
-              inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)),
-              inArray(findings.status, [...from]),
-            ),
+            and(inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)), eq(findings.status, from)),
           )
           .returning({ id: findings.id });
         if (rows.length === 0) continue;

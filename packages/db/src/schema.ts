@@ -41,8 +41,6 @@ export const findingStatus = pgEnum("finding_status", [
   "disputed",
   "resolved_by_human",
   "outdated",
-  // Read again by the reviewer and not raised again: a model judgement, not a fix.
-  "cleared",
 ]);
 export const findingEventType = pgEnum("finding_event_type", [
   "raised",
@@ -52,7 +50,8 @@ export const findingEventType = pgEnum("finding_event_type", [
   "dispute_answered",
   "resolved",
   "outdated",
-  "cleared",
+  // Raised again more severely: the finding now has the higher severity.
+  "escalated",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [
