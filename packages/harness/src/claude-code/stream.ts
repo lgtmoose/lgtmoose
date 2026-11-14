@@ -126,7 +126,7 @@ const CLAUDE_PLAN_LIMIT = new RegExp(
 /** "resets 3:10pm (UTC)" or "resets in 3h 20m": when Claude Code says the limit lifts. */
 const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·]{1,60}?)\s*(?:$|\n|·|\.(?:\s|$))/i;
 /** One part of a relative reset ("3h", "20m", "2 days"). */
-const DURATION_PART = /(\d+)\s*(d|days?|h|hours?|m|min(?:ute)?s?|s|sec(?:ond)?s?)\b/gi;
+const DURATION_PART = /(\d+)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)\b/gi;
 const UNIT_SECONDS: Record<string, number> = { d: 86_400, h: 3600, m: 60, s: 1 };
 
 /** Classifies a Claude failure message: Claude's plan wording first, then the shared patterns. */
@@ -218,7 +218,8 @@ function zoneOffsetMs(zone: string, now: Date): number {
  */
 export function claudeLimitFailure(result: ResultEvent, stderr: string): LimitFailure | undefined {
   const reported = [result.result, ...(result.errors ?? [])].filter(Boolean).join("\n");
-  if (result.api_error_status === 429) {
+  // 429 is throttling, 529 an overloaded API: both pass soon, so another provider can take the run.
+  if (result.api_error_status === 429 || result.api_error_status === 529) {
     const plan = reported === "" ? undefined : classifyClaudeFailure(reported);
     return plan?.kind === "plan_limit" ? plan : { kind: "rate_limit", ...limitTimes(reported) };
   }

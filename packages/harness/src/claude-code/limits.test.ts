@@ -84,6 +84,15 @@ describe("claudeLimitFailure", () => {
     expect(nextClockTime("3pm (Not/AZone)", now)).toBeUndefined();
   });
 
+  it("treats an overloaded API (529) as throttling, and reads hrs and mins", () => {
+    expect(
+      claudeLimitFailure(result({ api_error_status: 529, result: "API Error: 529" }), ""),
+    ).toEqual({ kind: "rate_limit" });
+    expect(
+      claudeLimitFailure(result({ result: "You've hit your limit · resets in 2 hrs 5 mins" }), ""),
+    ).toEqual({ kind: "plan_limit", retryAfterSeconds: 7500 });
+  });
+
   it("treats HTTP 429 as throttling unless the message says the plan is used up", () => {
     expect(claudeLimitFailure(result({ api_error_status: 429, result: "Overloaded" }), "")).toEqual(
       {

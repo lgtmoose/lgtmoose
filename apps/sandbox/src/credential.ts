@@ -78,9 +78,9 @@ export function harnessEnv(
   credential: Record<string, string>,
 ): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(task)) {
-    if (value === undefined) continue;
-    if (PASSED.includes(name)) env[name] = value;
+  for (const name of PASSED) {
+    const value = task[name];
+    if (value !== undefined) env[name] = value;
   }
   return { ...env, ...credential };
 }

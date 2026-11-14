@@ -91,8 +91,7 @@ export class AgentSdkHarness implements Harness {
     const runId = options.runId ?? randomUUID();
     const deadline = Date.now() + options.timeoutMs;
     // Loaded on first use, so importing the harness package doesn't load the SDK.
-    const query =
-      this.options.query ?? ((await import("@anthropic-ai/claude-agent-sdk")).query as AgentQuery);
+    const query = this.options.query ?? (await loadQuery());
     const home = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-agent-sdk-"));
     const keys: string[] = [];
     const secrets = auth.secrets;
@@ -170,6 +169,16 @@ export class AgentSdkHarness implements Harness {
     } finally {
       await removeRunHome(home);
     }
+  }
+}
+
+/** The SDK's `query`, loaded on first use. A broken install fails like a CLI that won't start. */
+async function loadQuery(): Promise<AgentQuery> {
+  try {
+    return (await import("@anthropic-ai/claude-agent-sdk")).query as AgentQuery;
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    throw new HarnessError("process", `Could not load the Claude Agent SDK: ${why}`);
   }
 }
 

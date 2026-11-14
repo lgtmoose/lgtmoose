@@ -65,6 +65,9 @@ describe("bedrockStatements", () => {
     expect(invoke?.Resource).toContain(arn);
     expect(invoke?.Resource).toContain("arn:aws:bedrock:*::foundation-model/anthropic.*");
     expect(get?.Resource).toContain(arn);
+    const [withModifier] = json({ standard: `${arn}[1m]` });
+    expect(withModifier?.Resource).toContain(arn);
+    expect(JSON.stringify(withModifier)).not.toContain("[1m]");
   });
 
   it("falls back to Anthropic's models when one tier is still an alias", () => {

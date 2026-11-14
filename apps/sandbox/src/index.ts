@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, createWriteStream } from "node:fs";
+import { accessSync, constants, createWriteStream, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -42,6 +42,7 @@ function onPath(name: string, path: string | undefined): string | undefined {
     const candidate = join(dir, name);
     try {
       accessSync(candidate, constants.X_OK);
+      if (!statSync(candidate).isFile()) continue;
       return candidate;
     } catch {
       // Not here.

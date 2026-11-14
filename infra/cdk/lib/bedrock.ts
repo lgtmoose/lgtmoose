@@ -31,7 +31,11 @@ export function bedrockStatements(
   // A tier pinned to a Bedrock ARN, such as an application inference profile, is allowed as
   // given; the model it routes to is covered by the Anthropic foundation-model wildcard below.
   const arns = [
-    ...new Set(pinned.filter((model): model is string => model?.startsWith("arn:") === true)),
+    ...new Set(
+      pinned
+        .filter((model): model is string => model?.startsWith("arn:") === true)
+        .map((arn) => arn.replace(MODEL_MODIFIER, "")),
+    ),
   ];
   const matches = exact ? (ids as RegExpExecArray[]) : [];
   const profiles = exact
