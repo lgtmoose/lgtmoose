@@ -322,7 +322,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         .where(
           and(
             eq(findings.pullRequestId, pullRequestId),
-            inArray(findings.status, ["open", "outdated"]),
+            inArray(findings.status, ["open", "outdated", "cleared"]),
             eq(findings.source, "self"),
           ),
         )
@@ -331,7 +331,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         row.path === null ||
         row.line === null ||
         row.side === null ||
-        (row.status !== "open" && row.status !== "outdated")
+        (row.status !== "open" && row.status !== "outdated" && row.status !== "cleared")
           ? []
           : [
               {
@@ -405,15 +405,15 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         }
       });
     },
-    markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
-    reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),
-    markCleared: (ids, sha) => moveStatus(ids, "open", "cleared", "cleared", sha),
+    markOutdated: (ids, sha) => moveStatus(ids, ["open"], "outdated", "outdated", sha),
+    reopen: (ids, sha) => moveStatus(ids, ["outdated", "cleared"], "open", "raised", sha),
+    markCleared: (ids, sha) => moveStatus(ids, ["open"], "cleared", "cleared", sha),
   };
 
-  /** Moves findings still in status `from` to `to`, with an event for each one that moved. */
+  /** Moves findings still in a status of `from` to `to`, with an event for each one that moved. */
   async function moveStatus(
     ids: readonly string[],
-    from: "open" | "outdated",
+    from: readonly ("open" | "outdated" | "cleared")[],
     to: "open" | "outdated" | "cleared",
     event: "outdated" | "raised" | "cleared",
     sha: string,
@@ -425,7 +425,10 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           .update(findings)
           .set({ status: to, updatedAt: now() })
           .where(
-            and(inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)), eq(findings.status, from)),
+            and(
+              inArray(findings.id, ids.slice(i, i + INSERT_CHUNK)),
+              inArray(findings.status, [...from]),
+            ),
           )
           .returning({ id: findings.id });
         if (rows.length === 0) continue;

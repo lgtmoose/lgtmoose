@@ -273,26 +273,34 @@ describe("drizzleFindingStore", () => {
       "raised",
     ]);
 
-    // Cleared (not fixed) when read again and not raised again; raising it later reopens it.
+    // Cleared (not fixed) when read again and not raised again. Still tracked, so raising it
+    // again can reopen it: in place (`reopen`), or at a new place (`saveFindings`).
     await findingStore.markCleared([first?.id ?? ""], sha("6"));
     expect(await open()).toEqual([]);
-    expect(await findingStore.trackedFindings(run.pullRequestId)).toEqual([]);
-    const [cleared] = await db
-      .select({ status: findings.status })
-      .from(findings)
-      .where(eq(findings.id, first?.id ?? ""));
-    expect(cleared).toEqual({ status: "cleared" });
-    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("7"), [
+    expect(await findingStore.trackedFindings(run.pullRequestId)).toMatchObject([
+      { fingerprint: "fp1:a", status: "cleared" },
+    ]);
+    await findingStore.reopen([first?.id ?? ""], sha("7"));
+    expect(await open()).toMatchObject([{ fingerprint: "fp1:a" }]);
+    await findingStore.markCleared([first?.id ?? ""], sha("8"));
+    await findingStore.saveFindings(run.pullRequestId, run.runId, sha("9"), [
       { finding: finding("First"), fingerprint: "fp1:a" },
     ]);
-    expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("7") }]);
+    expect(await open()).toMatchObject([{ fingerprint: "fp1:a", raisedAtSha: sha("9") }]);
     const later = await db
       .select({ type: findingEvents.type, sha: findingEvents.sha })
       .from(findingEvents)
       .where(eq(findingEvents.findingId, first?.id ?? ""));
-    expect(later.filter((event) => event.sha === sha("6") || event.sha === sha("7"))).toEqual([
+    const since = new Set(["6", "7", "8", "9"].map(sha));
+    expect(
+      later
+        .filter((event) => event.sha !== null && since.has(event.sha))
+        .toSorted((a, b) => (a.sha ?? "").localeCompare(b.sha ?? "")),
+    ).toEqual([
       { type: "cleared", sha: sha("6") },
       { type: "raised", sha: sha("7") },
+      { type: "cleared", sha: sha("8") },
+      { type: "raised", sha: sha("9") },
     ]);
   });
 });

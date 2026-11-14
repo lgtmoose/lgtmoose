@@ -233,10 +233,8 @@ function memoryRuns(): RunStore & { runs: Map<string, Run>; pr: Partial<RunRecor
   };
 }
 
-/** A stored finding: tracked while open or outdated, and kept once cleared. */
-type StoredFinding = Omit<FindingRecord, "status"> & {
-  status: FindingRecord["status"] | "cleared";
-};
+/** A stored finding: tracked while open, outdated or cleared. */
+type StoredFinding = FindingRecord;
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
 function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
@@ -244,9 +242,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
   return {
     rows,
     async trackedFindings() {
-      return rows.flatMap((row) =>
-        row.status === "cleared" ? [] : [{ ...row, status: row.status }],
-      );
+      return rows.map((row) => ({ ...row }));
     },
     async saveFindings(_pr, _run, headSha, posted) {
       for (const { finding, fingerprint } of posted) {
@@ -279,7 +275,9 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     },
     async reopen(ids) {
       for (const row of rows)
-        if (ids.includes(row.id) && row.status === "outdated") row.status = "open";
+        if (ids.includes(row.id) && (row.status === "outdated" || row.status === "cleared")) {
+          row.status = "open";
+        }
     },
   };
 }
@@ -618,6 +616,18 @@ describe("later runs", { timeout: 30_000 }, () => {
 
     expect(h.findings.rows).toMatchObject([{ status: "cleared" }]);
     expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
+
+    // The next push touches the block again and the reviewer raises it again: reopened in
+    // place, not posted again, and it holds the decision.
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 1;"),
+      },
+      "touch it again",
+    );
+    const reraised = await review(h, 3, [finding()]);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(reraised.posted).toMatchObject({ event: "REQUEST_CHANGES", findings: 0 });
   });
 
   it("reopens a finding raised again where its line moved to", async () => {
@@ -1098,7 +1108,7 @@ describe("readManifest", () => {
     );
     expect(() =>
       readManifest(
-        JSON.stringify({ version: 1, installationId: 1, review: { ...review, carried: [[]] } }),
+        JSON.stringify({ version: 1, installationId: 1, review: { ...review, carried: [] } }),
       ),
     ).toThrow("Unsupported run manifest");
   });

@@ -86,7 +86,7 @@ const manifestSchema = z.object({
   review: z.looseObject({
     kind: z.enum(["full", "incremental"]),
     done: z.array(z.object({ path: z.string(), depth })),
-    carried: z.array(z.array(findingSchema)),
+    carried: z.array(z.object({ files: z.array(z.string()), findings: z.array(findingSchema) })),
     unchanged: z.array(reviewedFile),
     noLongerChanged: z.array(z.object({ path: z.string(), lines: z.array(z.string()) })),
     jobs: z.array(
@@ -287,7 +287,7 @@ export async function prepare(
       batches: batches.length,
       done: prepared.done.length,
       carriedBatches: prepared.carried.length,
-      carriedFindings: prepared.carried.flat().length,
+      carriedFindings: prepared.carried.flatMap((batch) => batch.findings).length,
       ...(prepared.fallbackReason === undefined ? {} : { fallback: prepared.fallbackReason }),
     });
     return { runId: run.runId, superseded: false, batches };

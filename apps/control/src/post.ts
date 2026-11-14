@@ -52,7 +52,7 @@ function costOf(report: ReviewReport): number | undefined {
 }
 
 /**
- * The findings to follow to the new head: open ones, and outdated ones only while the PR still
+ * The findings to follow to the new head: open ones, and outdated or cleared ones only while the PR still
  * changes their file (so they could stand again). Outdated findings on files the PR left alone
  * stay as they are, which keeps the work from growing with the PR's age.
  */
@@ -75,6 +75,18 @@ function prPaths(changes: readonly ChangedPath[]): { changed: Set<string>; atHea
   };
 }
 
+/** Where the PR's tracked findings are at this head (see `standing`). */
+interface Standing {
+  /** Open (or reopened) findings whose lines exist, at their place now. */
+  open: EarlierFinding[];
+  /** Cleared findings whose lines exist, at their place now: they reopen if raised again. */
+  cleared: (EarlierFinding & { id: string })[];
+  /** IDs of open findings whose lines are gone. */
+  outdated: string[];
+  /** IDs of outdated findings whose lines are back. */
+  reopened: string[];
+}
+
 /** How many commits' lines are followed at once. */
 const FOLLOW_AT_ONCE = 4;
 
@@ -82,7 +94,8 @@ const FOLLOW_AT_ONCE = 4;
  * Splits the PR's tracked findings into those standing at `headSha`, moved to where their lines
  * are now, and those whose lines don't exist there (changed, deleted, or the PR no longer
  * changes the file). Open findings that no longer stand are `outdated`; outdated ones that stand
- * again, such as after a fix is reverted, are `reopened`.
+ * again, such as after a fix is reverted, are `reopened`. Cleared ones that stand are kept apart:
+ * they reopen only if the reviewer raises them again.
  *
  * A finding on the old side is on a line the PR deletes. It's followed from the base the PR had
  * when it was raised (its merge base with today's) to today's merge base, and stands while the
@@ -96,8 +109,8 @@ async function standing(
   changes: readonly ChangedPath[],
   mergeBase: string,
   headSha: string,
-): Promise<{ open: EarlierFinding[]; outdated: string[]; reopened: string[] }> {
-  if (records.length === 0) return { open: [], outdated: [], reopened: [] };
+): Promise<Standing> {
+  if (records.length === 0) return { open: [], cleared: [], outdated: [], reopened: [] };
   const { atHead } = prPaths(changes);
   // Old-side lines are keyed by the file's path on the base side, which differs for renames.
   const baseSide = new Map(changes.map((file) => [file.path, file.oldPath ?? file.path]));
@@ -165,6 +178,7 @@ async function standing(
   }
 
   const open: EarlierFinding[] = [];
+  const cleared: (EarlierFinding & { id: string })[] = [];
   const outdated: string[] = [];
   const reopened: string[] = [];
   for (const record of records) {
@@ -183,7 +197,6 @@ async function standing(
       if (record.status === "open") outdated.push(record.id);
       continue;
     }
-    if (record.status === "outdated") reopened.push(record.id);
     const shift = place.line - record.line;
     const startLine = record.startLine === undefined ? undefined : record.startLine + shift;
     const finding: Finding = {
@@ -198,9 +211,14 @@ async function standing(
       // Not kept: earlier findings are only counted and listed, never posted again.
       evidence: record.title,
     };
+    if (record.status === "cleared") {
+      cleared.push({ finding, fingerprint: record.fingerprint, id: record.id });
+      continue;
+    }
+    if (record.status === "outdated") reopened.push(record.id);
     open.push({ finding, fingerprint: record.fingerprint });
   }
-  return { open, outdated, reopened };
+  return { open, cleared, outdated, reopened };
 }
 
 /**
@@ -263,6 +281,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
   let report: ReviewReport;
   let outdated: string[];
   let reopened: string[];
+  let cleared: Standing["cleared"] = [];
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -273,7 +292,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       token: await github.token(),
       checkout: "none",
     });
-    let earlier: Awaited<ReturnType<typeof standing>> = { open: [], outdated: [], reopened: [] };
+    let earlier: Standing = { open: [], cleared: [], outdated: [], reopened: [] };
     if (records.length > 0) {
       // Which files the PR changes: names only, no patches or contents.
       const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
@@ -283,9 +302,11 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       earlier = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
     }
     ({ outdated, reopened } = earlier);
+    cleared = earlier.cleared;
     const latest = await github.reader.pull(target);
     report = await finishReview(repo, prepared, outcomes, latest.headSha, {
       earlier: earlier.open,
+      cleared: earlier.cleared,
     });
   } finally {
     await work.remove();
@@ -335,8 +356,16 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
 
   // Outdated first: a finding raised again at its new place (same fingerprint) is reopened.
   await deps.findings.markOutdated(outdated, pr.headSha);
-  await deps.findings.reopen(reopened, pr.headSha);
-  // Read again this run and not raised again: resolved.
+  // Cleared ones the reviewer raised again reopen too.
+  const raisedAgain = new Set(report.reopened);
+  await deps.findings.reopen(
+    [
+      ...reopened,
+      ...cleared.filter((entry) => raisedAgain.has(entry.fingerprint)).map((entry) => entry.id),
+    ],
+    pr.headSha,
+  );
+  // Read again this run and not raised again: cleared.
   const resolved = new Set(report.resolved);
   await deps.findings.markCleared(
     records.filter((record) => resolved.has(record.fingerprint)).map((record) => record.id),
@@ -360,8 +389,8 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     complete: report.complete,
     reviewed: !quiet,
     outdated: outdated.length,
-    reopened: reopened.length,
-    resolved: report.resolved.length,
+    reopened: reopened.length + report.reopened.length,
+    cleared: report.resolved.length,
   });
   return {
     runId,
