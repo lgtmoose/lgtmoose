@@ -2,11 +2,13 @@ import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { StartExecutionCommand, StopExecutionCommand, type SFNClient } from "@aws-sdk/client-sfn";
 import {
   dispatchedExecutions,
+  findingEvents,
+  findings,
   pullRequestDispatches,
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
@@ -155,6 +157,43 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
         )
         .limit(1);
       return row !== undefined;
+    },
+    async followThread(repo, number, firstCommentId, resolved) {
+      const from = resolved ? (["open", "outdated"] as const) : (["resolved_by_human"] as const);
+      const to = resolved ? "resolved_by_human" : "open";
+      return db.transaction(async (tx) => {
+        const pr = tx
+          .select({ id: pullRequests.id })
+          .from(pullRequests)
+          .where(
+            and(sql`lower(${pullRequests.repo}) = ${lower(repo)}`, eq(pullRequests.number, number)),
+          );
+        const rows = await tx
+          .update(findings)
+          .set({ status: to, updatedAt: now() })
+          .where(
+            and(
+              inArray(findings.pullRequestId, pr),
+              eq(findings.source, "self"),
+              inArray(findings.status, [...from]),
+              eq(findings.githubCommentId, firstCommentId),
+            ),
+          )
+          .returning({ id: findings.id, sha: findings.raisedAtSha });
+        if (rows.length > 0) {
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: resolved ? ("resolved" as const) : ("unresolved" as const),
+              actor: "human" as const,
+              // No review ran: the commit the finding was last raised at.
+              sha: row.sha,
+              githubCommentId: firstCommentId,
+            })),
+          );
+        }
+        return rows.length;
+      });
     },
   };
 }

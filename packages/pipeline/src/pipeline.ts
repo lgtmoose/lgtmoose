@@ -37,6 +37,7 @@ import {
 } from "@lgtmoose/roles";
 import { GITHUB_COMMENT_LIMIT, SUMMARY_MARKER_ROOM, renderSummary } from "@lgtmoose/summary";
 import type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
+import { reviewerMisses, type OtherReviewerFinding, type ReviewerMiss } from "./other-reviewers.js";
 
 /** Everything a dry run touches outside its own process. Tests pass fakes. */
 export interface ReviewDeps {
@@ -118,6 +119,10 @@ export interface ReviewReport {
   escalated: { fingerprint: string; severity: Severity }[];
   /** File versions this run reviewed, to record so a later run can skip them. */
   reviewedFiles: ReviewedFile[];
+  /** Other reviewers' open findings counted in the decision (`FinishOptions.others`). */
+  others: number;
+  /** Other reviewers' findings on files we reviewed that none of ours is near: for evals. */
+  misses: ReviewerMiss[];
 }
 
 /** A file version a run reviewed, and how closely. */
@@ -169,6 +174,12 @@ export interface FinishOptions {
    * it's stored.
    */
   stored?: readonly StoredSeverity[];
+  /**
+   * Other reviewers' open findings (`otherReviewerFindings`): they count towards the decision
+   * and are listed in the summary, but aren't posted or recorded as ours. Our duplicates of
+   * them are already dropped, since their comments are among the PR's.
+   */
+  others?: readonly OtherReviewerFinding[];
 }
 
 /**
@@ -818,8 +829,11 @@ export async function finishReview(
   const kept = new Set(deduped.kept.map((entry) => entry.finding));
   const keptOf = (findings: readonly Finding[]) =>
     findings.filter((finding) => kept.has(finding)).map(final);
-  // The earlier ones count once, as themselves.
-  const open = [...keptOf(inline), ...keptOf(body), ...earlier];
+  // The earlier ones count once, as themselves; other reviewers' ones count too, but are ours
+  // to neither post nor record.
+  const others = options.others ?? [];
+  const ownOpen = [...keptOf(inline), ...keptOf(body), ...earlier];
+  const open = [...ownOpen, ...others.map((entry) => entry.finding)];
 
   const unreviewed = unreviewedReasons(plan.skipped);
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
@@ -890,6 +904,21 @@ export async function finishReview(
     posted,
     escalated,
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
+    others: others.length,
+    misses: reviewerMisses(
+      others,
+      new Set(
+        statuses.flatMap(({ file, status }) =>
+          status === "reviewed" || status === "done" ? [file.path] : [],
+        ),
+      ),
+      // Ours, open or closed, and those dropped as duplicates of a comment: all caught.
+      [
+        ...ownOpen,
+        ...closed.map((entry) => entry.finding),
+        ...deduped.dropped.map((entry) => entry.finding),
+      ],
+    ),
   };
 }
 

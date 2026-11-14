@@ -706,6 +706,7 @@ export async function awsControlDeps(
       const client = new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS });
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
+        appId: app.appId,
         // GitHub Apps can call GraphQL with the installation token.
         threads: graphQlThreadReader(
           (query, variables) => client.graphql(query, variables),

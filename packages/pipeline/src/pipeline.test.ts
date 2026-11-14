@@ -740,6 +740,41 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(again.escalated).toEqual([]);
   });
 
+  it("counts another reviewer's finding in the decision without posting it, and notes a miss", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const outcome = { index: 0, findings: [], transcriptKeys: [] };
+    const other = {
+      source: "bot" as const,
+      login: "coderabbitai[bot]",
+      commentId: 77,
+      finding: finding({
+        rule_category: "other_reviewer",
+        title: "Raised by coderabbitai[bot] in their review comment",
+      }),
+    };
+    const report = await finishReview(repo, prepared, [outcome], headSha, { others: [other] });
+    expect(report.decision.event).toBe("REQUEST_CHANGES");
+    expect(report.decision.counts.blocking).toBe(1);
+    expect(report.posted).toEqual([]);
+    expect(report.inline).toEqual([]);
+    expect(report.others).toBe(1);
+    expect(report.summary).toContain("coderabbitai");
+    expect(report.misses).toEqual([
+      { path: "src/total.ts", line: 3, severity: "blocking", source: "bot" },
+    ]);
+
+    // Caught by us too: not a miss, and counted once each.
+    const both = await finishReview(
+      repo,
+      prepared,
+      [{ index: 0, findings: [finding()], transcriptKeys: [] }],
+      headSha,
+      { others: [other] },
+    );
+    expect(both.misses).toEqual([]);
+  });
+
   /**
    * The PR reviewed at its head now, with every file recorded there, and then a new head with
    * `files` changed: an incremental review of the new head.

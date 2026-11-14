@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { pullRequests, reviewRuns } from "@lgtmoose/db";
+import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -81,5 +81,58 @@ describe("drizzleDispatchStore", () => {
   it("counts a covered run's head as reviewed: another run's review is on it", async () => {
     await run(20, "arn:c1", "h20", "covered");
     expect(await store.reviewed("Acme/Shop", 20, "h20")).toBe(true);
+  });
+
+  it("follows a person resolving and unresolving our finding's thread", async () => {
+    const [pull] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "Acme/Shop",
+        number: 30,
+        author: "dev",
+        headSha: "h",
+        baseSha: "b",
+      })
+      .returning({ id: pullRequests.id });
+    if (pull === undefined) throw new Error("no pull request");
+    const finding = (fingerprint: string, commentId: number, source: "self" | "bot" = "self") => ({
+      pullRequestId: pull.id,
+      fingerprint,
+      ruleCategory: "correctness",
+      severity: "blocking" as const,
+      path: "a.ts",
+      line: 1,
+      side: "RIGHT" as const,
+      title: "t",
+      body: "b",
+      raisedAtSha: "h",
+      source,
+      githubCommentId: commentId,
+    });
+    const [ours] = await db
+      .insert(findings)
+      .values(finding("f1", 3_000_000_001))
+      .returning({ id: findings.id });
+    await db.insert(findings).values(finding("f2", 3_000_000_002, "bot"));
+    if (ours === undefined) throw new Error("no finding");
+    const status = async () =>
+      (await db.select().from(findings).where(eq(findings.id, ours.id)))[0]?.status;
+
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, true)).toBe(1);
+    expect(await status()).toBe("resolved_by_human");
+    // Already resolved: nothing to do.
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, true)).toBe(0);
+    expect(await store.followThread("acme/shop", 30, 3_000_000_001, false)).toBe(1);
+    expect(await status()).toBe("open");
+    // Not ours, another PR's, or no such comment: left alone.
+    expect(await store.followThread("acme/shop", 30, 3_000_000_002, true)).toBe(0);
+    expect(await store.followThread("acme/shop", 31, 3_000_000_001, true)).toBe(0);
+    const events = await db
+      .select()
+      .from(findingEvents)
+      .where(eq(findingEvents.findingId, ours.id));
+    expect(events.map((event) => event.type).sort()).toEqual(["resolved", "unresolved"]);
+    expect(events.every((event) => event.actor === "human")).toBe(true);
   });
 });

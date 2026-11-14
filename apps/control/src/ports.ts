@@ -249,6 +249,8 @@ export interface ControlDeps {
    */
   github(installationId: number): Promise<{
     reader: PullReader;
+    /** The App's ID: its own comments aren't another reviewer's. Undefined in tests and CLI. */
+    appId?: number;
     /** The PR's review threads, through GraphQL, to follow resolved ones. */
     threads: ReviewThreadReader;
     token: () => Promise<string>;

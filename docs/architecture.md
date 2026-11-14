@@ -20,6 +20,10 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 
 The reconciler runs every `reconcileIntervalMinutes` (30 by default). It queues a review only for a PR updated within `reconcileLookbackHours` (24 by default, at least the interval) whose head no run has started for. Older PRs are counted as `SkippedStale` and left alone, so a first run after a deploy, or a newly added repository, doesn't review every old open PR. Status-label re-syncs and the restore after a force-push back to a reviewed commit apply to every open PR, however old.
 
+When a person resolves one of LGTMoose's review threads, the `pull_request_review_thread` webhook marks its finding `resolved_by_human` straight away, without a review run; unresolving it opens the finding again. The person's latest action wins. LGTMoose never reopens a finding a person resolved on its own. The decision and label on GitHub catch up on the next review.
+
+Other reviewers' unresolved inline comments count too. Those from other bots (CodeRabbit, say), or from people who are owners, members or collaborators, that are marked Critical (blocking), Major or a bug (should fix), on files the review covers and still on the current diff, count towards the decision as open findings. The summary lists them with who raised them. They're never posted again, never stored as LGTMoose's own, and their text never reaches a model or the summary: only its opening words are read, for the severity. When one is on a file LGTMoose reviewed and none of its own findings is within a few lines, the run writes it to `misses.json` (path, line, severity and source, no text) for the evals.
+
 ## Harnesses
 
 Each vendor's official CLI runs headless behind a small adapter, restricted to read-only tools and validated with zod:

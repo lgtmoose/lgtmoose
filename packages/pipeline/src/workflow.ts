@@ -43,6 +43,11 @@ export function runKeys(runId: string) {
     /** Written once, before the run's review is posted: the attempt that writes it posts. */
     reviewClaim: `${root}review-claim.json`,
     checkout: `${root}checkout.tar.gz`,
+    /**
+     * Other reviewers' findings on files the run reviewed that none of ours was near (paths,
+     * lines, severities and sources, no comment text): what the bot missed, for the evals.
+     */
+    misses: `${root}misses.json`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,

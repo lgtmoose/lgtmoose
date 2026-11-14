@@ -59,6 +59,8 @@ function fakeDeps() {
   /** Run status by execution ARN, as `review_runs` would have it. */
   const runs = new Map<string, string>();
   const reviewedHeads = new Set<string>();
+  /** Our findings' status by their inline comment's ID, as `findings` would have it. */
+  const threadFindings = new Map<number, string>();
   const calls: string[] = [];
   const deadLettered: { messageId: string; reason: string }[] = [];
   /** Repositories whose jobs fail as if the database were down. */
@@ -117,6 +119,18 @@ function fakeDeps() {
       async reviewed(_repo, _n, headSha) {
         return reviewedHeads.has(headSha);
       },
+      async followThread(_repo, _n, commentId, resolved) {
+        const status = threadFindings.get(commentId);
+        if (resolved && (status === "open" || status === "outdated")) {
+          threadFindings.set(commentId, "resolved_by_human");
+          return 1;
+        }
+        if (!resolved && status === "resolved_by_human") {
+          threadFindings.set(commentId, "open");
+          return 1;
+        }
+        return 0;
+      },
     },
     async deadLetter(record, reason) {
       deadLettered.push({ messageId: record.messageId, reason });
@@ -130,6 +144,7 @@ function fakeDeps() {
     recorded,
     runs,
     reviewedHeads,
+    threadFindings,
     calls,
     logs,
     status,
@@ -388,6 +403,46 @@ describe("dispatch", () => {
     delete headless.headSha;
     expect(await dispatch(f.deps, headless)).toEqual({ action: "ignored", reason: "no head SHA" });
     expect(f.executions.size).toBe(0);
+  });
+});
+
+describe("dispatch: review threads", () => {
+  it("resolves the finding behind a thread a person resolved, without a review", async () => {
+    const f = fakeDeps();
+    f.threadFindings.set(900, "open");
+    const resolved = job({ kind: "thread_resolved", commentId: 900, threadNodeId: "PRRT_1" });
+    expect(await dispatch(f.deps, resolved)).toEqual({ action: "resolved", changed: 1 });
+    expect(f.threadFindings.get(900)).toBe("resolved_by_human");
+    expect(f.executions.size).toBe(0);
+  });
+
+  it("follows a person unresolving it again: the person's latest action wins", async () => {
+    const f = fakeDeps();
+    f.threadFindings.set(900, "resolved_by_human");
+    const unresolved = job({ kind: "thread_unresolved", commentId: 900 });
+    expect(await dispatch(f.deps, unresolved)).toEqual({ action: "unresolved", changed: 1 });
+    expect(f.threadFindings.get(900)).toBe("open");
+  });
+
+  it("ignores threads that aren't ours, and events without the first comment", async () => {
+    const f = fakeDeps();
+    expect(await dispatch(f.deps, job({ kind: "thread_resolved", commentId: 1 }))).toEqual({
+      action: "ignored",
+      reason: "not a thread of one of our open findings",
+    });
+    expect(await dispatch(f.deps, job({ kind: "thread_resolved" }))).toMatchObject({
+      action: "ignored",
+    });
+    expect(f.executions.size).toBe(0);
+  });
+
+  it("leaves a declined finding alone when its thread is unresolved", async () => {
+    const f = fakeDeps();
+    f.threadFindings.set(901, "declined");
+    expect(
+      await dispatch(f.deps, job({ kind: "thread_unresolved", commentId: 901 })),
+    ).toMatchObject({ action: "ignored" });
+    expect(f.threadFindings.get(901)).toBe("declined");
   });
 });
 

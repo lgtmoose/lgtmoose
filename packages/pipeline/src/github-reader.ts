@@ -27,11 +27,22 @@ const issueCommentSchema = z.object({
 const reviewSchema = z.object({ state: z.string(), commit_id: z.string() });
 
 const reviewCommentSchema = issueCommentSchema.extend({
+  user: z.object({ login: z.string(), type: z.string().optional() }).nullable(),
   path: z.string(),
   line: z.number().int().positive().nullable().optional(),
   start_line: z.number().int().positive().nullable().optional(),
   side: z.enum(["LEFT", "RIGHT"]).nullable().optional(),
+  author_association: z.string().optional(),
+  in_reply_to_id: z.number().int().positive().optional(),
+  performed_via_github_app: z.object({ id: z.number().int() }).nullable().optional(),
+  html_url: z.string().optional(),
 });
+
+/** A bot per GitHub: an App's account (`type: "Bot"`), or a `[bot]` login. */
+function authorTypeOf(user: { login: string; type?: string | undefined } | null): "bot" | "human" {
+  if (user === null) return "human";
+  return user.type === "Bot" || user.login.endsWith("[bot]") ? "bot" : "human";
+}
 
 const PAGE_SIZE = 100;
 
@@ -85,6 +96,13 @@ export function githubPullReader(get: GitHubGet): PullReader {
           ...(typeof c.line === "number" ? { line: c.line } : {}),
           ...(typeof c.start_line === "number" ? { startLine: c.start_line } : {}),
           ...(typeof c.side === "string" ? { side: c.side } : {}),
+          authorType: authorTypeOf(c.user),
+          ...(c.author_association === undefined ? {} : { association: c.author_association }),
+          ...(c.in_reply_to_id === undefined ? {} : { inReplyTo: c.in_reply_to_id }),
+          ...(typeof c.performed_via_github_app?.id === "number"
+            ? { viaAppId: c.performed_via_github_app.id }
+            : {}),
+          ...(c.html_url === undefined ? {} : { url: c.html_url }),
         })),
       ];
       return comments.filter((c) => c.body.trim() !== "");
