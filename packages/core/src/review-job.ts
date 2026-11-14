@@ -26,7 +26,10 @@ export type ReviewJobKind = (typeof REVIEW_JOB_KINDS)[number];
  */
 export interface ReviewJob {
   kind: ReviewJobKind;
-  /** X-GitHub-Delivery. The dispatcher dedupes on this against the database. */
+  /**
+   * X-GitHub-Delivery. The queue dedupes on it for five minutes; after that the dispatcher's
+   * execution names (per head, plus this ID for a retry) catch redeliveries.
+   */
   deliveryId: string;
   installationId: number;
   /** "owner/name", as GitHub spells it. */
