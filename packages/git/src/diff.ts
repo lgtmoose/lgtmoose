@@ -57,18 +57,15 @@ export interface ReviewDiff {
    * change hasn't moved since, so they're covered at this head too (whether or not the PR still
    * changes them). Not in `files`.
    */
-  unchanged: string[];
+  unchanged: { path: string; reviewedAs: string }[];
 }
 
 export interface DiffOptions {
   /** The base branch's head commit. */
   baseSha: string;
-  /** The commit reviewed last time, for every file. Omit for a first review. */
-  lastReviewed?: string;
   /**
-   * The commit each path (at the time) was last reviewed at, when that differs per file, such
-   * as after a batch failed. Takes the place of `lastReviewed`: a path with no entry has never
-   * been reviewed, so its whole PR diff is reviewed.
+   * The commit each path (as it was named then) was last reviewed at. A path with no entry has
+   * never been reviewed, so its whole PR diff is reviewed. Omit for a first review.
    */
   reviewedAt?: ReadonlyMap<string, string>;
 }
@@ -371,15 +368,21 @@ interface Baseline {
   since: Map<string, FileDiff>;
   previous: Map<string, FileDiff>;
   previousFiles: FileDiff[];
-  /** Paths renamed since then, to their new names: the previous diff has them under the old ones. */
+  /** Paths renamed since then, to their new names; the previous diff has the old names. */
   movedAway: Map<string, string>;
 }
 
-async function baseline(repo: Repo, baseSha: string, sha: string): Promise<Baseline> {
+async function baseline(
+  repo: Repo,
+  baseSha: string,
+  sha: string,
+  paths: readonly string[],
+): Promise<Baseline> {
   const previousBase = (await repo.git(["merge-base", baseSha, sha])).trim();
+  // Only the files reviewed at this commit matter here; renames are still found.
   const [sinceFiles, previousFiles] = await Promise.all([
-    diffRange(repo, sha, repo.headSha, { detectMechanical: false }),
-    diffRange(repo, previousBase, sha, { detectMechanical: false }),
+    diffRange(repo, sha, repo.headSha, { detectMechanical: false, paths }),
+    diffRange(repo, previousBase, sha, { detectMechanical: false, paths }),
   ]);
   return {
     since: new Map(sinceFiles.map((f) => [f.path, f])),
@@ -391,12 +394,15 @@ async function baseline(repo: Repo, baseSha: string, sha: string): Promise<Basel
   };
 }
 
+/** How many baselines are diffed at once. */
+const BASELINES_AT_ONCE = 4;
+
 /**
  * What changed in one file's PR change since its baseline: the file with its incremental
  * notes, or undefined when nothing did (the PR adds the same lines, moved or not, and stopped
  * adding nothing).
  */
-function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
+function sinceBaseline(file: FileDiff, base: Baseline, reviewedPath: string): FileDiff | undefined {
   const changed = base.since.get(file.path);
   if (file.status === "deleted") {
     // Deleted since the last review (it still existed then).
@@ -404,7 +410,8 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
       ? { ...file, changedSinceLastReview: [], removedSinceLastReview: [] }
       : undefined;
   }
-  const before = base.previous.get(file.oldPath ?? file.path) ?? base.previous.get(file.path);
+  // The PR's diff of the file back then, under the path it had then.
+  const before = base.previous.get(reviewedPath);
   const removed = removedTexts(before, file, changed);
   const prLines = addedLines(file);
   const newLines = changed
@@ -425,9 +432,9 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
  * moved since they were last reviewed: lines it adds that changed since then, and lines it
  * added then but no longer does. Both come from comparing the PR's diff, not the commits, so
  * changes that arrived by merging the base branch into the PR, and the base-branch changes a
- * rebase brings, drop out. Each file is compared with its own last review (`reviewedAt`), or
- * all with `lastReviewed`; a file never reviewed is reviewed whole. If a file's last reviewed
- * commit is gone (force-pushed away and collected), that file is reviewed whole too.
+ * rebase brings, drop out. Each file is compared with its own last review (`reviewedAt`),
+ * found under its new name if it was renamed since; a file never reviewed is reviewed whole.
+ * A file whose last reviewed commit is gone (force-pushed away) is reviewed whole too.
  *
  * Files the PR stopped changing altogether are listed with what they no longer add, when they
  * still exist; a file the PR added and dropped again has nothing left to review.
@@ -435,86 +442,97 @@ function sinceBaseline(file: FileDiff, base: Baseline): FileDiff | undefined {
 export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<ReviewDiff> {
   const mergeBase = (await repo.git(["merge-base", options.baseSha, repo.headSha])).trim();
   const files = await diffRange(repo, mergeBase, repo.headSha);
-  const { reviewedAt, lastReviewed } = options;
-  const baselineOf = (path: string): string | undefined =>
-    reviewedAt === undefined ? lastReviewed : reviewedAt.get(path);
-  const result = {
-    mergeBase,
-    headSha: repo.headSha,
-    ...(lastReviewed === undefined ? {} : { lastReviewed }),
-    prFiles: files,
-  };
-  if (reviewedAt === undefined && lastReviewed === undefined) {
+  const result = { mergeBase, headSha: repo.headSha, prFiles: files };
+  const { reviewedAt } = options;
+  if (reviewedAt === undefined || reviewedAt.size === 0) {
     return { ...result, kind: "full", files, unchanged: [] };
   }
 
-  // Every baseline commit in use, with what it gives; undefined when it's gone.
-  const wanted = new Set<string>();
-  for (const file of files) {
-    const sha = baselineOf(file.path);
-    if (sha !== undefined) wanted.add(sha);
-  }
-  for (const sha of reviewedAt?.values() ?? (lastReviewed === undefined ? [] : [lastReviewed])) {
-    wanted.add(sha);
-  }
+  // Every baseline commit in use, with what it gives (undefined when it's gone), each diffed
+  // only for the paths reviewed there.
+  const pathsAt = new Map<string, string[]>();
+  for (const [path, sha] of reviewedAt) pathsAt.set(sha, [...(pathsAt.get(sha) ?? []), path]);
   const baselines = new Map<string, Baseline | undefined>();
-  for (const sha of wanted) {
-    if (sha === repo.headSha) {
-      // Reviewed at this very head: nothing has changed since.
-      const same = new Map(files.map((f) => [f.path, f]));
-      baselines.set(sha, {
-        since: new Map(),
-        previous: same,
-        previousFiles: files,
-        movedAway: new Map(),
-      });
-    } else {
-      baselines.set(
-        sha,
-        (await repo.hasCommit(sha)) ? await baseline(repo, options.baseSha, sha) : undefined,
-      );
+  const shas = [...pathsAt.keys()];
+  for (let i = 0; i < shas.length; i += BASELINES_AT_ONCE) {
+    const chunk = shas.slice(i, i + BASELINES_AT_ONCE);
+    const built = await Promise.all(
+      chunk.map(async (sha): Promise<Baseline | undefined> => {
+        const paths = new Set(pathsAt.get(sha));
+        if (sha === repo.headSha) {
+          // Reviewed at this very head: nothing has changed since.
+          const same = files.filter((f) => paths.has(f.path));
+          return {
+            since: new Map(),
+            previous: new Map(same.map((f) => [f.path, f])),
+            previousFiles: same,
+            movedAway: new Map(),
+          };
+        }
+        if (!(await repo.hasCommit(sha))) return undefined;
+        return baseline(repo, options.baseSha, sha, [...paths]);
+      }),
+    );
+    for (const [j, sha] of chunk.entries()) baselines.set(sha, built[j]);
+  }
+  // A file renamed since its last review is found under its new name.
+  const renamedFrom = new Map<string, string>();
+  for (const [sha, base] of baselines) {
+    for (const [from, to] of base?.movedAway ?? []) {
+      if (reviewedAt.get(from) === sha) renamedFrom.set(to, from);
     }
   }
 
-  const incremental: FileDiff[] = [];
-  const unchanged: string[] = [];
+  // Each path ends up planned (in `files`) or covered (`unchanged`), never both.
+  const planned = new Map<string, FileDiff>();
+  /** Covered path to the name it was last reviewed under. */
+  const unchanged = new Map<string, string>();
+  const handled = new Set<string>();
+  const plan = (file: FileDiff) => {
+    planned.set(file.path, file);
+    unchanged.delete(file.path);
+    handled.add(file.path);
+  };
+  const cover = (path: string, reviewedAs = path) => {
+    if (!planned.has(path)) unchanged.set(path, reviewedAs);
+    handled.add(path);
+  };
   const gone: string[] = [];
   let compared = false;
-  const covered = new Set<string>();
-  // Paths the PR changes now, either side.
-  const inPr = new Set(
-    files.flatMap((file) => [file.path, ...(file.oldPath === undefined ? [] : [file.oldPath])]),
-  );
   for (const file of files) {
-    covered.add(file.path);
-    if (file.oldPath !== undefined) covered.add(file.oldPath);
-    const sha = baselineOf(file.path);
+    const reviewedPath = reviewedAt.has(file.path)
+      ? file.path
+      : (renamedFrom.get(file.path) ?? file.path);
+    const sha = reviewedAt.get(reviewedPath);
     const base = sha === undefined ? undefined : baselines.get(sha);
-    if (base === undefined) {
+    if (reviewedPath !== file.path) handled.add(reviewedPath);
+    if (sha === undefined || base === undefined) {
       // Never reviewed, or its last reviewed commit is gone: the whole PR diff.
       if (sha !== undefined) gone.push(file.path);
-      incremental.push(file);
+      plan(file);
       continue;
     }
     compared = true;
-    const moved = sinceBaseline(file, base);
-    if (moved === undefined) unchanged.push(file.path);
-    else incremental.push(moved);
+    const moved = sinceBaseline(file, base, reviewedPath);
+    if (moved === undefined) cover(file.path, reviewedPath);
+    else plan(moved);
+    // The old name is covered too: nothing is left there to review.
+    if (reviewedPath !== file.path) cover(reviewedPath);
   }
+  const inPr = new Set(files.map((file) => file.path));
 
   // Files the PR changed at their last review but no longer changes at all (fully reverted).
   const reverted: { before: FileDiff; removed: string[] }[] = [];
   for (const [sha, base] of baselines) {
     if (base === undefined) continue;
     for (const before of base.previousFiles) {
-      if (baselineOf(before.path) !== sha) continue;
+      if (reviewedAt.get(before.path) !== sha || handled.has(before.path)) continue;
       const movedTo = base.movedAway.get(before.path);
-      if (covered.has(before.path) || (movedTo !== undefined && inPr.has(movedTo))) continue;
-      covered.add(before.path);
+      if (movedTo !== undefined && inPr.has(movedTo)) continue;
       compared = true;
       const removed = before.status === "deleted" ? [] : removedTexts(before, undefined);
       if (removed.length > 0) reverted.push({ before, removed });
-      else unchanged.push(before.path);
+      else cover(before.path);
     }
   }
   // Their blobs are the ones at head (the same as at the merge base), not the last review's,
@@ -530,12 +548,14 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
     // A reverted rename is back at its old path.
     const path = atHead.has(before.path) ? before.path : before.oldPath;
     const blob = path === undefined ? undefined : atHead.get(path);
-    if (path !== before.path) unchanged.push(before.path);
-    // Added by the PR and dropped again: no file, nothing to review; covered at this head.
+    cover(before.path);
+    // Added by the PR and dropped again: no file, nothing to review; covered at this head. A
+    // path something else already planned or covered isn't listed twice.
     if (path === undefined || blob === undefined || inPr.has(path)) continue;
+    if (path !== before.path && handled.has(path)) continue;
     const rest: FileDiff = { ...before };
     delete rest.oldPath;
-    incremental.push({
+    plan({
       ...rest,
       path,
       status: "modified",
@@ -548,19 +568,21 @@ export async function reviewDiff(repo: Repo, options: DiffOptions): Promise<Revi
       removedSinceLastReview: removed,
     });
   }
-  // Paths with a record that the PR doesn't change and that weren't in their baseline's diff
-  // either: nothing to review, still covered.
-  for (const path of reviewedAt?.keys() ?? []) {
-    if (covered.has(path)) continue;
-    const sha = reviewedAt?.get(path);
-    if (sha !== undefined && baselines.get(sha) !== undefined) unchanged.push(path);
+  // Records for paths the PR doesn't change, and that weren't in their baseline's diff either
+  // (or whose baseline is gone): nothing to review, covered at this head, so a gone commit isn't
+  // asked for again.
+  for (const path of reviewedAt.keys()) {
+    if (!handled.has(path) && !inPr.has(path)) cover(path);
   }
 
+  for (const path of unchanged.keys()) {
+    if (planned.has(path)) throw new Error(`${path} is both planned and covered.`);
+  }
   return {
     ...result,
     kind: compared ? "incremental" : "full",
-    files: incremental,
-    unchanged,
+    files: [...planned.values()],
+    unchanged: [...unchanged].map(([path, reviewedAs]) => ({ path, reviewedAs })),
     ...(gone.length > 0
       ? {
           fallbackReason: `The commit ${gone.length === 1 ? `${gone[0] ?? ""} was` : `${gone.length} files were`} last reviewed at is no longer in the repository (force-pushed away), so ${gone.length === 1 ? "it is" : "they are"} reviewed in full.`,

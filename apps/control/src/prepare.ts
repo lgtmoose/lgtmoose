@@ -231,11 +231,7 @@ export async function prepare(
       target,
       repo,
       pr,
-      {
-        ...(lastReviewed === undefined ? {} : { lastReviewed }),
-        reviewed,
-        resumed,
-      },
+      { reviewed, resumed },
     );
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");

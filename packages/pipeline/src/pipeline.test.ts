@@ -344,7 +344,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       OPTIONS.target,
       repo,
       pull(),
-      { lastReviewed, reviewed },
+      { reviewed },
     );
     expect(prepared.kind).toBe("incremental");
     expect(prepared.done).not.toContain("src/total.ts");
@@ -447,7 +447,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       OPTIONS.target,
       repo,
       pull(),
-      { lastReviewed, reviewed },
+      { reviewed },
     );
     expect(prepared.kind).toBe("incremental");
     // Not in the range, but still in the plan: skipped, and so never recorded as reviewed.
@@ -533,7 +533,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
       OPTIONS.target,
       repo,
       pull(),
-      { lastReviewed, reviewed },
+      { reviewed },
     );
     expect(prepared.kind).toBe("incremental");
     expect(prepared.files.map((file) => file.path).toSorted()).toEqual([
@@ -541,6 +541,40 @@ describe("prepareReview and finishReview with earlier runs", () => {
       "src/total.ts",
     ]);
     expect(prepared.jobs[0]?.prompt).toContain("src/total.ts");
+  });
+
+  it("covers a file renamed since its review at the depth it was read at", async () => {
+    // A file the PR adds, reviewed (say, at mechanical depth), then only renamed.
+    headSha = await commit({ "src/util.ts": "export const one = 1;\n" }, "add util");
+    const reviewedHead = headSha;
+    const first = await setUp();
+    const records = [...ALL, "src/util.ts"].map((path) => ({
+      path,
+      blobSha: first.blobs.get(path) ?? "",
+      depth: path === "src/util.ts" ? ("mechanical" as const) : FULL,
+      reviewedAt: reviewedHead,
+    }));
+    await git(work, "mv", "src/util.ts", "src/sum.ts");
+    headSha = await commit({}, "rename only");
+    const repo = await cloneAtSha({
+      url: pathToFileURL(remote).href,
+      dir: await mkdtemp(join(root, "checkout-")),
+      headSha,
+      otherShas: [baseSha, reviewedHead],
+    });
+
+    const prepared = await prepareReview(
+      { github: deps().deps.github, progress: () => {} },
+      OPTIONS.target,
+      repo,
+      pull(),
+      { reviewed: records },
+    );
+
+    expect(prepared.files).toEqual([]);
+    expect(prepared.unchanged).toContainEqual(
+      expect.objectContaining({ path: "src/sum.ts", depth: "mechanical" }),
+    );
   });
 
   it("counts earlier open findings once and doesn't post them again", async () => {

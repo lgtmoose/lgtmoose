@@ -145,14 +145,26 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
 
   const fetched = new Set([options.headSha]);
   await fetch([options.headSha]);
-  /** Whether the commit is in this clone, without asking the remote. */
-  const isLocalCommit = async (sha: string): Promise<boolean> => {
-    const { exitCode } = await run(["cat-file", "-e", `${sha}^{commit}`], {
-      okExitCodes: [1, 128],
+  /**
+   * Which of these commits are in this clone, with one `git cat-file --batch-check` and without
+   * asking the remote.
+   */
+  const localCommits = async (shas: readonly string[]): Promise<Set<string>> => {
+    if (shas.length === 0) return new Set();
+    const { stdout } = await run(["cat-file", "--batch-check=%(objectname) %(objecttype)"], {
+      input: shas.map((sha) => `${sha}^{commit}`).join("\n") + "\n",
       env: { GIT_NO_LAZY_FETCH: "1" },
     });
-    return exitCode === 0;
+    // One line per input, in order: "<sha> commit", or "<input> missing".
+    const present = new Set<string>();
+    for (const [i, line] of stdout.split("\n").entries()) {
+      const sha = shas[i];
+      if (sha !== undefined && line.endsWith(" commit")) present.add(sha);
+    }
+    return present;
   };
+  const isLocalCommit = async (sha: string): Promise<boolean> =>
+    (await localCommits([sha])).has(sha);
   /**
    * Fetches commits in one request; if one of them is gone, the request fails as a whole, so
    * they're fetched one at a time instead, skipping the ones that are gone.
@@ -163,11 +175,9 @@ export async function cloneAtSha(options: CloneOptions): Promise<Repo> {
       if (!SHA.test(sha)) throw new Error(`Not a full commit SHA: ${JSON.stringify(sha)}`);
     }
     // Commits in head's history (or fetched before) are here already: don't ask for them.
-    const wanted: string[] = [];
-    for (const sha of unknown) {
-      if (await isLocalCommit(sha)) fetched.add(sha);
-      else wanted.push(sha);
-    }
+    const here = await localCommits(unknown);
+    for (const sha of here) fetched.add(sha);
+    const wanted = unknown.filter((sha) => !here.has(sha));
     if (wanted.length === 0) return;
     try {
       await fetch(wanted);

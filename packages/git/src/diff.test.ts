@@ -24,6 +24,18 @@ function byPath(files: FileDiff[]): Record<string, FileDiff> {
   return Object.fromEntries(files.map((f) => [f.path, f]));
 }
 
+/** Every file the PR changed at `sha`, as reviewed there (what one posted run records). */
+async function reviewedAllAt(sha: string): Promise<Map<string, string>> {
+  const mergeBase = await fixture.git(["merge-base", "main", sha]);
+  const names = await fixture.git(["diff", "--name-only", "--find-renames", mergeBase, sha]);
+  return new Map(
+    names
+      .split("\n")
+      .filter((name) => name !== "")
+      .map((name) => [name, sha]),
+  );
+}
+
 const lines = (n: number, prefix = "line") =>
   Array.from({ length: n }, (_, i) => `${prefix} ${i + 1}`).join("\n") + "\n";
 
@@ -228,7 +240,7 @@ describe("reviewDiff: incremental review", () => {
 
     const diff = await reviewDiff(await clone(head, [base, reviewed]), {
       baseSha: base,
-      lastReviewed: reviewed,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
     expect(diff.kind).toBe("incremental");
     expect(diff.files.map((f) => f.path)).toEqual(["a.txt"]);
@@ -260,7 +272,7 @@ describe("reviewDiff: incremental review", () => {
 
     const diff = await reviewDiff(await clone(head, [mainHead, reviewed]), {
       baseSha: mainHead,
-      lastReviewed: reviewed,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
     expect(diff.files.map((f) => f.path)).toEqual(["shared.txt"]);
     expect(diff.files[0]?.changedSinceLastReview).toEqual([20]);
@@ -288,7 +300,7 @@ describe("reviewDiff: incremental review", () => {
     // The pre-rebase commit is still fetchable, so this stays incremental.
     const diff = await reviewDiff(await clone(head, [mainHead, reviewed]), {
       baseSha: mainHead,
-      lastReviewed: reviewed,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
     expect(diff.kind).toBe("incremental");
     expect(diff.files.map((f) => f.path)).toEqual(["a.txt"]);
@@ -306,7 +318,7 @@ describe("reviewDiff: incremental review", () => {
 
     const diff = await reviewDiff(await clone(head, [base, reviewed]), {
       baseSha: base,
-      lastReviewed: reviewed,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
     expect(diff.kind).toBe("full");
     expect(diff.fallbackReason).toContain("force-pushed away");
@@ -330,7 +342,7 @@ describe("reviewDiff: incremental review", () => {
       (
         await reviewDiff(await clone(head, [base, reviewed]), {
           baseSha: base,
-          lastReviewed: reviewed,
+          reviewedAt: await reviewedAllAt(reviewed),
         })
       ).files,
     );
@@ -359,7 +371,7 @@ describe("reviewDiff: incremental review", () => {
     });
     expect(diff.files).toEqual([]);
     // Covered at this head: nothing left of the PR's change to it.
-    expect(diff.unchanged).toEqual(["added.ts"]);
+    expect(diff.unchanged).toEqual([{ path: "added.ts", reviewedAs: "added.ts" }]);
   });
 
   it("drops the old path of a rename the PR reverted", async () => {
@@ -375,7 +387,7 @@ describe("reviewDiff: incremental review", () => {
       (
         await reviewDiff(await clone(head, [base, reviewed]), {
           baseSha: base,
-          lastReviewed: reviewed,
+          reviewedAt: await reviewedAllAt(reviewed),
         })
       ).files,
     );
@@ -417,7 +429,7 @@ describe("reviewDiff: incremental review", () => {
     // a.ts's blob changed (the merge), but not its PR change: covered, not reviewed again.
     expect(diff.kind).toBe("incremental");
     expect(diff.files).toEqual([]);
-    expect(diff.unchanged.toSorted()).toEqual(["a.ts", "b.ts"]);
+    expect(diff.unchanged.map((entry) => entry.path).toSorted()).toEqual(["a.ts", "b.ts"]);
   });
 
   it("keeps lines a file stopped adding since its own, older review", async () => {
@@ -469,6 +481,67 @@ describe("reviewDiff: incremental review", () => {
     expect(diff.fallbackReason).toContain("b.ts");
   });
 
+  it("finds a file renamed since its last review under its new name", async () => {
+    await setUp({ "keep.txt": "k\n" });
+    await fixture.write({ "src/auth.ts": lines(8, "auth") });
+    const reviewed = await fixture.commit("add auth");
+    // A pure rename of a file the PR adds: nothing new to review.
+    await fixture.move("src/auth.ts", "src/security/auth.ts");
+    const head = await fixture.commit("move it");
+
+    const diff = await reviewDiff(await clone(head, [reviewed]), {
+      baseSha: await fixture.git(["rev-parse", "main"]),
+      reviewedAt: new Map([["src/auth.ts", reviewed]]),
+    });
+    expect(diff.kind).toBe("incremental");
+    expect(diff.files).toEqual([]);
+    // The new name is covered as what was reviewed under the old one.
+    expect(diff.unchanged).toContainEqual({
+      path: "src/security/auth.ts",
+      reviewedAs: "src/auth.ts",
+    });
+    expect(diff.unchanged.map((entry) => entry.path).toSorted()).toEqual([
+      "src/auth.ts",
+      "src/security/auth.ts",
+    ]);
+  });
+
+  it("lists a reverted rename once, and never both plans and covers a path", async () => {
+    const base = await setUp({ "a.ts": lines(10), "z.ts": lines(3) });
+    await fixture.move("a.ts", "b.ts");
+    await fixture.write({ "b.ts": lines(10).replace("line 3\n", "line 3\ncheck();\n") });
+    const reviewed = await fixture.commit("rename and add a check");
+    await fixture.move("b.ts", "a.ts");
+    await fixture.write({ "a.ts": lines(10), "z.ts": lines(4) });
+    const head = await fixture.commit("undo it, touch z.ts");
+
+    const diff = await reviewDiff(await clone(head, [base, reviewed]), {
+      baseSha: base,
+      // Records for both names, as runs before and after the rename would leave.
+      reviewedAt: new Map([
+        ["a.ts", reviewed],
+        ["b.ts", reviewed],
+      ]),
+    });
+    const paths = diff.files.map((file) => file.path);
+    expect(paths.toSorted()).toEqual(["a.ts", "z.ts"]);
+    expect(diff.unchanged.filter((entry) => paths.includes(entry.path))).toEqual([]);
+  });
+
+  it("covers a file the PR no longer changes whose last review is gone", async () => {
+    const base = await setUp({ "a.ts": lines(5), "b.ts": lines(5) });
+    await fixture.write({ "a.ts": lines(5).replace("line 1\n", "A\n") });
+    const head = await fixture.commit("change a");
+
+    const diff = await reviewDiff(await clone(head, [base]), {
+      baseSha: base,
+      reviewedAt: new Map([["b.ts", "e".repeat(40)]]),
+    });
+    // Re-recorded at this head, so the gone commit isn't asked for again.
+    expect(diff.unchanged).toEqual([{ path: "b.ts", reviewedAs: "b.ts" }]);
+    expect(diff.files.map((file) => file.path)).toEqual(["a.ts"]);
+  });
+
   it("doesn't call a file renamed since the last review reverted", async () => {
     const base = await setUp({ "keep.txt": "k\n" });
     await fixture.write({ "src/auth.ts": lines(8, "auth") });
@@ -478,7 +551,7 @@ describe("reviewDiff: incremental review", () => {
 
     const diff = await reviewDiff(await clone(head, [base, reviewed]), {
       baseSha: base,
-      lastReviewed: reviewed,
+      reviewedAt: await reviewedAllAt(reviewed),
     });
     expect(diff.files.find((f) => f.path === "src/auth.ts")).toBeUndefined();
     expect(diff.files.flatMap((f) => f.removedSinceLastReview ?? [])).toEqual([]);
@@ -501,7 +574,7 @@ describe("reviewDiff: incremental review", () => {
     const [file] = (
       await reviewDiff(await clone(head, [base, reviewed]), {
         baseSha: base,
-        lastReviewed: reviewed,
+        reviewedAt: await reviewedAllAt(reviewed),
       })
     ).files;
     expect(file?.removedSinceLastReview).toEqual(["assertOwner(user);"]);
@@ -520,7 +593,7 @@ describe("reviewDiff: incremental review", () => {
     const [file] = (
       await reviewDiff(await clone(head, [base, reviewed]), {
         baseSha: base,
-        lastReviewed: reviewed,
+        reviewedAt: await reviewedAllAt(reviewed),
       })
     ).files;
     expect(file?.removedSinceLastReview).toEqual(["requireAdmin(user);"]);
@@ -539,9 +612,13 @@ describe("reviewDiff: incremental review", () => {
     const head = await fixture.commit("delete and rename");
 
     const repo = await clone(head, [base, reviewed]);
-    const files = byPath((await reviewDiff(repo, { baseSha: base, lastReviewed: reviewed })).files);
+    const files = byPath(
+      (await reviewDiff(repo, { baseSha: base, reviewedAt: await reviewedAllAt(reviewed) })).files,
+    );
     expect(files["a.txt"]).toMatchObject({ status: "deleted", changedSinceLastReview: [] });
     expect(files["c.txt"]).toMatchObject({ status: "renamed", oldPath: "b.txt" });
-    expect((await reviewDiff(repo, { baseSha: base, lastReviewed: head })).files).toEqual([]);
+    expect(
+      (await reviewDiff(repo, { baseSha: base, reviewedAt: await reviewedAllAt(head) })).files,
+    ).toEqual([]);
   });
 });

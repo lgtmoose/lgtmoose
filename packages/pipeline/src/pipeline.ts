@@ -13,7 +13,7 @@ import {
   type KnownFinding,
   type ReviewDecision,
 } from "@lgtmoose/core";
-import type { CloneOptions, DiffOptions, FileDiff, Repo } from "@lgtmoose/git";
+import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
 import { reviewDiff } from "@lgtmoose/git";
 import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness";
 import {
@@ -145,12 +145,10 @@ export interface PreparedReview {
   /** One entry per planned batch, in order. */
   jobs: BatchJob[];
   /**
-   * `incremental`: only the files the PR's own changes moved in since `lastReviewed` (see
-   * `reviewDiff`). `full`: the whole PR, also when an incremental review fell back to it.
+   * `incremental`: only the files whose PR change moved since each was last reviewed (see
+   * `reviewDiff`). `full`: the whole PR, also when no file has a usable earlier review.
    */
   kind: "full" | "incremental";
-  /** The commit the incremental review starts from. */
-  lastReviewed?: string;
   /** Why an incremental review became a full one: the last reviewed commit is gone. */
   fallbackReason?: string;
   /**
@@ -209,8 +207,6 @@ export interface ResumedWork {
 }
 
 export interface PrepareOptions {
-  /** The commit the last posted review was for, for an incremental review. */
-  lastReviewed?: string;
   /**
    * Each path's latest version a posted run reviewed (see `reviewedBlobOf`). A planned file at
    * that version is done, if it was read at least as closely as this plan reads it; on an
@@ -344,25 +340,22 @@ export async function prepareReview(
   // With records, each file is compared with its own last review: a file whose batch failed
   // keeps the commit it was last reviewed at, so what changed since then is still reviewed.
   const reviewed = new Map((options.reviewed ?? []).map((entry) => [entry.path, entry]));
-  const diffOptions: DiffOptions = { baseSha: pr.baseSha };
-  if (options.reviewed !== undefined) {
-    diffOptions.reviewedAt = new Map(
-      [...reviewed].map(([path, entry]) => [path, entry.reviewedAt]),
-    );
-  } else if (options.lastReviewed !== undefined) {
-    diffOptions.lastReviewed = options.lastReviewed;
-  }
-  const diff = await reviewDiff(repo, diffOptions);
+  const diff = await reviewDiff(repo, {
+    baseSha: pr.baseSha,
+    reviewedAt: new Map([...reviewed].map(([path, entry]) => [path, entry.reviewedAt])),
+  });
   if (diff.fallbackReason !== undefined) deps.progress(diff.fallbackReason);
   const { files } = diff;
   const prFiles = new Map(diff.prFiles.map((file) => [file.path, file]));
-  const unchanged = diff.unchanged.map((path) => {
+  const unchanged = diff.unchanged.map(({ path, reviewedAs }) => {
     const file = prFiles.get(path);
     return {
       path,
       // The PR doesn't change the path at all now.
       blobSha: (file === undefined ? undefined : reviewedBlobOf(file)) ?? NOT_CHANGED,
-      depth: reviewed.get(path)?.depth ?? ("full" as const),
+      // How closely it was read, under the name it had then. Every covered path has a record;
+      // without one, the lowest depth claims the least.
+      depth: reviewed.get(reviewedAs)?.depth ?? ("move" as const),
     };
   });
   const headers = await readHeaders(repo, files, { skip: config.skip, include: config.include });
@@ -411,7 +404,6 @@ export async function prepareReview(
     conventionFilesOmitted: conventions.omitted,
     jobs,
     kind: diff.kind,
-    ...(diff.lastReviewed === undefined ? {} : { lastReviewed: diff.lastReviewed }),
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
     done: [...done].map(([path, depth]) => ({ path, depth })),
     carried,
