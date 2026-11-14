@@ -34,6 +34,8 @@ interface Setup {
   refreshed?: string;
   /** Whether the batch has a URL to hand a refreshed credential back. */
   credentialUrl?: boolean;
+  /** The reviewer's notes for the cross-file pass. */
+  notes?: string[];
 }
 
 function setup(options: Setup = {}) {
@@ -85,7 +87,10 @@ function setup(options: Setup = {}) {
         throw new HarnessError("timeout", "The run timed out.", { transcriptKeys: [TRANSCRIPT] });
       }
       return {
-        output: run.schema.parse({ findings: [FINDING] }),
+        output: run.schema.parse({
+          findings: [FINDING],
+          ...(options.notes === undefined ? {} : { notes: options.notes }),
+        }),
         transcriptKey: TRANSCRIPT,
         usage: { costUsd: 0.5 },
       };
@@ -131,6 +136,29 @@ describe("runSandboxBatch", () => {
     expect(s.puts.get("/runs/t1.jsonl")).toBe("{}\n");
     // A transcript with no URL is dropped, not written anywhere.
     expect(s.puts.size).toBe(2);
+  });
+
+  it("runs its own provider's model, sends the shared part as system, and keeps notes", async () => {
+    const s = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 1,
+        prompt: "Review src/total.ts",
+        system: "# Role\n\nShared rules.",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      notes: ["exports total()", "exports total()", "x".repeat(900)],
+    });
+    s.deps.model = "gpt-5.1-codex";
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.runs[0]).toMatchObject({
+      model: "gpt-5.1-codex",
+      system: "# Role\n\nShared rules.",
+      prompt: "Review src/total.ts",
+    });
+    expect(output.notes).toEqual(["exports total()", `${"x".repeat(499)}…`]);
   });
 
   it("removes symlinks after extracting and before the harness runs", async () => {

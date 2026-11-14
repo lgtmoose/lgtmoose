@@ -243,6 +243,41 @@ describe("credential broker", () => {
     });
   });
 
+  it("leases a fallback provider's own credential when a batch falls back to it", () => {
+    const chain = synth([
+      { id: "claude", harness: "claude-code", auth: "oauth-token" },
+      { id: "codex", harness: "codex", auth: "chatgpt-login" },
+    ]);
+    const credentials = JSON.parse(envText(chain.broker()?.env.LGTMOOSE_CREDENTIALS)) as Record<
+      string,
+      { auth: string; limit: number }
+    >;
+    expect(Object.keys(credentials).sort()).toEqual(["claude", "codex"]);
+    expect(credentials.codex).toMatchObject({ auth: "chatgpt-login", limit: 1 });
+    const [machine] = Object.values(chain.resources).filter(
+      (r) => r.Type === "AWS::StepFunctions::StateMachine",
+    );
+    const body = machine?.Properties.DefinitionString as { "Fn::Join": [string, unknown[]] };
+    const text = body["Fn::Join"][1].map((p) => (typeof p === "string" ? p : "REF")).join("");
+    const items =
+      (JSON.parse(text) as { States: Record<string, State> }).States.Batches?.ItemProcessor
+        ?.States ?? {};
+    const codex = items["Attempt-codex"]?.Branches?.[0]?.States ?? {};
+    expect(codex["Lease-codex"]?.Parameters).toMatchObject({
+      action: "acquire",
+      providerId: "codex",
+    });
+    expect(codex["Presign-codex"]?.Parameters).toMatchObject({ credentialRefresh: true });
+    // Only the sign-in's secret may be read and written; the Claude token's is described only.
+    const writes = chain
+      .statements(chain.broker()!.fn)
+      .filter((s) => actions([s]).includes("secretsmanager:PutSecretValue"));
+    expect(JSON.stringify(writes.map((s) => s.Resource))).toContain(SECRET_NAMES.provider("codex"));
+    expect(JSON.stringify(writes.map((s) => s.Resource))).not.toContain(
+      SECRET_NAMES.provider("claude"),
+    );
+  }, 120_000);
+
   it("leases nothing for a Bedrock reviewer, which has no stored credential", () => {
     const bedrock = synth([{ id: "bedrock", harness: "claude-code", auth: "bedrock" }]);
     expect(bedrock.broker()).toBeUndefined();

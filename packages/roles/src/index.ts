@@ -20,7 +20,9 @@ export {
   type ReviewDepth,
 } from "./diff.js";
 export {
+  buildReviewerParts,
   buildReviewerPrompt,
+  type ReviewerPromptParts,
   type PullRequestComment,
   type PullRequestInfo,
   type ReviewerPromptInput,
@@ -43,6 +45,7 @@ export {
   CROSS_FILE_LIMITS,
   CROSS_FILE_TIER,
   buildCrossFilePrompt,
+  clipBatchNotes,
   collectBatchNotes,
   type BatchNotes,
   type CrossFilePromptInput,

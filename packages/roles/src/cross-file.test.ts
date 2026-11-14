@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CROSS_FILE_LIMITS,
   buildCrossFilePrompt,
+  clipBatchNotes,
   collectBatchNotes,
   type CrossFilePromptInput,
 } from "./cross-file.js";
@@ -80,6 +81,22 @@ describe("buildCrossFilePrompt", () => {
     expect(() => buildCrossFilePrompt({ ...input, mergeBase: "HEAD; echo hi" })).toThrow(
       "Not a full commit SHA",
     );
+  });
+});
+
+describe("clipBatchNotes", () => {
+  it("keeps one batch's notes within the soft limits", () => {
+    const notes = clipBatchNotes([
+      "  exports total() from src/math  ",
+      "",
+      "exports total() from src/math",
+      "x".repeat(FINDING_LIMITS.note + 50),
+      ...Array.from({ length: 40 }, (_, i) => `reads ENV_${i}`),
+    ]);
+    expect(notes[0]).toBe("exports total() from src/math");
+    expect(notes[1]).toHaveLength(FINDING_LIMITS.note);
+    expect(notes).toHaveLength(FINDING_LIMITS.notesPerRun);
+    expect(new Set(notes).size).toBe(notes.length);
   });
 });
 

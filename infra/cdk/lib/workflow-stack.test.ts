@@ -279,8 +279,66 @@ describe("review state machine", () => {
     expect(attempt.Review?.Resource).toContain("ecs:runTask.sync");
   });
 
-  it("caps the map at the configured concurrency", () => {
-    expect(definition().States.Batches?.MaxConcurrency).toBe(4);
+  it("caps the map at the configured concurrency, or the reviewer credential's if lower", () => {
+    // maxConcurrency is 4 by default; the reviewer's Claude plan token allows 2 at once.
+    expect(definition().States.Batches?.MaxConcurrency).toBe(2);
+    const bedrockFirst = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      maxConcurrency: 6,
+      providers: [{ id: "bedrock", harness: "claude-code", auth: "bedrock" }],
+    });
+    const machine = Object.values(
+      Template.fromStack(buildApp(bedrockFirst, appWithoutBundling()).workflow).toJSON()
+        .Resources as Resources,
+    ).find((r) => r.Type === "AWS::StepFunctions::StateMachine");
+    const body = machine?.Properties.DefinitionString as { "Fn::Join": [string, unknown[]] };
+    const text = body["Fn::Join"][1].map((p) => (typeof p === "string" ? p : "REF")).join("");
+    // Bedrock has no stored credential to limit it.
+    expect((JSON.parse(text) as ReturnType<typeof definition>).States.Batches?.MaxConcurrency).toBe(
+      6,
+    );
+  }, 120_000);
+
+  it("falls back to the next provider when a batch hits a limit, and fails it after the last", () => {
+    const items = definition().States.Batches?.ItemProcessor?.States ?? {};
+    // The reviewer's attempt, then a look at its output.
+    expect(items.Attempt?.Next).toBe("CheckOutcome");
+    expect(items.CheckOutcome?.Parameters).toMatchObject({
+      action: "outcome",
+      "runId.$": "$.runId",
+      "index.$": "$.index",
+      providerId: "claude",
+    });
+    expect(items["FallBack?"]).toMatchObject({
+      Choices: [{ Variable: "$.outcome.fallback", BooleanEquals: true, Next: "Attempt-bedrock" }],
+      Default: "BatchDone",
+    });
+    // An attempt that failed outright moves on too.
+    expect(items.Attempt?.Catch?.[0]?.Next).toBe("Attempt-bedrock");
+    // The last provider's outcome stands, and a failure there fails the batch.
+    expect(items["Attempt-bedrock"]?.Next).toBeUndefined();
+    expect(items["Attempt-bedrock"]?.End).toBe(true);
+    expect(items["Attempt-bedrock"]?.Catch?.[0]?.Next).toBe("BatchFailed");
+    // Each provider's attempt runs its own sandbox task.
+    const branch = items["Attempt-bedrock"]?.Branches?.[0]?.States ?? {};
+    expect(branch["Review-bedrock"]?.Parameters?.TaskDefinition).toBe(
+      taskDefinition("bedrock").Family,
+    );
+    // Bedrock has no stored credential: nothing to lease.
+    expect(branch["Lease-bedrock"]).toBeUndefined();
+  });
+
+  it("gives each sandbox task its own provider's model", () => {
+    const model = (provider: string) =>
+      (
+        (
+          taskDefinition(provider).ContainerDefinitions as {
+            Environment: { Name: string; Value: unknown }[];
+          }[]
+        )[0]?.Environment ?? []
+      ).find((e) => e.Name === "LGTMOOSE_MODEL")?.Value;
+    expect(model("claude")).toBe("sonnet");
+    expect(model("bedrock")).toBe("sonnet");
   });
 
   it("passes each step its command and the execution, and the job to prepare", () => {
@@ -368,9 +426,11 @@ describe("review state machine", () => {
     }
     expect(States.MarkFailed?.Next).toBe("ReviewFailed");
     expect(States.ReviewFailed?.Type).toBe("Fail");
-    // A batch that fails for good leaves no output; the review is incomplete, not failed.
+    // A batch that fails for good, on every provider, leaves no output; the review is
+    // incomplete, not failed.
     const items = States.Batches?.ItemProcessor?.States ?? {};
-    expect(items.Attempt?.Catch?.[0]?.Next).toBe("BatchFailed");
+    expect(items["Attempt-bedrock"]?.Catch?.[0]?.Next).toBe("BatchFailed");
+    expect(items.BatchFailed?.Type).toBe("Pass");
   });
 
   it("logs without execution data, which holds task tokens and presigned URLs", () => {

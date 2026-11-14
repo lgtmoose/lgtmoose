@@ -110,25 +110,36 @@ export interface ReviewWorkflowProps {
   control: { taskDefinition: TaskDefinition; container: ContainerDefinition };
   controlSubnets: SubnetSelection;
   controlSecurityGroup: ISecurityGroup;
-  /** The reviewer provider's sandbox task. */
-  sandbox: { taskDefinition: TaskDefinition; container: ContainerDefinition };
+  /**
+   * The providers a batch is reviewed on, in order: the reviewer's, then its fallbacks
+   * (`providerChain`). At least one.
+   */
+  providers: readonly ReviewProvider[];
   sandboxSubnets: SubnetSelection;
   sandboxSecurityGroup: ISecurityGroup;
-  /** Sandbox tasks run at once per review, from the deploy config. */
-  maxConcurrency: number;
   /**
-   * The reviewer provider's stored credential, which each batch leases around its sandbox task.
+   * Sandbox tasks run at once per review, from the deploy config; lower when the reviewer's
+   * credential allows fewer (its `limit`).
+   */
+  maxConcurrency: number;
+  /** How long the broker's audit log is kept. */
+  auditRetention: RetentionDays;
+}
+
+/** One provider a batch can be reviewed on: its sandbox task, and its credential if stored. */
+export interface ReviewProvider {
+  providerId: string;
+  sandbox: { taskDefinition: TaskDefinition; container: ContainerDefinition };
+  /**
+   * The provider's stored credential, which each attempt on it leases around its sandbox task.
    * None for a Bedrock provider: it signs with the task role and has nothing to lease.
    */
   credential?: {
-    providerId: string;
     auth: string;
     /** Tasks that may hold it at once, across reviews (`credentialConcurrency`). */
     limit: number;
     secret: ISecret;
   };
-  /** How long the broker's audit log is kept. */
-  auditRetention: RetentionDays;
 }
 
 /**
@@ -251,76 +262,68 @@ export class ReviewWorkflow extends Construct {
       String(PRESIGNER_SESSION.toSeconds()),
     );
 
-    const refresh = props.credential?.auth === "chatgpt-login";
-    const presign = new LambdaInvoke(this, "Presign", {
-      lambdaFunction: presignFunction,
-      payload: TaskInput.fromObject({
-        runId: JsonPath.stringAt("$.runId"),
-        index: JsonPath.numberAt("$.index"),
-        // A ChatGPT sign-in's task also gets a URL to hand its refreshed auth.json back.
-        ...(refresh ? { credentialRefresh: true } : {}),
-      }),
-      payloadResponseOnly: true,
-      resultPath: "$.presigned",
-      taskTimeout: Timeout.duration(Duration.minutes(1)),
-    });
-    presign.addRetry({
-      errors: [Errors.ALL],
-      maxAttempts: 3,
-      interval: Duration.seconds(5),
-      backoffRate: 2,
-      jitterStrategy: JitterType.FULL,
-    });
-
-    const sandbox = new EcsRunTask(this, "Review", {
-      cluster: props.cluster,
-      taskDefinition: props.sandbox.taskDefinition,
-      launchTarget: new EcsFargateLaunchTarget(),
-      subnets: props.sandboxSubnets,
-      securityGroups: [props.sandboxSecurityGroup],
-      // Sandbox subnets have no route out but the proxy; never give a task a public address.
-      assignPublicIp: false,
-      integrationPattern: IntegrationPattern.RUN_JOB,
-      containerOverrides: [
-        {
-          containerDefinition: props.sandbox.container,
-          environment: [
-            { name: "LGTMOOSE_BATCH_URLS", value: JsonPath.stringAt("$.presigned.urls") },
-          ],
-        },
-      ],
-      resultPath: JsonPath.DISCARD,
-      taskTimeout: Timeout.duration(BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD)),
-    });
+    const [first] = props.providers;
+    if (first === undefined) throw new Error("The review workflow needs at least one provider.");
     const batchFailed = new Pass(this, "BatchFailed", {
       comment: "No output: the post step counts the batch as failed.",
     });
-    // One attempt: fresh URLs, then the sandbox task. A model failure is written as the batch's
-    // output and the task succeeds; a failed task is infrastructure (the image, capacity),
-    // worth another go, and the retry presigns again so its URLs are new too. With a stored
-    // credential, the attempt first leases it, and gives it back after the task, whatever the
-    // task did (`credentialBroker`).
-    const batch = new Parallel(this, "Attempt", { resultPath: JsonPath.DISCARD });
-    batch.branch(
-      props.credential === undefined
-        ? presign.next(sandbox)
-        : this.leased(props, props.credential, presign, sandbox),
-    );
-    // Waiting for a credential slot has its own retries; a credential that can't be used won't
-    // be fixed by another attempt.
-    batch.addRetry({ errors: [CREDENTIAL_BUSY, CREDENTIAL_UNAVAILABLE], maxAttempts: 0 });
-    batch.addRetry({
-      errors: [Errors.ALL],
-      maxAttempts: SANDBOX_ATTEMPTS - 1,
-      interval: Duration.seconds(30),
-      backoffRate: 2,
-      jitterStrategy: JitterType.FULL,
-    });
-    batch.addCatch(batchFailed, { errors: [Errors.ALL], resultPath: "$.error" });
+    // Each provider in turn, from the reviewer's: an attempt, then (unless it's the last) a look
+    // at the batch's output, and the next provider when this one hit a limit or an auth failure,
+    // couldn't take the prompt, or left no usable output (`checkOutcome`). The last provider's
+    // outcome stands: a batch that failed there is a failed batch, so the review is incomplete
+    // and can't approve.
+    // Built from the last provider back, so each attempt knows where its batch goes next.
+    let onward: IChainable = batchFailed;
+    const last = props.providers.length - 1;
+    for (let i = last; i >= 0; i -= 1) {
+      const provider = props.providers[i]!;
+      // The reviewer's states keep their plain names; a fallback's carry its provider's id.
+      const suffix = i === 0 ? "" : `-${provider.providerId}`;
+      const attempt = this.attempt(props, presignFunction, provider, suffix);
+      // An attempt that failed outright (its retries spent, no credential slot, an unusable
+      // credential) goes on to the next provider, or fails the batch after the last.
+      attempt.addCatch(onward, { errors: [Errors.ALL], resultPath: "$.error" });
+      if (i < last) {
+        const check = new LambdaInvoke(this, `CheckOutcome${suffix}`, {
+          lambdaFunction: presignFunction,
+          payload: TaskInput.fromObject({
+            action: "outcome",
+            runId: JsonPath.stringAt("$.runId"),
+            index: JsonPath.numberAt("$.index"),
+            providerId: provider.providerId,
+          }),
+          payloadResponseOnly: true,
+          resultPath: "$.outcome",
+          taskTimeout: Timeout.duration(Duration.minutes(1)),
+        });
+        check.addRetry({
+          errors: [Errors.ALL],
+          maxAttempts: 3,
+          interval: Duration.seconds(5),
+          backoffRate: 2,
+          jitterStrategy: JitterType.FULL,
+        });
+        // The output can't be read: leave it as it is for the post step to judge.
+        check.addCatch(new Succeed(this, `OutcomeUnknown${suffix}`), {
+          errors: [Errors.ALL],
+          resultPath: JsonPath.DISCARD,
+        });
+        const choice = new Choice(this, `FallBack${suffix}?`)
+          .when(Condition.booleanEquals("$.outcome.fallback", true), onward)
+          .otherwise(new Succeed(this, `BatchDone${suffix}`));
+        attempt.next(check).next(choice);
+      }
+      onward = attempt;
+    }
+    const batch = onward;
 
+    // Every batch starts on the reviewer's provider, so at most as many run at once as its
+    // credential allows (`credentialConcurrency`); the broker's leases also cap it across
+    // reviews, and a batch waiting for a slot waits in its lease step, not in a sandbox task.
+    const concurrency = Math.min(props.maxConcurrency, first.credential?.limit ?? Infinity);
     const batches = new MapState(this, "Batches", {
       itemsPath: "$.prepared.batches",
-      maxConcurrency: props.maxConcurrency,
+      maxConcurrency: concurrency,
       itemSelector: {
         runId: JsonPath.stringAt("$.prepared.runId"),
         index: JsonPath.numberAt("$$.Map.Item.Value.index"),
@@ -457,35 +460,114 @@ export class ReviewWorkflow extends Construct {
     }
   }
 
-  /** The credential broker Lambda, when the reviewer has a stored credential. */
+  /** The credential broker Lambda, when a provider of the chain has a stored credential. */
   brokerFunction: NodejsFunction | undefined;
 
   /**
-   * One batch attempt that leases the reviewer's credential: take a lease (waiting while every
-   * slot is in use), presign, run the sandbox task, and give the lease back. A failure after the
-   * lease gives it back too, then fails the attempt for the attempt's own retries.
+   * One batch attempt on one provider: fresh URLs, then the provider's sandbox task. A model
+   * failure is written as the batch's output and the task succeeds; a failed task is
+   * infrastructure (the image, capacity), worth another go, and the retry presigns again so its
+   * URLs are new too. With a stored credential, the attempt first leases it, and gives it back
+   * after the task, whatever the task did (`leased`). `suffix` tells a fallback provider's
+   * states from the reviewer's.
    */
-  private leased(
+  private attempt(
     props: ReviewWorkflowProps,
-    credential: NonNullable<ReviewWorkflowProps["credential"]>,
-    presign: LambdaInvoke,
-    sandbox: EcsRunTask,
-  ): IChainable {
+    presignFunction: NodejsFunction,
+    provider: ReviewProvider,
+    suffix: string,
+  ): Parallel {
+    const presign = new LambdaInvoke(this, `Presign${suffix}`, {
+      lambdaFunction: presignFunction,
+      payload: TaskInput.fromObject({
+        runId: JsonPath.stringAt("$.runId"),
+        index: JsonPath.numberAt("$.index"),
+        // A ChatGPT sign-in's task also gets a URL to hand its refreshed auth.json back.
+        ...(provider.credential?.auth === "chatgpt-login" ? { credentialRefresh: true } : {}),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.presigned",
+      taskTimeout: Timeout.duration(Duration.minutes(1)),
+    });
+    presign.addRetry({
+      errors: [Errors.ALL],
+      maxAttempts: 3,
+      interval: Duration.seconds(5),
+      backoffRate: 2,
+      jitterStrategy: JitterType.FULL,
+    });
+
+    const sandbox = new EcsRunTask(this, `Review${suffix}`, {
+      cluster: props.cluster,
+      taskDefinition: provider.sandbox.taskDefinition,
+      launchTarget: new EcsFargateLaunchTarget(),
+      subnets: props.sandboxSubnets,
+      securityGroups: [props.sandboxSecurityGroup],
+      // Sandbox subnets have no route out but the proxy; never give a task a public address.
+      assignPublicIp: false,
+      integrationPattern: IntegrationPattern.RUN_JOB,
+      containerOverrides: [
+        {
+          containerDefinition: provider.sandbox.container,
+          environment: [
+            { name: "LGTMOOSE_BATCH_URLS", value: JsonPath.stringAt("$.presigned.urls") },
+          ],
+        },
+      ],
+      resultPath: JsonPath.DISCARD,
+      taskTimeout: Timeout.duration(BATCH_TIMEOUT.plus(SANDBOX_OVERHEAD)),
+    });
+
+    const attempt = new Parallel(this, `Attempt${suffix}`, { resultPath: JsonPath.DISCARD });
+    attempt.branch(
+      provider.credential === undefined
+        ? presign.next(sandbox)
+        : this.leased(this.broker(props), provider.providerId, suffix, presign, sandbox),
+    );
+    // Waiting for a credential slot has its own retries; a credential that can't be used won't
+    // be fixed by another attempt.
+    attempt.addRetry({ errors: [CREDENTIAL_BUSY, CREDENTIAL_UNAVAILABLE], maxAttempts: 0 });
+    attempt.addRetry({
+      errors: [Errors.ALL],
+      maxAttempts: SANDBOX_ATTEMPTS - 1,
+      interval: Duration.seconds(30),
+      backoffRate: 2,
+      jitterStrategy: JitterType.FULL,
+    });
+    return attempt;
+  }
+
+  /**
+   * The credential broker Lambda, made on first use, for every provider of the chain with a
+   * stored credential: one lease table, and IAM for each of their secrets.
+   */
+  private broker(props: ReviewWorkflowProps): NodejsFunction {
+    if (this.brokerFunction !== undefined) return this.brokerFunction;
+    const stored = props.providers.flatMap((provider) =>
+      provider.credential === undefined
+        ? []
+        : [{ ...provider.credential, id: provider.providerId }],
+    );
     const fn = lgtmooseFunction(this, "BrokerFunction", {
       entry: BROKER_HANDLER,
-      description: "Leases the reviewer's model credential around each sandbox task.",
+      description: "Leases the reviewers' model credentials around each sandbox task.",
       memorySize: 256,
       timeout: Duration.seconds(30),
       environment: {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         LGTMOOSE_LEASE_TTL_SECONDS: String(LEASE_TTL.toSeconds()),
-        LGTMOOSE_CREDENTIALS: JSON.stringify({
-          [credential.providerId]: {
-            secretId: credential.secret.secretArn,
-            auth: credential.auth,
-            limit: credential.limit,
-          },
-        }),
+        LGTMOOSE_CREDENTIALS: JSON.stringify(
+          Object.fromEntries(
+            stored.map((credential) => [
+              credential.id,
+              {
+                secretId: credential.secret.secretArn,
+                auth: credential.auth,
+                limit: credential.limit,
+              },
+            ]),
+          ),
+        ),
       },
       // The audit log: which run and batch used which credential version.
       logGroup: new LogGroup(this, "BrokerLogs", {
@@ -520,32 +602,47 @@ export class ReviewWorkflow extends Construct {
         resources: [bucket.arnForObjects(`${RUN_PREFIX}*/batches/*/credential.json`)],
       }),
     );
-    // Its state and version, never its value...
+    // Their state and version, never their values...
     fn.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"],
-        resources: [secretArnPattern(credential.secret)],
+        resources: stored.map((credential) => secretArnPattern(credential.secret)),
       }),
     );
     // ...except for a ChatGPT sign-in, whose refreshed auth.json it stores after checking it's
     // for the same account.
-    if (credential.auth === "chatgpt-login") {
+    const signIns = stored.filter((credential) => credential.auth === "chatgpt-login");
+    if (signIns.length > 0) {
       fn.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
-          resources: [secretArnPattern(credential.secret)],
+          resources: signIns.map((credential) => secretArnPattern(credential.secret)),
         }),
       );
     }
+    return fn;
+  }
 
+  /**
+   * One attempt that leases its provider's credential: take a lease (waiting while every slot is
+   * in use), presign, run the sandbox task, and give the lease back. A failure after the lease
+   * gives it back too, then fails the attempt for the attempt's own retries.
+   */
+  private leased(
+    fn: NodejsFunction,
+    providerId: string,
+    suffix: string,
+    presign: LambdaInvoke,
+    sandbox: EcsRunTask,
+  ): IChainable {
     const batchRef = {
-      providerId: credential.providerId,
+      providerId,
       runId: JsonPath.stringAt("$.runId"),
       index: JsonPath.numberAt("$.index"),
     };
-    const acquire = new LambdaInvoke(this, "Lease", {
+    const acquire = new LambdaInvoke(this, `Lease${suffix}`, {
       lambdaFunction: fn,
       payload: TaskInput.fromObject({
         action: "acquire",
@@ -588,14 +685,14 @@ export class ReviewWorkflow extends Construct {
     };
     // A release that keeps failing doesn't fail the batch: its review is done, and the lease
     // expires (`LEASE_TTL`). A refreshed auth.json is then stored by whoever takes the slot.
-    const done = new Pass(this, "Released");
-    const releaseAfterTask = release("Release");
+    const done = new Pass(this, `Released${suffix}`);
+    const releaseAfterTask = release(`Release${suffix}`);
     releaseAfterTask.addCatch(done, { errors: [Errors.ALL], resultPath: JsonPath.DISCARD });
-    const attemptFailed = new Fail(this, "AttemptFailed", {
+    const attemptFailed = new Fail(this, `AttemptFailed${suffix}`, {
       error: SANDBOX_FAILED,
       cause: "The sandbox attempt failed; its credential lease was given back.",
     });
-    const releaseAfterFailure = release("ReleaseAfterFailure");
+    const releaseAfterFailure = release(`ReleaseAfterFailure${suffix}`);
     releaseAfterFailure.addCatch(attemptFailed, {
       errors: [Errors.ALL],
       resultPath: JsonPath.DISCARD,

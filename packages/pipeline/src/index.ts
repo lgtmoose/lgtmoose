@@ -32,6 +32,7 @@ export type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js
 export { githubPullReader, type GitHubGet } from "./github-reader.js";
 export {
   RUN_PREFIX,
+  FALLBACK_ERROR_KINDS,
   TRANSCRIPT_ATTEMPTS,
   assertRunId,
   batchInputSchema,
@@ -41,6 +42,7 @@ export {
   batchUrlsSchema,
   headKeys,
   runKeys,
+  wantsFallback,
   type BatchInput,
   type BatchOutput,
   type BatchUrls,

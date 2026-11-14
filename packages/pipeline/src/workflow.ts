@@ -1,4 +1,4 @@
-import { findingSchema } from "@lgtmoose/core";
+import { FINDING_LIMITS, findingSchema } from "@lgtmoose/core";
 import { transcriptKey } from "@lgtmoose/harness";
 import { z } from "zod";
 
@@ -95,7 +95,18 @@ export const batchInputSchema = z
     runId: z.string().regex(RUN_ID),
     index: z.number().int().min(0),
     prompt: z.string().min(1),
-    /** Model name or alias; empty means the harness's default. */
+    /**
+     * The part of the prompt every batch of the run shares (`PreparedReview.reviewerSystem`),
+     * sent as the harness's `system` so it's prompt-cached. Absent in inputs written before it
+     * was split out, whose `prompt` is whole.
+     */
+    system: z.string().min(1).optional(),
+    /**
+     * The reviewer provider's model name or alias; empty means the harness's default. A sandbox
+     * task runs its own provider's model (`LGTMOOSE_MODEL` on its task definition), which for the
+     * reviewer provider is this one, so a batch that falls back to another provider runs that
+     * provider's model.
+     */
     model: z.string(),
     timeoutMs: z
       .number()
@@ -146,6 +157,14 @@ export const batchOutputSchema = z
     version: z.literal(1),
     index: z.number().int().min(0),
     findings: z.array(findingSchema).optional(),
+    /**
+     * The reviewer's notes for the cross-file pass, within the soft limits the sandbox cuts them
+     * to (`clipBatchNotes` in @lgtmoose/roles). Model output: leads to check, never facts.
+     */
+    notes: z
+      .array(z.string().min(1).max(FINDING_LIMITS.note))
+      .max(FINDING_LIMITS.notesPerRun)
+      .optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
@@ -153,6 +172,47 @@ export const batchOutputSchema = z
   .strict()
   .refine((output) => (output.findings === undefined) !== (output.error === undefined), {
     message: "a batch output has either findings or an error",
+  })
+  .refine((output) => output.notes === undefined || output.findings !== undefined, {
+    message: "only a batch with findings has notes",
   });
 
 export type BatchOutput = z.infer<typeof batchOutputSchema>;
+
+/**
+ * Harness failures that move a batch on to the next provider, as `FallbackHarness` does: limits
+ * and auth (the provider can't be used now) and a prompt too large for it (another may take it).
+ * Other failures (a timeout, invalid output) would fail the same way elsewhere.
+ */
+export const FALLBACK_ERROR_KINDS = [
+  "rate_limit",
+  "plan_limit",
+  "auth",
+  "input_too_large",
+] as const;
+
+/**
+ * Whether a batch should be tried on the next provider, from its output as the sandbox wrote it
+ * (untrusted: it only picks between trying another provider and stopping). An output that's
+ * missing or doesn't validate counts as a failed attempt, so the next provider is tried; one
+ * with findings is done; one with an error falls back only for `FALLBACK_ERROR_KINDS`.
+ */
+export function wantsFallback(outputText: string | undefined): {
+  fallback: boolean;
+  reason: string;
+} {
+  if (outputText === undefined) return { fallback: true, reason: "no output" };
+  let parsed: ReturnType<typeof batchOutputSchema.safeParse>;
+  try {
+    parsed = batchOutputSchema.safeParse(JSON.parse(outputText));
+  } catch {
+    return { fallback: true, reason: "output isn't JSON" };
+  }
+  if (!parsed.success) return { fallback: true, reason: "output doesn't validate" };
+  const { error } = parsed.data;
+  if (error === undefined) return { fallback: false, reason: "reviewed" };
+  const kind = FALLBACK_ERROR_KINDS.find((name) => error.startsWith(`${name}:`));
+  return kind === undefined
+    ? { fallback: false, reason: "failed (no fallback for this failure)" }
+    : { fallback: true, reason: kind };
+}

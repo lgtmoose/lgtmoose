@@ -28,6 +28,7 @@ import type { IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   credentialConcurrency,
+  modelFor,
   providerModelEnv,
   STACK_OUTPUTS,
   type DeployConfig,
@@ -35,7 +36,12 @@ import {
 import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
 import { bedrockStatements } from "./bedrock.js";
-import { BATCH_TIMEOUT, ReviewWorkflow, secretArnPattern } from "./review-workflow.js";
+import {
+  BATCH_TIMEOUT,
+  ReviewWorkflow,
+  secretArnPattern,
+  type ReviewProvider,
+} from "./review-workflow.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -220,6 +226,9 @@ export class WorkflowStack extends Stack {
           HTTPS_PROXY: props.proxyUrl,
           NO_PROXY: noProxy(this.region),
           AWS_REGION: this.region,
+          // The model this provider reviews with, so a batch that falls back to it runs its
+          // own model (`default`: the harness's).
+          LGTMOOSE_MODEL: modelFor(provider, "standard") ?? "default",
           ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't
@@ -238,22 +247,34 @@ export class WorkflowStack extends Stack {
     }
     this.sandboxTaskDefinitions = sandboxes;
 
-    const reviewerTask = sandboxes.get(props.reviewerProviderId);
-    const reviewerContainer = sandboxContainers.get(props.reviewerProviderId);
-    if (reviewerTask === undefined || reviewerContainer === undefined) {
+    // A batch is reviewed on the reviewer's provider, then on the others in config order when it
+    // hits a limit there (`providerChain` in @lgtmoose/config).
+    const reviewer = props.providers.find((provider) => provider.id === props.reviewerProviderId);
+    if (reviewer === undefined) {
       throw new Error(`No sandbox task for the reviewer provider ${props.reviewerProviderId}.`);
     }
-    const reviewer = props.providers.find((provider) => provider.id === props.reviewerProviderId);
-    const reviewerSecret = props.providerSecrets.get(props.reviewerProviderId);
-    const reviewerCredential =
-      reviewer === undefined || reviewerSecret === undefined
-        ? undefined
-        : {
-            providerId: reviewer.id,
-            auth: reviewer.auth,
-            limit: credentialConcurrency(reviewer),
-            secret: reviewerSecret,
-          };
+    const chain = [reviewer, ...props.providers.filter((provider) => provider.id !== reviewer.id)];
+    const reviewProviders: ReviewProvider[] = chain.map((provider) => {
+      const taskDefinition = sandboxes.get(provider.id);
+      const container = sandboxContainers.get(provider.id);
+      if (taskDefinition === undefined || container === undefined) {
+        throw new Error(`No sandbox task for the provider ${provider.id}.`);
+      }
+      const secret = props.providerSecrets.get(provider.id);
+      return {
+        providerId: provider.id,
+        sandbox: { taskDefinition, container },
+        ...(secret === undefined
+          ? {}
+          : {
+              credential: {
+                auth: provider.auth,
+                limit: credentialConcurrency(provider),
+                secret,
+              },
+            }),
+      };
+    });
     this.reviewWorkflow = new ReviewWorkflow(this, "Review", {
       cluster: this.cluster,
       retention,
@@ -261,11 +282,10 @@ export class WorkflowStack extends Stack {
       control: { taskDefinition: this.controlTaskDefinition, container: controlContainer },
       controlSubnets: props.controlSubnets,
       controlSecurityGroup: props.controlSecurityGroup,
-      sandbox: { taskDefinition: reviewerTask, container: reviewerContainer },
+      providers: reviewProviders,
       sandboxSubnets: props.sandboxSubnets,
       sandboxSecurityGroup: props.sandboxSecurityGroup,
       maxConcurrency: props.maxConcurrency,
-      ...(reviewerCredential === undefined ? {} : { credential: reviewerCredential }),
       auditRetention: lean ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_YEAR,
     });
 

@@ -3,6 +3,7 @@ import {
   batchTranscriptKeys,
   batchUrlsSchema,
   runKeys,
+  wantsFallback,
   type BatchUrls,
 } from "@lgtmoose/pipeline";
 import { z } from "zod";
@@ -75,4 +76,41 @@ export async function presignBatch(
   });
   await deps.putText(keys.batchUrls(index), JSON.stringify(urls));
   return { urls: await deps.presign("GET", keys.batchUrls(index), expiresInSeconds) };
+}
+
+/** After a batch's attempt on one provider: whether to try it on the next one. */
+export const outcomeEventSchema = z
+  .object({
+    action: z.literal("outcome"),
+    runId: presignEventSchema.shape.runId,
+    index: z.number().int().min(0),
+    /** The provider the attempt ran on, for the log. */
+    providerId: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+  })
+  .strict();
+
+export type OutcomeEvent = z.infer<typeof outcomeEventSchema>;
+
+/**
+ * Reads the batch's output after an attempt and says whether the state machine should try the
+ * next provider (`wantsFallback`): a limit, an auth failure or a prompt too large for this
+ * provider, or no usable output. The output is the sandbox's, so untrusted; it only decides
+ * between trying another configured provider and stopping, never what's posted.
+ */
+export async function checkOutcome(
+  deps: {
+    getText(key: string): Promise<string | undefined>;
+    log(message: string, fields: Record<string, unknown>): void;
+  },
+  event: OutcomeEvent,
+): Promise<{ fallback: boolean }> {
+  const { runId, index, providerId } = outcomeEventSchema.parse(event);
+  const { fallback, reason } = wantsFallback(await deps.getText(runKeys(runId).batchOutput(index)));
+  deps.log(fallback ? "batch falls back to the next provider" : "batch done on this provider", {
+    runId,
+    index,
+    providerId,
+    reason,
+  });
+  return { fallback };
 }

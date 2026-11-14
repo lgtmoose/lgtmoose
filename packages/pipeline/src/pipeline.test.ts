@@ -128,10 +128,18 @@ interface Setup {
   /** What the second read of the PR (after the run) returns as head. */
   latestHead?: string;
   fail?: boolean;
+  /** The reviewer's notes for the cross-file pass. */
+  notes?: string[];
 }
 
-function deps(setup: Setup = {}): { deps: ReviewDeps; prompts: string[]; progress: string[] } {
+function deps(setup: Setup = {}): {
+  deps: ReviewDeps;
+  prompts: string[];
+  systems: (string | undefined)[];
+  progress: string[];
+} {
   const prompts: string[] = [];
+  const systems: (string | undefined)[] = [];
   const progress: string[] = [];
   let reads = 0;
   const github: PullReader = {
@@ -142,13 +150,18 @@ function deps(setup: Setup = {}): { deps: ReviewDeps; prompts: string[]; progres
     id: "fake",
     run: async <T>(options: HarnessRunOptions<T>) => {
       prompts.push(options.prompt);
+      systems.push(options.system);
       if (setup.fail) throw new HarnessError("timeout", "The run timed out.");
-      const output = options.schema.parse({ findings: setup.findings ?? [] });
+      const output = options.schema.parse({
+        findings: setup.findings ?? [],
+        ...(setup.notes === undefined ? {} : { notes: setup.notes }),
+      });
       return { output, transcriptKey: "transcripts/x/1.jsonl" };
     },
   };
   return {
     prompts,
+    systems,
     progress,
     deps: {
       github,
@@ -254,6 +267,46 @@ describe("runReview", () => {
     expect(report.summary).toContain("unchanged (the review is for an older commit)");
     expect(report.summary).toContain("the PR\\'s head moved during the run");
   });
+
+  it("sends the part every batch shares as the system prompt, to be cached", async () => {
+    const { deps: d, prompts, systems } = deps();
+    await runReview(d, OPTIONS);
+    const system = systems[0] ?? "";
+    expect(system).toContain("## Rule pack: generic");
+    // PR and repository content stay in the prompt, out of the system part.
+    expect(system).not.toMatch(/<untrusted source=/);
+    expect(system).not.toContain("Fix totals");
+    expect(prompts[0]).toContain("# Repo conventions");
+    expect(prompts[0]).not.toContain("## Rule pack: generic");
+  });
+
+  it("keeps the reviewer's notes for the cross-file pass, within the soft limits", async () => {
+    const notes = ["exports total() from src/total.ts", "exports total() from src/total.ts", " "];
+    const { deps: d } = deps({ notes: [...notes, "x".repeat(600)] });
+    const report = await runReview(d, OPTIONS);
+    expect(report.batches[0]?.notes?.[0]).toBe("exports total() from src/total.ts");
+    expect(report.batches[0]?.notes).toHaveLength(2);
+    expect(report.batches[0]?.notes?.[1]).toHaveLength(500);
+  });
+
+  it("finishes a 300-file PR in one run, every batch with the same system part", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 300 }, (_, i) => [
+        `src/gen/file-${String(i).padStart(3, "0")}.ts`,
+        `export const value${i} = ${i};\n`,
+      ]),
+    );
+    headSha = await commit(files, "300 files");
+    const { deps: d, systems } = deps();
+    const report = await runReview(d, OPTIONS);
+    expect(report.plan.reviewed).toBe(303);
+    expect(report.batches.length).toBeGreaterThanOrEqual(30);
+    expect(report.batches.every((batch) => batch.error === undefined)).toBe(true);
+    expect(report.complete).toBe(true);
+    expect(report.decision.event).toBe("APPROVE");
+    expect(new Set(systems).size).toBe(1);
+    expect(systems).toHaveLength(report.batches.length);
+  }, 120_000);
 
   it("removes the checkout afterwards, even when the run fails", async () => {
     const { deps: d } = deps();

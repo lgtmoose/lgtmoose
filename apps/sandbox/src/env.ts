@@ -14,7 +14,16 @@ export interface SandboxEnv {
   auth: string;
   /** A presigned GET for the batch's `urls.json`. */
   batchUrls: string;
+  /**
+   * `LGTMOOSE_MODEL`: this provider's model, set on its task definition; `default` (read as
+   * empty) for the harness's default. Undefined when the variable isn't set: the batch input's
+   * model is used.
+   */
+  model?: string;
 }
+
+/** `LGTMOOSE_MODEL`'s value for the harness's default model. */
+export const DEFAULT_MODEL = "default";
 
 const VARIABLES = {
   providerId: "LGTMOOSE_PROVIDER",
@@ -22,7 +31,7 @@ const VARIABLES = {
   harness: "LGTMOOSE_HARNESS",
   auth: "LGTMOOSE_AUTH",
   batchUrls: "LGTMOOSE_BATCH_URLS",
-} as const satisfies Record<keyof SandboxEnv, string>;
+} as const satisfies Record<Exclude<keyof SandboxEnv, "model">, string>;
 
 /** Reads the sandbox task's settings, or says which variables are missing (blank counts). */
 export function readSandboxEnv(
@@ -31,11 +40,13 @@ export function readSandboxEnv(
   const missing = Object.values(VARIABLES).filter((name) => !env[name]?.trim());
   if (missing.length > 0) return { missing };
   const read = (name: string) => env[name]?.trim() ?? "";
+  const model = env.LGTMOOSE_MODEL?.trim();
   return {
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
     harness: read(VARIABLES.harness),
     auth: read(VARIABLES.auth),
     batchUrls: read(VARIABLES.batchUrls),
+    ...(model === undefined || model === "" ? {} : { model: model === DEFAULT_MODEL ? "" : model }),
   };
 }

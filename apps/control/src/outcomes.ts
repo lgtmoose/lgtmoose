@@ -31,10 +31,11 @@ export async function readOutcome(
   if (!parsed.success || parsed.data.index !== index) {
     return { index, error: "the batch output doesn't match its schema", transcriptKeys: [] };
   }
-  const { findings, error, transcriptKeys, usage } = parsed.data;
+  const { findings, notes, error, transcriptKeys, usage } = parsed.data;
   return {
     index,
     ...(findings === undefined ? {} : { findings }),
+    ...(notes === undefined ? {} : { notes }),
     ...(error === undefined ? {} : { error }),
     transcriptKeys,
     ...(usage === undefined ? {} : { usage: withoutUndefined(usage) }),
