@@ -1,0 +1,143 @@
+name: AWS smoke test
+
+# Deploys LGTMoose to a throwaway AWS account, checks that a signed webhook reaches the job
+# queue and the dispatcher, and destroys everything again, also when a step fails or the run is
+# cancelled. Started by hand only. See docs/smoke-test.md for what the account owner sets up.
+#
+# The AWS role is assumed through OIDC from the `aws-smoke` environment, which has required
+# reviewers, and the role's trust policy accepts only that environment: a pull request can't
+# assume it.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: two would deploy and destroy the same stacks.
+concurrency:
+  group: smoke-aws
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: aws-smoke
+    # RDS alone takes about 15 minutes each way; the image builds add more.
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      SMOKE_OWNER: ${{ vars.SMOKE_OWNER }}
+    steps:
+      - name: Check the environment's settings
+        env:
+          ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          missing=()
+          [ -n "$ROLE_ARN" ] || missing+=(AWS_ROLE_ARN)
+          [ -n "$AWS_REGION" ] || missing+=(AWS_REGION)
+          [ -n "$SMOKE_OWNER" ] || missing+=(SMOKE_OWNER)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Set these variables on the aws-smoke environment: ${missing[*]} (see docs/smoke-test.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup
+
+      # Pinned by commit: it handles the AWS credentials.
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: lgtmoose-smoke-${{ github.run_id }}
+          # Deploy and destroy together take well over an hour. The role's maximum session
+          # duration must allow this (docs/smoke-test.md).
+          role-duration-seconds: 10800
+
+      # The config `lgtmoose setup` would write, for the region and org in the environment's
+      # variables: Claude Code on Bedrock, which needs no stored model credential. Values are
+      # JSON-encoded, so nothing in a variable can change the file's code.
+      - name: Write lgtmoose.config.ts
+        run: |
+          node -e '
+            const { AWS_REGION: region, SMOKE_OWNER: owner } = process.env;
+            const config = {
+              region,
+              profile: "lean",
+              allowedOrgs: [owner],
+              providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
+            };
+            const text = `import { defineConfig } from "@lgtmoose/config";\n\nexport default defineConfig(${JSON.stringify(config, null, 2)});\n`;
+            require("node:fs").writeFileSync("lgtmoose.config.ts", text);
+          '
+          cat lgtmoose.config.ts
+
+      - name: Deploy
+        run: pnpm lgtmoose deploy --yes
+
+      - name: Send signed webhooks to the gateway
+        id: webhook
+        run: |
+          set -euo pipefail
+          url=$(aws cloudformation describe-stacks --stack-name Lgtmoose-Api \
+            --query "Stacks[0].Outputs[?OutputKey=='GithubWebhookUrl'].OutputValue" --output text)
+          secret=$(aws secretsmanager get-secret-value --secret-id lgtmoose/github-webhook-secret \
+            --query SecretString --output text)
+          echo "::add-mask::$secret"
+          echo "Gateway: $url"
+          pnpm turbo run build --filter=@lgtmoose/gateway^...
+          SMOKE_WEBHOOK_URL="$url" SMOKE_WEBHOOK_SECRET="$secret" \
+            pnpm --filter @lgtmoose/gateway smoke:webhook
+
+      # The gateway answers 202 only once the job is on the queue. The dispatcher consumes the
+      # queue, so the job is looked for in its log: a comment job is acknowledged there without
+      # starting a review.
+      - name: Check the dispatcher took the job from the queue
+        env:
+          DELIVERY_ID: ${{ steps.webhook.outputs.delivery_id }}
+        run: |
+          set -euo pipefail
+          group=$(aws cloudformation describe-stack-resources --stack-name Lgtmoose-Workflow \
+            --query "StackResources[?ResourceType=='AWS::Logs::LogGroup' && starts_with(LogicalResourceId, 'DispatchLogs')].PhysicalResourceId" \
+            --output text)
+          echo "Dispatcher log group: $group"
+          for attempt in $(seq 1 18); do
+            found=$(aws logs filter-log-events --log-group-name "$group" \
+              --filter-pattern "\"$DELIVERY_ID\"" --query 'events[].message' --output json)
+            if echo "$found" | jq -e --arg id "$DELIVERY_ID" \
+              'map(fromjson? // {}) | any(.message == "dispatched" and .deliveryId == $id and .action == "deferred")' >/dev/null; then
+              echo "The dispatcher took delivery $DELIVERY_ID from the queue and deferred it."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Delivery $DELIVERY_ID didn't show up as dispatched in $group within 3 minutes."
+          echo "$found"
+          exit 1
+
+      - name: Destroy
+        if: always()
+        run: |
+          if [ ! -f lgtmoose.config.ts ]; then
+            echo "Nothing was configured, so nothing was deployed."
+            exit 0
+          fi
+          pnpm lgtmoose destroy --purge --yes
+
+      - name: Check no LGTMoose stacks are left
+        if: always()
+        run: |
+          set -euo pipefail
+          left=$(aws cloudformation list-stacks \
+            --query "StackSummaries[?starts_with(StackName, 'Lgtmoose-') && StackStatus!='DELETE_COMPLETE'].[StackName,StackStatus]" \
+            --output text)
+          if [ -n "$left" ]; then
+            echo "::error::LGTMoose stacks are still there; delete them by hand (docs/smoke-test.md):"
+            echo "$left"
+            exit 1
+          fi
+          echo "No LGTMoose stacks are left."
