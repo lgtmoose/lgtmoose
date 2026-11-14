@@ -38,7 +38,7 @@ rules:
       const items = await db.menuItems.find({ id: { in: body.itemIds } }); // ids can be another org's
   - id: background-job-scope
     category: tenant_scoping
-    severity: should_fix
+    severity: blocking
     rule: A job or webhook handler that processes tenant data without carrying and checking the organisation it was queued for.
     example: |
       queue.process("export", async ({ exportId }) => runExport(exportId)); // org not checked

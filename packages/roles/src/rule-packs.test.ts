@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PROTECTED_CATEGORIES } from "@lgtmoose/core";
 import { renderRulePacks } from "./reviewer.js";
 import {
   MANDATORY_RULE_PACKS,
@@ -19,6 +20,8 @@ import {
 } from "./rule-packs.js";
 
 const run = promisify(execFile);
+
+const EXAMPLES = new URL("../../../examples/rulepacks/", import.meta.url);
 
 const pack = (front: string, body = "") => `---\n${front}\n---\n${body}`;
 
@@ -44,6 +47,24 @@ describe("built-in rule packs", () => {
     for (const rule of loaded.rules) expect(rule.example).not.toBe("");
   });
 
+  it.each([
+    ...BUILTIN.map((id) => [id, undefined] as const),
+    ["tenant-scoping", EXAMPLES] as const,
+  ])(
+    "%s makes every rule in a protected category blocking, as repo packs must",
+    async (id, dir) => {
+      const loaded =
+        dir === undefined
+          ? await loadRulePack(id)
+          : parseRulePack(await readFile(new URL(`${id}.md`, dir), "utf8"), id, "private");
+      for (const rule of loaded.rules) {
+        if ((PROTECTED_CATEGORIES as readonly string[]).includes(rule.category)) {
+          expect([rule.id, rule.severity]).toEqual([rule.id, "blocking"]);
+        }
+      }
+    },
+  );
+
   it("keeps the generic pack's categories in the prompt's order", async () => {
     const generic = await loadRulePack("generic");
     const categories = [...generic.text.matchAll(/^#### (\S+)$/gm)].map((match) => match[1]);
@@ -59,10 +80,7 @@ describe("built-in rule packs", () => {
   });
 
   it("parses the example private pack", async () => {
-    const text = await readFile(
-      new URL("../../../examples/rulepacks/tenant-scoping.md", import.meta.url),
-      "utf8",
-    );
+    const text = await readFile(new URL("tenant-scoping.md", EXAMPLES), "utf8");
     const example = parseRulePack(text, "tenant-scoping", "private");
     expect(example.rules.map((rule) => rule.category)).toContain("tenant_scoping");
   });
@@ -230,6 +248,15 @@ describe("parseRulePack", () => {
     expect(parsed.text).toContain("2.0 clients must send X.\n\n3\\) Third");
   });
 
+  it("allows trailing spaces on the front matter's delimiters", () => {
+    const parsed = parseRulePack(
+      `--- \nid: x\ntitle: X\nrules:\n${RULE}\n---\t\nBody`,
+      "x",
+      "private",
+    );
+    expect(parsed.title).toBe("X");
+  });
+
   it("reads a pack saved with a byte order mark", () => {
     const parsed = parseRulePack(
       `\uFEFF${pack(`id: x\ntitle: X\nrules:\n${RULE}`)}`,
@@ -368,11 +395,15 @@ describe("selectRulePacks", () => {
   });
 
   it("reports an unknown or malformed entry and goes on", async () => {
-    const selected = await selectRulePacks(["nope", "./elsewhere/x.md", "./rules/../x.md"], {
-      dirs: fixtures,
-    });
+    const selected = await selectRulePacks(
+      ["nope", "./elsewhere/x.md", "./rules/../x.md", "rules/billing.md"],
+      { dirs: fixtures },
+    );
     expect(selected.packs.map((loaded) => loaded.id)).toEqual([...MANDATORY_RULE_PACKS]);
-    expect(selected.problems).toHaveLength(3);
+    expect(selected.problems).toHaveLength(4);
+    expect(selected.problems).toContain(
+      '"rules/billing.md" isn\'t a repo rule pack: use ./rules/<name>.md or ./rules/*.md.',
+    );
   });
 
   it("names only the built-in packs when an id is unknown, so private names stay private", async () => {
@@ -438,6 +469,24 @@ describe("selectRulePacks", () => {
       5,
     );
     expect(selected.problems.some((problem) => /readme/i.test(problem))).toBe(false);
+  });
+
+  it("reads packs the config names before globbed ones, so the caps can't push them out", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 25; i += 1) {
+      files[`rules/p${String(i).padStart(2, "0")}.md`] = repoPack(`P${i}`);
+    }
+    const base = await commit(files);
+    const selected = await selectRulePacks(["./rules/*.md", "./rules/p24.md"], {
+      repo,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    const ids = selected.packs
+      .filter((loaded) => loaded.source === "repo")
+      .map((loaded) => loaded.id);
+    expect(ids).toHaveLength(10);
+    expect(ids[0]).toBe("./rules/p24.md");
   });
 
   it("reports a pack whose blob can't be read", async () => {

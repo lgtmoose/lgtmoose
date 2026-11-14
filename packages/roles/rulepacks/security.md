@@ -52,7 +52,7 @@ rules:
     example: |
       await db.resetTokens.insert({ userId, token }); // no expiresAt, never deleted
   - id: sensitive-logging
-    category: secrets
+    category: security
     severity: should_fix
     rule: Personal or payment data written to logs or analytics, such as email addresses, card numbers or request bodies with credentials.
     example: |

@@ -44,7 +44,7 @@ rules:
       - uses: some-org/deploy-action@main
   - id: persisted-credentials
     category: secrets
-    severity: should_fix
+    severity: blocking
     rule: actions/checkout leaving its token in the git config in a job that later runs untrusted code or uploads the workspace.
     example: |
       - uses: actions/checkout@v4   # no persist-credentials: false; next step runs PR scripts

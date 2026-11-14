@@ -110,7 +110,7 @@ function splitFrontMatter(text: string): { front: string; body: string } | undef
   // Only CR and CRLF, which YAML also reads as line breaks. NEL and the Unicode separators are
   // plain characters to YAML, so they're handled where text is rendered (see `lines`).
   const normalised = text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  const match = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/.exec(normalised);
+  const match = /^---[ \t]*\n(?:([\s\S]*?)\n)?---[ \t]*(?:\n|$)([\s\S]*)$/.exec(normalised);
   return match === null ? undefined : { front: match[1] ?? "", body: (match[2] ?? "").trim() };
 }
 
@@ -268,9 +268,10 @@ export function parseRulePack(text: string, name: string, source: RulePackSource
 }
 
 /**
- * The repo rules that break the floors, with the reason for each: a rule in a category no
- * trusted pack uses (it could relabel, say, a missing permission check so it's reported softly
- * outside `authz`), or one softer than its category's floor.
+ * The repo rules that break the floors, with the reason for each: a rule in a category that
+ * neither the trusted packs use nor is protected, or one softer than its category's floor.
+ * Floors are per category: they can't tell what a rule is about, so a repo rule that restates
+ * a trusted one in another category is left to the prompt, which says the trusted rule wins.
  */
 function softRules(
   rules: readonly PackRule[],
@@ -497,7 +498,11 @@ async function readRepoPacks(
       );
     }
   }
-  entries.sort((a, b) => byCodeUnit(a.path, b.path));
+  // Packs named in the config first, so the read and file caps can't push them out.
+  entries.sort(
+    (a, b) =>
+      Number(!wanted.has(a.path)) - Number(!wanted.has(b.path)) || byCodeUnit(a.path, b.path),
+  );
   if (all && globbed === 0) {
     problems.push("./rules/*.md matched no rule packs: the base branch has none in rules/.");
   }
@@ -578,6 +583,8 @@ export async function selectRulePacks(
       } else {
         repoPaths.add(`rules/${match[1]}.md`);
       }
+    } else if (entry.includes("/") || entry.endsWith(".md")) {
+      problems.push(`"${entry}" isn't a repo rule pack: use ./rules/<name>.md or ./rules/*.md.`);
     } else if (!named.includes(entry)) {
       named.push(entry);
     }
