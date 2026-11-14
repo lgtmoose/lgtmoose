@@ -12,6 +12,7 @@ import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
 import { ProxyStack } from "./proxy-stack.js";
+import { ALLOW_UNVERIFIED_CURSOR_ENV } from "./sandbox-image.js";
 import { WorkflowStack } from "./workflow-stack.js";
 
 export const LGTMOOSE_VERSION = "0.0.0";
@@ -94,6 +95,9 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     databaseName: DATABASE_NAME,
     githubAppSecret: data.githubAppSecret,
     providerSecrets: data.providerSecrets,
+    allowUnverifiedCursor:
+      process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
+      isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),
   });
   workflow.addDependency(data);
   // Sandbox tasks can only reach model APIs once the proxy runs.

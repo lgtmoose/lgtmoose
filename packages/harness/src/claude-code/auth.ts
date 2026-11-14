@@ -141,19 +141,3 @@ export function claudeAuthEnv(source: Source): ClaudeAuthEnv {
     "No model credential found. Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK with AWS credentials and AWS_REGION, or CLAUDE_CODE_USE_VERTEX with Google credentials.",
   );
 }
-
-/** Network settings the sandbox may need to reach the model API through its egress proxy. */
-export const NETWORK_VARS = [
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-  "NO_PROXY",
-  "no_proxy",
-  "NODE_EXTRA_CA_CERTS",
-  "SSL_CERT_FILE",
-];
-
-export function networkEnv(source: Source): Record<string, string> {
-  return pick(source, NETWORK_VARS);
-}

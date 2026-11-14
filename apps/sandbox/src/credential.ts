@@ -29,6 +29,9 @@ export function credentialEnv(
       return { CODEX_ACCESS_TOKEN: need() };
     case "codex/api-key":
       return { CODEX_API_KEY: need() };
+    case "cursor-agent/api-key":
+    case "cursor-agent/service-account":
+      return { CURSOR_API_KEY: need() };
     default:
       throw new Error(`The sandbox can't run ${harness} with ${auth} auth yet.`);
   }
