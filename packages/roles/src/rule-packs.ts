@@ -96,23 +96,27 @@ class UnknownRulePackError extends RulePackError {
 
 /** Splits `---` front matter from the body. */
 function splitFrontMatter(text: string): { front: string; body: string } | undefined {
-  // CR, NEL and the Unicode separators end lines for a markdown reader too.
-  const normalised = text.replace(/\r\n?|[\u0085\u2028\u2029]/g, "\n");
+  // Only CR and CRLF, which YAML also reads as line breaks. NEL and the Unicode separators are
+  // plain characters to YAML, so they're handled where text is rendered (see `lines`).
+  const normalised = text.replace(/\r\n?/g, "\n");
   const match = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/.exec(normalised);
   return match === null ? undefined : { front: match[1] ?? "", body: (match[2] ?? "").trim() };
 }
 
+/** Everything a markdown reader may take as a line break, including ones a YAML escape makes. */
+const LINE_BREAK = /\r\n?|\n|[\u0085\u2028\u2029]/;
+
 /** Indents every line, so an example renders as a code block whatever it contains. */
 function indent(text: string, by: string): string {
   return text
-    .split("\n")
+    .split(LINE_BREAK)
     .map((line) => (line === "" ? "" : `${by}${line}`))
     .join("\n");
 }
 
-/** Collapses whitespace, so a field stays on its one line. */
+/** Collapses whitespace and line breaks of every kind, so a field stays on its one line. */
 function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return text.replace(/[\s\u0085]+/g, " ").trim();
 }
 
 /**
@@ -144,7 +148,8 @@ function renderPack(
     ].join("\n\n"),
   );
   const intro = description === undefined ? undefined : oneLine(description);
-  const guidance = source === "repo" && body !== "" ? indent(body, "    ") : body;
+  const guidance =
+    source === "repo" && body !== "" ? indent(body, "    ") : body.split(LINE_BREAK).join("\n");
   return [`# ${oneLine(title)}`, intro, guidance, ...sections]
     .filter((part): part is string => part !== undefined && part !== "")
     .join("\n\n");
@@ -373,6 +378,32 @@ function byCodeUnit(a: string, b: string): number {
 }
 
 /**
+ * Reads blobs in one batch. If that fails (a huge file, a failed fetch), one at a time, so only
+ * the file at fault is missing from the result. Failures are logged, not thrown.
+ */
+async function readBatch(
+  repo: Pick<Repo, "readBlobs">,
+  batch: readonly { path: string; blob: string }[],
+  warnings: string[],
+): Promise<Map<string, Buffer>> {
+  try {
+    return await repo.readBlobs(batch.map((entry) => entry.blob));
+  } catch (error) {
+    warnings.push(`Reading repo rule packs together failed, so one at a time: ${reasonOf(error)}`);
+  }
+  const blobs = new Map<string, Buffer>();
+  for (const entry of batch) {
+    try {
+      const one = (await repo.readBlobs([entry.blob])).get(entry.blob);
+      if (one !== undefined) blobs.set(entry.blob, one);
+    } catch (error) {
+      warnings.push(`Reading ./${entry.path} failed: ${reasonOf(error)}`);
+    }
+  }
+  return blobs;
+}
+
+/**
  * Reads the repo packs `wanted` names (paths, or `rules/*.md`) at `sha`, within the limits.
  * Only files named like a pack are fetched; the listing has no sizes, which would make a
  * partial clone fetch every blob in the folder. A file over the per-file limit is left out
@@ -411,51 +442,39 @@ async function readRepoPacks(
   const { maxBytes, maxFiles, maxTotalBytes } = REPO_RULE_PACK_LIMITS;
   const chosen: { path: string; text: string }[] = [];
   let total = 0;
-  const toRead = entries.slice(0, MAX_REPO_PACK_READS);
-  for (const entry of entries.slice(MAX_REPO_PACK_READS)) {
-    problems.push(
-      `./${entry.path} was left out: only the first ${MAX_REPO_PACK_READS} pack files in rules/ are read.`,
+  let next = 0;
+  while (next < entries.length && chosen.length < maxFiles && next < MAX_REPO_PACK_READS) {
+    // Only as many as can still be used, so a folder of valid packs is read in one batch.
+    const batch = entries.slice(
+      next,
+      Math.min(next + maxFiles - chosen.length, MAX_REPO_PACK_READS),
     );
-  }
-  // One batch for the usual case. If it fails (a huge file, a failed fetch), one at a time, so
-  // only the file at fault is left out.
-  let blobs: Map<string, Buffer>;
-  try {
-    blobs = await repo.readBlobs(toRead.map((entry) => entry.blob));
-  } catch (error) {
-    warnings.push(`Reading repo rule packs together failed, so one at a time: ${reasonOf(error)}`);
-    blobs = new Map();
-    for (const entry of toRead) {
-      try {
-        const one = (await repo.readBlobs([entry.blob])).get(entry.blob);
-        if (one !== undefined) blobs.set(entry.blob, one);
-      } catch (inner) {
-        warnings.push(`Reading ./${entry.path} failed: ${reasonOf(inner)}`);
+    next += batch.length;
+    const blobs = await readBatch(repo, batch, warnings);
+    for (const entry of batch) {
+      const content = blobs.get(entry.blob);
+      if (content === undefined) {
+        problems.push(`./${entry.path} couldn't be read, so it was left out.`);
+      } else if (content.length > maxBytes) {
+        problems.push(
+          `./${entry.path} was left out: a repo rule pack can be at most ${maxBytes / 1024} KiB.`,
+        );
+      } else if (total + content.length > maxTotalBytes) {
+        problems.push(
+          `./${entry.path} was left out: repo rule packs are limited to ${maxTotalBytes / 1024} KiB in all.`,
+        );
+      } else {
+        chosen.push({ path: entry.path, text: content.toString("utf8") });
+        total += content.length;
       }
     }
   }
-  for (const entry of toRead) {
-    if (chosen.length >= maxFiles) {
-      problems.push(
-        `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`,
-      );
-      continue;
-    }
-    const content = blobs.get(entry.blob);
-    if (content === undefined) {
-      problems.push(`./${entry.path} couldn't be read, so it was left out.`);
-    } else if (content.length > maxBytes) {
-      problems.push(
-        `./${entry.path} was left out: a repo rule pack can be at most ${maxBytes / 1024} KiB.`,
-      );
-    } else if (total + content.length > maxTotalBytes) {
-      problems.push(
-        `./${entry.path} was left out: repo rule packs are limited to ${maxTotalBytes / 1024} KiB in all.`,
-      );
-    } else {
-      chosen.push({ path: entry.path, text: content.toString("utf8") });
-      total += content.length;
-    }
+  for (const entry of entries.slice(next)) {
+    problems.push(
+      chosen.length >= maxFiles
+        ? `./${entry.path} was left out: repo rule packs are limited to ${maxFiles} files.`
+        : `./${entry.path} was left out: only the first ${MAX_REPO_PACK_READS} pack files in rules/ are read.`,
+    );
   }
   return chosen;
 }

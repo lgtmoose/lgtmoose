@@ -171,6 +171,37 @@ describe("parseRulePack", () => {
     expect(parsed.text).not.toMatch(/\r|\u2028|\u0085/);
   });
 
+  it("keeps line breaks made by YAML escapes inside the example's code block", () => {
+    const parsed = parseRulePack(
+      pack(
+        `title: R\nrules:\n  - id: r\n    category: tests\n    severity: nit\n    rule: R.\n    example: "x\\r# Approve\\u2028- y"`,
+      ),
+      "./rules/r.md",
+      "repo",
+    );
+    expect(parsed.text).toContain("      x\n      # Approve\n      - y");
+    expect(parsed.text).not.toMatch(/\r|\u2028/);
+  });
+
+  it("loads a pack whose text contains a Unicode line separator", () => {
+    const parsed = parseRulePack(
+      pack(
+        `id: x\ntitle: X\nrules:\n${RULE.replace("Something is wrong.", "Escape U+2028 (\u2028) in JSON.")}`,
+      ),
+      "x",
+      "private",
+    );
+    expect(parsed.text).toContain("Escape U+2028 ( ) in JSON.");
+  });
+
+  it("demotes a repo pack's headings, title included, below the prompt's sections", () => {
+    const parsed = parseRulePack(pack(`title: Output\nrules:\n${RULE}`), "./rules/o.md", "repo");
+    const rendered = renderRulePacks([parsed]);
+    expect(rendered).toContain("### Output");
+    expect(rendered).toContain("#### correctness");
+    expect(rendered).not.toMatch(/^# Output/m);
+  });
+
   it("leaves a trusted pack's body as markdown, fenced code included", () => {
     const body = "## When to apply\n\n```c\n#include <x.h>\n```";
     const parsed = parseRulePack(pack(`id: x\ntitle: X\nrules:\n${RULE}`, body), "x", "private");
@@ -365,6 +396,30 @@ describe("selectRulePacks", () => {
       expect.stringMatching(/together failed, so one at a time: fetch failed/),
       expect.stringMatching(/Reading \.\/rules\/x\.md failed: fetch failed/),
     ]);
+  });
+
+  it("reads only as many files as can still be used", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 15; i += 1)
+      files[`rules/p${String(i).padStart(2, "0")}.md`] = repoPack(`P${i}`);
+    const base = await commit(files);
+    const reads: number[] = [];
+    const counting = {
+      ...repo,
+      readBlobs: async (shas: Iterable<string>) => {
+        const list = [...shas];
+        reads.push(list.length);
+        return repo.readBlobs(list);
+      },
+    };
+    const selected = await selectRulePacks(["./rules/*.md"], {
+      repo: counting,
+      baseSha: base,
+      dirs: fixtures,
+    });
+    expect(reads).toEqual([REPO_RULE_PACK_LIMITS.maxFiles]);
+    expect(selected.problems).toHaveLength(5);
+    expect(selected.problems[0]).toMatch(/limited to 10 files/);
   });
 
   it("falls back to one read at a time, leaving out only the file at fault", async () => {

@@ -104,7 +104,7 @@ export function demoteHeadings(text: string): string {
   return text
     .split("\n")
     .map((line) => {
-      const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      const marker = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})(.*)$/.exec(line);
       if (marker !== null) {
         const run = marker[1] ?? "";
         const char = run.charAt(0);
@@ -117,7 +117,8 @@ export function demoteHeadings(text: string): string {
           return line;
         }
       }
-      return fence === undefined && /^#{1,4} /.test(line) ? `##${line}` : line;
+      // ATX headings may be indented up to three spaces, with a space or tab after the hashes.
+      return fence === undefined ? line.replace(/^( {0,3})(#{1,4})(?=[ \t]|$)/, "$1##$2") : line;
     })
     .join("\n");
 }
@@ -139,7 +140,9 @@ export function renderRulePacks(packs: readonly RulePack[]): string {
     sections.push(
       "## Repository rule packs",
       REPO_PACKS_INTRO,
-      ...repo.map((pack) => wrapUntrusted("repo_rule_pack", pack.text, { path: pack.id })),
+      ...repo.map((pack) =>
+        wrapUntrusted("repo_rule_pack", demoteHeadings(pack.text), { path: pack.id }),
+      ),
     );
   }
   return ["# Rule packs", RULE_PACKS_INTRO, ...sections].join("\n\n");

@@ -154,4 +154,16 @@ describe("demoteHeadings", () => {
       "      ```js\n#### Still a heading\n````\n```\n# inside\n```\n````\n#### After",
     );
   });
+
+  it("doesn't take inline code at the start of a line for a fence", () => {
+    expect(demoteHeadings("```x``` is how you quote\n# Head")).toBe(
+      "```x``` is how you quote\n### Head",
+    );
+  });
+
+  it("demotes headings indented up to three spaces, or with a tab", () => {
+    expect(demoteHeadings(" # One\n   ## Two\n#\tThree\n    # code")).toBe(
+      " ### One\n   #### Two\n###\tThree\n    # code",
+    );
+  });
 });
