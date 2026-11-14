@@ -75,6 +75,17 @@ export const learningKind = pgEnum("learning_kind", [
   "scoping",
 ]);
 export const learningStatus = pgEnum("learning_status", ["pending", "active", "retired"]);
+/**
+ * What happened to a learning: proposed (stored, pending or active), applied (active as
+ * proposed: its author had the access), approved (a pending one made active by someone with
+ * the access), retired (`forget`).
+ */
+export const learningEventType = pgEnum("learning_event_type", [
+  "proposed",
+  "applied",
+  "approved",
+  "retired",
+]);
 export const reaction = pgEnum("reaction", ["+1", "-1"]);
 
 export const pullRequests = pgTable(
@@ -240,6 +251,12 @@ export const learnings = pgTable(
     /** Limits the learning to matching paths. Null applies to the whole repo. */
     pathGlob: text("path_glob"),
     kind: learningKind("kind").notNull(),
+    /**
+     * The finding category it's about, if any. Never a protected category for a kind that can
+     * suppress findings (see @lgtmoose/learnings).
+     */
+    category: text("category"),
+    /** Redacted before it's stored: no secrets, tokens or personal data. */
     text: text("text").notNull(),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
     status: learningStatus("status").notNull().default("pending"),
@@ -258,7 +275,31 @@ export const learnings = pgTable(
   (t) => [
     index("learnings_scope_idx").on(t.org, t.repo, t.status),
     index("learnings_embedding_idx").using("hnsw", t.embedding.op("vector_cosine_ops")),
+    // One learning per source comment, so a retried proposal isn't stored twice.
+    uniqueIndex("learnings_source_comment_key").on(t.sourceRepo, t.sourceCommentId),
   ],
+);
+
+/** A learning's history: kept when it's retired; a learning with events is never deleted. */
+export const learningEvents = pgTable(
+  "learning_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    learningId: uuid("learning_id")
+      .notNull()
+      .references(() => learnings.id, { onDelete: "restrict" }),
+    type: learningEventType("type").notNull(),
+    /** The GitHub login that did it. */
+    actor: text("actor").notNull(),
+    /** The actor's repo permission at the time, as GitHub reported it. */
+    actorPermission: text("actor_permission").notNull(),
+    /** The comment it came from, when there was one. */
+    githubCommentId: bigint("github_comment_id", { mode: "number" }),
+    /** Increases with every event: their order, also for events written together. */
+    seq: bigint("seq", { mode: "number" }).notNull().generatedAlwaysAsIdentity(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("learning_events_learning_idx").on(t.learningId, t.seq)],
 );
 
 export const providerUsage = pgTable(

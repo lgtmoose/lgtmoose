@@ -1,5 +1,5 @@
 {
-  "id": "4cc3a6da-6027-401d-afcc-fa78bcd007a5",
+  "id": "2d528b0f-81d9-4294-9d9a-f64e062c233a",
   "prevId": "7ec59811-ed08-432a-8f16-ed14ee5227d1",
   "version": "7",
   "dialect": "postgresql",
@@ -287,18 +287,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "actor_login": {
-          "name": "actor_login",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "counted": {
-          "name": "counted",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
         "sha": {
           "name": "sha",
           "type": "text",
@@ -564,6 +552,113 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.learning_events": {
+      "name": "learning_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "learning_id": {
+          "name": "learning_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "learning_event_type",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_permission": {
+          "name": "actor_permission",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "github_comment_id": {
+          "name": "github_comment_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "seq": {
+          "name": "seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "learning_events_seq_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "learning_events_learning_idx": {
+          "name": "learning_events_learning_idx",
+          "columns": [
+            {
+              "expression": "learning_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "learning_events_learning_id_learnings_id_fk": {
+          "name": "learning_events_learning_id_learnings_id_fk",
+          "tableFrom": "learning_events",
+          "tableTo": "learnings",
+          "columnsFrom": ["learning_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.learnings": {
       "name": "learnings",
       "schema": "",
@@ -599,6 +694,12 @@
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "text": {
           "name": "text",
@@ -726,6 +827,27 @@
           "isUnique": false,
           "concurrently": false,
           "method": "hnsw",
+          "with": {}
+        },
+        "learnings_source_comment_key": {
+          "name": "learnings_source_comment_key",
+          "columns": [
+            {
+              "expression": "source_repo",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_comment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
           "with": {}
         }
       },
@@ -1269,6 +1391,11 @@
       "name": "finding_status",
       "schema": "public",
       "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
+    },
+    "public.learning_event_type": {
+      "name": "learning_event_type",
+      "schema": "public",
+      "values": ["proposed", "applied", "approved", "retired"]
     },
     "public.learning_kind": {
       "name": "learning_kind",
