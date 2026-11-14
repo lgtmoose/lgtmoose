@@ -1,0 +1,19 @@
+{
+  "title": "Share the email check between sign-up and invites",
+  "body": "Both handlers validated email addresses with the same copied code. Moves it to one helper; behaviour is unchanged.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "src/email.ts",
+      "note": "the helper is the old condition, negated"
+    },
+    {
+      "path": "src/signup.ts",
+      "note": "same behaviour as before"
+    },
+    {
+      "path": "src/invite.ts",
+      "note": "same behaviour as before"
+    }
+  ]
+}

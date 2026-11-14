@@ -1,0 +1,30 @@
+{
+  "title": "Show job durations as minutes and seconds",
+  "body": "The jobs list shows durations in raw milliseconds. Adds `formatDuration` to @acme/format for the jobs list.",
+  "kind": "seeded",
+  "tags": [
+    "cross-file"
+  ],
+  "expected": [
+    {
+      "category": "wiring",
+      "path": "packages/format/src/index.ts",
+      "lines": [
+        7,
+        9
+      ],
+      "severity": "should_fix",
+      "note": "formatDuration is added for the jobs list, but JobRow still prints raw milliseconds and nothing calls it"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "packages/format/src/index.ts",
+      "lines": [
+        2,
+        4
+      ],
+      "note": "formatPrice is unchanged"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "title": "Add password reset by emailed token",
+  "body": "Users get a reset token by email; POST /reset with the token and a new password sets it.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": "security",
+      "path": "src/routes.ts",
+      "lines": [
+        24,
+        24
+      ],
+      "severity": "blocking",
+      "note": "req.body.token goes into the query unchecked: {\"$ne\": null} matches any user with a token and resets their password"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/routes.ts",
+      "lines": [
+        13,
+        20
+      ],
+      "note": "login validates its inputs with asString"
+    }
+  ]
+}

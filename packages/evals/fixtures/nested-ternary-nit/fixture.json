@@ -1,0 +1,21 @@
+{
+  "title": "Show a label for each plan",
+  "body": "The billing page shows Free, Pro or Team next to the account name.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "convention",
+        "readability",
+        "style"
+      ],
+      "path": "src/account-header.tsx",
+      "lines": [
+        4,
+        4
+      ],
+      "severity": "nit",
+      "note": "CLAUDE.md forbids nested ternaries; a lookup object is the house style"
+    }
+  ]
+}

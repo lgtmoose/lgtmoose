@@ -1,0 +1,11 @@
+{
+  "title": "Paginate the audit log",
+  "body": "GET /audit returned every entry. Adds limit and cursor parameters, with tests.",
+  "kind": "clean",
+  "mustNotFlag": [
+    {
+      "path": "src/audit.ts",
+      "note": "the pagination and clamping are correct and tested"
+    }
+  ]
+}

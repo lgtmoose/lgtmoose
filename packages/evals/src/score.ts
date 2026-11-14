@@ -53,6 +53,7 @@ export interface FixtureRun {
 export interface FixtureScore {
   name: string;
   kind: Fixture["kind"];
+  tags: readonly string[];
   expected: number;
   /** Expected problems some finding reported, each with the finding that reported it. */
   matched: { expected: ExpectedFinding; finding: Finding }[];
@@ -132,6 +133,7 @@ export function scoreFixture(fixture: Fixture, run: FixtureRun): FixtureScore {
   return {
     name: fixture.name,
     kind: fixture.kind,
+    tags: fixture.tags,
     expected: fixture.expected.length,
     matched,
     severityCorrect: matched.filter((m) => m.finding.severity === m.expected.severity).length,
@@ -184,4 +186,23 @@ export function totals(scores: readonly FixtureScore[]): EvalTotals {
     durationMs: scores.reduce((n, s) => n + s.durationMs, 0),
     failedRuns: scores.filter((s) => s.errors.length > 0).length,
   };
+}
+
+/** Recall per tag, over the seeded fixtures with that tag, sorted by tag. */
+export function recallByTag(
+  scores: readonly FixtureScore[],
+): { tag: string; found: number; expected: number }[] {
+  const byTag = new Map<string, { found: number; expected: number }>();
+  for (const score of scores) {
+    if (score.kind !== "seeded") continue;
+    for (const tag of score.tags) {
+      const entry = byTag.get(tag) ?? { found: 0, expected: 0 };
+      entry.found += score.matched.length;
+      entry.expected += score.expected;
+      byTag.set(tag, entry);
+    }
+  }
+  return [...byTag]
+    .sort(([a], [b]) => Number(a > b) - Number(a < b))
+    .map(([tag, counts]) => ({ tag, ...counts }));
 }

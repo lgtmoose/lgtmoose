@@ -1,0 +1,30 @@
+{
+  "title": "Log outgoing payment requests",
+  "body": "We can't see why some payout calls fail. Log each request before it's sent.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "secrets",
+        "security"
+      ],
+      "path": "src/payouts.ts",
+      "lines": [
+        11,
+        11
+      ],
+      "severity": "blocking",
+      "note": "the logged headers include the API key in the authorization header"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/payouts.ts",
+      "lines": [
+        13,
+        13
+      ],
+      "note": "the error message has no secret in it"
+    }
+  ]
+}

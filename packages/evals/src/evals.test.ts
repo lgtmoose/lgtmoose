@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Finding } from "@lgtmoose/core";
 import { HarnessError, type Harness, type HarnessRunOptions } from "@lgtmoose/harness";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fixtureSpecSchema, loadFixtures, type Fixture } from "./fixture.js";
+import { fixtureProblems, fixtureSpecSchema, loadFixtures, type Fixture } from "./fixture.js";
 import {
   RECALL_TOLERANCE,
   REPORT_MARKER,
@@ -15,7 +15,7 @@ import {
   type Baseline,
 } from "./report.js";
 import { runFixture, runFixtures } from "./run.js";
-import { hitsMustNotFlag, matchesExpected, scoreFixture, totals } from "./score.js";
+import { hitsMustNotFlag, matchesExpected, recallByTag, scoreFixture, totals } from "./score.js";
 
 const FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 
@@ -51,6 +51,7 @@ function fixture(overrides: Partial<Fixture> = {}): Fixture {
     ],
     mustNotFlag: [],
     deleted: [],
+    tags: [],
     ...overrides,
   };
 }
@@ -58,39 +59,114 @@ function fixture(overrides: Partial<Fixture> = {}): Fixture {
 const RUN = { costUsd: 0, durationMs: 0, errors: [] };
 
 describe("fixtures", () => {
-  it("loads the seeded fixtures", async () => {
+  it("loads the golden fixtures: at least 15 seeded and 5 clean", async () => {
     const fixtures = await loadFixtures(FIXTURES);
-    expect(fixtures.map((f) => [f.name, f.kind])).toEqual([
-      ["clean-rename", "clean"],
-      ["missing-authz", "seeded"],
-      ["off-by-one", "seeded"],
-    ]);
+    const seeded = fixtures.filter((f) => f.kind === "seeded");
+    const clean = fixtures.filter((f) => f.kind === "clean");
+    expect(seeded.length).toBeGreaterThanOrEqual(15);
+    expect(clean.length).toBeGreaterThanOrEqual(5);
+    // The bug classes the golden set has to cover.
+    const names = fixtures.map((f) => f.name);
+    for (const name of [
+      "tenant-filter-missing",
+      "missing-auth-middleware",
+      "cents-vs-dollars",
+      "double-charge-on-retry",
+      "unused-new-export",
+      "env-var-undefined",
+      "ci-wrong-working-directory",
+      "nosql-operator-injection",
+      "nested-ternary-nit",
+    ]) {
+      expect(names).toContain(name);
+    }
+    expect(names).toEqual([...names].sort());
   });
 
-  it("points every expected and protected range at lines that exist", async () => {
+  it("finds no mistakes in any fixture", async () => {
+    // loadFixtures stops at the first bad fixture; this lists every problem at once.
     const problems: string[] = [];
-    for (const f of await loadFixtures(FIXTURES)) {
-      const lineCount = async (side: "LEFT" | "RIGHT", path: string) => {
-        const dirs = side === "LEFT" ? ["base"] : ["head", "base"];
-        for (const dir of dirs) {
-          const text = await readFile(join(f.dir, dir, path), "utf8").catch(() => undefined);
-          if (text !== undefined) return text.split("\n").length;
-        }
-        return 0;
-      };
-      const ranges = [
-        ...f.expected.map((e) => ({ side: e.side, path: e.path, lines: e.lines })),
-        ...f.mustNotFlag.flatMap((m) =>
-          m.lines === undefined ? [] : [{ side: "RIGHT" as const, path: m.path, lines: m.lines }],
-        ),
-      ];
-      for (const range of ranges) {
-        if ((await lineCount(range.side, range.path)) < range.lines[1]) {
-          problems.push(`${f.name}: ${range.path}:${range.lines.join("-")}`);
-        }
+    for (const entry of await readdir(FIXTURES, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(FIXTURES, entry.name);
+      const spec = fixtureSpecSchema.parse(
+        JSON.parse(await readFile(join(dir, "fixture.json"), "utf8")),
+      );
+      for (const problem of await fixtureProblems({ ...spec, name: entry.name, dir })) {
+        problems.push(`${entry.name}: ${problem}`);
       }
     }
     expect(problems).toEqual([]);
+  });
+
+  it("tags the cross-file bugs", async () => {
+    const fixtures = await loadFixtures(FIXTURES);
+    const crossFile = fixtures.filter((f) => f.tags.includes("cross-file")).map((f) => f.name);
+    expect(crossFile).toEqual([
+      "ci-wrong-working-directory",
+      "env-var-undefined",
+      "unused-new-export",
+    ]);
+  });
+
+  describe("checks", () => {
+    let root: string;
+    beforeEach(async () => {
+      root = await mkdtemp(join(tmpdir(), "lgtmoose-fixture-checks-"));
+    });
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+
+    async function write(name: string, spec: object, files: Record<string, string>) {
+      for (const [path, text] of Object.entries(files)) {
+        await mkdir(join(root, name, path, ".."), { recursive: true });
+        await writeFile(join(root, name, path), text);
+      }
+      await writeFile(join(root, name, "fixture.json"), JSON.stringify(spec));
+    }
+
+    it.each([
+      ["a range past the end of the file", { lines: [3, 4] }, "is past the file's last line"],
+      ["a file that isn't there", { path: "src/missing.ts" }, "isn't in the head"],
+      [
+        "a file the PR doesn't change",
+        { path: "src/same.ts", lines: [1, 1] },
+        "isn't changed by the PR",
+      ],
+    ])("rejects %s", async (_, change, message) => {
+      await write(
+        "bad",
+        {
+          title: "t",
+          kind: "seeded",
+          expected: [
+            {
+              category: "correctness",
+              path: "src/a.ts",
+              lines: [1, 2],
+              severity: "blocking",
+              ...change,
+            },
+          ],
+        },
+        { "base/src/a.ts": "one\ntwo\n", "head/src/a.ts": "one\n2\n", "base/src/same.ts": "x\n" },
+      );
+      await expect(loadFixtures(root)).rejects.toThrow(message);
+    });
+
+    it("loads fixtures from several directories and refuses a name in two", async () => {
+      const other = join(root, "private");
+      await mkdir(other);
+      await cp(join(FIXTURES, "off-by-one"), join(other, "private-off-by-one"), {
+        recursive: true,
+      });
+      const both = await loadFixtures([FIXTURES, other]);
+      expect(both.map((f) => f.name)).toContain("private-off-by-one");
+      await cp(join(FIXTURES, "off-by-one"), join(other, "off-by-one"), { recursive: true });
+      await expect(loadFixtures([FIXTURES, other])).rejects.toThrow("names must be unique");
+      await expect(loadFixtures(join(root, "nope"))).rejects.toThrow("doesn't exist");
+    });
   });
 
   it.each([
@@ -148,6 +224,39 @@ describe("matching", () => {
     expect(hitsMustNotFlag(finding(), { path: "src/cart.ts", categories: ["security"] })).toBe(
       false,
     );
+  });
+});
+
+describe("recall by tag", () => {
+  it("adds up seeded fixtures per tag and ignores clean ones", () => {
+    const seeded = scoreFixture(fixture({ name: "a", tags: ["cross-file"] }), {
+      ...RUN,
+      findings: [],
+    });
+    const found = scoreFixture(fixture({ name: "b", tags: ["cross-file", "money"] }), {
+      ...RUN,
+      findings: [finding()],
+    });
+    const clean = scoreFixture(
+      fixture({ name: "c", kind: "clean", expected: [], tags: ["money"] }),
+      {
+        ...RUN,
+        findings: [],
+      },
+    );
+    expect(recallByTag([seeded, found, clean])).toEqual([
+      { tag: "cross-file", found: 1, expected: 2 },
+      { tag: "money", found: 1, expected: 1 },
+    ]);
+    const markdown = renderMarkdown(
+      buildReport([seeded, found], "sonnet", new Date(0)),
+      undefined,
+      {
+        ok: true,
+        message: "ok",
+      },
+    );
+    expect(markdown).toContain("Recall by tag: cross\\-file 1/2 (50%), money 1/1 (100%).");
   });
 });
 
@@ -308,8 +417,65 @@ describe("running fixtures", () => {
     };
   }
 
-  it("runs the real pipeline on every fixture and scores it", async () => {
+  it("puts every golden bug in a reviewed batch, on lines the diff shows", async () => {
     const fixtures = await loadFixtures(FIXTURES);
+    const problems: string[] = [];
+    /** Answers each batch with a finding on every expected bug of the files it shows. */
+    const perfect: Harness = {
+      id: "perfect",
+      run: async <T>(options: HarnessRunOptions<T>) => {
+        const name = (options.runId ?? "").replace(/^evals-/, "").replace(/-batch-\d+$/, "");
+        const fx = fixtures.find((f) => f.name === name);
+        const findings: Finding[] = [];
+        for (const e of fx?.expected ?? []) {
+          const at = options.prompt.indexOf(`path="${e.path}"`);
+          if (fx === undefined || at === -1) continue;
+          // The file's diff block, up to the next file's.
+          const next = options.prompt.indexOf(' path="', at + 1);
+          const block = options.prompt.slice(at, next === -1 ? undefined : next);
+          const label = `${e.side === "LEFT" ? "L" : "R"}${e.lines[0]} `;
+          if (!block.includes(label))
+            problems.push(`${fx.name}: ${e.path}:${e.lines[0]} isn't in the diff`);
+          const side = e.side === "LEFT" ? ["base"] : ["head", "base"];
+          let text = "";
+          for (const dir of side) {
+            text = await readFile(join(fx.dir, dir, e.path), "utf8").catch(() => "");
+            if (text !== "") break;
+          }
+          const category = typeof e.category === "string" ? e.category : e.category[0];
+          findings.push({
+            rule_category: category ?? "correctness",
+            severity: e.severity,
+            path: e.path,
+            line: e.lines[1],
+            ...(e.lines[0] === e.lines[1] ? {} : { start_line: e.lines[0] }),
+            side: e.side,
+            title: "Seeded bug",
+            body: e.note ?? "The seeded bug.",
+            evidence: text
+              .split("\n")
+              .slice(e.lines[0] - 1, e.lines[1])
+              .join("\n"),
+          });
+        }
+        return { output: options.schema.parse({ findings }), transcriptKey: "t" };
+      },
+    };
+    const scores = await runFixtures(fixtures, {
+      harness: perfect,
+      model: "fake",
+      batchTimeoutMs: 1000,
+      workRoot,
+    });
+    expect(problems).toEqual([]);
+    const missed = scores.flatMap((score) => score.missed.map((m) => `${score.name}: ${m.path}`));
+    expect(missed).toEqual([]);
+    expect(totals(scores)).toMatchObject({ recall: 1, falsePositiveRate: 0, failedRuns: 0 });
+  }, 120_000);
+
+  it("runs the real pipeline on fixtures and scores them", async () => {
+    const seeds = new Set(["clean-rename", "missing-authz", "off-by-one"]);
+    const fixtures = (await loadFixtures(FIXTURES)).filter((f) => seeds.has(f.name));
     const harness = fakeHarness({
       "src/cart.ts": [finding()],
       "src/routes/orders.ts": [

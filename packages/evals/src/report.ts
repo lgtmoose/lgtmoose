@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { inline } from "@lgtmoose/summary";
 import { z } from "zod";
-import { totals, type EvalTotals, type FixtureScore } from "./score.js";
+import { recallByTag, totals, type EvalTotals, type FixtureScore } from "./score.js";
 
 /** The marker the CI job finds its own PR comment by, to edit it instead of adding another. */
 export const REPORT_MARKER = "<!-- lgtmoose-evals -->";
@@ -142,14 +142,22 @@ export function renderMarkdown(
       `⚠️ ${t.failedRuns} of ${report.fixtures.length} fixture runs had failures. They count as misses on seeded fixtures, and a clean fixture that didn't run can't show a false positive.`,
     );
   }
+  const byTag = recallByTag(report.fixtures);
+  if (byTag.length > 0) {
+    const parts = byTag.map(
+      ({ tag, found, expected }) =>
+        `${inline(tag)} ${found}/${expected} (${percent(expected === 0 ? 1 : found / expected)})`,
+    );
+    lines.push("", `Recall by tag: ${parts.join(", ")}.`);
+  }
   lines.push(
     "",
-    "| Fixture | Kind | Found | Missed | False positives | Cost | Time |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Fixture | Kind | Tags | Found | Missed | False positives | Cost | Time |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
   );
   for (const score of report.fixtures) {
     lines.push(
-      `| ${inline(score.name)} | ${score.kind} | ${score.matched.length}/${score.expected} | ${score.missed.length} | ${score.falsePositives.length} | ${money(score.costUsd)} | ${seconds(score.durationMs)} |`,
+      `| ${inline(score.name)} | ${score.kind} | ${score.tags.map((tag) => inline(tag)).join(", ")} | ${score.matched.length}/${score.expected} | ${score.missed.length} | ${score.falsePositives.length} | ${money(score.costUsd)} | ${seconds(score.durationMs)} |`,
     );
   }
   const details: string[] = [];

@@ -1,0 +1,26 @@
+{
+  "title": "Retry card charges that time out",
+  "body": "The payment provider sometimes times out under load. Retry the charge up to three times before failing the checkout.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "correctness",
+        "error_handling"
+      ],
+      "path": "src/charge.ts",
+      "lines": [
+        11,
+        17
+      ],
+      "severity": "blocking",
+      "note": "a timed-out charge may have gone through; retrying it without an idempotency key can charge the customer twice"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/provider.ts",
+      "note": "the provider interface is unchanged"
+    }
+  ]
+}

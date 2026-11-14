@@ -1,0 +1,5 @@
+{
+  "name": "payments-webhooks",
+  "private": true,
+  "type": "module"
+}

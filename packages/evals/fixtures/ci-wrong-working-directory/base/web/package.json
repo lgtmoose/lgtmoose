@@ -1,0 +1,8 @@
+{
+  "name": "acme-web",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run"
+  }
+}

@@ -7,6 +7,7 @@
 export {
   buildFixtureRepo,
   expectedFindingSchema,
+  fixtureProblems,
   fixtureSpecSchema,
   loadFixtures,
   mustNotFlagSchema,
@@ -19,6 +20,7 @@ export {
 export {
   hitsMustNotFlag,
   matchesExpected,
+  recallByTag,
   scoreFixture,
   totals,
   type EvalTotals,

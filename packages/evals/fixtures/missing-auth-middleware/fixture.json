@@ -1,0 +1,38 @@
+{
+  "title": "Let admins delete users",
+  "body": "Adds DELETE /admin/users/:id for the admin console.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": [
+        "authz",
+        "security"
+      ],
+      "path": "src/app.ts",
+      "lines": [
+        13,
+        13
+      ],
+      "severity": "blocking",
+      "note": "the new admin route has no requireAdmin: anyone can delete users"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/app.ts",
+      "lines": [
+        8,
+        10
+      ],
+      "note": "health check is public on purpose"
+    },
+    {
+      "path": "src/app.ts",
+      "lines": [
+        12,
+        12
+      ],
+      "note": "the list route is protected"
+    }
+  ]
+}

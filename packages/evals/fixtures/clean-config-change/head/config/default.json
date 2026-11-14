@@ -1,0 +1,6 @@
+{
+  "uploads": {
+    "maxBytes": 26214400,
+    "allowedTypes": ["image/png", "image/jpeg", "application/pdf"]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "title": "Search products by name",
+  "body": "Adds ?q= to GET /products for a case-insensitive name search.",
+  "kind": "seeded",
+  "expected": [
+    {
+      "category": "security",
+      "path": "src/products.ts",
+      "lines": [
+        21,
+        21
+      ],
+      "severity": "blocking",
+      "note": "the search text is built into the SQL string: SQL injection"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/products.ts",
+      "lines": [
+        12,
+        12
+      ],
+      "note": "listProducts uses a parameter and is unchanged"
+    }
+  ]
+}

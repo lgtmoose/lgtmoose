@@ -1,0 +1,30 @@
+{
+  "title": "Verify webhook signatures",
+  "body": "Checks the signature on incoming payment webhooks with the provider's signing secret.",
+  "kind": "seeded",
+  "tags": [
+    "cross-file"
+  ],
+  "expected": [
+    {
+      "category": "wiring",
+      "path": "src/config.ts",
+      "lines": [
+        11,
+        11
+      ],
+      "severity": "blocking",
+      "note": "PAYMENTS_WEBHOOK_SECRET is required at startup but isn't in deploy/service.yaml or .env.example, so the next deploy fails to start"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/webhooks.ts",
+      "lines": [
+        10,
+        10
+      ],
+      "note": "the length check before timingSafeEqual is correct"
+    }
+  ]
+}

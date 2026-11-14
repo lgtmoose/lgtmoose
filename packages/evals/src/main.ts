@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { ClaudeCodeHarness } from "@lgtmoose/harness";
@@ -30,7 +30,10 @@ the evals couldn't run (bad fixtures or options, or every fixture run failed, as
 model credential).
 
 Options:
-  --fixtures <dir>     Fixture directory (default: this package's fixtures/)
+  --fixtures <dir>     Another fixture directory, run with this package's fixtures/
+                       (repeatable). LGTMOOSE_EVAL_FIXTURES adds more, separated by "${delimiter}".
+                       For private fixtures kept outside this repository.
+  --no-public          Leave out this package's fixtures/ and run only the extra ones
   --only <name>        Run only this fixture (repeatable); the baseline isn't checked
   --out <dir>          Where to write the report and transcripts (default: ./eval-report)
   --baseline <file>    Baseline to compare with (default: this package's baseline.json)
@@ -62,7 +65,8 @@ async function main(argv: readonly string[]): Promise<number> {
     args: [...argv],
     strict: true,
     options: {
-      fixtures: { type: "string" },
+      fixtures: { type: "string", multiple: true },
+      "no-public": { type: "boolean" },
       only: { type: "string", multiple: true },
       out: { type: "string" },
       baseline: { type: "string" },
@@ -86,7 +90,21 @@ async function main(argv: readonly string[]): Promise<number> {
   if (values["update-baseline"] && values.only !== undefined) {
     throw new Error("--update-baseline needs every fixture: leave out --only.");
   }
-  let fixtures = await loadFixtures(resolve(values.fixtures ?? join(PACKAGE_DIR, "fixtures")));
+  const extra = [
+    ...(values.fixtures ?? []),
+    ...(process.env.LGTMOOSE_EVAL_FIXTURES ?? "").split(delimiter).filter((dir) => dir !== ""),
+  ].map((dir) => resolve(dir));
+  const roots = [...(values["no-public"] ? [] : [join(PACKAGE_DIR, "fixtures")]), ...extra];
+  if (roots.length === 0) {
+    throw new Error("--no-public needs --fixtures or LGTMOOSE_EVAL_FIXTURES.");
+  }
+  // The committed baseline is measured on the public fixtures; a run with others needs its own.
+  if (values["update-baseline"] && extra.length > 0 && values.baseline === undefined) {
+    throw new Error(
+      "--update-baseline with extra fixtures needs --baseline <file>: the committed baseline is for the public fixtures.",
+    );
+  }
+  let fixtures = await loadFixtures(roots);
   if (values.only !== undefined) {
     const only = new Set(values.only);
     fixtures = fixtures.filter((fixture) => only.has(fixture.name));
