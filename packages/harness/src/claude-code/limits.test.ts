@@ -84,6 +84,24 @@ describe("claudeLimitFailure", () => {
     expect(nextClockTime("3pm (Not/AZone)", now)).toBeUndefined();
   });
 
+  it("reads '<window> limit reached', the ∙ separator and compact durations", () => {
+    expect(
+      claudeLimitFailure(result({ result: "Weekly limit reached ∙ resets Nov 18, 10am" }), ""),
+    ).toMatchObject({ kind: "plan_limit" });
+    expect(
+      claudeLimitFailure(
+        result({ result: "You've hit your limit ∙ resets in 3h20m ∙ /upgrade" }),
+        "",
+      ),
+    ).toEqual({ kind: "plan_limit", retryAfterSeconds: 12_000 });
+    expect(
+      claudeLimitFailure(
+        result({ result: "You've hit your limit ∙ resets 3pm (UTC) ∙ /upgrade" }),
+        "",
+      ),
+    ).toEqual({ kind: "plan_limit", resetsAt: expect.stringMatching(/T15:00:00\.000Z$/) });
+  });
+
   it("treats an overloaded API (529) as throttling, and reads hrs and mins", () => {
     expect(
       claudeLimitFailure(result({ api_error_status: 529, result: "API Error: 529" }), ""),

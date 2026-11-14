@@ -2,6 +2,7 @@ import {
   BEDROCK_MODEL_ID,
   MODEL_MODIFIER,
   isModelAlias,
+  modelFor,
   TIERS,
   type ProviderConfig,
 } from "@lgtmoose/config";
@@ -20,7 +21,7 @@ export function bedrockStatements(
   partition: string,
   account: string,
 ): PolicyStatement[] {
-  const pinned = TIERS.map((tier) => provider.models?.[tier]);
+  const pinned = TIERS.map((tier) => modelFor(provider, tier));
   // The ID Claude Code calls: without a `[1m]`-style modifier.
   const ids = pinned.map((model) =>
     model === undefined || isModelAlias(model)

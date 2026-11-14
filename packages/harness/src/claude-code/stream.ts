@@ -116,7 +116,8 @@ const CLAUDE_PLAN_LIMIT = new RegExp(
     String.raw`hit your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}(?:limit|budget)`,
     // "You've reached your Fable limit"
     String.raw`reached your (?:(?!rate\b|requests?\b)[\w'-]+ ){0,3}limit`,
-    String.raw`usage limit reached`,
+    // "usage limit reached", "5-hour limit reached", "Weekly limit reached"
+    String.raw`(?<!\b(?:rate|requests?) )\blimit reached`,
     String.raw`out of (?:usage )?credits`,
     // The API's prepaid balance: "Your credit balance is too low to access the Anthropic API."
     String.raw`credit balance is too low`,
@@ -124,9 +125,10 @@ const CLAUDE_PLAN_LIMIT = new RegExp(
   "i",
 );
 /** "resets 3:10pm (UTC)" or "resets in 3h 20m": when Claude Code says the limit lifts. */
-const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·]{1,60}?)\s*(?:$|\n|·|\.(?:\s|$))/i;
+const CLAUDE_RESETS = /\bresets? (?:at )?([^\n·∙]{1,60}?)\s*(?:$|\n|[·∙]|\.(?:\s|$))/i;
 /** One part of a relative reset ("3h", "20m", "2 days"). */
-const DURATION_PART = /(\d+)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)\b/gi;
+const DURATION_PART =
+  /(\d+)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)(?![a-z])/gi;
 const UNIT_SECONDS: Record<string, number> = { d: 86_400, h: 3600, m: 60, s: 1 };
 
 /** Classifies a Claude failure message: Claude's plan wording first, then the shared patterns. */
