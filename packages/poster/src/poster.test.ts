@@ -122,6 +122,33 @@ describe("GitHubPoster", () => {
       },
     ]);
     expect((await o.submitReview(PULL, "abc", review)).commentIds).toEqual([902]);
+
+    // Moved by a push meanwhile: the original line is the posted one.
+    const { poster: m } = poster([
+      { status: 200, body: { id: 14 } },
+      {
+        status: 200,
+        body: [
+          {
+            id: 903,
+            path: comment.path,
+            side: comment.side,
+            line: comment.line + 5,
+            original_side: comment.side,
+            original_line: comment.line,
+          },
+          {
+            id: 904,
+            path: comment.path,
+            side: comment.side,
+            line: comment.line,
+            original_side: comment.side,
+            original_line: comment.line - 2,
+          },
+        ],
+      },
+    ]);
+    expect((await m.submitReview(PULL, "abc", review)).commentIds).toEqual([903]);
     expect(calls[1]).toMatchObject({
       method: "GET",
       url: "https://api.github.com/repos/acme/app/pulls/7/reviews/11/comments?per_page=100&page=1",

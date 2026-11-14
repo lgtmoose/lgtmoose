@@ -130,9 +130,11 @@ export interface EarlierFinding {
   /** Its inline review comment's GitHub ID, when it has one: that comment stands for it. */
   commentId?: number;
   /**
-   * False when its line couldn't be followed to this head (the commit it was raised at is gone,
-   * or the PR no longer changes its file): its place is the recorded one, which today's code
-   * may not match, so it's only matched by its stored fingerprint and comment ID.
+   * False when its place at this head isn't known: its line is gone, or it wasn't followed (a
+   * closed finding on a file the PR no longer changes). Today's code at its recorded place says
+   * nothing about it, so it's only matched by its stored fingerprint and comment ID. A finding
+   * kept at its recorded place because its commit is gone (its file still in the PR) counts as
+   * placed there.
    */
   followed?: boolean;
 }

@@ -797,6 +797,40 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(old).not.toBe(headSha);
   });
 
+  it("matches a re-raise to a finding kept at its place after a force-push", async () => {
+    const h = harness();
+    await review(h, 1, [finding({ severity: "should_fix" })]);
+    // Rewrite the branch: the commit the finding was raised at is gone, the loop line stays.
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price ?? 0;"),
+      },
+      "rewritten",
+    );
+    await git(remote, "reflog", "expire", "--expire=now", "--all");
+    await git(remote, "gc", "--quiet", "--prune=now");
+
+    // Its line can't be followed, so it's kept where it was; the code there is still its code,
+    // so a reworded re-raise is matched to it (and raises its severity) rather than posted.
+    const again = await review(h, 2, [finding({ title: "Loop skips the final item" })]);
+    expect(again.posted).toMatchObject({ findings: 0 });
+    expect(h.findings.rows).toMatchObject([{ status: "open", severity: "blocking" }]);
+  });
+
+  it("doesn't follow a closed finding on a file the PR no longer changes", async () => {
+    let threads: ReviewThread[] = [];
+    const h = harness({ commentIds: true, threads: () => threads });
+    await review(h, 1, [finding()]);
+    const raisedAt = headSha;
+    threads = [{ resolved: true, firstCommentId: 1000 }];
+    // src/total.ts back as the base has it: the PR no longer changes it.
+    headSha = await commit({ "src/total.ts": TOTAL }, "revert total");
+    await review(h, 2);
+    expect(h.findings.rows).toMatchObject([{ status: "resolved_by_human" }]);
+    expect(h.fetched.flat()).not.toContain(raisedAt);
+  });
+
   it("skips an unreadable earlier manifest instead of failing the run", async () => {
     const h = harness();
     await addOther();

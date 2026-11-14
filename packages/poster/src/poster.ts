@@ -123,8 +123,9 @@ export class GitHubPoster implements Poster {
 
   /**
    * The review's comment IDs, matched to the payload's comments by place (path, side, line), in
-   * order. GitHub gives an outdated comment (the PR moved on meanwhile) no line, so its original
-   * line and side count then. The review is already posted: if they can't be read, they're left
+   * order. The original line and side are the posted commit's, which is what the payload gave;
+   * the current ones are GitHub's move of them to the PR's head (none once outdated), used only
+   * when there's no original. The review is already posted: if they can't be read, they're left
    * undefined.
    */
   private async commentIds(path: string, payload: ReviewPayload): Promise<(number | undefined)[]> {
@@ -148,8 +149,8 @@ export class GitHubPoster implements Poster {
         (item) =>
           !used.has(item.id) &&
           item.path === comment.path &&
-          (item.side ?? item.original_side ?? "RIGHT") === comment.side &&
-          (item.line ?? item.original_line) === comment.line,
+          (item.original_side ?? item.side ?? "RIGHT") === comment.side &&
+          (item.original_line ?? item.line) === comment.line,
       );
       if (match === undefined) return undefined;
       used.add(match.id);

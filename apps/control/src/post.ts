@@ -53,17 +53,26 @@ function costOf(report: ReviewReport): number | undefined {
 
 /**
  * The findings to follow to the new head: open ones, and outdated ones only while the PR still
- * changes their file (so they could stand again). Outdated findings on files the PR left alone
- * stay as they are, which keeps the work from growing with the PR's age.
+ * changes their file (so they could stand again), under that name or, renamed since, under
+ * another. Outdated findings on files the PR left alone stay as they are, which keeps the work
+ * from growing with the PR's age.
  */
 function toTrack(
   records: readonly FindingRecord[],
   changes: readonly ChangedPath[],
 ): FindingRecord[] {
   const { changed, atHead } = prPaths(changes);
+  // Old names of files the PR renames and keeps: still changed by it, under the new name.
+  const renamedFrom = new Set(
+    changes.flatMap((file) =>
+      file.status !== "deleted" && file.oldPath !== undefined ? [file.oldPath] : [],
+    ),
+  );
   return records.filter(
     (record) =>
-      record.status === "open" || (record.side === "RIGHT" ? atHead : changed).has(record.path),
+      record.status === "open" ||
+      (record.side === "RIGHT" ? atHead : changed).has(record.path) ||
+      renamedFrom.has(record.path),
   );
 }
 
@@ -214,7 +223,9 @@ async function standing(
       continue;
     }
     if (record.status === "outdated") reopened.push(record.id);
-    open.push({ ...recordToEarlier(record, place, at.has(record)), id: record.id });
+    // Followed to its place now, or kept at its recorded one (its commit is gone, its file still
+    // in the PR): either way, that's where it is.
+    open.push({ ...recordToEarlier(record, place), id: record.id });
   }
   return { open, outdated, reopened };
 }
@@ -318,11 +329,14 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
     if (records.length + closedRecords.length > 0) {
       // Which files the PR changes: names only, no patches or contents.
       const changes = await changedPaths(repo, prepared.mergeBase, pr.headSha);
-      // Closed ones go in as outdated, whatever the PR changes: one whose line is gone stays out.
-      const tracked = [
-        ...toTrack(records, changes),
-        ...closedRecords.map((record) => ({ ...record, status: "outdated" as const })),
-      ];
+      // Closed ones are followed like outdated ones, only while the PR still changes their file,
+      // and placed like open ones: kept at their recorded place when their commit is gone, out
+      // when their line is (they're never marked outdated).
+      const closedTracked = toTrack(
+        closedRecords.map((record) => ({ ...record, status: "outdated" as const })),
+        changes,
+      ).map((record) => ({ ...record, status: "open" as const }));
+      const tracked = [...toTrack(records, changes), ...closedTracked];
       // The commits those findings were raised at, to follow their lines: one request.
       await repo.fetchCommits(tracked.map((record) => record.raisedAtSha));
       const all = await standing(repo, tracked, changes, prepared.mergeBase, pr.headSha);
@@ -335,7 +349,7 @@ export async function post(deps: ControlDeps, runId: string): Promise<PostOutput
       });
       earlier = {
         open: all.open.filter((entry) => !closedIds.has(entry.id)),
-        outdated: all.outdated,
+        outdated: all.outdated.filter((id) => !closedIds.has(id)),
         reopened: all.reopened.filter((id) => !closedIds.has(id)),
       };
     }
