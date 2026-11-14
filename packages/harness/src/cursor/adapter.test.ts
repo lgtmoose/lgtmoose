@@ -416,6 +416,17 @@ describe("CursorHarness", () => {
     expect((await failure(run(harness))).kind).toBe(kind);
   });
 
+  it("doesn't read stderr's statuses behind a specific error result", async () => {
+    const stdout = `${JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "The model returned malformed tool calls.",
+    })}\n`;
+    const harness = await harnessFor([{ stdout, stderr: "HTTPError: 401", exitCode: 1 }]);
+    expect((await failure(run(harness))).kind).toBe("process");
+  });
+
   it("ignores limit wording on stderr behind a generic error result", async () => {
     const stdout = `${JSON.stringify({
       type: "result",

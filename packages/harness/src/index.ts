@@ -66,7 +66,12 @@ export {
 } from "./cursor/adapter.js";
 export { cursorAuth, type CursorAuth, type CursorAuthMethod } from "./cursor/auth.js";
 export { CURSOR_DENIED_TOOLS, cursorPermissions, DENIED_ROOTS } from "./cursor/policy.js";
-export { classifyCursorFailure, classifyStrictCursorFailure } from "./cursor/result.js";
+export {
+  classifyCursorFailure,
+  classifyStrictCursorFailure,
+  isGenericError,
+} from "./cursor/result.js";
+export { statusesIn } from "./status.js";
 export { CURSOR_SKIPPED_DIRS, CURSOR_SKIPPED_FILES, copyWorkspace } from "./cursor/workspace.js";
 export { isInside } from "./paths.js";
 export { isUnreadable, walkTree, type TreeEntry, type WalkOptions } from "./tree.js";

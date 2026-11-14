@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { copyFile, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isUnreadable, walkTree } from "../tree.js";
@@ -65,7 +66,8 @@ export async function copyWorkspace(source: string, dest: string): Promise<Works
       } else if (entry.isSymbolicLink()) {
         copy.links += 1;
       } else if (entry.isFile() && !CURSOR_SKIPPED_FILES.includes(name)) {
-        await copyFile(path, out).catch((error: unknown) => {
+        // A copy-on-write clone where the filesystem has them, else a plain copy.
+        await copyFile(path, out, constants.COPYFILE_FICLONE).catch((error: unknown) => {
           if (!isUnreadable(error)) throw error;
           copy.unreadable += 1;
         });

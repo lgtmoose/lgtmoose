@@ -1,4 +1,5 @@
 import type { HarnessErrorKind } from "./harness.js";
+import { statusesIn } from "./status.js";
 
 /**
  * Failure wording the CLIs share: plan and spend limits, throttling and refused credentials, with
@@ -18,42 +19,11 @@ export interface LimitFailure {
  */
 const PLAN_LIMIT =
   /hit your usage limit|usage[_ ]limit[_ ]reached|spend cap|quota[_ ]exceeded|usage[_ ]not[_ ]included|insufficient[_ ]quota|purchase more credits/i;
-/** HTTP status texts, by code, that may follow the number. */
-const STATUS_TEXT: Readonly<Record<number, string>> = {
-  401: "Unauthorized",
-  429: "Too Many Requests",
-};
-/** A count, not a status: "returned 429 results". */
-const NOT_A_STATUS = String.raw`(?!\s*(?:results?|matches|files?|items?|lines?|records?|rows?|entries|bytes|tokens|ms|seconds?|times|changed)\b)`;
-
-/**
- * An HTTP status in a message, as a regex source: the code right after HTTP wording, so a line
- * number in a stack trace (`index.js:429:17`) or a count ("search returned 429 results")
- * doesn't count. The wordings:
- * - "HTTP 429", "HTTP/1.1 401";
- * - "status 401", "status code: 429", "statusCode: 429", "status_code=401";
- * - an error name or "error" before it: "AuthenticationError: 401", "HTTPError: 401",
- *   "ServerError: 429", "error 401";
- * - "code 401", "code: 429";
- * - the code with its status text: "401 Unauthorized", "429 Too Many Requests" (which covers
- *   "returned 429 Too Many Requests").
- */
-export function httpStatus(code: number): string {
-  const text = STATUS_TEXT[code];
-  const prefixed = String.raw`(?:\bHTTP(?:\/[\d.]+)?|\bstatus(?:[ _]?code)?|\w*error|\bcode)[\s:=]*${code}\b${NOT_A_STATUS}`;
-  return text === undefined ? prefixed : String.raw`${prefixed}|\b${code}\s+${text}\b`;
-}
-
-/** Throttling: the same credential works again shortly. */
-const RATE_LIMIT = new RegExp(
-  String.raw`rate[_ -]?limit|too many requests|${httpStatus(429)}|server[_ ]overloaded`,
-  "i",
-);
-/** The credential itself was refused. A 401 only as a status (`httpStatus`). */
-const AUTH_FAILURE = new RegExp(
-  String.raw`${httpStatus(401)}|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials`,
-  "i",
-);
+/** Throttling wording: the same credential works again shortly. */
+const RATE_LIMIT = /rate[_ -]?limit|too many requests|server[_ ]overloaded/i;
+/** Wording that says the credential itself was refused. */
+const AUTH_FAILURE =
+  /unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|auth error|token (?:is )?expired|refresh token|not logged in|no codex credentials/i;
 
 const SECONDS: Record<string, number> = {
   s: 1,
@@ -80,7 +50,8 @@ function retryAfter(message: string): number | undefined {
 
 /** "Try again at Nov 14, 2026 3:45 PM.": the reset time as Codex wrote it. */
 function resetsAt(message: string): string | undefined {
-  return /try again at (.+?)(?:\.(?:\s|$)|$)/i.exec(message)?.[1]?.trim();
+  // Bounded and on one line, so a long message can't make the lazy match quadratic.
+  return /try again at ([^\n]{1,80}?)(?:\.(?:\s|$)|$)/im.exec(message)?.[1]?.trim();
 }
 
 /**
@@ -89,9 +60,10 @@ function resetsAt(message: string): string | undefined {
  */
 export function classifyFailure(message: string): LimitFailure | undefined {
   let kind: LimitFailure["kind"];
+  const statuses = statusesIn(message);
   if (PLAN_LIMIT.test(message)) kind = "plan_limit";
-  else if (RATE_LIMIT.test(message)) kind = "rate_limit";
-  else if (AUTH_FAILURE.test(message)) return { kind: "auth" };
+  else if (statuses.has(429) || RATE_LIMIT.test(message)) kind = "rate_limit";
+  else if (statuses.has(401) || AUTH_FAILURE.test(message)) return { kind: "auth" };
   else return undefined;
   return { kind, ...limitTimes(message) };
 }

@@ -15,8 +15,9 @@ describe("classifyFailure status codes", () => {
     ["ServerError: 429", "rate_limit"],
     ["statusCode: 429", "rate_limit"],
     ["status_code=401", "auth"],
-    ["error 401", "auth"],
-    ["code: 429", "rate_limit"],
+    ["server returned 401", "auth"],
+    ["failed with 429.", "rate_limit"],
+    ['{"error":{"code":429}}', "rate_limit"],
   ] as const)("reads %j as %s", (message, kind) => {
     expect(classifyFailure(message)?.kind).toBe(kind);
   });
@@ -29,7 +30,8 @@ describe("classifyFailure status codes", () => {
     "search returned 429 results",
     "the query failed with 401 matches pending",
     "Error: 429 files changed",
-    "status: 429 rows",
+    "error 401 tests failed",
+    "code 429 lines changed",
   ])("doesn't read a bare number in %j as a status", (message) => {
     expect(classifyFailure(message)).toBeUndefined();
   });

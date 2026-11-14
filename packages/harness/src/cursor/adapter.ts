@@ -24,6 +24,7 @@ import { cursorCliConfig } from "./policy.js";
 import {
   classifyCursorFailure,
   classifyStrictCursorFailure,
+  isGenericError,
   cursorUsage,
   findCursorResult,
   type CursorResult,
@@ -125,13 +126,14 @@ export class CursorHarness implements Harness {
     const model = options.model.trim() || this.options.models?.[tier];
     const secrets = auth.secrets;
     const keys: string[] = [];
-    checkPromptSize(options.prompt, keys);
+    // No structured-output flag: the schema is described in the prompt, and checked with zod.
+    const schemaSuffix = schemaPromptSuffix(schemaJson(options.schema));
+    // Before copying anything; the note about the copy adds a sentence, checked again below.
+    checkPromptSize(options.prompt + schemaSuffix, keys);
     const root = await mkdtemp(join(this.options.tmpRoot ?? tmpdir(), "lgtmoose-cursor-"));
     try {
       const { dir: workspace, copy } = await copyCheckout(options.cwd, root, keys);
-      // No structured-output flag: the schema is described in the prompt, and checked with zod.
-      const firstPrompt =
-        options.prompt + copyNote(copy) + schemaPromptSuffix(schemaJson(options.schema));
+      const firstPrompt = options.prompt + copyNote(copy) + schemaSuffix;
       checkPromptSize(firstPrompt, keys);
       const taskDir = await freeTaskDir(workspace);
       const home = join(root, "home");
@@ -298,7 +300,9 @@ function classifyRun(
   if (errorText === undefined)
     return stderr === undefined ? undefined : classifyCursorFailure(stderr);
   const fromResult = classifyCursorFailure(errorText);
-  if (fromResult !== undefined || stderr === undefined) return fromResult;
+  if (fromResult !== undefined || stderr === undefined || !isGenericError(errorText)) {
+    return fromResult;
+  }
   return classifyStrictCursorFailure(stderr);
 }
 

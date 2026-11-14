@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyCursorFailure, cursorUsage, findCursorResult } from "./result.js";
+import {
+  classifyCursorFailure,
+  classifyStrictCursorFailure,
+  cursorUsage,
+  findCursorResult,
+  isGenericError,
+} from "./result.js";
 
 describe("findCursorResult", () => {
   it("reads the result object and ignores unknown fields and other lines", () => {
@@ -27,6 +33,37 @@ describe("cursorUsage", () => {
       }),
     ).toEqual({ inputTokens: 1, outputTokens: 2, cacheReadTokens: 3 });
     expect(cursorUsage(undefined)).toEqual({});
+  });
+});
+
+describe("isGenericError", () => {
+  it.each([
+    "",
+    "  ",
+    "Request failed",
+    "request failed.",
+    "Unknown error",
+    "An error occurred",
+    "Error",
+  ])("%j is generic", (text) => {
+    expect(isGenericError(text)).toBe(true);
+  });
+
+  it.each(["Request failed: model overloaded", "The model returned malformed tool calls."])(
+    "%j is not",
+    (text) => {
+      expect(isGenericError(text)).toBe(false);
+    },
+  );
+});
+
+describe("classifyStrictCursorFailure", () => {
+  it("reads only machine signals", () => {
+    expect(classifyStrictCursorFailure("[unauthenticated] bad key")?.kind).toBe("auth");
+    expect(classifyStrictCursorFailure('{"status":429}')?.kind).toBe("rate_limit");
+    expect(classifyStrictCursorFailure("unauthenticated session")).toBeUndefined();
+    expect(classifyStrictCursorFailure("resource exhausted")).toBeUndefined();
+    expect(classifyStrictCursorFailure("You've hit your usage limit")).toBeUndefined();
   });
 });
 
