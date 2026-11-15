@@ -472,6 +472,27 @@ describe("dispatch: pause and requested reviews", () => {
     });
   });
 
+  it("drops a bot's label on a reviewed head (our own status labels) before anything else", async () => {
+    const f = fakeDeps();
+    f.reviewedHeads.add(NEW);
+    const ours = job({
+      kind: "pr_labeled",
+      label: "Approved",
+      actor: "moose[bot]",
+      botActor: true,
+    });
+    expect(await dispatch(f.deps, ours)).toEqual({
+      action: "ignored",
+      reason: "a bot's label on a reviewed head",
+    });
+    expect(f.calls).toEqual([]);
+    expect(f.executions.size).toBe(0);
+    expect(f.recorded.size).toBe(0);
+    // A person's label on that head still goes through, as a duplicate.
+    const person = job({ kind: "pr_labeled", label: "lgtmoose:review", deliveryId: "d-person" });
+    expect(await dispatch(f.deps, person)).toMatchObject({ action: "started" });
+  });
+
   it("starts a label's run on a paused PR: the repo's trigger decides in the prepare step", async () => {
     const f = fakeDeps();
     f.pausedPrs.add("acme/shop#12");

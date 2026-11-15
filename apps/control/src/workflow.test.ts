@@ -2123,6 +2123,47 @@ describe("later runs", { timeout: 30_000 }, () => {
       };
     }
 
+    it("with on_push: manual, judges a reply after a push without reviewing the new commit", async () => {
+      const h = harness({
+        commentIds: true,
+        threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
+        config: "review:\n  on_push: manual\n",
+      });
+      await review(h, 1, [finding()]);
+      const firstHead = headSha;
+      const r = withReplies(h, { body: "Fixed now.", author: "dev" });
+      // A push the repo doesn't review on its own, then a reply on the old finding.
+      await touchTotal("items[i].price!");
+
+      const { prepared, manifest, posted } = await judgedRun(h, 2, {
+        kind: "fixed",
+        fixed_at_head: true,
+      });
+
+      // Only the judge ran: no reviewer batch, no ticket batch.
+      expect(manifest.conversationOnly).toBe(true);
+      expect(manifest.review.jobs).toEqual([]);
+      const judges = (manifest.judgements ?? []).map((judge) => judge.index);
+      expect(prepared.batches.map((batch) => batch.index)).toEqual(judges);
+      expect(judges).toHaveLength(1);
+      // The reply is judged and answered. The fix isn't taken: nothing reviewed the new commit.
+      expect(r.marked).toMatchObject({ judged: ["r1"] });
+      expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+      expect(r.writes).toHaveLength(1);
+      expect(r.writes[0]).toMatch(/^reply 1000: .*wasn't reviewed again in this run/);
+      // No review, and the PR's last reviewed head stays the first one.
+      expect(posted).toMatchObject({ posted: false, reviewed: false });
+      expect(reviews(h)).toBe(1);
+      expect(h.runs.runs.get(prepared.runId)?.status).toBe("superseded");
+      expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "succeeded", headSha: firstHead });
+      // The new commit waits, as a push's run would say.
+      const waiting = shadowRecords(h.objects, "check-run").filter(
+        (check) => check.title === "Waiting for a trigger",
+      );
+      expect(waiting).toMatchObject([{ head_sha: headSha, conclusion: "action_required" }]);
+      expect(shadowRecords(h.objects, "summary-comment")).toHaveLength(1);
+    });
+
     it("keeps a fix open when the same run's reviewer finds it again", async () => {
       const { h, first } = withOurComment();
       await first();

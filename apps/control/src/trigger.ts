@@ -9,8 +9,9 @@ import type { WorkflowJob } from "./job.js";
  * Decided in the prepare step before the clone, so a run that doesn't review spends no model time
  * and reads no code.
  *
- * - A person's `review` or `full review`, and runs for replies or `explain`, always run: someone
- *   asked. (The conversation handler already checked who may ask.)
+ * - A person's `review` or `full review` always runs: someone asked. (The conversation handler
+ *   already checked who may ask.) A run for replies or `explain` is gated like a push; when that
+ *   waits, it judges and explains without reviewing the code.
  * - A label added (`pr_labeled`) starts a review only when it's `review.label`, the trigger is
  *   `label`, and a person added it or a bot in `review.trusted_bots` did. Anything else is
  *   ignored: nothing is posted.
@@ -43,7 +44,18 @@ export function reviewGate(
   pr: { labels: readonly string[] },
   reviewedBefore: boolean,
 ): GateDecision {
-  if (job.requested !== undefined) return { review: true };
+  if (job.requested === "review" || job.requested === "full_review") return { review: true };
+  // A run for replies or an `explain` isn't anyone asking for a code review: the reply judge and
+  // the explainer queue it. It's gated as a push would be; when that waits, the run only judges
+  // and explains (`conversationOnly` in the prepare step).
+  if (job.requested !== undefined) {
+    const push = {
+      kind: "pr_updated" as const,
+      ...(job.actor === undefined ? {} : { actor: job.actor }),
+      ...(job.botActor === undefined ? {} : { botActor: job.botActor }),
+    };
+    return reviewGate(settings, push, pr, reviewedBefore);
+  }
   const labelled = pr.labels.some((name) => same(name, settings.label));
   const removeLabel =
     settings.label_once && settings.trigger === "label" ? settings.label : undefined;

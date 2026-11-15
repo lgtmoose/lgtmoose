@@ -274,6 +274,16 @@ async function review(
   job: ReviewJob & { headSha: string },
   eventAt: Date,
 ): Promise<DispatchResult> {
+  // Most bots' labels are LGTMoose's own status labels, set as it posts a review: on a head
+  // that's reviewed, a bot's label starts nothing, so nothing is recorded or started for it.
+  // (The gateway can't tell our App's bot from others: it holds only the webhook secret.)
+  if (
+    job.kind === "pr_labeled" &&
+    job.botActor === true &&
+    (await deps.store.reviewed(job.repo, job.prNumber, job.headSha))
+  ) {
+    return { action: "ignored", reason: "a bot's label on a reviewed head" };
+  }
   await deps.store.advance(job.repo, job.prNumber, eventAt, false);
   if (!runsWhenPaused(job) && (await deps.store.paused(job.repo, job.prNumber))) {
     return { action: "paused" };

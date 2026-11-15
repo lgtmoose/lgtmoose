@@ -68,6 +68,12 @@ export interface RunManifest {
   tickets?: TicketsManifest;
   /** The `explain`s this run answers (NIC-1053); their batches follow the tickets'. */
   explanations?: ExplainJob[];
+  /**
+   * A run for replies or `explain` while the PR's code waits for a review trigger (NIC-1077): it
+   * has judge and explainer batches only, and its post step writes their replies and nothing
+   * else. No review, check run, summary or label, and the PR's last reviewed head stays put.
+   */
+  conversationOnly?: true;
 }
 
 /** A manifest written before incremental reviews: the review lacks the fields they added. */
@@ -342,11 +348,18 @@ async function judgeJobs(
 type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
 
 /**
- * Whether this run reviews the PR, by the repo's `review` config at the base (`reviewGate`,
- * NIC-1077), read before anything is cloned. A run that doesn't review ends like a superseded
- * one. One that waits for a trigger says so in its check run; one that isn't a trigger at all (a
- * label that isn't the review label, say) posts nothing. With `review.label_once`, the label
- * comes off as the review starts. Without a way to read the config (the CLI), every run reviews.
+ * What this run does, by the repo's `review` config at the base (`reviewGate`, NIC-1077), read
+ * before anything is cloned:
+ *
+ * - `review`: the usual run. With `review.label_once`, the label comes off as it starts.
+ * - `skip`: nothing, ended like a superseded run. One that waits for a trigger says so in its
+ *   check run; one that isn't a trigger at all (a label that isn't the review label) posts
+ *   nothing.
+ * - `conversation`: a run for replies or `explain` while the code waits for a trigger. It judges
+ *   and explains, but reviews no code and doesn't move the PR's last reviewed head, so the new
+ *   commits stay unreviewed. The check run says it waits, as a push's would.
+ *
+ * Without a way to read the config (the CLI), every run reviews.
  */
 async function triggered(
   deps: ControlDeps,
@@ -356,8 +369,8 @@ async function triggered(
   pr: PullRequest,
   runId: string,
   reviewedBefore: boolean,
-): Promise<boolean> {
-  if (github.reader.fileAt === undefined) return true;
+): Promise<"review" | "conversation" | "skip"> {
+  if (github.reader.fileAt === undefined) return "review";
   const config = parseRepoConfigYaml(
     await github.reader.fileAt(target, pr.baseSha, ".lgtmoose.yaml"),
   );
@@ -375,11 +388,12 @@ async function triggered(
         });
       }
     }
-    return true;
+    return "review";
   }
-  await deps.runs.supersedeRun(runId);
-  deps.log("not triggered", { runId, reason: gate.reason, waiting: gate.waiting });
-  if (!gate.waiting) return false;
+  const conversation = job.requested === "replies" || job.requested === "explain";
+  if (!conversation) await deps.runs.supersedeRun(runId);
+  deps.log("not triggered", { runId, reason: gate.reason, waiting: gate.waiting, conversation });
+  if (!gate.waiting) return conversation ? "conversation" : "skip";
   const check = waitingCheckRun(config.review, config.gate, await github.slug?.(), reviewedBefore);
   if (check !== undefined) {
     await github.poster(runId, pull).completeCheckRun(pull, {
@@ -390,7 +404,7 @@ async function triggered(
       externalId: runId,
     });
   }
-  return false;
+  return conversation ? "conversation" : "skip";
 }
 
 /**
@@ -424,18 +438,27 @@ export async function prepare(
   }
 
   const lastReviewed = run.lastReviewedSha;
-  if (!(await triggered(deps, github, job, target, pr, run.runId, lastReviewed !== undefined))) {
-    return { runId: run.runId, superseded: true, batches: [] };
-  }
+  const mode = await triggered(
+    deps,
+    github,
+    job,
+    target,
+    pr,
+    run.runId,
+    lastReviewed !== undefined,
+  );
+  if (mode === "skip") return { runId: run.runId, superseded: true, batches: [] };
+  const conversationOnly = mode === "conversation";
 
   const keys = runKeys(run.runId);
   // A full review someone asked for leaves earlier reviews out: every file is reviewed again,
-  // as on a first review. Duplicates of what earlier reviews posted are still dropped.
+  // as on a first review. Duplicates of what earlier reviews posted are still dropped. A
+  // conversation-only run reviews nothing, so it picks up no earlier run's batches.
   const full = job.requested === "full_review";
   const [resumed, reviewed] = full
     ? [[], []]
     : await Promise.all([
-        resumableWork(deps, run.pullRequestId, run.runId),
+        conversationOnly ? [] : resumableWork(deps, run.pullRequestId, run.runId),
         deps.runs.reviewedFiles(run.pullRequestId),
       ]);
   const work = await deps.workDir();
@@ -451,11 +474,12 @@ export async function prepare(
     });
     const { learnings } = deps;
     const taken = await takeReplies(deps, run.pullRequestId, settings);
-    const prepared = await prepareReview(
+    const planned = await prepareReview(
       {
         github: github.reader,
         progress: (line) => deps.log(line),
-        ...(learnings === undefined
+        // A conversation-only run builds no reviewer prompts, so it ranks no learnings.
+        ...(learnings === undefined || conversationOnly
           ? {}
           : {
               learnings: (batch) =>
@@ -474,16 +498,26 @@ export async function prepare(
         ]),
       },
     );
+    // A conversation-only run keeps the plan (the post step reads the PR from it) but reviews
+    // none of it: no review batches.
+    const prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
     const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     // Linked tickets, read here with the provider's credential; their text goes to the sandbox
-    // in the checker's prompt, the credential never does.
-    const tickets = await prepareTickets(
-      deps,
-      repo,
-      prepared,
-      Math.max(-1, ...prepared.jobs.map((batch) => batch.index), ...judges.map((j) => j.index)) + 1,
-    );
+    // in the checker's prompt, the credential never does. They're part of a code review, so a
+    // conversation-only run has none.
+    const tickets: Awaited<ReturnType<typeof prepareTickets>> = conversationOnly
+      ? { batches: [] }
+      : await prepareTickets(
+          deps,
+          repo,
+          prepared,
+          Math.max(
+            -1,
+            ...prepared.jobs.map((batch) => batch.index),
+            ...judges.map((j) => j.index),
+          ) + 1,
+        );
     // Findings someone asked to have explained, after the tickets' batches.
     const explains = await explainJobs(deps, {
       pullRequestId: run.pullRequestId,
@@ -500,7 +534,7 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
-    await sealCheckout(repo, prepared);
+    await sealCheckout(repo, planned);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);
     await deps.store.putFile(keys.checkout, archive, "application/gzip");
@@ -573,10 +607,11 @@ export async function prepare(
       ...(explains.length === 0
         ? {}
         : { explanations: explains.map(({ prompt: _, ...rest }) => rest) }),
+      ...(conversationOnly ? { conversationOnly: true as const } : {}),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {
-      filesTotal: prepared.plan.files.length,
+      filesTotal: conversationOnly ? 0 : prepared.plan.files.length,
       kind: runKind(prepared, lastReviewed),
       fromSha: prepared.kind === "incremental" ? lastReviewed : undefined,
     });
@@ -584,6 +619,7 @@ export async function prepare(
       runId: run.runId,
       kind: prepared.kind,
       batches: batches.length,
+      ...(conversationOnly ? { conversationOnly } : {}),
       done: prepared.done.length,
       carriedBatches: prepared.carried.length,
       carriedFindings: prepared.carried.flatMap((batch) => batch.findings).length,

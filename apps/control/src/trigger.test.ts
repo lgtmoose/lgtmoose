@@ -26,13 +26,37 @@ describe("reviewGate", () => {
     expect(reviewGate(settings(), {}, none, true)).toEqual({ review: true });
   });
 
-  it("always runs what someone asked for", () => {
+  it("always runs a review someone asked for", () => {
     for (const trigger of ["auto", "label", "command"]) {
-      for (const requested of ["review", "full_review", "replies", "explain"] as const) {
+      for (const requested of ["review", "full_review"] as const) {
         expect(
           reviewGate(settings({ trigger, on_push: "manual" }), { ...push, requested }, none, true),
         ).toEqual({ review: true });
       }
+    }
+  });
+
+  it("gates a run for replies or explain as a push: the judge didn't ask for a code review", () => {
+    for (const requested of ["replies", "explain"] as const) {
+      const asked = { kind: "pr_updated" as const, actor: "dev", requested };
+      // As before when every push is reviewed.
+      expect(reviewGate(settings(), asked, none, true)).toEqual({ review: true });
+      // Waits whenever a push would.
+      expect(reviewGate(settings({ on_push: "manual" }), asked, none, true)).toMatchObject({
+        review: false,
+        waiting: true,
+      });
+      expect(reviewGate(settings({ trigger: "command" }), asked, none, false)).toMatchObject({
+        review: false,
+        waiting: true,
+      });
+      expect(reviewGate(settings({ trigger: "label" }), asked, none, true)).toMatchObject({
+        review: false,
+        waiting: true,
+      });
+      expect(reviewGate(settings({ trigger: "label" }), asked, withLabel, true)).toEqual({
+        review: true,
+      });
     }
   });
 
