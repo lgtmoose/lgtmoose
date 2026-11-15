@@ -369,4 +369,36 @@ export interface ControlDeps {
    * CLI), nothing is capped or recorded.
    */
   spend?: { store: SpendStore; budgets: Budgets };
+  /**
+   * Which head a PR's review waits for CI on (`review.wait_for_checks`, NIC-1078), kept with the
+   * dispatcher's records so a check finishing on that head asks for a run again. Left out
+   * (tests, the CLI), no run waits for CI.
+   */
+  checksWaits?: ChecksWaitStore;
+}
+
+/** A PR waiting for its CI: the head, since when, and what its check run last said. */
+export interface ChecksWait {
+  headSha: string;
+  since: Date;
+  state: string | undefined;
+}
+
+/** `pull_request_dispatches`' wait for CI. `repo` is passed as the job has it. */
+export interface ChecksWaitStore {
+  get(repo: string, number: number): Promise<ChecksWait | undefined>;
+  /**
+   * Records that the PR waits on `headSha`, with `state` as its check run's: since now, or
+   * since the wait on that head began when it was already waiting on it. Returns the wait as it
+   * was before (undefined when the PR wasn't waiting on this head).
+   */
+  wait(
+    repo: string,
+    number: number,
+    headSha: string,
+    state: string,
+    now: Date,
+  ): Promise<ChecksWait | undefined>;
+  /** The PR no longer waits: its review started, or nothing is to be waited for. */
+  clear(repo: string, number: number): Promise<void>;
 }

@@ -49,6 +49,32 @@ review:
 
 The setting is read from the PR's base, so a PR can't change its own trigger. The prepare step decides before it clones anything, so a run that doesn't review reads no code and spends no model time. A PR that waits gets a check run titled "Waiting for a trigger" that says how to start the review: `action_required` with `gate.check_run: required` (so code nobody reviewed can't merge on it), neutral with `optional`, none with `off`. No summary comment is posted until the first review. A requested review (`review`, `full review`) always runs. A run for replies or `explain` is gated like a push: when the code waits for a trigger, the run only judges the replies and answers the explains. It reviews no code, posts no review, summary or label, and leaves the PR's last reviewed commit where it was, so the new commits stay unreviewed. A fix the judge sees then stays open, with a reply saying its file wasn't reviewed again. Its check run says the PR waits, as a push's would. A label that isn't `review.label`, or a label from a bot that isn't trusted, posts nothing. The reconciler queues a review for a PR that carries its label but whose head waited, in case the `labeled` webhook was missed. The App already receives `labeled`: it's an action of the `pull_request` event it subscribes to, so existing installs need no change.
 
+### Waiting for CI
+
+A review can also wait until the PR's CI passes, so model time isn't spent on code that's about to change:
+
+```yaml
+review:
+  wait_for_checks: required # off (the default), required, or a list of check names
+  wait_timeout_minutes: 60 # how long to wait for checks that haven't finished
+```
+
+- **`required`** waits for the base branch's required status checks: those its rulesets require, and those its classic branch protection requires. Both are read without the `administration` permission (the rules API, and "Get a branch"). A branch that requires none doesn't wait.
+- **A list**, such as `[build, test]`, waits for the check runs or commit statuses with those names.
+- LGTMoose's own check is never one it waits for, even when it's required.
+
+The wait comes after the trigger: with `trigger: label`, adding the label starts the wait, and the review runs once CI is green. Then:
+
+- **All passed** (success, neutral or skipped): the review starts.
+- **One failed**: the review waits until it passes, however long that takes. Its check run, "Waiting for CI to pass", names the failed checks.
+- **Some still running**: the check run, "Waiting for CI", names them. After `wait_timeout_minutes` (5 to 1440) since the wait began, the review starts anyway, and its summary says it didn't wait and for which checks.
+- **`@lgtmoose review`** from someone with write access, by GitHub's collaborators API, starts the review at once. From the PR's author without write access, or from a trusted bot, it waits for CI like a push.
+- **A push** during the wait starts it again for the new head.
+
+The waiting check runs are `action_required`, `neutral` or absent by `gate.check_run`, as for a trigger. A run for replies or `explain` on a waiting PR only judges and explains, as above. Spend caps apply once the review starts.
+
+While a PR waits, the dispatcher keeps which head it waits on. A check suite or check run finishing on that head starts a short run that reads the checks again, after 20 seconds so a burst of finishing checks is read once. A check on any other PR, or on a PR that doesn't wait, is dropped after one database read. GitHub names no PR in a fork's check events, and CI that only sets commit statuses sends none of them: the reconciler checks every waiting PR again each interval, at most every five minutes, which also starts a review whose wait timed out. A wait on a failed check is checked again by the reconciler only within its lookback window; the webhook of the check's re-run is what normally ends it.
+
 Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
 
 ## `explain`: the explainer

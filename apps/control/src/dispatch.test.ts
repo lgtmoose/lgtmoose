@@ -818,3 +818,71 @@ describe("sqsDeadLetter", () => {
     expect(send.mock.calls[1]?.[0].input.MessageGroupId).toBe("invalid");
   });
 });
+
+describe("dispatch: checks finishing (NIC-1078)", () => {
+  const checks = (overrides: Partial<DispatchJob> = {}) =>
+    job({ kind: "pr_checks", deliveryId: "d-check", eventAt: T3, actor: "ci[bot]", ...overrides });
+
+  function waitingOn(f: ReturnType<typeof fakeDeps>, headSha: string | undefined) {
+    f.deps.checksWaits = {
+      get: async () =>
+        headSha === undefined ? undefined : { headSha, since: new Date(T1), state: "pending" },
+    };
+  }
+
+  it("starts nothing for a PR that doesn't wait for CI, or waits on another head", async () => {
+    for (const head of [undefined, OLD]) {
+      const f = fakeDeps();
+      waitingOn(f, head);
+      await dispatch(f.deps, job());
+      const before = f.executions.size;
+      expect(await dispatch(f.deps, checks())).toMatchObject({ action: "ignored" });
+      expect(f.executions.size).toBe(before);
+    }
+    // And without the store at all.
+    const f = fakeDeps();
+    expect(await dispatch(f.deps, checks())).toMatchObject({ action: "ignored" });
+  });
+
+  it("starts a run for the waiting head at the PR's own event time, stopping and advancing nothing", async () => {
+    const f = fakeDeps();
+    waitingOn(f, NEW);
+    await dispatch(f.deps, job());
+    // The push's run ended: it waited for CI.
+    must(f.executions.get(nameOf(NEW))).status = "SUCCEEDED";
+    expect(await dispatch(f.deps, checks())).toMatchObject({ action: "retried", stopped: [] });
+    const started = must(f.executions.get(nameOf(NEW, "d-check")));
+    expect(started.input).toMatchObject({ kind: "pr_checks", eventAt: T2, debounceSeconds: 20 });
+    // The check's own time didn't advance the PR: a push at the PR's time isn't made stale.
+    const next = job({ headSha: OLD, eventAt: T2, deliveryId: "d-next" });
+    expect(await dispatch(f.deps, next)).not.toMatchObject({ action: "stale" });
+  });
+
+  it("starts none while a run for the head is running: that one reads the checks after its wait", async () => {
+    const f = fakeDeps();
+    waitingOn(f, NEW);
+    await dispatch(f.deps, job());
+    expect(await dispatch(f.deps, checks())).toMatchObject({ action: "duplicate" });
+    expect(f.calls.filter((call) => call.startsWith("stop"))).toEqual([]);
+  });
+
+  it("starts nothing for a reviewed head, a paused PR or a closed one", async () => {
+    const reviewed = fakeDeps();
+    waitingOn(reviewed, NEW);
+    await dispatch(reviewed.deps, job());
+    must(reviewed.executions.get(nameOf(NEW))).status = "SUCCEEDED";
+    reviewed.reviewedHeads.add(NEW);
+    expect(await dispatch(reviewed.deps, checks())).toMatchObject({ action: "ignored" });
+
+    const paused = fakeDeps();
+    waitingOn(paused, NEW);
+    await dispatch(paused.deps, job());
+    paused.pausedPrs.add("acme/shop#12");
+    expect(await dispatch(paused.deps, checks())).toEqual({ action: "paused" });
+
+    const closed = fakeDeps();
+    waitingOn(closed, NEW);
+    await dispatch(closed.deps, job({ kind: "pr_closed" }));
+    expect(await dispatch(closed.deps, checks())).toMatchObject({ action: "ignored" });
+  });
+});

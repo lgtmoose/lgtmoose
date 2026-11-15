@@ -456,6 +456,18 @@ export const pullRequestDispatches = pgTable(
      */
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     pausedBy: text("paused_by"),
+    /**
+     * Set while the PR's review waits for its CI (`review.wait_for_checks`, NIC-1078): the head
+     * that waits, and since when. A check finishing on that head asks for a run again; one on any
+     * other head, or on a PR that isn't waiting, does nothing. Cleared when the review starts.
+     */
+    checksWaitSha: text("checks_wait_sha"),
+    checksWaitSince: timestamp("checks_wait_since", { withTimezone: true }),
+    /**
+     * What the waiting check run last said (`pending`, or the failed checks), so a run whose
+     * checks say the same posts nothing: our own check run finishing is a check event too.
+     */
+    checksWaitState: text("checks_wait_state"),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

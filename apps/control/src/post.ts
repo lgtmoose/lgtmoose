@@ -1316,6 +1316,7 @@ export async function post(
           : {
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
+        ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({

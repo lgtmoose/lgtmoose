@@ -25,6 +25,7 @@ describe("buildManifest", () => {
       pull_requests: "write",
       issues: "write",
       checks: "write",
+      statuses: "read",
     });
     expect(manifest.default_events).toEqual([
       "pull_request",
@@ -32,6 +33,8 @@ describe("buildManifest", () => {
       "pull_request_review_comment",
       "pull_request_review_thread",
       "issue_comment",
+      "check_suite",
+      "check_run",
     ]);
     expect(manifest.default_events).toEqual([...APP_EVENTS]);
   });

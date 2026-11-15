@@ -242,6 +242,8 @@ export interface FinishOptions {
    * their files are reviewed by the next run, but not as failed.
    */
   spendCap?: { batches: readonly number[]; reason: string };
+  /** Notes for the summary about how the run started (`SummaryInput.notices`), such as CI. */
+  notices?: readonly string[];
 }
 
 /** What a batch a spend cap kept from running reports as its error. */
@@ -1327,6 +1329,9 @@ export async function finishReview(
       ...(tickets.table === undefined ? {} : { tickets: tickets.table }),
       // The team's learnings this run's prompts had (NIC-1081), so people see them at work.
       learningsApplied: [...new Set(prepared.jobs.flatMap((job) => job.learningIds ?? []))],
+      ...(options.notices === undefined || options.notices.length === 0
+        ? {}
+        : { notices: options.notices }),
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );

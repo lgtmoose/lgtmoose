@@ -62,6 +62,16 @@ export function reviewGate(
   const pass = (): GateDecision =>
     removeLabel === undefined ? { review: true } : { review: true, removeLabel };
 
+  // A check finished on a head whose review waits for CI (NIC-1078): the dispatcher starts this
+  // only for the head the PR waits on, and a PR waits only once its trigger said the review may
+  // start. Only a review label can have come off since.
+  if (job.kind === "pr_checks") {
+    if (settings.trigger === "label" && !labelled) {
+      return { review: false, reason: "the label is gone", waiting: true };
+    }
+    return pass();
+  }
+
   if (job.kind === "pr_labeled") {
     if (settings.trigger !== "label") {
       return { review: false, reason: "labels don't start reviews here", waiting: false };

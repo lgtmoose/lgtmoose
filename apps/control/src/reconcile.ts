@@ -123,6 +123,18 @@ export interface ReconcileStore {
   pendingReply?(
     pullRequestId: string,
   ): Promise<{ id: string; attempts: number; kind?: string } | undefined>;
+  /**
+   * The repository's PRs whose review waits for CI (NIC-1078), by number: the head, since when,
+   * and what its check run last said. Optional: without it, no wait is checked again.
+   */
+  checksWaits?(repo: string): Promise<Map<number, ChecksWaitRow>>;
+}
+
+/** A PR waiting for its CI (`pull_request_dispatches`). */
+export interface ChecksWaitRow {
+  headSha: string;
+  since: Date;
+  state: string | undefined;
 }
 
 /** Where jobs go: the gateway's FIFO queue, one message group per PR. */
@@ -162,6 +174,11 @@ export interface ReconcileCounts {
   missedLabels: number;
   /** Comment jobs queued for human comments newer than the record. */
   missedComments: number;
+  /**
+   * Check jobs queued for PRs whose review waits for CI (NIC-1078): a missed check webhook (a
+   * fork's PR gets none, nor does CI that only sets commit statuses), or a wait that timed out.
+   */
+  checksRechecked: number;
   /** Runs for replies queued: replies waiting for the reply judge that no run took. */
   pendingReplies: number;
   /** Status labels synced back to the recorded one. */
@@ -190,6 +207,7 @@ function emptyCounts(): ReconcileCounts {
     missedHeads: 0,
     missedLabels: 0,
     missedComments: 0,
+    checksRechecked: 0,
     pendingReplies: 0,
     labelsResynced: 0,
     statesResynced: 0,
@@ -288,6 +306,7 @@ async function reconcileRepo(
   );
   if (pulls.length === 0) return;
   const recorded = await deps.store.pullRequests(repo);
+  const waits = (await deps.store.checksWaits?.(repo)) ?? new Map<number, ChecksWaitRow>();
   // One config read per base commit: most of a repository's PRs share one.
   const configs = new Map<string, Promise<readonly string[]>>();
   const statusLabels = (baseSha: string) => {
@@ -302,7 +321,7 @@ async function reconcileRepo(
   for (const pull of pulls) {
     counts.openPullRequests += 1;
     try {
-      await reconcilePull(context, pull, recorded.get(pull.number));
+      await reconcilePull(context, pull, recorded.get(pull.number), waits.get(pull.number));
     } catch (error) {
       counts.errors += 1;
       deps.log("reconcile: pull request not checked", {
@@ -327,6 +346,7 @@ async function reconcilePull(
   context: RepoContext,
   pull: OpenPull,
   record: RecordedPull | undefined,
+  checksWait?: ChecksWaitRow,
 ): Promise<void> {
   const { deps, counts, repo } = context;
   const fields = { repo, prNumber: pull.number, headSha: pull.headSha };
@@ -354,9 +374,16 @@ async function reconcilePull(
         }
       }
     } else if (record.headSha === pull.headSha) {
-      // A run started for this head and hasn't posted: running, failed, or waiting for its
-      // repo's review label, which the PR now carries (a missed `labeled` webhook).
-      if (await queueMissedLabel(context, pull)) {
+      // A run started for this head and hasn't posted: running, failed, waiting for its CI, or
+      // waiting for its repo's review label, which the PR now carries (a missed `labeled`
+      // webhook).
+      if (checksWait?.headSha === pull.headSha) {
+        if (await queueChecks(context, pull, checksWait)) {
+          deps.log("reconcile: queued a check of a PR waiting for CI", fields);
+        } else {
+          counts.unreviewed += 1;
+        }
+      } else if (await queueMissedLabel(context, pull)) {
         deps.log("reconcile: queued a review for a PR with its review label", fields);
       } else {
         counts.unreviewed += 1;
@@ -486,6 +513,39 @@ async function queueMissedLabel(context: RepoContext, pull: OpenPull): Promise<b
   return true;
 }
 
+/** How often a wait for CI is checked again, at most: the reconcile interval is usually longer. */
+const CHECKS_RECHECK_MS = 5 * 60_000;
+
+/**
+ * A PR whose review waits for CI on its head (NIC-1078): a check job is queued, as the gateway
+ * queues one when a check finishes, so the prepare step reads the checks again. That catches a
+ * missed webhook, a fork's PR (GitHub names no PR in its check events), CI that only sets commit
+ * statuses, and a wait that timed out. One per head per five minutes: the delivery ID, and the
+ * dispatcher's execution name made from it, repeat within that time. A wait on a failed check is
+ * checked again only within the lookback window: its re-run's webhook is what ends it, and an
+ * old failing PR isn't read every interval.
+ */
+async function queueChecks(
+  context: RepoContext,
+  pull: OpenPull,
+  waiting: ChecksWaitRow,
+): Promise<boolean> {
+  const now = (context.deps.now?.() ?? new Date()).getTime();
+  if (waiting.state !== "pending" && now - waiting.since.getTime() > context.deps.lookbackMs) {
+    return false;
+  }
+  const { repo } = context;
+  const deliveryId = reconcileDeliveryId(
+    `${repo.toLowerCase()}#${pull.number}@${pull.headSha}:checks:${Math.floor(now / CHECKS_RECHECK_MS)}`,
+  );
+  await context.deps.queue.send(
+    { ...jobBase(context, pull), kind: "pr_checks", deliveryId, actor: pull.author },
+    { groupId: reviewJobGroupId({ repo, prNumber: pull.number }), dedupeId: deliveryId },
+  );
+  context.counts.checksRechecked += 1;
+  return true;
+}
+
 async function resyncLabel(context: RepoContext, pull: OpenPull, target: string): Promise<void> {
   if (context.deps.shadow) return;
   const statusLabels = await context.statusLabels(pull.baseSha);
@@ -518,6 +578,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     missedHeads: "MissedHeads",
     missedLabels: "MissedLabels",
     missedComments: "MissedComments",
+    checksRechecked: "ChecksRechecked",
     pendingReplies: "PendingReplies",
     labelsResynced: "LabelsResynced",
     statesResynced: "StatesResynced",

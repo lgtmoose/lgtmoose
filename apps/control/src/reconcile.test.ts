@@ -195,6 +195,43 @@ describe("reconcile", () => {
     expect(sent).toEqual([]);
   });
 
+  describe("a PR waiting for CI (NIC-1078)", () => {
+    const records = new Map([[7, recorded({ headSha: HEAD, lastReviewedSha: OLD })]]);
+    const at = (iso: string) => new Date(iso);
+
+    it("queues a check job for the head it waits on, once per five minutes", async () => {
+      const waits = async () =>
+        new Map([[7, { headSha: HEAD, since: at("2026-11-14T11:00:00Z"), state: "pending" }]]);
+      const { deps, sent } = setup({ records });
+      deps.store.checksWaits = waits;
+      expect(await reconcile(deps)).toMatchObject({ checksRechecked: 1, unreviewed: 0 });
+      expect(sent[0]?.job).toMatchObject({ kind: "pr_checks", headSha: HEAD, prNumber: 7 });
+      // The same delivery within five minutes; a new one after.
+      const soon = setup({ records });
+      soon.deps.store.checksWaits = waits;
+      soon.deps.now = () => at("2026-11-14T12:04:00Z");
+      await reconcile(soon.deps);
+      expect(soon.sent[0]?.dedupeId).toBe(sent[0]?.dedupeId);
+      const later = setup({ records });
+      later.deps.store.checksWaits = waits;
+      later.deps.now = () => at("2026-11-14T12:06:00Z");
+      await reconcile(later.deps);
+      expect(later.sent[0]?.dedupeId).not.toBe(sent[0]?.dedupeId);
+    });
+
+    it("leaves a wait on another head, and an old failed one, alone", async () => {
+      for (const wait of [
+        { headSha: OLD, since: at("2026-11-14T11:00:00Z"), state: "pending" },
+        { headSha: HEAD, since: at("2026-11-01T00:00:00Z"), state: "failed:test" },
+      ]) {
+        const { deps, sent } = setup({ records });
+        deps.store.checksWaits = async () => new Map([[7, wait]]);
+        expect(await reconcile(deps)).toMatchObject({ checksRechecked: 0 });
+        expect(sent).toEqual([]);
+      }
+    });
+  });
+
   describe("a missed review label (review.trigger: label)", () => {
     const labelRepo = parseRepoConfig({ review: { trigger: "label" } }).review;
     const waiting = new Map([[7, recorded({ headSha: HEAD, lastReviewedSha: OLD })]]);
@@ -431,6 +468,7 @@ describe("metricsLine", () => {
           missedHeads: 1,
           missedLabels: 6,
           missedComments: 0,
+          checksRechecked: 0,
           pendingReplies: 0,
           labelsResynced: 2,
           statesResynced: 0,
@@ -449,7 +487,7 @@ describe("metricsLine", () => {
     };
     expect(line._aws.Timestamp).toBe(1000);
     expect(line._aws.CloudWatchMetrics[0]?.Namespace).toBe("LGTMoose");
-    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(14);
+    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(15);
     expect(line).toMatchObject({
       BootstrapsStarted: 1,
       MissedLabels: 6,

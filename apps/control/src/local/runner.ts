@@ -60,6 +60,8 @@ export interface RunnerDeps {
   dead: RunnerDeadQueue;
   executions: RunnerExecutions;
   dispatchStore: DispatchStore;
+  /** Which head each PR waits for CI on (`DispatchDeps.checksWaits`, NIC-1078). */
+  checksWaits?: DispatchDeps["checksWaits"];
   /** The workflow's dependencies, without what the runner supplies. */
   workflow: Omit<LocalWorkflowDeps, "executions" | "owner">;
   /** This process: unique per start, so a restart can tell its own executions from orphans. */
@@ -93,6 +95,7 @@ export function createRunner(deps: RunnerDeps) {
   const dispatchDeps: DispatchDeps = {
     executions: deps.executions,
     store: deps.dispatchStore,
+    ...(deps.checksWaits === undefined ? {} : { checksWaits: deps.checksWaits }),
     async deadLetter(record, reason) {
       await deps.dead.send({
         groupId: record.attributes?.MessageGroupId ?? "",

@@ -1,6 +1,6 @@
 import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { statusLabels, type RepoConfig } from "@lgtmoose/config";
-import { pendingReplies, pullRequests, reviewRuns } from "@lgtmoose/db";
+import { pendingReplies, pullRequestDispatches, pullRequests, reviewRuns } from "@lgtmoose/db";
 import {
   GitHubClient,
   GitHubLabelClient,
@@ -9,7 +9,7 @@ import {
   repoPath,
 } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
-import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "./database.js";
 import { repoConfigAt } from "./repo-config.js";
@@ -121,6 +121,32 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
         .orderBy(asc(pendingReplies.createdAt))
         .limit(1);
       return row;
+    },
+    async checksWaits(repo) {
+      const rows = await db
+        .select({
+          number: pullRequestDispatches.number,
+          headSha: pullRequestDispatches.checksWaitSha,
+          since: pullRequestDispatches.checksWaitSince,
+          state: pullRequestDispatches.checksWaitState,
+        })
+        .from(pullRequestDispatches)
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, repo.toLowerCase()),
+            isNotNull(pullRequestDispatches.checksWaitSha),
+          ),
+        );
+      const waits = new Map<number, { headSha: string; since: Date; state: string | undefined }>();
+      for (const row of rows) {
+        if (row.headSha === null || row.since === null) continue;
+        waits.set(row.number, {
+          headSha: row.headSha,
+          since: row.since,
+          state: row.state ?? undefined,
+        });
+      }
+      return waits;
     },
   };
 }

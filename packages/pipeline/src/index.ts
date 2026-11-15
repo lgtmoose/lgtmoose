@@ -39,7 +39,7 @@ export {
   type ReviewReport,
   type RunBatchOptions,
 } from "./pipeline.js";
-export type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
+export type { HeadChecks, PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 export { githubPullReader, type GitHubGet } from "./github-reader.js";
 export {
   otherReviewerFindings,

@@ -6,7 +6,8 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { drizzleDispatchStore } from "./dispatch-aws.js";
+import { drizzleChecksWaits, drizzleDispatchStore } from "./dispatch-aws.js";
+import { drizzleReconcileStore } from "./reconcile-aws.js";
 
 // The migrations create the vector extension (for learnings).
 const client = new PGlite({ extensions: { vector } });
@@ -195,5 +196,41 @@ describe("drizzleDispatchStore", () => {
       ["resolved", "dev", false],
       ["resolved", "maintainer", false],
     ]);
+  });
+});
+
+describe("the wait for CI (NIC-1078)", () => {
+  const waits = drizzleChecksWaits(db);
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+
+  it("keeps when a head’s wait began, starts it again for a new head, and clears it", async () => {
+    await store.advance("Acme/Shop", 70, T1, false);
+    expect(await waits.get("acme/shop", 70)).toBeUndefined();
+
+    expect(await waits.wait("Acme/Shop", 70, A, "pending", T1)).toBeUndefined();
+    expect(await waits.wait("acme/shop", 70, A, "failed:test", T2)).toEqual({
+      headSha: A,
+      since: T1,
+      state: "pending",
+    });
+    expect(await waits.get("acme/shop", 70)).toEqual({
+      headSha: A,
+      since: T1,
+      state: "failed:test",
+    });
+
+    const T3 = new Date("2026-11-14T00:00:03.000Z");
+    expect(await waits.wait("acme/shop", 70, B, "pending", T3)).toBeUndefined();
+    expect(await waits.get("acme/shop", 70)).toMatchObject({ headSha: B, since: T3 });
+
+    const reconciled = await drizzleReconcileStore(db).checksWaits?.("ACME/shop");
+    expect(reconciled?.get(70)).toEqual({ headSha: B, since: T3, state: "pending" });
+
+    await waits.clear("acme/shop", 70);
+    expect(await waits.get("acme/shop", 70)).toBeUndefined();
+    expect((await drizzleReconcileStore(db).checksWaits?.("acme/shop"))?.has(70)).toBe(false);
+    // The dispatcher’s record itself stays.
+    expect(await store.latest("acme/shop", 70)).toEqual({ eventAt: T1, closed: false });
   });
 });

@@ -24,7 +24,7 @@ import { drizzleConversationStore, githubConversation } from "../conversation-aw
 import { conversationBatch } from "../conversation-lambda.js";
 import { checkCredentials } from "../credentials.js";
 import { reportProblem } from "../credentials-aws.js";
-import { drizzleDispatchStore } from "../dispatch-aws.js";
+import { drizzleChecksWaits, drizzleDispatchStore } from "../dispatch-aws.js";
 import { collectFeedback } from "../feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "../feedback-aws.js";
 import { embedderFor } from "../learnings.js";
@@ -195,6 +195,7 @@ async function main(): Promise<void> {
     dead,
     executions,
     dispatchStore: drizzleDispatchStore(db),
+    checksWaits: drizzleChecksWaits(db),
     conversation: queueSender(conversations),
     pushDebounceSeconds: config.reviewDebounceSeconds,
     workflow: {

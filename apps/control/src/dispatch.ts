@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { REVIEW_JOB_KINDS, type ReviewJob } from "@lgtmoose/core";
 import { z } from "zod";
 import { workflowJobSchema } from "./job.js";
+import type { ChecksWaitStore } from "./ports.js";
 
 /**
  * The dispatcher: reads review jobs from the FIFO queue and turns them into review workflow
@@ -112,8 +113,15 @@ export function debounceSeconds(
   job: Pick<ReviewJob, "kind" | "requested">,
   pushSeconds: number = PUSH_DEBOUNCE_SECONDS,
 ): number {
+  if (job.kind === "pr_checks") return CHECKS_DEBOUNCE_SECONDS;
   return job.kind === "pr_updated" && job.requested === undefined ? pushSeconds : 0;
 }
+
+/**
+ * How long a run for a finished check waits before it reads the head's checks: a push's CI
+ * finishes in a burst, and the checks finishing meanwhile find this run running and start none.
+ */
+export const CHECKS_DEBOUNCE_SECONDS = 20;
 
 /**
  * Whether a job runs on a paused PR: a person's review or explain command does, and so does a
@@ -204,6 +212,11 @@ export interface DispatchDeps {
   conversation?: { send(job: DispatchJob): Promise<void> };
   /** How long a push's review waits (`reviewDebounceSeconds`). Left out: `PUSH_DEBOUNCE_SECONDS`. */
   pushDebounceSeconds?: number;
+  /**
+   * Which head each PR's review waits for CI on (NIC-1078). Left out, a finished check starts
+   * nothing.
+   */
+  checksWaits?: Pick<ChecksWaitStore, "get">;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -364,6 +377,47 @@ async function needsRetry(
 }
 
 /**
+ * A check finished on a PR's head (`pr_checks`, NIC-1078). It matters only when the PR's review
+ * waits for CI on that very head: then a run is started to read the checks again, which reviews
+ * once they pass. Anything else (no wait, another head, a reviewed head, a closed or paused PR)
+ * starts nothing, so CI on PRs that don't wait costs one database read.
+ *
+ * It's not a PR event: it neither advances the PR's event time nor stops other executions, and
+ * the run it starts takes the PR's newest event time, so it never orders before or after the
+ * push it's about. While a run for the head is running, a check finishing meanwhile starts none:
+ * that run waits `CHECKS_DEBOUNCE_SECONDS` before it reads the checks, and the reconciler catches
+ * a check that finished just after the read.
+ */
+async function checksJob(deps: DispatchDeps, job: DispatchJob): Promise<DispatchResult> {
+  const headSha = job.headSha;
+  if (headSha === undefined) return { action: "ignored", reason: "no head SHA" };
+  const wait = await deps.checksWaits?.get(job.repo, job.prNumber);
+  if (wait === undefined || wait.headSha !== headSha) {
+    return { action: "ignored", reason: "not waiting for CI on this head" };
+  }
+  const latest = await deps.store.latest(job.repo, job.prNumber);
+  if (latest === undefined || latest.closed) {
+    return { action: "ignored", reason: "the PR is closed" };
+  }
+  if (await deps.store.paused(job.repo, job.prNumber)) return { action: "paused" };
+  if (await deps.store.reviewed(job.repo, job.prNumber, headSha)) {
+    return { action: "ignored", reason: "the head is reviewed" };
+  }
+  const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
+  const forHead = unstopped.filter((execution) => execution.headSha === headSha);
+  const statuses = await Promise.all(
+    forHead.map((execution) => deps.executions.status(execution.executionArn)),
+  );
+  const name = executionName(job.repo, job.prNumber, headSha, job.deliveryId);
+  if (statuses.includes("RUNNING")) return { action: "duplicate", name, stopped: [] };
+  const ordered = { ...job, headSha, eventAt: latest.eventAt.toISOString() };
+  const { started, executionArn } = await startExecution(deps, ordered, name, latest.eventAt);
+  return started
+    ? { action: "retried", executionArn, stopped: [] }
+    : { action: "duplicate", name, stopped: [] };
+}
+
+/**
  * Comment jobs and submitted reviews go to the conversation handler, which reads them on GitHub:
  * commands in all three, replies for the judge in review comments. Without a conversation queue
  * they're acknowledged and dropped.
@@ -429,6 +483,8 @@ export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<Di
     case "thread_resolved":
     case "thread_unresolved":
       return threadJob(deps, job);
+    case "pr_checks":
+      return checksJob(deps, job);
     case "pr_opened":
     case "pr_ready":
     case "pr_updated":

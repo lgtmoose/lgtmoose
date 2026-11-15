@@ -157,6 +157,31 @@ export const repoConfigSchema = z
           .describe(
             "Bot logins, such as claude[bot], whose review.label or @lgtmoose review starts a review. They can do nothing else.",
           ),
+        wait_for_checks: z
+          .union([
+            z.enum(["off", "required"]),
+            z
+              .array(z.string().trim().min(1).max(100))
+              .min(1)
+              .max(30)
+              .refine(
+                (names) => !names.some((name) => name.toLowerCase() === "lgtmoose"),
+                "wait_for_checks can't name LGTMoose's own check",
+              ),
+          ])
+          .default("off")
+          .describe(
+            "Wait for CI before a review starts. off: don't wait. required: the base branch's required status checks. A list: the check runs or commit statuses with these names. LGTMoose's own check is never waited for.",
+          ),
+        wait_timeout_minutes: z
+          .number()
+          .int()
+          .min(5)
+          .max(1440)
+          .default(60)
+          .describe(
+            "With wait_for_checks: how long to wait for checks that haven't finished before reviewing anyway. A failed check holds the review until it passes; this doesn't.",
+          ),
       })
       .strict()
       .prefault({})

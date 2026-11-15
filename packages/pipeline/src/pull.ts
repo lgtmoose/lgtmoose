@@ -21,6 +21,30 @@ export interface PullReader {
    * every run reviews.
    */
   fileAt?(target: PullTarget, sha: string, path: string): Promise<string | undefined>;
+  /**
+   * The checks on a commit, for `review.wait_for_checks` (NIC-1078): each check run's latest
+   * attempt and each commit status's latest state. Optional: without it, no run waits for CI.
+   */
+  checksAt?(target: PullTarget, sha: string): Promise<HeadChecks>;
+  /**
+   * The names of the status checks a branch requires to merge: from its rulesets (the rules API)
+   * and its classic branch protection, as far as they can be read without `administration`.
+   */
+  requiredChecks?(target: PullTarget, branch: string): Promise<string[]>;
+}
+
+/** A commit's CI as `checksAt` reads it. */
+export interface HeadChecks {
+  /** Check runs, the latest attempt of each name. */
+  runs: readonly {
+    name: string;
+    /** queued, in_progress, completed, waiting, requested or pending. */
+    status: string;
+    /** When completed: success, failure, neutral, cancelled, skipped, timed_out, action_required or stale. */
+    conclusion: string | undefined;
+  }[];
+  /** Commit statuses, the latest of each context: success, pending, failure or error. */
+  statuses: readonly { context: string; state: string }[];
 }
 
 export interface PullRequest {
@@ -41,6 +65,8 @@ export interface PullRequest {
   state: string;
   /** The PR's label names as GitHub has them now, when it gave them. */
   labels?: string[];
+  /** Whether the PR is a draft, when GitHub said. */
+  draft?: boolean;
 }
 
 export interface PullComment {
