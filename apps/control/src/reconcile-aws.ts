@@ -104,7 +104,11 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
     },
     async pendingReply(pullRequestId) {
       const [row] = await db
-        .select({ id: pendingReplies.id, attempts: pendingReplies.attempts })
+        .select({
+          id: pendingReplies.id,
+          attempts: pendingReplies.attempts,
+          kind: pendingReplies.kind,
+        })
         .from(pendingReplies)
         .where(
           and(

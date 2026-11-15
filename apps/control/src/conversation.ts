@@ -10,8 +10,9 @@ import {
   type OrgRole,
   type Permission,
 } from "@lgtmoose/learnings";
-import { inline, paragraphs } from "@lgtmoose/summary";
+import { inline } from "@lgtmoose/summary";
 import { helpText, learningProposal, parseCommands, type Command } from "./commands.js";
+import { describeFinding } from "./explain.js";
 import { JUDGE_REPLY_MARKER, isTrivialReply, type ReplyStore } from "./replies.js";
 import { resolutionHeld } from "./thread-policy.js";
 
@@ -141,6 +142,11 @@ export interface ConversationDeps {
    * deferred as before.
    */
   replies?: ReplyStore;
+  /**
+   * The most `explain`s the explainer answers per PR per run (`maxExplanations`). Left out or
+   * 0, or without `replies`, `explain` replies with the finding as it's stored.
+   */
+  maxExplanations?: number;
   /** The job queue, for reviews a command asks for. */
   queue: { send(job: ReviewJob): Promise<void> };
   /** In shadow mode nothing is written to GitHub: reactions and replies are logged. */
@@ -271,19 +277,53 @@ async function pauseCommand(context: Context, pause: boolean): Promise<Outcome> 
   return { ok: true };
 }
 
-/** A finding as a short Markdown block: its fields escaped, its text as plain paragraphs. */
-function describeFinding(finding: StoredFinding): string {
-  const where =
-    finding.path === undefined
-      ? "the whole PR"
-      : `${inline(finding.path)}${finding.line === undefined ? "" : `:${finding.line}`}`;
-  return [
-    `**${inline(finding.title)}**`,
-    "",
-    `Severity: ${finding.severity}. Category: ${inline(finding.ruleCategory)}. Where: ${where}. Status: ${finding.status}. Raised at ${short(finding.raisedAtSha)}.`,
-    "",
-    paragraphs(finding.body),
-  ].join("\n");
+/**
+ * Asks the explainer about one finding (NIC-1053): records the request and asks for a run,
+ * whose post step answers it. False when it isn't asked: then the stored finding is the reply.
+ * Only the PR's author or someone with write access asks, since it costs model time, and only
+ * about an open or outdated finding on an open PR.
+ */
+async function askExplainer(
+  context: Context,
+  finding: StoredFinding,
+  where: "thread" | "pr",
+): Promise<boolean> {
+  const { deps, job, commentId } = context;
+  if (deps.replies === undefined || (deps.maxExplanations ?? 0) <= 0) return false;
+  // A submitted review's body isn't a comment: nothing to record the request by, so its
+  // `explain path:line` gets the stored finding in the review's reply.
+  if (commentId === undefined) return false;
+  if (finding.status !== "open" && finding.status !== "outdated") return false;
+  const pull = await context.pull();
+  if (!pull.open) return false;
+  if (!sameLogin(context.comment.author, pull.author) && !(await hasWrite(context))) return false;
+  const added = await deps.replies.add({
+    repo: job.repo,
+    prNumber: job.prNumber,
+    findingId: finding.id,
+    commentId,
+    author: context.comment.author,
+    body: context.comment.body,
+    kind: where === "thread" ? "explain" : "explain_pr",
+  });
+  // A redelivery: its run was asked for the first time.
+  if (!added) return true;
+  const now = deps.now?.() ?? new Date();
+  await deps.queue.send({
+    kind: "pr_updated",
+    requested: "explain",
+    // One comment asks once: a redelivery dedupes on the queue and in the dispatcher.
+    deliveryId: `explain-${commentId}`,
+    installationId: job.installationId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    headSha: pull.headSha,
+    actor: context.comment.author,
+    commentId,
+    receivedAt: now.toISOString(),
+    eventAt: job.eventAt ?? now.toISOString(),
+  });
+  return true;
 }
 
 async function explainCommand(
@@ -305,6 +345,15 @@ async function explainCommand(
     };
   }
   if (found.length === 0) return { ok: false, reply: "I have no finding there." };
+  // One finding: the explainer answers, in a later run. Several at one line: the stored ones.
+  const [only] = found;
+  if (
+    found.length === 1 &&
+    only !== undefined &&
+    (await askExplainer(context, only, at === undefined ? "thread" : "pr"))
+  ) {
+    return { ok: true };
+  }
   return { ok: true, reply: found.slice(0, 3).map(describeFinding).join("\n\n---\n\n") };
 }
 

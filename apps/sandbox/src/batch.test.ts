@@ -222,6 +222,37 @@ describe("runSandboxBatch", () => {
     expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
   });
 
+  it("runs an explain batch on the fast model, and writes its answer", async () => {
+    const s = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 6,
+        prompt: "Explain this finding",
+        role: "explain",
+        tier: "fast",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: { text: "The catch drops the error.", line: 4 },
+    });
+    s.deps.model = "sonnet";
+    s.deps.fastModel = "haiku";
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.runs[0]).toMatchObject({
+      model: "haiku",
+      tier: "fast",
+      prompt: "Explain this finding",
+    });
+    expect(s.runs[0]?.system).toBeUndefined();
+    expect(output).toMatchObject({
+      index: 6,
+      explanation: { text: "The catch drops the error.", line: 4 },
+    });
+    expect(output.findings).toBeUndefined();
+    expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
+  });
+
   it("writes a judge's failure as the batch's error", async () => {
     const s = setup({
       run: "timeout",

@@ -1743,6 +1743,122 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
+  describe("explain answered by the explainer", () => {
+    function withExplain(h: ReturnType<typeof harness>, kind: "explain" | "explain_pr") {
+      const writes: string[] = [];
+      const marked: Record<string, string[]> = {};
+      let pending = true;
+      h.deps.replies = {
+        add: async () => true,
+        take: async (_id, _limit, what) => {
+          const row = h.findings.rows[0];
+          return what === "explain" && pending && row !== undefined
+            ? [
+                {
+                  id: "x1",
+                  findingId: row.id,
+                  commentId: 777,
+                  author: "dev",
+                  body: "@lgtmoose explain",
+                  attempts: 0,
+                  kind,
+                },
+              ]
+            : [];
+        },
+        finish: async (ids, status) => {
+          if (ids.length > 0) pending = false;
+          marked[status] = [...(marked[status] ?? []), ...ids];
+        },
+        failed: async () => {},
+      };
+      const github = h.deps.github.bind(h.deps);
+      h.deps.github = async (installationId) => ({
+        ...(await github(installationId)),
+        conversation: {
+          reply: async (_target, root, body) => {
+            writes.push(`reply ${root}: ${body}`);
+          },
+          comment: async (_target, body) => {
+            writes.push(`comment: ${body}`);
+          },
+          resolveThread: async (id) => {
+            writes.push(`resolve ${id}`);
+          },
+        },
+      });
+      return { writes, marked };
+    }
+
+    async function explainedRun(
+      h: ReturnType<typeof harness>,
+      n: number,
+      explanation: NonNullable<BatchOutput["explanation"]> | undefined,
+    ) {
+      const prepared = await prepare(h.deps, { ...JOB, requested: "explain" }, exec(n), {
+        ...SETTINGS,
+        maxExplanations: 5,
+      });
+      const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+      const explains = new Set((manifest.explanations ?? []).map((job) => job.index));
+      const answer = (index: number) =>
+        explanation === undefined
+          ? { version: 1, index, error: "rate limited", transcriptKeys: [] }
+          : { version: 1, index, explanation, transcriptKeys: [] };
+      for (const batch of prepared.batches) {
+        h.objects.set(
+          runKeys(prepared.runId).batchOutput(batch.index),
+          JSON.stringify(
+            explains.has(batch.index)
+              ? answer(batch.index)
+              : output({ index: batch.index, findings: [] }),
+          ),
+        );
+      }
+      return { prepared, manifest, posted: await post(h.deps, prepared.runId) };
+    }
+
+    it("answers in the finding's thread on the fast tier, and reuses the answer at the head", async () => {
+      const h = harness({ commentIds: true });
+      await review(h, 1, [finding()]);
+      const x = withExplain(h, "explain");
+
+      const { prepared, manifest } = await explainedRun(h, 2, {
+        text: "The bound stops one short, so @dev's last item is never added.",
+        line: 3,
+      });
+
+      const [job] = manifest.explanations ?? [];
+      expect(job).toMatchObject({ replyId: "x1", kind: "explain", threadRootId: 1000 });
+      const input = JSON.parse(
+        h.objects.get(runKeys(prepared.runId).batchInput(job?.index ?? -1)) ?? "{}",
+      ) as Record<string, unknown>;
+      expect(input).toMatchObject({ role: "explain", tier: "fast" });
+      expect(input.prompt).toContain('<untrusted source="finding">');
+      expect(x.writes).toHaveLength(1);
+      expect(x.writes[0]).toMatch(/^reply 1000: /);
+      expect(x.writes[0]).toContain("\\@\u2060dev");
+      expect(x.marked).toMatchObject({ judged: ["x1"] });
+
+      // Asked again at the same head: no explainer batch, the kept answer.
+      const again = withExplain(h, "explain_pr");
+      const second = await explainedRun(h, 3, undefined);
+      expect(second.manifest.explanations?.[0]?.index).toBeUndefined();
+      expect(second.manifest.explanations?.[0]?.cached).toBeDefined();
+      expect(again.writes[0]).toMatch(/^comment: /);
+      expect(again.writes[0]).toContain("The bound stops one short");
+    });
+
+    it("replies with the stored finding when the explainer fails", async () => {
+      const h = harness({ commentIds: true });
+      await review(h, 1, [finding()]);
+      const x = withExplain(h, "explain");
+      await explainedRun(h, 2, undefined);
+      expect(x.writes[0]).toContain("Severity: blocking.");
+      expect(x.marked).toMatchObject({ judged: ["x1"] });
+    });
+  });
+
   describe("replies judged by the reply judge", () => {
     /** Wires the reply judge's stores and GitHub writes into a harness, with one pending reply. */
     function withReplies(h: ReturnType<typeof harness>, reply: { body: string; author: string }) {
@@ -1786,6 +1902,9 @@ describe("later runs", { timeout: 30_000 }, () => {
         conversation: {
           reply: async (_target, root, body) => {
             writes.push(`reply ${root}: ${body}`);
+          },
+          comment: async (_target, body) => {
+            writes.push(`comment: ${body}`);
           },
           resolveThread: async (id) => {
             writes.push(`resolve ${id}`);

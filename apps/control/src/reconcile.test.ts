@@ -347,6 +347,15 @@ describe("reconcile", () => {
     expect(await reconcile(deps)).toMatchObject({ pendingReplies: 0 });
   });
 
+  it("asks for a run for explains for an explain no run answered", async () => {
+    const { deps, sent } = setup({ records: new Map([[7, recorded()]]) });
+    deps.store.pendingReply = async () => ({ id: "r-2", attempts: 0, kind: "explain_pr" });
+    await reconcile(deps);
+    expect(sent.filter((entry) => entry.job.requested === "explain")).toMatchObject([
+      { job: { deliveryId: reconcileDeliveryId("acme/shop#7:explain:r-2:0") } },
+    ]);
+  });
+
   it("counts a repository it can't read as an error and goes on", async () => {
     const { deps } = setup({ failPulls: true, repos: ["acme/a", "acme/b"] });
     expect(await reconcile(deps)).toMatchObject({ errors: 2 });

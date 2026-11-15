@@ -115,6 +115,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     reconcileLookbackHours: config.reconcileLookbackHours,
     feedback: config.feedback,
     maxReplyJudgements: config.maxReplyJudgements,
+    maxExplanations: config.maxExplanations,
     embeddings: config.learnings.embeddings,
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
     ...(config.tickets === undefined ? {} : { tickets: config.tickets }),

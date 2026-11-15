@@ -9,7 +9,7 @@ import { handleConversation, type ConversationDeps } from "./conversation.js";
 import { drizzleReplyStore } from "./replies-aws.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { parseQueuedJob, type DispatchJob, type QueueRecord } from "./dispatch.js";
-import { readConversationEnv, readMaxPendingLearnings } from "./env.js";
+import { readConversationEnv, readMaxExplanations, readMaxPendingLearnings } from "./env.js";
 
 /** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
 function maxPendingLearnings(): { maxPendingLearnings?: number } {
@@ -84,6 +84,7 @@ function conversationDeps(): Promise<ConversationDeps> {
       learnings: drizzleLearningStore(db),
       ...maxPendingLearnings(),
       replies: drizzleReplyStore(db),
+      maxExplanations: readMaxExplanations(process.env),
       queue: sqsJobQueue(new SQSClient({}), env.jobQueueUrl),
       shadow: env.shadow,
       log,

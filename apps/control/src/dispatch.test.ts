@@ -496,6 +496,17 @@ describe("dispatch: pause and requested reviews", () => {
     expect(paused.executions.size).toBe(0);
   });
 
+  it("starts a run for an explain at a reviewed head, on a paused PR too", async () => {
+    const f = fakeDeps();
+    f.reviewedHeads.add(NEW);
+    f.pausedPrs.add("acme/shop#12");
+    const explain = job({ requested: "explain", deliveryId: "explain-901" });
+    expect(await dispatch(f.deps, explain)).toMatchObject({
+      executionArn: arn(nameOf(NEW, "explain-901")),
+    });
+    expect(f.executions.get(nameOf(NEW, "explain-901"))?.input.requested).toBe("explain");
+  });
+
   it("doesn't start a full review while a review of the head is running", async () => {
     const f = fakeDeps();
     expect(await dispatch(f.deps, job())).toMatchObject({ action: "started" });

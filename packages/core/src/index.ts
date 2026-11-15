@@ -75,6 +75,7 @@ export {
   type Judgement,
   type ReplyKind,
 } from "./judgement.js";
+export { MAX_EXPLANATION_TEXT, explanationSchema, type Explanation } from "./explanation.js";
 export {
   MAX_TICKET_GAPS,
   REQUIREMENT_STATUSES,

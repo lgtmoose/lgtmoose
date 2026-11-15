@@ -138,6 +138,8 @@ export interface WorkflowStackProps extends StackProps {
   feedback?: { acceptanceThreshold: number; minSamples: number; maxCommentsPerRun: number };
   /** The most replies the reply judge reads per run (`maxReplyJudgements`). Left out: 10. */
   maxReplyJudgements?: number;
+  /** The most `explain`s the explainer answers per PR per run (`maxExplanations`). Left out: 5. */
+  maxExplanations?: number;
   /**
    * How the control task ranks learnings (`learnings.embeddings`): none (keywords), Bedrock in
    * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
@@ -230,6 +232,7 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_REPLY_JUDGEMENTS: String(props.maxReplyJudgements ?? 10),
+        LGTMOOSE_MAX_EXPLANATIONS: String(props.maxExplanations ?? 5),
         ...embeddingsEnvironment(embeddings),
         ...ticketsEnvironment(props.tickets),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
@@ -510,6 +513,8 @@ export class WorkflowStack extends Stack {
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
+        // Whether `explain` asks the explainer (in a run) or replies with the stored finding.
+        LGTMOOSE_MAX_EXPLANATIONS: String(props.maxExplanations ?? 5),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

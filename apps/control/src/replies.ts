@@ -33,23 +33,32 @@ export const DEFAULT_MAX_REPLY_JUDGEMENTS = 10;
 /** Runs that may fail to judge a reply before it's left alone. */
 export const MAX_JUDGE_ATTEMPTS = 3;
 
-/** A reply waiting for the judge (`pending_replies`). */
+/**
+ * What a pending row asks for: a reply for the judge, or an `explain` for the explainer,
+ * answered in the finding's thread (`explain`) or on the PR (`explain_pr`).
+ */
+export type PendingKind = "reply" | "explain" | "explain_pr";
+
+/** A reply waiting for the judge, or an `explain` waiting for the explainer (`pending_replies`). */
 export interface PendingReply {
   id: string;
   findingId: string;
-  /** The reply's review comment ID. */
+  /** The comment's ID: a review comment, or for `explain_pr` an issue comment. */
   commentId: number;
   author: string;
   /** Redacted before it was stored; untrusted. */
   body: string;
   attempts: number;
+  /** Left out: a reply. */
+  kind?: PendingKind;
 }
 
 /** `pending_replies`. */
 export interface ReplyStore {
   /**
-   * Records a reply on one of our findings' threads; false when that comment is already
-   * recorded (a redelivery). `pullRequest` is the repo (owner/name) and number.
+   * Records a reply on one of our findings' threads, or an `explain` (`kind`); false when that
+   * comment is already recorded (a redelivery). `pullRequest` is the repo (owner/name) and
+   * number.
    */
   add(input: {
     repo: string;
@@ -58,12 +67,14 @@ export interface ReplyStore {
     commentId: number;
     author: string;
     body: string;
+    kind?: PendingKind;
   }): Promise<boolean>;
   /**
-   * The PR's pending replies to judge, oldest first, at most `limit`. Only each finding's
-   * latest counts: older ones on the same finding are marked skipped here.
+   * The PR's pending replies to judge (with `explain`: its pending `explain`s, of either kind),
+   * oldest first, at most `limit`. Only each finding's latest counts: older ones on the same
+   * finding are marked skipped here.
    */
-  take(pullRequestId: string, limit: number): Promise<PendingReply[]>;
+  take(pullRequestId: string, limit: number, what?: "reply" | "explain"): Promise<PendingReply[]>;
   /** Marks replies judged (acted on) or skipped. */
   finish(ids: readonly string[], status: "judged" | "skipped"): Promise<void>;
   /** Counts a failed judging; a reply past `MAX_JUDGE_ATTEMPTS` is skipped. */

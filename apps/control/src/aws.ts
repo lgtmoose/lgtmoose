@@ -852,6 +852,9 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
               async reply(target, commentId, body) {
                 log("shadow: reply not posted", { pr: target.number, commentId, body });
               },
+              async comment(target, body) {
+                log("shadow: comment not posted", { pr: target.number, body });
+              },
               async resolveThread(threadId) {
                 log("shadow: review thread not resolved", { threadId });
               },
@@ -861,6 +864,13 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
                 await client.request(
                   "POST",
                   `${repoPath(target)}/pulls/${target.number}/comments/${commentId}/replies`,
+                  { body },
+                );
+              },
+              async comment(target, body) {
+                await client.request(
+                  "POST",
+                  `${repoPath(target)}/issues/${target.number}/comments`,
                   { body },
                 );
               },

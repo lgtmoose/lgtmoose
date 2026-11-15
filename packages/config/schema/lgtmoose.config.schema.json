@@ -284,6 +284,13 @@
       "minimum": 0,
       "maximum": 50
     },
+    "maxExplanations": {
+      "default": 5,
+      "description": "Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20
+    },
     "shadow": {
       "default": true,
       "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",
