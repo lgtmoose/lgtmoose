@@ -111,9 +111,9 @@ describe("drizzleReplyStore", () => {
   });
 
   it("keeps explains apart from replies", async () => {
-    const prId = await pull(72);
-    const a = await finding(prId, 7201);
-    const base = { repo: "acme/shop", prNumber: 72, author: "dev", findingId: a };
+    const prId = await pull(79);
+    const a = await finding(prId, 7901);
+    const base = { repo: "acme/shop", prNumber: 79, author: "dev", findingId: a };
     await replies.add({ ...base, commentId: 21, body: "is this right?" });
     await replies.add({ ...base, commentId: 22, body: "@lgtmoose explain", kind: "explain" });
     await replies.add({

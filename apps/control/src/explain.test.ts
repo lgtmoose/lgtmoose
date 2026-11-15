@@ -46,14 +46,7 @@ function record(overrides: Partial<FindingRecord> = {}): FindingRecord {
 }
 
 function job(overrides: Partial<ExplainJob> = {}): ExplainJob {
-  const {
-    id: _,
-    fingerprint: __,
-    startLine: ___,
-    side: ____,
-    basePath: _____,
-    ...finding
-  } = record();
+  const r = record();
   return {
     replyId: "r-1",
     findingId: FINDING_ID,
@@ -61,7 +54,16 @@ function job(overrides: Partial<ExplainJob> = {}): ExplainJob {
     author: "dev",
     kind: "explain",
     threadRootId: 900,
-    finding: { ...finding, path: finding.path, line: finding.line },
+    finding: {
+      severity: r.severity,
+      ruleCategory: r.ruleCategory,
+      title: r.title,
+      body: r.body,
+      path: r.path,
+      line: r.line,
+      status: r.status,
+      raisedAtSha: r.raisedAtSha,
+    },
     index: 4,
     ...overrides,
   };
@@ -150,10 +152,11 @@ describe("answerExplanations", () => {
   it("reuses an earlier answer, and answers an explain by place on the PR", async () => {
     const s = store();
     const a = answerDeps(s);
-    const { index: _, ...cachedJob } = job({
+    const cachedJob = job({
       kind: "explain_pr",
       cached: { version: 1, explanation: { text: "Kept from earlier." } },
     });
+    delete cachedJob.index;
     expect(await answerExplanations([cachedJob], run, a.deps)).toBe(1);
     expect(a.replies).toEqual([]);
     expect(a.comments[0]).toContain("Kept from earlier\\.");

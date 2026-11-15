@@ -288,8 +288,11 @@ async function askExplainer(
   finding: StoredFinding,
   where: "thread" | "pr",
 ): Promise<boolean> {
-  const { deps, job } = context;
+  const { deps, job, commentId } = context;
   if (deps.replies === undefined || (deps.maxExplanations ?? 0) <= 0) return false;
+  // A submitted review's body isn't a comment: nothing to record the request by, so its
+  // `explain path:line` gets the stored finding in the review's reply.
+  if (commentId === undefined) return false;
   if (finding.status !== "open" && finding.status !== "outdated") return false;
   const pull = await context.pull();
   if (!pull.open) return false;
@@ -298,7 +301,7 @@ async function askExplainer(
     repo: job.repo,
     prNumber: job.prNumber,
     findingId: finding.id,
-    commentId: job.commentId,
+    commentId,
     author: context.comment.author,
     body: context.comment.body,
     kind: where === "thread" ? "explain" : "explain_pr",
@@ -310,13 +313,13 @@ async function askExplainer(
     kind: "pr_updated",
     requested: "explain",
     // One comment asks once: a redelivery dedupes on the queue and in the dispatcher.
-    deliveryId: `explain-${job.commentId}`,
+    deliveryId: `explain-${commentId}`,
     installationId: job.installationId,
     repo: job.repo,
     prNumber: job.prNumber,
     headSha: pull.headSha,
     actor: context.comment.author,
-    commentId: job.commentId,
+    commentId,
     receivedAt: now.toISOString(),
     eventAt: job.eventAt ?? now.toISOString(),
   });

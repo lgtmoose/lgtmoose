@@ -1801,14 +1801,16 @@ describe("later runs", { timeout: 30_000 }, () => {
       });
       const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
       const explains = new Set((manifest.explanations ?? []).map((job) => job.index));
+      const answer = (index: number) =>
+        explanation === undefined
+          ? { version: 1, index, error: "rate limited", transcriptKeys: [] }
+          : { version: 1, index, explanation, transcriptKeys: [] };
       for (const batch of prepared.batches) {
         h.objects.set(
           runKeys(prepared.runId).batchOutput(batch.index),
           JSON.stringify(
             explains.has(batch.index)
-              ? explanation === undefined
-                ? { version: 1, index: batch.index, error: "rate limited", transcriptKeys: [] }
-                : { version: 1, index: batch.index, explanation, transcriptKeys: [] }
+              ? answer(batch.index)
               : output({ index: batch.index, findings: [] }),
           ),
         );

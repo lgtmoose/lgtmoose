@@ -290,6 +290,27 @@ describe("handleConversation", () => {
       expect(unknown.replies[0]?.body).toContain("@lgtmoose full review");
     });
 
+    it("answers explain path:line with the stored finding, the explainer on", async () => {
+      const f = fakeDeps(from("author", "@lgtmoose explain src/a.ts:10"), {
+        findings: new Map([[900, finding()]]),
+      });
+      const added: unknown[] = [];
+      f.deps.replies = {
+        add: async (input) => {
+          added.push(input);
+          return true;
+        },
+        take: async () => [],
+        finish: async () => {},
+        failed: async () => {},
+      };
+      f.deps.maxExplanations = 5;
+      expect(await handleConversation(f.deps, review())).toMatchObject({ ok: true });
+      expect(added).toEqual([]);
+      expect(f.queued).toEqual([]);
+      expect(f.replies[0]?.body).toContain("The loop skips the last item");
+    });
+
     it("reads commands outside code and quotes only", async () => {
       const f = fakeDeps(from("dev", "> @lgtmoose pause\n\n```\n@lgtmoose pause\n```"));
       expect(await handleConversation(f.deps, review())).toEqual({

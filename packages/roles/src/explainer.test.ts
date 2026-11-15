@@ -35,8 +35,8 @@ describe("buildExplainPrompt", () => {
   });
 
   it("leaves the code out without an excerpt", () => {
-    const { excerpt: _, ...rest } = input;
-    expect(buildExplainPrompt(rest)).not.toContain('source="code"');
+    const prompt = buildExplainPrompt({ finding: input.finding, headSha: input.headSha });
+    expect(prompt).not.toContain('source="code"');
   });
 
   it("is deterministic", () => {
