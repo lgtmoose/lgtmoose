@@ -100,7 +100,11 @@ const LEARNINGS_LISTED = 10;
 /** "Applied N learnings" with their IDs, for `@lgtmoose learnings` and `forget <id>`. */
 function renderLearningsApplied(ids: readonly string[]): string | undefined {
   if (ids.length === 0) return undefined;
-  const listed = ids.slice(0, LEARNINGS_LISTED).map((id) => inline(clip(id, 64)));
+  // IDs are the database's UUIDs, shown as code so they can be copied into `forget <id>`;
+  // anything else is escaped as text.
+  const listed = ids
+    .slice(0, LEARNINGS_LISTED)
+    .map((id) => (/^[0-9a-z-]{1,64}$/i.test(id) ? `\`${id}\`` : inline(clip(id, 64))));
   const more = ids.length > LEARNINGS_LISTED ? ` and ${ids.length - LEARNINGS_LISTED} more` : "";
   return `_Applied ${count(ids.length, "learning")}: ${listed.join(", ")}${more}._`;
 }

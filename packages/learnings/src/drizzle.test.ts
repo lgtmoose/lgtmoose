@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { learnings } from "@lgtmoose/db";
+import { findings, learnings, pullRequests } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -173,5 +173,70 @@ describe("drizzleLearningStore", () => {
     const staleIds = stale.map((row) => row.id);
     expect(staleIds).toContain(idle.learning.id);
     expect(staleIds).not.toContain(used.learning.id);
+  });
+});
+
+describe("drizzleLearningStore outcomes (NIC-1081)", () => {
+  let pr = 0;
+  async function finding(): Promise<string> {
+    pr += 1;
+    const [pull] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "acme/shop",
+        number: 900 + pr,
+        author: "dana",
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+      })
+      .returning({ id: pullRequests.id });
+    if (pull === undefined) throw new Error("no pull request");
+    const [row] = await db
+      .insert(findings)
+      .values({
+        pullRequestId: pull.id,
+        fingerprint: `fp1:${pr}`,
+        ruleCategory: "style",
+        severity: "nit",
+        title: "Prefer named exports",
+        body: "x",
+        raisedAtSha: "a".repeat(40),
+      })
+      .returning({ id: findings.id });
+    if (row === undefined) throw new Error("no finding");
+    return row.id;
+  }
+
+  it("stores a pattern key and lists live patterned learnings", async () => {
+    const { learning: row } = await store.insert(
+      learning({ sourceCommentId: 9001, patternKey: "style:export named" }),
+      [proposed],
+    );
+    expect(row.patternKey).toBe("style:export named");
+    expect((await store.patterned("acme/shop")).map((entry) => entry.id)).toContain(row.id);
+  });
+
+  it("reinforces once per finding and counts not-followed events", async () => {
+    const { learning: row } = await store.insert(learning({ sourceCommentId: 9002 }), [proposed]);
+    const fixed = await finding();
+    const declined = await finding();
+    const at = new Date();
+    await store.recordOutcome([row.id], { type: "reinforced", findingId: fixed }, at);
+    await store.recordOutcome([row.id], { type: "reinforced", findingId: fixed }, at);
+    await store.recordOutcome(
+      [row.id],
+      { type: "not_followed", findingId: declined, githubCommentId: 77 },
+      at,
+    );
+    expect((await store.get(row.id))?.hits).toBe(1);
+    const events = await store.events(row.id);
+    expect(events.map((event) => [event.type, event.findingId ?? null])).toEqual([
+      ["proposed", null],
+      ["reinforced", fixed],
+      ["not_followed", declined],
+    ]);
+    const counts = await store.notFollowedSince("acme", new Date(at.getTime() - 60_000));
+    expect(counts.get(row.id)).toBe(1);
   });
 });

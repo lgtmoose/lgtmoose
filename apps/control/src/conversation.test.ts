@@ -883,6 +883,98 @@ describe("handleConversation", () => {
     expect(f.replies[0]?.body).toContain("finding");
   });
 
+  it("hands a finding `ignore` declined to outcome learning (NIC-1081)", async () => {
+    const findings = new Map([[900, finding()]]);
+    const f = fakeDeps(from("author", "@lgtmoose ignore", { threadRootId: 900 }), { findings });
+    const rejected: unknown[] = [];
+    f.deps.outcomes = {
+      async rejected(installationId, repo, entries) {
+        rejected.push({ installationId, repo, entries });
+      },
+    };
+    await handleConversation(f.deps, job({ kind: "review_comment", commentId: 901 }));
+    expect(rejected).toEqual([
+      { installationId: 7, repo: "acme/shop", entries: [{ findingId: "f-1", commentId: 901 }] },
+    ]);
+  });
+
+  describe("remember (NIC-1081)", () => {
+    const declined = (overrides: Partial<StoredFinding> = {}) =>
+      new Map([[900, finding({ status: "declined", ruleCategory: "style", ...overrides })]]);
+    const remember = (
+      author: string,
+      findings: Map<number, StoredFinding>,
+      options: Parameters<typeof fakeDeps>[1] = {},
+    ) => {
+      const f = fakeDeps(from(author, "@lgtmoose remember", { threadRootId: 900 }), {
+        findings,
+        ...options,
+      });
+      f.deps.store.declineReason = async () => ({
+        author: "maint",
+        body: "Default exports are how we do pages.",
+      });
+      return f;
+    };
+
+    it("learns not to raise findings like a declined one, active with write access", async () => {
+      const f = remember("maint", declined(), { permissions: { maint: "write" } });
+      expect(
+        await handleConversation(f.deps, job({ kind: "review_comment", commentId: 950 })),
+      ).toMatchObject({ ok: true, replied: true });
+      const [learning] = f.learnings.all();
+      expect(learning).toMatchObject({
+        kind: "scoping",
+        category: "style",
+        repo: "acme/shop",
+        status: "active",
+        author: "maint",
+        sourceCommentId: 950,
+      });
+      expect(learning?.patternKey).toMatch(/^style:/);
+      expect(learning?.text).toContain("Default exports are how we do pages.");
+      expect(f.replies[0]?.body).toContain("is active");
+    });
+
+    it("leaves one by someone without write access pending", async () => {
+      const f = remember("visitor", declined());
+      await handleConversation(f.deps, job({ kind: "review_comment", commentId: 951 }));
+      expect(f.learnings.all()).toMatchObject([{ status: "pending" }]);
+      expect(f.replies[0]?.body).toContain("pending");
+    });
+
+    it("refuses a protected category, and a finding that wasn't declined", async () => {
+      const authz = remember("maint", declined({ ruleCategory: "authz" }), {
+        permissions: { maint: "admin" },
+      });
+      await handleConversation(authz.deps, job({ kind: "review_comment", commentId: 952 }));
+      expect(authz.learnings.all()).toEqual([]);
+      expect(authz.replies[0]?.body).toContain("Not remembered");
+
+      const open = remember("maint", new Map([[900, finding()]]), {
+        permissions: { maint: "write" },
+      });
+      await handleConversation(open.deps, job({ kind: "review_comment", commentId: 953 }));
+      expect(open.learnings.all()).toEqual([]);
+      expect(open.replies[0]?.body).toContain("Decline it first");
+    });
+
+    it("never takes `remember` from a bot, trusted or not", async () => {
+      const f = fakeDeps(
+        from("claude[bot]", "@lgtmoose remember", { threadRootId: 900, authorIsBot: true }),
+        {
+          findings: declined(),
+          trustedBots: ["claude[bot]"],
+          permissions: { "claude[bot]": "write" },
+        },
+      );
+      expect(
+        await handleConversation(f.deps, job({ kind: "review_comment", commentId: 954 })),
+      ).toMatchObject({ action: "ignored" });
+      expect(f.learnings.all()).toEqual([]);
+    });
+  });
+
   it("writes nothing to GitHub in shadow mode, and logs what it would have", async () => {
     const f = fakeDeps(from("dev", "@lgtmoose help"), { shadow: true });
     expect(await handleConversation(f.deps, job())).toMatchObject({ action: "commands" });

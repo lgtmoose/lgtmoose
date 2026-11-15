@@ -77,6 +77,44 @@ describe("decideReply", () => {
     ).toMatchObject({ status: "declined", resolveThread: true, learning: "We log at debug here." });
   });
 
+  it("offers `remember` on a decline with no rule in it, never for a protected category", async () => {
+    const offered = await decideReply({ kind: "declined" }, context({ slug: "lgtmoose" }));
+    expect(offered).toMatchObject({
+      status: "declined",
+      resolveThread: true,
+      replyEvent: "replied",
+    });
+    expect(offered.reply).toContain("`@lgtmoose remember`");
+    // A rule in the reason is proposed instead: nothing to offer.
+    expect(
+      (
+        await decideReply(
+          { kind: "declined", learning: "We log at debug here." },
+          context({ slug: "lgtmoose" }),
+        )
+      ).reply,
+    ).toBeUndefined();
+    // A protected finding, declined by a maintainer who isn't the PR's author: declined, no offer.
+    const authz = context(
+      {
+        slug: "lgtmoose",
+        author: "maint",
+        finding: {
+          severity: "should_fix",
+          ruleCategory: "authz",
+          path: "src/a.ts",
+          status: "open",
+        },
+      },
+      "write",
+    );
+    const protectedDecline = await decideReply({ kind: "declined" }, authz);
+    expect(protectedDecline.status).toBe("declined");
+    expect(protectedDecline.reply).toBeUndefined();
+    // Without the slug (it couldn't be read), no offer.
+    expect((await decideReply({ kind: "declined" }, context())).reply).toBeUndefined();
+  });
+
   it("holds a decline of a blocking finding by the PR's author", async () => {
     const action = await decideReply({ kind: "declined" }, context({ finding: blocking }, "admin"));
     expect(action.status).toBeUndefined();

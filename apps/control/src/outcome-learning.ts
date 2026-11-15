@@ -129,12 +129,14 @@ export function rememberText(
   finding: { title: string; ruleCategory: string },
   reason: string | undefined,
 ): string {
-  const head = `Don't raise findings like "${quote(finding.title, 160)}" (${finding.ruleCategory}) in this repository unless the code shows a real problem the reason below doesn't cover.`;
-  const why =
-    reason === undefined || reason.trim() === ""
-      ? ""
-      : ` The reason it was declined: "${quote(reason, 400)}"`;
-  return quote(`${head}${why}`, MAX_LEARNING_TEXT);
+  const like = `Don't raise findings like "${quote(finding.title, 160)}" (${finding.ruleCategory}) in this repository`;
+  if (reason === undefined || reason.trim() === "") {
+    return quote(`${like}: people here declined it.`, MAX_LEARNING_TEXT);
+  }
+  return quote(
+    `${like} unless the code shows a real problem the reason doesn't cover. The reason it was declined: "${quote(reason, 400)}"`,
+    MAX_LEARNING_TEXT,
+  );
 }
 
 export interface OutcomeDeps {
