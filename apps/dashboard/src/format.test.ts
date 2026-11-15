@@ -3,8 +3,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  count,
   duration,
+  learningRefusal,
   money,
+  percent,
   parseRoute,
   pullRequestUrl,
   routeHash,
@@ -30,6 +33,20 @@ describe("routes", () => {
       repo: undefined,
     });
     expect(parseRoute("#/runs?repo=a/b/c")).toEqual({ page: "runs", repo: undefined });
+  });
+
+  it("reads the learnings status, usage and acceptance pages", () => {
+    expect(parseRoute("#/learnings")).toEqual({ page: "learnings", status: "pending" });
+    expect(parseRoute("#/learnings?status=retired")).toEqual({
+      page: "learnings",
+      status: "retired",
+    });
+    expect(parseRoute("#/learnings?status=<x>")).toEqual({ page: "learnings", status: "pending" });
+    expect(parseRoute("#/usage")).toEqual({ page: "usage" });
+    expect(parseRoute("#/acceptance")).toEqual({ page: "acceptance" });
+    expect(routeHash({ page: "learnings", status: "pending" })).toBe("#/learnings");
+    expect(routeHash({ page: "learnings", status: "active" })).toBe("#/learnings?status=active");
+    expect(routeHash({ page: "usage" })).toBe("#/usage");
   });
 
   it("writes routes back as hashes", () => {
@@ -83,5 +100,20 @@ describe("source", () => {
         expect(text, `${name} uses ${sink}`).not.toContain(sink);
       }
     }
+  });
+});
+
+describe("numbers and refusals", () => {
+  it("formats shares and counts", () => {
+    expect(percent(0.625)).toBe("63%");
+    expect(percent(undefined)).toBe("—");
+    expect(count(12345)).toBe("12,345");
+  });
+
+  it("says why a learning wasn't changed", () => {
+    expect(learningRefusal(403, "needs write")).toBe("needs write");
+    expect(learningRefusal(403, undefined)).toEqual(expect.any(String));
+    expect(learningRefusal(404, undefined)).toContain("isn't there");
+    expect(learningRefusal(500, undefined)).toContain("500");
   });
 });

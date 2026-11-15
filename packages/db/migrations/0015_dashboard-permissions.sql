@@ -1,0 +1,2 @@
+ALTER TABLE "dashboard_sessions" ADD COLUMN "write_repos" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "dashboard_sessions" ADD COLUMN "owner_orgs" jsonb DEFAULT '[]'::jsonb NOT NULL;

@@ -29,12 +29,12 @@ import type { ISecurityGroup, IVpc, SubnetSelection } from "aws-cdk-lib/aws-ec2"
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
 import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, type RetentionDays } from "aws-cdk-lib/aws-logs";
-import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
+import { BlockPublicAccess, Bucket, BucketEncryption, type IBucket } from "aws-cdk-lib/aws-s3";
 import { BucketDeployment, Source } from "aws-cdk-lib/aws-s3-deployment";
 import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import type { Construct } from "constructs";
-import { SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
+import { FEEDBACK_REPORT_KEY, SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -68,6 +68,8 @@ export interface DashboardStackProps extends StackProps {
   apiSecurityGroup: ISecurityGroup;
   databaseSecret: ISecret;
   databaseName: string;
+  /** Holds the feedback report; the API may read that one key and nothing else. */
+  artifactBucket: IBucket;
   allowedOrgs: readonly string[];
   logRetention: RetentionDays;
 }
@@ -116,6 +118,7 @@ export class DashboardStack extends Stack {
         SIGNING_KEY_SECRET_ARN: signingKey.secretArn,
         ORIGIN_PARAMETER_NAME,
         ALLOWED_ORGS: props.allowedOrgs.join(","),
+        ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
       bundling: { externalModules: ["pg-native"] },
@@ -127,6 +130,8 @@ export class DashboardStack extends Stack {
     props.databaseSecret.grantRead(this.apiFunction);
     oauthSecret.grantRead(this.apiFunction);
     signingKey.grantRead(this.apiFunction);
+    // The acceptance report only: not transcripts, run data or anything else in the bucket.
+    props.artifactBucket.grantRead(this.apiFunction, FEEDBACK_REPORT_KEY);
     // By ARN, not by the parameter resource: the parameter needs CloudFront, which needs the API.
     this.apiFunction.addToRolePolicy(
       new PolicyStatement({

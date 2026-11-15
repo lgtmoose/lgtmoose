@@ -135,6 +135,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
       apiSecurityGroup: network.controlSecurityGroup,
       databaseSecret: data.databaseSecret,
       databaseName: DATABASE_NAME,
+      artifactBucket: data.artifactBucket,
       allowedOrgs: config.allowedOrgs,
       logRetention: config.profile === "lean" ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
     });

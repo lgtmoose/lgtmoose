@@ -21,7 +21,9 @@ Kinds are `accepted_pattern`, `correction`, `convention` and `scoping`. A `learn
 - The text is scanned and redacted before it's stored, pending ones included: tokens, keys, credentials in URLs, JWTs, emails, phone and card numbers.
 - `@lgtmoose forget <id>` retires a learning. Its row and its `learning_events` history stay.
 
-Not built yet: an `approve` command for pending learnings, a limit on how many pending learnings one person can propose, and the monthly sync PR that writes learnings into the repository.
+Pending learnings are approved (or rejected) on the [dashboard](dashboard.md#approving-and-rejecting-learnings), with the same access rules.
+
+Not built yet: an `approve` command on PRs, a limit on how many pending learnings one person can propose, and the monthly sync PR that writes learnings into the repository.
 
 ## Retrieval: learnings in reviews
 

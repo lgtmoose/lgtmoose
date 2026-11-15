@@ -1,19 +1,24 @@
 import { el, replace, table } from "./dom.js";
 import {
+  count,
   duration,
+  LEARNING_STATUSES,
+  learningRefusal,
   money,
   parseRoute,
+  percent,
   pullRequestUrl,
   routeHash,
   severityLabel,
   signInMessage,
   when,
+  type LearningStatus,
   type Route,
 } from "./format.js";
 
 /**
- * The dashboard (NIC-840): open findings and review runs for the repositories the signed-in
- * person can see. Every call goes to /api on this same origin; the session is an HttpOnly cookie
+ * The dashboard (NIC-840): open findings, review runs, learnings, provider usage and acceptance
+ * for the repositories the signed-in person can see. Every call goes to /api on this same origin; the session is an HttpOnly cookie
  * this script never sees.
  */
 
@@ -21,7 +26,77 @@ interface Me {
   login: string;
   orgs: string[];
   repos: number;
+  writeRepos: number;
+  ownerOrgs: string[];
   expiresAt: string;
+}
+
+interface Learning {
+  id: string;
+  status: LearningStatus;
+  kind: string;
+  category: string | undefined;
+  scope: string;
+  org: string;
+  repo: string | undefined;
+  text: string;
+  author: string;
+  sourceRepo: string;
+  sourcePr: number;
+  hits: number;
+  createdAt: string;
+  lastUsedAt: string | undefined;
+  retiredAt: string | undefined;
+}
+
+interface ProviderUse {
+  providerId: string;
+  batches: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  limitHits: number;
+  fallbacks: number;
+}
+
+interface Cooldown {
+  providerId: string;
+  until: string;
+  reason: string;
+}
+
+interface CategoryReport {
+  category: string;
+  protected: boolean;
+  findings: number;
+  fixed: number;
+  declined: number;
+  disputed: number;
+  thumbsUp: number;
+  thumbsDown: number;
+  accepted: number;
+  rejected: number;
+  acceptance: number | null;
+  flagged: boolean;
+}
+
+interface DeclinedFinding {
+  repo: string;
+  prNumber: number;
+  path: string;
+  line: number;
+  category: string;
+  severity: string;
+  title: string;
+}
+
+interface FeedbackReport {
+  generatedAt: string;
+  windowDays: number;
+  threshold: number;
+  minSamples: number;
+  categories: CategoryReport[];
+  declined: DeclinedFinding[];
 }
 
 interface RepoSummary {
@@ -73,6 +148,19 @@ async function api<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** A change the API makes: same origin, JSON, and the session cookie. */
+async function post(path: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: "{}",
+  });
+  if (response.status === 401) throw new SignedOut();
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: response.status, body };
+}
+
 const main = () => document.getElementById("main") as HTMLElement;
 
 function link(route: Route, text: string): HTMLAnchorElement {
@@ -99,6 +187,9 @@ function renderNav(me: Me | undefined): void {
     link({ page: "repos" }, "Repositories"),
     link({ page: "findings", repo: undefined }, "Open findings"),
     link({ page: "runs", repo: undefined }, "Review runs"),
+    link({ page: "learnings", status: "pending" }, "Learnings"),
+    link({ page: "usage" }, "Usage"),
+    link({ page: "acceptance" }, "Acceptance"),
   );
   const signOut = el("button", { type: "button" }, "Sign out");
   signOut.addEventListener("click", () => {
@@ -213,6 +304,195 @@ async function renderRuns(repo: string | undefined): Promise<void> {
   );
 }
 
+const STATUS_HEADINGS: Record<LearningStatus, string> = {
+  pending: "Learnings waiting for approval",
+  active: "Active learnings",
+  retired: "Retired learnings",
+};
+
+/** Approve or reject (retire) one learning, then show the list again or say why not. */
+function learningButton(
+  learning: Learning,
+  action: "approve" | "reject",
+  status: HTMLElement,
+): HTMLButtonElement {
+  const button = el("button", { type: "button" }, action === "approve" ? "Approve" : "Reject");
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    void post(`/api/learnings/${encodeURIComponent(learning.id)}/${action}`)
+      .then(({ status: code, body }) => {
+        if (code === 200) return render();
+        const reason = typeof body.error === "string" ? body.error : undefined;
+        replace(status, learningRefusal(code, reason));
+        button.disabled = false;
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        if (error instanceof SignedOut) return render();
+        replace(status, error instanceof Error ? error.message : "Something went wrong.");
+        button.disabled = false;
+        return undefined;
+      });
+  });
+  return button;
+}
+
+async function renderLearnings(status: LearningStatus): Promise<void> {
+  const { learnings } = await api<{ learnings: Learning[] }>(
+    `/api/learnings?status=${encodeURIComponent(status)}`,
+  );
+  const tabs = el(
+    "p",
+    {},
+    ...LEARNING_STATUSES.flatMap((each, index) => [
+      index === 0 ? undefined : " · ",
+      each === status ? el("strong", {}, each) : link({ page: "learnings", status: each }, each),
+    ]),
+  );
+  replace(
+    main(),
+    el("h1", {}, STATUS_HEADINGS[status]),
+    tabs,
+    el(
+      "p",
+      { class: "muted" },
+      "Approving needs write access to the repository, or owning the organization for an org-wide learning, as GitHub said when you signed in. Rejecting retires a learning; its history stays.",
+    ),
+    learnings.length === 0
+      ? el("p", { class: "muted" }, "None.")
+      : table(
+          ["Learning", "Applies to", "Kind", "From", "Used", status === "retired" ? "Retired" : ""],
+          learnings.map((learning) => {
+            const message = el("span", { role: "status", class: "muted" });
+            const actions =
+              status === "retired"
+                ? when(learning.retiredAt)
+                : el(
+                    "span",
+                    {},
+                    status === "pending" ? learningButton(learning, "approve", message) : undefined,
+                    " ",
+                    learningButton(learning, "reject", message),
+                    " ",
+                    message,
+                  );
+            return [
+              // Untrusted: always a text node, and preformatted so nothing is reflowed into markup.
+              el("pre", { class: "body" }, learning.text),
+              `${learning.repo ?? learning.org} (${learning.scope})`,
+              learning.category === undefined
+                ? learning.kind
+                : `${learning.kind}, ${learning.category}`,
+              el(
+                "span",
+                {},
+                `${learning.author} in `,
+                prLink(learning.sourceRepo, learning.sourcePr),
+              ),
+              `${count(learning.hits)}${learning.lastUsedAt === undefined ? "" : `, last ${when(learning.lastUsedAt)}`}`,
+              actions,
+            ];
+          }),
+        ),
+  );
+}
+
+async function renderUsage(): Promise<void> {
+  const { days, providers, cooldowns } = await api<{
+    days: number;
+    providers: ProviderUse[];
+    cooldowns: Cooldown[];
+  }>("/api/usage");
+  replace(
+    main(),
+    el("h1", {}, "Provider usage"),
+    el("p", { class: "muted" }, `Review batches in your repositories over the last ${days} days.`),
+    providers.length === 0
+      ? el("p", { class: "muted" }, "No provider use yet.")
+      : table(
+          [
+            "Provider",
+            "Batches",
+            "Input tokens",
+            "Output tokens",
+            "Cost",
+            "Limit hits",
+            "Fell back",
+          ],
+          providers.map((use) => [
+            use.providerId,
+            count(use.batches),
+            count(use.inputTokens),
+            count(use.outputTokens),
+            money(use.costUsd),
+            el("span", { class: use.limitHits > 0 ? "sev-should_fix" : "" }, count(use.limitHits)),
+            count(use.fallbacks),
+          ]),
+        ),
+    el("h2", {}, "Sitting out now"),
+    el(
+      "p",
+      { class: "muted" },
+      "Providers skipped by every review after a rate limit, a used-up plan or a rejected credential.",
+    ),
+    cooldowns.length === 0
+      ? el("p", { class: "muted" }, "None: every provider is available.")
+      : table(
+          ["Provider", "Until", "Why"],
+          cooldowns.map((cooldown) => [cooldown.providerId, when(cooldown.until), cooldown.reason]),
+        ),
+  );
+}
+
+async function renderAcceptance(): Promise<void> {
+  const { report } = await api<{ report: FeedbackReport | null }>("/api/acceptance");
+  if (report === null) {
+    replace(
+      main(),
+      el("h1", {}, "Acceptance by rule category"),
+      el("p", { class: "muted" }, "No feedback report yet. The reconciler writes one each day."),
+    );
+    return;
+  }
+  replace(
+    main(),
+    el("h1", {}, "Acceptance by rule category"),
+    el(
+      "p",
+      { class: "muted" },
+      `Across every repository LGTMoose reviews, findings raised in the ${report.windowDays} days to ${when(report.generatedAt)}. Flagged: below ${percent(report.threshold)} with at least ${report.minSamples} answers.`,
+    ),
+    report.categories.length === 0
+      ? el("p", { class: "muted" }, "No findings in the window.")
+      : table(
+          ["Category", "Findings", "Fixed", "Declined", "Disputed", "👍 / 👎", "Acceptance", ""],
+          report.categories.map((category) => [
+            category.protected ? `${category.category} (protected)` : category.category,
+            count(category.findings),
+            count(category.fixed),
+            count(category.declined),
+            count(category.disputed),
+            `${count(category.thumbsUp)} / ${count(category.thumbsDown)}`,
+            percent(category.acceptance ?? undefined),
+            category.flagged ? el("span", { class: "sev-should_fix" }, "Flagged") : "",
+          ]),
+        ),
+    el("h2", {}, "Declined in your repositories"),
+    report.declined.length === 0
+      ? el("p", { class: "muted" }, "None.")
+      : table(
+          ["Pull request", "Where", "Category", "Severity", "Finding"],
+          report.declined.map((entry) => [
+            prLink(entry.repo, entry.prNumber),
+            `${entry.path}:${entry.line}`,
+            entry.category,
+            el("span", { class: `sev-${entry.severity}` }, severityLabel(entry.severity)),
+            entry.title,
+          ]),
+        ),
+  );
+}
+
 async function render(): Promise<void> {
   const route = parseRoute(window.location.hash);
   if (route.page === "signed-out") {
@@ -225,6 +505,9 @@ async function render(): Promise<void> {
     renderNav(me);
     if (route.page === "findings") await renderFindings(route.repo);
     else if (route.page === "runs") await renderRuns(route.repo);
+    else if (route.page === "learnings") await renderLearnings(route.status);
+    else if (route.page === "usage") await renderUsage();
+    else if (route.page === "acceptance") await renderAcceptance();
     else await renderRepos();
   } catch (error) {
     if (error instanceof SignedOut) {

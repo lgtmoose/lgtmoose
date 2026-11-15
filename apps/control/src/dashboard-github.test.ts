@@ -62,15 +62,17 @@ describe("githubDashboard", () => {
     ).toBeUndefined();
   });
 
-  it("counts only active memberships", async () => {
+  it("reads the person's role from active memberships only", async () => {
     const { fetch } = fakeFetch({
-      "/user/memberships/orgs/acme": { body: { state: "active" } },
-      "/user/memberships/orgs/pending": { body: { state: "pending" } },
+      "/user/memberships/orgs/acme": { body: { state: "active", role: "member" } },
+      "/user/memberships/orgs/owned": { body: { state: "active", role: "admin" } },
+      "/user/memberships/orgs/pending": { body: { state: "pending", role: "admin" } },
     });
     const github = githubDashboard({ fetch });
-    expect(await github.isOrgMember("t", "acme")).toBe(true);
-    expect(await github.isOrgMember("t", "pending")).toBe(false);
-    expect(await github.isOrgMember("t", "nope")).toBe(false);
+    expect(await github.orgRole("t", "acme")).toBe("member");
+    expect(await github.orgRole("t", "owned")).toBe("admin");
+    expect(await github.orgRole("t", "pending")).toBe("none");
+    expect(await github.orgRole("t", "nope")).toBe("none");
   });
 
   it("lists the repositories of allowed owners' installations only, with the person's token", async () => {
@@ -86,7 +88,10 @@ describe("githubDashboard", () => {
       "/user/installations/1/repositories?per_page=100&page=1": {
         body: {
           total_count: 2,
-          repositories: [{ full_name: "Acme/Web" }, { full_name: "Acme/API" }],
+          repositories: [
+            { full_name: "Acme/Web", permissions: { pull: true, push: false } },
+            { full_name: "Acme/API", permissions: { pull: true, push: true } },
+          ],
         },
       },
       "/user/installations/2/repositories?per_page=100&page=1": {
@@ -94,10 +99,10 @@ describe("githubDashboard", () => {
       },
     });
     const github = githubDashboard({ fetch });
-    expect(await github.visibleRepos("gho_user", new Set(["acme"]), 10)).toEqual([
-      "acme/api",
-      "acme/web",
-    ]);
+    expect(await github.visibleRepos("gho_user", new Set(["acme"]), 10)).toEqual({
+      repos: ["acme/api", "acme/web"],
+      writeRepos: ["acme/api"],
+    });
     expect(calls.some((call) => call.url.includes("/installations/2/"))).toBe(false);
     expect(new Headers(calls[0]?.init.headers).get("authorization")).toBe("Bearer gho_user");
   });

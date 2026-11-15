@@ -4,7 +4,19 @@ export type Route =
   | { page: "repos" }
   | { page: "findings"; repo: string | undefined }
   | { page: "runs"; repo: string | undefined }
+  | { page: "learnings"; status: LearningStatus }
+  | { page: "usage" }
+  | { page: "acceptance" }
   | { page: "signed-out"; error: string | undefined };
+
+export type LearningStatus = "pending" | "active" | "retired";
+export const LEARNING_STATUSES: readonly LearningStatus[] = ["pending", "active", "retired"];
+
+function learningStatus(value: string | null): LearningStatus {
+  return (LEARNING_STATUSES as readonly (string | null)[]).includes(value)
+    ? (value as LearningStatus)
+    : "pending";
+}
 
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -19,6 +31,12 @@ export function parseRoute(hash: string): Route {
       return { page: "findings", repo };
     case "/runs":
       return { page: "runs", repo };
+    case "/learnings":
+      return { page: "learnings", status: learningStatus(params.get("status")) };
+    case "/usage":
+      return { page: "usage" };
+    case "/acceptance":
+      return { page: "acceptance" };
     case "/signed-out":
       return { page: "signed-out", error: params.get("error") ?? undefined };
     default:
@@ -29,6 +47,10 @@ export function parseRoute(hash: string): Route {
 export function routeHash(route: Route): string {
   if (route.page === "repos") return "#/";
   if (route.page === "signed-out") return "#/signed-out";
+  if (route.page === "usage" || route.page === "acceptance") return `#/${route.page}`;
+  if (route.page === "learnings") {
+    return route.status === "pending" ? "#/learnings" : `#/learnings?status=${route.status}`;
+  }
   return route.repo === undefined
     ? `#/${route.page}`
     : `#/${route.page}?repo=${encodeURIComponent(route.repo)}`;
@@ -64,6 +86,22 @@ export function severityLabel(severity: string): string {
 
 export function money(usd: number | undefined): string {
   return usd === undefined ? "—" : `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
+}
+
+/** A share such as 0.625 as `63%`; "—" without one. */
+export function percent(share: number | undefined): string {
+  return share === undefined || !Number.isFinite(share) ? "—" : `${Math.round(share * 100)}%`;
+}
+
+export function count(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+/** Why the API refused to change a learning, in words for the page. */
+export function learningRefusal(status: number, reason: string | undefined): string {
+  if (status === 403) return reason ?? "You can't change this learning.";
+  if (status === 404) return "That learning isn't there any more, or isn't yours to see.";
+  return `The dashboard API answered ${status}.`;
 }
 
 /** A timestamp as the browser's local date and time; "—" without one. */

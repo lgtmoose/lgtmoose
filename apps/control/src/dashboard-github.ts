@@ -18,13 +18,21 @@ export interface DashboardGitHub {
   }): Promise<{ token: string; expiresInSeconds: number | undefined } | undefined>;
   /** The token's own login. */
   login(token: string): Promise<string>;
-  /** Whether the token's person is an active member of `org`. */
-  isOrgMember(token: string, org: string): Promise<boolean>;
+  /**
+   * The token's person's role in `org`, from their active membership: `admin` is an owner;
+   * `none` when they aren't an active member.
+   */
+  orgRole(token: string, org: string): Promise<"admin" | "member" | "none">;
   /**
    * Lowercased owner/name of the repositories the person can see through installations of the
-   * App on `owners` (lowercased), at most `limit`.
+   * App on `owners` (lowercased), at most `limit`, and those of them where GitHub reports the
+   * person's own permission as write or more (push, maintain or admin).
    */
-  visibleRepos(token: string, owners: ReadonlySet<string>, limit: number): Promise<string[]>;
+  visibleRepos(
+    token: string,
+    owners: ReadonlySet<string>,
+    limit: number,
+  ): Promise<{ repos: string[]; writeRepos: string[] }>;
 }
 
 /** The URL GitHub's sign-in starts at. */
@@ -55,7 +63,7 @@ const tokenReply = z.union([
 ]);
 
 const userReply = z.object({ login: z.string().min(1) });
-const membershipReply = z.object({ state: z.string() });
+const membershipReply = z.object({ state: z.string(), role: z.string().optional() });
 const installationsReply = z.object({
   installations: z.array(
     z.object({ id: z.number().int(), account: z.object({ login: z.string() }).nullable() }),
@@ -63,7 +71,19 @@ const installationsReply = z.object({
 });
 const repositoriesReply = z.object({
   total_count: z.number().int(),
-  repositories: z.array(z.object({ full_name: z.string() })),
+  repositories: z.array(
+    z.object({
+      full_name: z.string(),
+      /** The person's own permission on it, as their token sees it. */
+      permissions: z
+        .object({
+          admin: z.boolean().optional(),
+          maintain: z.boolean().optional(),
+          push: z.boolean().optional(),
+        })
+        .optional(),
+    }),
+  ),
 });
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -128,18 +148,20 @@ export function githubDashboard(
         throw new DashboardGitHubError("reading the signed-in user", response.status);
       return userReply.parse(await response.json()).login;
     },
-    async isOrgMember(token, org) {
+    async orgRole(token, org) {
       const response = await get(
         token,
         `/user/memberships/orgs/${encodeURIComponent(org)}`,
         "reading an org membership",
       );
-      if (!response.ok) return false;
+      if (!response.ok) return "none";
       const reply = membershipReply.safeParse(await response.json());
-      return reply.success && reply.data.state === "active";
+      if (!reply.success || reply.data.state !== "active") return "none";
+      return reply.data.role === "admin" ? "admin" : "member";
     },
     async visibleRepos(token, owners, limit) {
       const repos = new Set<string>();
+      const writeRepos = new Set<string>();
       const installations = installationsReply.parse(
         await (
           await get(token, `/user/installations?per_page=${PAGE}`, "listing installations")
@@ -159,13 +181,18 @@ export function githubDashboard(
           for (const repo of reply.repositories) {
             const name = repo.full_name.toLowerCase();
             // Only repositories of an allowed owner, whatever the installation lists.
-            if (owners.has(name.split("/")[0] ?? "")) repos.add(name);
+            if (!owners.has(name.split("/")[0] ?? "")) continue;
+            repos.add(name);
+            const can = repo.permissions;
+            if (can?.push === true || can?.maintain === true || can?.admin === true) {
+              writeRepos.add(name);
+            }
             if (repos.size >= limit) break;
           }
           if (reply.repositories.length < PAGE) break;
         }
       }
-      return [...repos].sort();
+      return { repos: [...repos].sort(), writeRepos: [...writeRepos].sort() };
     },
   };
 }
