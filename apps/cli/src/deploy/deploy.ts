@@ -11,6 +11,7 @@ import { CLI, loadDeployConfig } from "../paths.js";
 import { PLACEHOLDER_WEBHOOK_URL, installUrl } from "../setup/manifest.js";
 import { isPromptCancel, type Prompter } from "../setup/prompter.js";
 import {
+  ensureDashboardOAuth,
   readAppCredentials,
   readWebhookSecret,
   SecretScheduledForDeletion,
@@ -141,7 +142,15 @@ function jwtFor(app: AppCredentials, deps: DeployDeps): string {
 
 async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string> {
   const config = await loadConfig(deps);
-  const { app, webhookSecret } = await checkSecrets(config, deps.secrets(config.region));
+  const store = deps.secrets(config.region);
+  const { app, webhookSecret } = await checkSecrets(config, store);
+  if (config.dashboard) {
+    // The dashboard API's copy of the OAuth client, so it never needs the App's private key.
+    const oauth = await ensureDashboardOAuth(store);
+    if (oauth !== "unchanged") {
+      deps.out(`Stored the App's OAuth client in ${SECRET_NAMES.githubAppOAuth} for the dashboard.\n`);
+    }
+  }
   const cdk = deps.cdk({ configPath: deps.configPath, region: config.region });
 
   // Every time, not just the first: it's a no-op when current, and a newer aws-cdk after
@@ -192,12 +201,25 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
     }
   }
 
+  const dashboard = outputs[STACK_NAMES.dashboard];
+  const dashboardUrl = dashboard?.[STACK_OUTPUTS.dashboard.dashboardUrl];
+  const callbackUrl = dashboard?.[STACK_OUTPUTS.dashboard.oauthCallbackUrl];
+  const dashboardNote =
+    dashboardUrl === undefined || callbackUrl === undefined
+      ? ""
+      : `
+The dashboard is at ${dashboardUrl}. For its GitHub sign-in to work, add this
+callback URL to the App (Callback URL, under Identifying and authorizing users) once:
+  ${callbackUrl}
+  in ${appSettingsUrl(info)}
+`;
+
   return `
 LGTMoose is deployed.
 
 Install the App on the repositories it should review:
   ${installUrl(info.slug)}
-
+${dashboardNote}
 To upgrade later: git pull && ${CLI} deploy
 `;
 }

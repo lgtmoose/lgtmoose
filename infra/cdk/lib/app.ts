@@ -1,6 +1,7 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
 import { Alarm } from "aws-cdk-lib/aws-cloudwatch";
 import { SnsAction } from "aws-cdk-lib/aws-cloudwatch-actions";
+import { RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { ITopic } from "aws-cdk-lib/aws-sns";
 import {
   CDK_CONTEXT,
@@ -12,6 +13,7 @@ import {
   type ProviderConfig,
 } from "@lgtmoose/config";
 import { ApiStack } from "./api-stack.js";
+import { DashboardStack } from "./dashboard-stack.js";
 import { DATABASE_NAME, DataStack } from "./data-stack.js";
 import { MetaStack } from "./meta-stack.js";
 import { NetworkStack } from "./network-stack.js";
@@ -39,10 +41,12 @@ export interface LgtmooseStacks {
   api: ApiStack;
   proxy: ProxyStack;
   workflow: WorkflowStack;
+  /** Undefined with `dashboard: false`. */
+  dashboard: DashboardStack | undefined;
 }
 
 /**
- * Builds the LGTMoose CDK app from a validated config. Stack still to come: Dashboard (NIC-840).
+ * Builds the LGTMoose CDK app from a validated config.
  */
 export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseStacks {
   Tags.of(app).add("project", "lgtmoose");
@@ -120,9 +124,25 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
   // Sandbox tasks can only reach model APIs once the proxy runs.
   workflow.addDependency(proxy);
 
+  let dashboard: DashboardStack | undefined;
+  if (config.dashboard) {
+    dashboard = new DashboardStack(app, STACK_NAMES.dashboard, {
+      env,
+      vpc: network.vpc,
+      apiSubnets: { subnetGroupName: "app" },
+      apiSecurityGroup: network.controlSecurityGroup,
+      databaseSecret: data.databaseSecret,
+      databaseName: DATABASE_NAME,
+      allowedOrgs: config.allowedOrgs,
+      logRetention: config.profile === "lean" ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
+    });
+    // It reads the database, so it deploys after the migrations.
+    dashboard.addDependency(data);
+  }
+
   notifyAlarms(app, meta.alarmTopic);
 
-  return { app, meta, network, data, api, proxy, workflow };
+  return { app, meta, network, data, api, proxy, workflow, dashboard };
 }
 
 /** Every alarm in the app, in any stack, notifies `topic` when it goes into ALARM. */
