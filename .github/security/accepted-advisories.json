@@ -1,17 +1,4 @@
 {
   "$comment": "High and critical npm advisories the dependency audit (tools/security/audit.mjs) accepts until their expiry. Each needs a reason. An expired entry fails the audit, so fix the dependency or accept it again with a new reason and date.",
-  "accepted": [
-    {
-      "id": "GHSA-5gmw-xhrv-c9v3",
-      "package": "tinypool",
-      "reason": "Dev only: tinypool is vitest's worker pool. It runs only this repository's own tests, in CI and on developer machines, never PR code under review, and no deployed image includes it. The fix needs vitest 4; upgrade tracked as a follow-up to NIC-844.",
-      "expires": "2027-01-31"
-    },
-    {
-      "id": "GHSA-85c8-ppgw-ccpr",
-      "package": "tinypool",
-      "reason": "Dev only: tinypool is vitest's worker pool. It runs only this repository's own tests, in CI and on developer machines, never PR code under review, and no deployed image includes it. The fix needs vitest 4; upgrade tracked as a follow-up to NIC-844.",
-      "expires": "2027-01-31"
-    }
-  ]
+  "accepted": []
 }
