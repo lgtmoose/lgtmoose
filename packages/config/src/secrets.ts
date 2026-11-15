@@ -17,6 +17,13 @@ export const SECRET_NAMES = {
    */
   githubWebhook: "lgtmoose/github-webhook-secret",
   /**
+   * JSON: { clientId, clientSecret }, the App's OAuth client for the dashboard's sign-in. A copy
+   * kept apart from `githubApp`, so the dashboard API can sign people in without being able to
+   * act as the App. `lgtmoose deploy` copies it from `githubApp` when the dashboard is on, and
+   * again whenever the App's client changes.
+   */
+  githubAppOAuth: "lgtmoose/github-app-oauth",
+  /**
    * One per provider that needs a stored credential, written by `lgtmoose auth`. The value is
    * the credential as plain text, exactly what the sandbox reads from
    * `LGTMOOSE_PROVIDER_CREDENTIAL`: a token or key, or for a Codex ChatGPT sign-in the whole

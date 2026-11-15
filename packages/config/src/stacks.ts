@@ -9,6 +9,8 @@ export const STACK_NAMES = {
   api: "Lgtmoose-Api",
   proxy: "Lgtmoose-Proxy",
   workflow: "Lgtmoose-Workflow",
+  /** Only with `dashboard: true` (the default). */
+  dashboard: "Lgtmoose-Dashboard",
 } as const;
 
 /** Stack outputs the CLI reads from `cdk deploy --outputs-file`. */
@@ -33,6 +35,12 @@ export const STACK_OUTPUTS = {
     sandboxTaskDefinitionArns: "SandboxTaskDefinitionArns",
     /** The review state machine, for the dispatcher (NIC-812) to start executions of. */
     stateMachineArn: "StateMachineArn",
+  },
+  dashboard: {
+    /** https://<id>.cloudfront.net, where people open the dashboard. */
+    dashboardUrl: "DashboardUrl",
+    /** The GitHub App's callback URL for the dashboard's sign-in. */
+    oauthCallbackUrl: "OAuthCallbackUrl",
   },
 } as const;
 

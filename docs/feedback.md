@@ -48,7 +48,7 @@ pnpm lgtmoose feedback report
 pnpm lgtmoose feedback report --json
 ```
 
-The JSON is `feedbackReportSchema` in `@lgtmoose/core`, which the dashboard (NIC-840) will read.
+The JSON is `feedbackReportSchema` in `@lgtmoose/core`, which the [dashboard](dashboard.md) will show once its acceptance page is built.
 
 ## Declined findings as eval fixtures
 

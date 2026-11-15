@@ -449,3 +449,25 @@ export const dispatchedExecutions = pgTable(
       .where(sql`${t.stoppedAt} is null`),
   ],
 );
+
+/**
+ * Dashboard sign-ins (NIC-840). The browser holds only a random token in an HttpOnly cookie; the
+ * row is found by the token's SHA-256, so reading the table never yields a usable cookie. No
+ * GitHub token is stored: what the signed-in person may see is read from GitHub once, at sign-in,
+ * and kept here until the session ends.
+ */
+export const dashboardSessions = pgTable(
+  "dashboard_sessions",
+  {
+    /** Hex SHA-256 of the cookie's token. */
+    tokenHash: text("token_hash").primaryKey(),
+    login: text("login").notNull(),
+    /** The allowed orgs (or user accounts) the person belongs to, lowercased. */
+    orgs: jsonb("orgs").$type<string[]>().notNull(),
+    /** Lowercased owner/name of every repository the person can see through the App. */
+    repos: jsonb("repos").$type<string[]>().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("dashboard_sessions_expires_idx").on(t.expiresAt)],
+);

@@ -57,12 +57,22 @@ function harness(
   } = {},
 ) {
   const secrets = new Map(Object.entries(options.secrets ?? goodSecrets));
+  const written: string[] = [];
   const store: SetupSecretStore = {
     read: (name) =>
       options.scheduled?.includes(name)
         ? Promise.reject(new SecretScheduledForDeletion(name, "eu-west-2"))
         : Promise.resolve(secrets.get(name)),
-    write: () => Promise.reject(new Error("deploy never writes secrets")),
+    // Deploy writes only the dashboard's copy of the OAuth client.
+    write: (name, value) => {
+      if (name !== SECRET_NAMES.githubAppOAuth) {
+        return Promise.reject(new Error(`deploy never writes ${name}`));
+      }
+      const existed = secrets.has(name);
+      secrets.set(name, value);
+      written.push(name);
+      return Promise.resolve(existed ? "updated" : "created");
+    },
   };
   const calls: string[] = [];
   const deployed: DeployOptions[] = [];
@@ -172,6 +182,8 @@ function harness(
     webhooks,
     regions,
     protection,
+    secrets,
+    written,
     output: () => chunks.join(""),
   };
 }
@@ -201,6 +213,40 @@ describe("lgtmoose deploy", () => {
     for (const secret of ["WEBHOOK-SECRET", "CLIENT-SECRET", "PRIVATE KEY"]) {
       expect(result.all).not.toContain(secret);
     }
+  });
+
+  it("copies the App's OAuth client for the dashboard, once, and prints where to sign in", async () => {
+    const h = harness({
+      outputs: {
+        [STACK_NAMES.api]: { GithubWebhookUrl: WEBHOOK_URL },
+        [STACK_NAMES.dashboard]: {
+          DashboardUrl: "https://d1.cloudfront.net",
+          OAuthCallbackUrl: "https://d1.cloudfront.net/api/auth/callback",
+        },
+      },
+    });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(h.written).toEqual([SECRET_NAMES.githubAppOAuth]);
+    expect(JSON.parse(h.secrets.get(SECRET_NAMES.githubAppOAuth) ?? "")).toEqual({
+      clientId: "Iv1.x",
+      clientSecret: "CLIENT-SECRET",
+    });
+    expect(result.all).toContain("The dashboard is at https://d1.cloudfront.net");
+    expect(result.all).toContain("https://d1.cloudfront.net/api/auth/callback");
+    expect(result.all).not.toContain("CLIENT-SECRET");
+    // A second deploy finds it current and writes nothing.
+    const again = harness({ secrets: Object.fromEntries(h.secrets) });
+    await run(runDeploy, [], again);
+    expect(again.written).toEqual([]);
+  });
+
+  it("writes no OAuth copy with dashboard: false", async () => {
+    const h = harness({ config: { ...bedrockConfig, dashboard: false } });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(h.written).toEqual([]);
+    expect(result.all).not.toContain("dashboard is at");
   });
 
   it("prints the release check's notice before deploying, and still deploys", async () => {
