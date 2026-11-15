@@ -37,7 +37,10 @@ export interface SpendSnapshot {
 export interface SpendStore {
   snapshot(target: { repo: string; prNumber: number }, now: Date): Promise<SpendSnapshot>;
   /** Reads the snapshot and records `decide`'s reservation, under one lock. */
-  reserve<T extends { costUsd: number; batches: number } | undefined>(
+  reserve<
+    T extends
+      { costUsd: number; batches: number; dispatched?: readonly DispatchedBatch[] } | undefined,
+  >(
     runId: string,
     target: { repo: string; prNumber: number },
     now: Date,
@@ -47,6 +50,11 @@ export interface SpendStore {
     runId: string,
     costUsd: number,
   ): Promise<{ repo: string; month: string; reservedUsd: number; wasSettled: boolean } | undefined>;
+  /** Reservations made before `before` that no post settled, oldest first. */
+  unsettled(
+    before: Date,
+    limit: number,
+  ): Promise<{ runId: string; costUsd: number; batches: number; dispatched: DispatchedBatch[] }[]>;
   markCapped(runId: string, kind: CapKind): Promise<void>;
   lastCapped(
     pullRequestId: string,
@@ -227,33 +235,38 @@ export const SPEND_CAP_TITLE = "Spend cap reached";
 /** A dispatched batch's index and tier, to price what it reported. */
 export interface DispatchedBatch {
   index: number;
-  tier: Tier;
+  tier: string;
 }
+
+const tierOf = (tier: string): Tier => (tier === "fast" || tier === "deep" ? tier : "standard");
 
 /**
  * What the run's dispatched batches cost, from their output objects: each one's reported usage
- * at its tier's price. A batch with no output (it never finished) counts at the default tokens.
+ * at its tier's price. A batch with no readable output (it never finished) counts at
+ * `missingUsd` when given (the run's reserved estimate per batch), or else the default tokens.
  */
 export async function runCost(
-  store: ArtifactStore,
+  store: Pick<ArtifactStore, "getText">,
   runId: string,
   batches: readonly DispatchedBatch[],
   budgets: Budgets,
+  missingUsd?: number,
 ): Promise<number> {
   const prices = tierPrices(budgets);
   const keys = runKeys(runId);
   const costs = await Promise.all(
     batches.map(async (batch) => {
-      let usage;
+      let output;
       try {
         const text = await store.getText(keys.batchOutput(batch.index));
         const parsed =
           text === undefined ? undefined : batchOutputSchema.safeParse(JSON.parse(text));
-        usage = parsed?.success === true ? parsed.data.usage : undefined;
+        output = parsed?.success === true ? parsed.data : undefined;
       } catch {
-        usage = undefined;
+        output = undefined;
       }
-      return estimateCost(usage, prices[batch.tier]);
+      if (output === undefined && missingUsd !== undefined) return missingUsd;
+      return estimateCost(output?.usage, prices[tierOf(batch.tier)]);
     }),
   );
   return costs.reduce((sum, cost) => sum + cost, 0);
@@ -387,7 +400,14 @@ export async function reserveSpend(
     input.now,
     (snapshot) => {
       const plan = planSpend({ ...input, snapshot, prices });
-      return { costUsd: plan.reserveUsd, batches: plan.keep.size, plan };
+      return {
+        costUsd: plan.reserveUsd,
+        batches: plan.keep.size,
+        dispatched: input.wanted
+          .filter((batch) => plan.keep.has(batch.index))
+          .map((batch) => ({ index: batch.index, tier: batch.tier })),
+        plan,
+      };
     },
   );
   const { plan } = decision;
@@ -402,4 +422,51 @@ export async function reserveSpend(
     runs: (index) => plan.keep.has(index),
     ...(plan.cap === undefined ? {} : { cap: plan.cap }),
   };
+}
+
+/** How many stale reservations one reconcile settles. */
+export const SETTLE_BATCH = 50;
+
+/**
+ * Settles reservations the post step never did (NIC-1079): runs a newer push stopped, and runs
+ * that failed after their batches ran. Each is priced from its batches' outputs as post would,
+ * with a batch that left no output kept at the run's estimate, so the ledger comes to what was
+ * spent. Until then a reservation counts at its estimate. Runs from the reconciler; a failure
+ * is logged, never thrown, and the rest wait for the next run. Returns how many it settled.
+ */
+export async function settleStaleSpend(
+  spend: { store: Pick<SpendStore, "unsettled" | "settle">; budgets: Budgets },
+  artifacts: Pick<ArtifactStore, "getText">,
+  now: Date,
+  log: (message: string, fields?: Record<string, unknown>) => void,
+  staleMs: number,
+): Promise<number> {
+  let settled = 0;
+  try {
+    const stale = await spend.store.unsettled(new Date(now.getTime() - staleMs), SETTLE_BATCH);
+    for (const run of stale) {
+      try {
+        const perBatch = run.batches > 0 ? run.costUsd / run.batches : 0;
+        const costUsd =
+          run.dispatched.length === 0
+            ? run.costUsd
+            : await runCost(artifacts, run.runId, run.dispatched, spend.budgets, perBatch);
+        await spend.store.settle(run.runId, costUsd);
+        settled += 1;
+        log("spend settled without a post", {
+          runId: run.runId,
+          costUsd: Number(costUsd.toFixed(4)),
+          estimateUsd: Number(run.costUsd.toFixed(4)),
+        });
+      } catch (error) {
+        log("stale spend not settled", {
+          runId: run.runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  } catch (error) {
+    log("stale spend not read", { error: error instanceof Error ? error.message : String(error) });
+  }
+  return settled;
 }

@@ -37,7 +37,7 @@ import {
   type PostAttempt,
 } from "./post.js";
 import { RESUME_RUNS, prepare, readManifest, type RunManifest } from "./prepare.js";
-import type { SpendSnapshot, SpendStore } from "./spend.js";
+import { settleStaleSpend, type SpendSnapshot, type SpendStore } from "./spend.js";
 import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
 const exec = promisify(execFile);
@@ -3305,7 +3305,15 @@ describe("runCommand", () => {
 describe("spend caps (NIC-1079)", () => {
   /** The spend ledger in memory: what's spent, and what runs reserve and settle. */
   function memorySpend(spent: Partial<SpendSnapshot> = {}, lastCapped?: string) {
-    const reserved = new Map<string, { costUsd: number; batches: number; settled?: number }>();
+    const reserved = new Map<
+      string,
+      {
+        costUsd: number;
+        batches: number;
+        dispatched?: readonly { index: number; tier: string }[];
+        settled?: number;
+      }
+    >();
     const capped = new Map<string, string>();
     const snapshot = (): SpendSnapshot => ({
       prDayRuns: 0,
@@ -3321,7 +3329,11 @@ describe("spend caps (NIC-1079)", () => {
         const seen = snapshot();
         const decision = decide(seen);
         if (decision !== undefined && decision.batches > 0 && !reserved.has(runId)) {
-          reserved.set(runId, { costUsd: decision.costUsd, batches: decision.batches });
+          reserved.set(runId, {
+            costUsd: decision.costUsd,
+            batches: decision.batches,
+            dispatched: decision.dispatched ?? [],
+          });
         }
         return { snapshot: seen, decision };
       },
@@ -3337,6 +3349,16 @@ describe("spend caps (NIC-1079)", () => {
         capped.set(runId, kind);
       },
       lastCapped: async () => lastCapped,
+      // Every unsettled one, however young: the cut-off is the store's to apply.
+      unsettled: async () =>
+        [...reserved]
+          .filter(([, row]) => row.settled === undefined)
+          .map(([runId, row]) => ({
+            runId,
+            costUsd: row.costUsd,
+            batches: row.batches,
+            dispatched: [...(row.dispatched ?? [])],
+          })),
       monthTotals: async () => ({ monthUsd: 0, repos: new Map() }),
     };
     return { store, reserved, capped };
@@ -3350,7 +3372,11 @@ describe("spend caps (NIC-1079)", () => {
     h.deps.spend = { store: spend.store, budgets: budgets({ monthlyUsd: 100 }) };
     const result = await prepare(h.deps, JOB, EXECUTION, SETTINGS);
     expect(result.batches).toEqual([{ index: 0 }]);
-    expect(spend.reserved.get(RUN_ID)).toEqual({ costUsd: 1, batches: 1 });
+    expect(spend.reserved.get(RUN_ID)).toEqual({
+      costUsd: 1,
+      batches: 1,
+      dispatched: [{ index: 0, tier: "standard" }],
+    });
     h.objects.set(
       runKeys(RUN_ID).batchOutput(0),
       JSON.stringify(output({ usage: { inputTokens: 100_000, outputTokens: 10_000 } })),
@@ -3359,6 +3385,41 @@ describe("spend caps (NIC-1079)", () => {
     // 100k input and 10k output at the standard tier's $3 and $15 a million.
     expect(spend.reserved.get(RUN_ID)?.settled).toBeCloseTo(0.45, 6);
     expect(spend.capped.size).toBe(0);
+  });
+
+  it("settles a run a newer push stopped, at what its batches reported, without a post", async () => {
+    const h = harness();
+    const spend = memorySpend();
+    const caps = budgets({ monthlyUsd: 100 });
+    h.deps.spend = { store: spend.store, budgets: caps };
+    await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    // The batch ran and wrote its output; then a push stopped the execution before post.
+    h.objects.set(
+      runKeys(RUN_ID).batchOutput(0),
+      JSON.stringify(output({ usage: { inputTokens: 200_000, outputTokens: 20_000 } })),
+    );
+    const logs: string[] = [];
+    const settled = await settleStaleSpend(
+      { store: spend.store, budgets: caps },
+      { getText: async (key) => h.objects.get(key) },
+      new Date(),
+      (message) => logs.push(message),
+      0,
+    );
+    expect(settled).toBe(1);
+    // 200k input and 20k output at $3 and $15 a million, not the $1 estimate.
+    expect(spend.reserved.get(RUN_ID)?.settled).toBeCloseTo(0.9, 6);
+    expect(logs).toContain("spend settled without a post");
+    // Settled once: the next reconcile has nothing to do.
+    expect(
+      await settleStaleSpend(
+        { store: spend.store, budgets: caps },
+        h.deps.store,
+        new Date(),
+        () => undefined,
+        0,
+      ),
+    ).toBe(0);
   });
 
   it("dispatches nothing past a cap, and posts an incomplete review that says which", async () => {

@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from "drizzle-orm";
 import { reviewRuns, spendLedger } from "./schema.js";
 import type { Database } from "./usage.js";
 
@@ -7,10 +7,19 @@ import type { Database } from "./usage.js";
  * estimate before they run and settled at what they reported after. Caps are checked and a
  * reservation made under one transaction-scoped advisory lock, so two runs prepared at once
  * can't both see the same headroom: the second sees the first's reservation.
+ *
+ * Every row counts, settled or not: a reservation is made only just before its batches are
+ * dispatched, so it stands for spend that happened (or is happening) even when the run never
+ * gets to post, such as one a newer push stopped. The post step settles a run; the reconciler
+ * settles those post never reached (`unsettled`), at what their batches reported.
  */
 
-/** How long an unsettled reservation counts: longer than any run can take. */
-export const RESERVATION_TTL_MS = 24 * 3600 * 1000;
+/**
+ * How old an unsettled reservation is before the reconciler settles it: longer than a run's
+ * batches take (each has a 20-minute limit and a few retries), so it doesn't settle a run that
+ * is still going. If it does, post settles it again at the same cost.
+ */
+export const STALE_RESERVATION_MS = 6 * 3600 * 1000;
 /** How far back the average batch cost is taken from. */
 const HISTORY_MS = 30 * 24 * 3600 * 1000;
 /** Fewer settled batches than this, and the deployment has no average of its own yet. */
@@ -42,26 +51,33 @@ export interface SpendTarget {
   prNumber: number;
 }
 
+/** A batch a run dispatched: its index, and its tier, which prices its tokens. */
+export interface DispatchedBatchRow {
+  index: number;
+  tier: string;
+}
+
 /** A run's reservation, from the decision made on a snapshot. */
 export interface SpendReservation {
   costUsd: number;
   batches: number;
+  /** The batches it dispatches, for settling the run where post never did. */
+  dispatched?: readonly DispatchedBatchRow[];
+}
+
+/** An unsettled reservation, for the reconciler to settle. */
+export interface UnsettledRun {
+  runId: string;
+  costUsd: number;
+  batches: number;
+  dispatched: DispatchedBatchRow[];
 }
 
 const money = (value: unknown) => Number(value ?? 0);
 
-/** Rows that count: settled ones, and reservations young enough to still be running. */
-function counting(now: Date): SQL {
-  return or(
-    eq(spendLedger.settled, true),
-    gt(spendLedger.createdAt, new Date(now.getTime() - RESERVATION_TTL_MS)),
-  ) as SQL;
-}
-
 async function snapshotOf(db: Database, target: SpendTarget, now: Date): Promise<SpendSnapshot> {
   const repo = target.repo.toLowerCase();
   const { month, day } = spendPeriod(now);
-  const live = counting(now);
   const [totals] = await db
     .select({
       monthUsd: sql<string>`coalesce(sum(${spendLedger.costUsd}), 0)`,
@@ -70,7 +86,7 @@ async function snapshotOf(db: Database, target: SpendTarget, now: Date): Promise
       prDayRuns: sql<number>`count(*) filter (where ${spendLedger.repo} = ${repo} and ${spendLedger.prNumber} = ${target.prNumber} and ${spendLedger.day} = ${day})`,
     })
     .from(spendLedger)
-    .where(and(eq(spendLedger.month, month), live));
+    .where(eq(spendLedger.month, month));
   const [history] = await db
     .select({
       cost: sql<string>`coalesce(sum(${spendLedger.costUsd}), 0)`,
@@ -124,6 +140,7 @@ export function postgresSpend(db: Database) {
               day,
               costUsd: decision.costUsd.toFixed(4),
               batches: decision.batches,
+              dispatched: [...(decision.dispatched ?? [])],
             })
             .onConflictDoNothing({ target: spendLedger.runId });
         }
@@ -164,6 +181,29 @@ export function postgresSpend(db: Database) {
         };
       });
     },
+    /**
+     * Reservations made before `before` that no post settled, oldest first, at most `limit`:
+     * runs a newer push stopped, or that failed after their batches ran.
+     */
+    async unsettled(before: Date, limit: number): Promise<UnsettledRun[]> {
+      const rows = await db
+        .select({
+          runId: spendLedger.runId,
+          costUsd: spendLedger.costUsd,
+          batches: spendLedger.batches,
+          dispatched: spendLedger.dispatched,
+        })
+        .from(spendLedger)
+        .where(and(eq(spendLedger.settled, false), lt(spendLedger.createdAt, before)))
+        .orderBy(asc(spendLedger.createdAt))
+        .limit(limit);
+      return rows.map((row) => ({
+        runId: row.runId,
+        costUsd: money(row.costUsd),
+        batches: row.batches,
+        dispatched: row.dispatched,
+      }));
+    },
     /** Records the cap that kept batches of the run from running. */
     async markCapped(runId: string, kind: string): Promise<void> {
       await db.update(reviewRuns).set({ spendCap: kind }).where(eq(reviewRuns.id, runId));
@@ -198,11 +238,10 @@ export function postgresSpend(db: Database) {
       now: Date,
     ): Promise<{ monthUsd: number; repos: Map<string, number> }> {
       const { month } = spendPeriod(now);
-      const live = counting(now);
       const [all] = await db
         .select({ cost: sql<string>`coalesce(sum(${spendLedger.costUsd}), 0)` })
         .from(spendLedger)
-        .where(and(eq(spendLedger.month, month), live));
+        .where(eq(spendLedger.month, month));
       const lowered = [...new Set(repos.map((repo) => repo.toLowerCase()))];
       const rows =
         lowered.length === 0
@@ -213,7 +252,7 @@ export function postgresSpend(db: Database) {
                 cost: sql<string>`coalesce(sum(${spendLedger.costUsd}), 0)`,
               })
               .from(spendLedger)
-              .where(and(eq(spendLedger.month, month), inArray(spendLedger.repo, lowered), live))
+              .where(and(eq(spendLedger.month, month), inArray(spendLedger.repo, lowered)))
               .groupBy(spendLedger.repo);
       return {
         monthUsd: money(all?.cost),

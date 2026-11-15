@@ -1,5 +1,5 @@
 {
-  "id": "73f24c26-1504-439c-8d2e-0ed33facc6c3",
+  "id": "fe7a2f1d-a53b-42e9-9854-f84afe8bc355",
   "prevId": "05d86a56-057a-4881-a1ff-c28129db9da4",
   "version": "7",
   "dialect": "postgresql",
@@ -2000,6 +2000,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "dispatched": {
+          "name": "dispatched",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
         "settled": {
           "name": "settled",
           "type": "boolean",
@@ -2076,6 +2083,27 @@
             },
             {
               "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "spend_ledger_unsettled_idx": {
+          "name": "spend_ledger_unsettled_idx",
+          "columns": [
+            {
+              "expression": "settled",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

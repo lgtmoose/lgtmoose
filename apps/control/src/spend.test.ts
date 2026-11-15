@@ -9,6 +9,7 @@ import {
   quietlyCapped,
   readBudgets,
   runCost,
+  settleStaleSpend,
   spendAlerts,
   type PlannedBatch,
   type SpendSnapshot,
@@ -301,5 +302,71 @@ describe("readBudgets", () => {
   it("fails rather than run without caps someone set", () => {
     expect(() => readBudgets({ LGTMOOSE_BUDGETS: "{monthly" })).toThrow(/valid JSON/);
     expect(() => readBudgets({ LGTMOOSE_BUDGETS: '{"monthlyUsd":-5}' })).toThrow(/invalid/);
+  });
+});
+
+describe("settleStaleSpend", () => {
+  const RUN = "11111111-2222-4333-8444-555555555555";
+
+  it("keeps a batch that left no output at the run's estimate per batch", async () => {
+    const settle = vi.fn(async () => undefined);
+    const output = JSON.stringify({
+      version: 1,
+      index: 0,
+      findings: [],
+      transcriptKeys: [],
+      usage: { inputTokens: 1_000_000 },
+    });
+    const settled = await settleStaleSpend(
+      {
+        store: {
+          unsettled: async () => [
+            {
+              runId: RUN,
+              costUsd: 2,
+              batches: 2,
+              dispatched: [
+                { index: 0, tier: "standard" },
+                { index: 1, tier: "standard" },
+              ],
+            },
+          ],
+          settle,
+        },
+        budgets: budgetsSchema.parse({}),
+      },
+      { getText: async (key) => (key === runKeys(RUN).batchOutput(0) ? output : undefined) },
+      NOW,
+      () => undefined,
+      6 * 3600 * 1000,
+    );
+    expect(settled).toBe(1);
+    // $3 for the batch that reported, $1 (the estimate) for the one that didn't.
+    expect(settle).toHaveBeenCalledWith(RUN, 4);
+  });
+
+  it("asks only for reservations older than the cut-off, and logs a failure", async () => {
+    const unsettled = vi.fn(async () => [
+      { runId: RUN, costUsd: 1, batches: 1, dispatched: [{ index: 0, tier: "fast" }] },
+    ]);
+    const log = vi.fn();
+    const settled = await settleStaleSpend(
+      {
+        store: {
+          unsettled,
+          settle: async () => {
+            throw new Error("database down");
+          },
+        },
+        budgets: budgetsSchema.parse({}),
+      },
+      { getText: async () => undefined },
+      NOW,
+      log,
+      60_000,
+    );
+    expect(unsettled).toHaveBeenCalledWith(new Date(NOW.getTime() - 60_000), expect.any(Number));
+    expect(settled).toBe(0);
+    expect(log).toHaveBeenCalledWith("stale spend not settled", expect.anything());
   });
 });

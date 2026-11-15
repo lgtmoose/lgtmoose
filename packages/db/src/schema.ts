@@ -600,9 +600,9 @@ export const dashboardSessions = pgTable(
 
 /**
  * Model spend per review run (NIC-1079), for the spend caps. Prepare reserves a run's estimated
- * cost here before any batch is dispatched; post settles it with what the batches reported. An
- * unsettled reservation counts for a day, so a run that died before posting still counts while
- * it could be running. Months and days are UTC, taken when the run was prepared.
+ * cost here before any batch is dispatched; post settles it with what the batches reported, and
+ * the reconciler settles a run post never reached. Every row counts, settled or not. Months and
+ * days are UTC, taken when the run was prepared.
  */
 export const spendLedger = pgTable(
   "spend_ledger",
@@ -620,6 +620,11 @@ export const spendLedger = pgTable(
     costUsd: numeric("cost_usd", { precision: 12, scale: 4 }).notNull(),
     /** Batches dispatched. */
     batches: integer("batches").notNull(),
+    /** Which batches, and their tiers: to settle the run from their outputs if post never does. */
+    dispatched: jsonb("dispatched")
+      .$type<{ index: number; tier: string }[]>()
+      .notNull()
+      .default([]),
     settled: boolean("settled").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -628,5 +633,7 @@ export const spendLedger = pgTable(
     index("spend_ledger_month_idx").on(t.month),
     index("spend_ledger_repo_month_idx").on(t.repo, t.month),
     index("spend_ledger_pr_day_idx").on(t.repo, t.prNumber, t.day),
+    // The reconciler's look for reservations post never settled.
+    index("spend_ledger_unsettled_idx").on(t.settled, t.createdAt),
   ],
 );

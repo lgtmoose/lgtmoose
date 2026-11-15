@@ -39,6 +39,7 @@ import type { Profile } from "./network-stack.js";
 import { bedrockStatements } from "./bedrock.js";
 import {
   BATCH_TIMEOUT,
+  RUN_PREFIX,
   ReviewWorkflow,
   secretArnPattern,
   type ReviewProvider,
@@ -570,6 +571,8 @@ export class WorkflowStack extends Stack {
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         LGTMOOSE_SHADOW: String(props.shadow),
         RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
+        // Spend caps' prices, to settle runs post never reached (NIC-1079).
+        LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
         // Feedback signals: the acceptance report goes to the artifact bucket.
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         ...(props.feedback === undefined
@@ -593,6 +596,9 @@ export class WorkflowStack extends Stack {
     props.jobQueue.grantSendMessages(fn);
     // The feedback report only: nothing else in the bucket.
     props.artifactBucket.grantPut(fn, FEEDBACK_REPORT_KEY);
+    // Batch outputs only, read-only: their reported usage settles runs post never reached
+    // (NIC-1079). Not inputs, checkouts or transcripts.
+    props.artifactBucket.grantRead(fn, `${RUN_PREFIX}*/batches/*/output.json`);
     new Schedule(this, "ReconcileSchedule", {
       description: "Runs the reconciler.",
       schedule: ScheduleExpression.rate(Duration.minutes(props.reconcileIntervalMinutes)),

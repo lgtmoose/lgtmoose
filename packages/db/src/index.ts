@@ -23,11 +23,13 @@ export {
 } from "./usage.js";
 export {
   MIN_HISTORY_BATCHES,
-  RESERVATION_TTL_MS,
+  STALE_RESERVATION_MS,
   postgresSpend,
   spendPeriod,
+  type DispatchedBatchRow,
   type PostgresSpend,
   type SpendReservation,
   type SpendSnapshot,
   type SpendTarget,
+  type UnsettledRun,
 } from "./spend.js";

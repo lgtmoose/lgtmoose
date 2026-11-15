@@ -115,7 +115,7 @@ Set `budgets.prices` for other models or a negotiated price, per tier and per fi
 
 The prepare step checks the caps before any batch is dispatched:
 
-1. It reads what's been spent from the spend ledger (`spend_ledger`): each run's reservation until the run settles, then its reported cost. A reservation that never settled (the run died) stops counting after a day.
+1. It reads what's been spent from the spend ledger (`spend_ledger`): each run's reservation until the run settles, then its reported cost. A reservation counts until it's settled, however long that takes: it's made only just before batches are dispatched, so it stands for spend that happened. The post step settles a run. The reconciler settles one that post never reached (a newer push stopped it, or it failed after its batches ran) once it's 6 hours old, from its batches' outputs; a batch that left no output keeps its estimate.
 2. It estimates each batch: the deployment's average settled cost per batch over 30 days, once it has 10 batches of history, and the tier's default before that.
 3. It keeps the batches that fit under every cap, in this order: replies to judge, `explain`s, linked tickets, then the review's batches in plan order (riskiest files first). It reserves their estimate.
 

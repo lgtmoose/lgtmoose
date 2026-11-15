@@ -6,6 +6,8 @@ import {
   retireUnusedLearnings,
   type LearningStore,
 } from "@lgtmoose/learnings";
+import { STALE_RESERVATION_MS, postgresSpend } from "@lgtmoose/db";
+import type { Budgets } from "@lgtmoose/config";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { databasePool, parseSecret, readSecret } from "./database.js";
@@ -15,6 +17,8 @@ import { drizzleFeedbackStore, githubFeedback } from "./feedback-aws.js";
 import { log } from "./log.js";
 import { metricsLine, reconcile, type ReconcileCounts, type ReconcileDeps } from "./reconcile.js";
 import { drizzleReconcileStore, githubReconcile, sqsReconcileQueue } from "./reconcile-aws.js";
+import { s3ArtifactStore } from "./s3-store.js";
+import { readBudgets, settleStaleSpend, type SpendStore } from "./spend.js";
 
 /**
  * The reconciler Lambda, run on a schedule (EventBridge Scheduler). It runs in the VPC with the
@@ -34,6 +38,12 @@ type LambdaDeps = ReconcileDeps & {
   learnings: LearningStore;
   /** Undefined without an artifact bucket to write the report to. */
   feedback: FeedbackDeps | undefined;
+  /**
+   * The spend ledger and the batch outputs (read-only), to settle runs post never reached
+   * (NIC-1079). Without a bucket, such runs settle at their estimate.
+   */
+  spend: { store: SpendStore; budgets: Budgets };
+  runOutputs: { getText(key: string): Promise<string | undefined> };
 };
 
 let deps: Promise<LambdaDeps> | undefined;
@@ -80,6 +90,9 @@ function reconcileDeps(): Promise<LambdaDeps> {
           };
     return {
       feedback,
+      spend: { store: postgresSpend(db), budgets: readBudgets(process.env) },
+      runOutputs:
+        bucket === undefined ? { getText: async () => undefined } : s3ArtifactStore(s3, bucket),
       github: githubReconcile(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
       store: drizzleReconcileStore(db),
       learnings: drizzleLearningStore(db),
@@ -118,6 +131,9 @@ export async function handler(): Promise<ReconcileCounts> {
     counts.categoriesFlagged = feedback.categoriesFlagged;
     counts.errors += feedback.errors;
   }
+  // Spend caps (NIC-1079): runs a newer push stopped, or that failed after their batches ran,
+  // are settled at what their batches reported. Logged, never thrown.
+  await settleStaleSpend(ready.spend, ready.runOutputs, new Date(), log, STALE_RESERVATION_MS);
   process.stdout.write(`${metricsLine(counts, new Date())}\n`);
   return counts;
 }

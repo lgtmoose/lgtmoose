@@ -6,7 +6,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIGRATIONS_FOLDER } from "./migrate.js";
 import { pullRequests, reviewRuns, spendLedger } from "./schema.js";
-import { MIN_HISTORY_BATCHES, RESERVATION_TTL_MS, postgresSpend, spendPeriod } from "./spend.js";
+import { MIN_HISTORY_BATCHES, STALE_RESERVATION_MS, postgresSpend, spendPeriod } from "./spend.js";
 
 const client = new PGlite({ extensions: { vector } });
 const db = drizzle(client);
@@ -101,21 +101,57 @@ describe("postgresSpend", () => {
     expect(await spend.settle("00000000-0000-4000-8000-000000000000", 1)).toBeUndefined();
   });
 
-  it("stops counting a reservation a day on, but keeps a settled run for the month", async () => {
+  it("counts a reservation post never settled, however old, until it's settled", async () => {
     const target = { repo: "acme/stale", prNumber: 4 };
-    const reserved = await newRun("acme/stale", 4);
-    const settled = await newRun("acme/stale", 4);
-    await spend.reserve(reserved.runId, target, NOW, () => ({ costUsd: 3, batches: 1 }));
-    await spend.reserve(settled.runId, target, NOW, () => ({ costUsd: 1, batches: 1 }));
-    await spend.settle(settled.runId, 1);
-    const later = new Date(NOW.getTime() + RESERVATION_TTL_MS + 60_000);
-    // Rows' creation time is the database's now(), so move them back instead of the clock on.
+    const stopped = await newRun("acme/stale", 4);
+    const posted = await newRun("acme/stale", 4);
+    await spend.reserve(stopped.runId, target, NOW, () => ({
+      costUsd: 3,
+      batches: 2,
+      dispatched: [
+        { index: 0, tier: "standard" },
+        { index: 1, tier: "fast" },
+      ],
+    }));
+    await spend.reserve(posted.runId, target, NOW, () => ({ costUsd: 1, batches: 1 }));
+    await spend.settle(posted.runId, 1);
+    // A day and more on, as a run a newer push stopped would be: it still counts.
     await db
       .update(spendLedger)
-      .set({ createdAt: new Date(NOW.getTime() - 1000) })
+      .set({ createdAt: new Date(NOW.getTime() - 30 * 3600 * 1000) })
       .where(sql`${spendLedger.repo} = 'acme/stale'`);
     expect((await spend.snapshot(target, NOW)).repoMonthUsd).toBe(4);
-    expect((await spend.snapshot(target, later)).repoMonthUsd).toBe(1);
+    expect((await spend.monthTotals(["acme/stale"], NOW)).repos.get("acme/stale")).toBe(4);
+
+    // Listed for the reconciler, with what it dispatched; the settled one isn't.
+    const stale = await spend.unsettled(new Date(NOW.getTime() - STALE_RESERVATION_MS), 50);
+    const mine = stale.filter((row) => row.runId === stopped.runId || row.runId === posted.runId);
+    expect(mine).toEqual([
+      {
+        runId: stopped.runId,
+        costUsd: 3,
+        batches: 2,
+        dispatched: [
+          { index: 0, tier: "standard" },
+          { index: 1, tier: "fast" },
+        ],
+      },
+    ]);
+    // Settled at what it really cost, the totals follow, and it's listed no more.
+    await spend.settle(stopped.runId, 1.75);
+    expect((await spend.snapshot(target, NOW)).repoMonthUsd).toBeCloseTo(2.75);
+    expect((await spend.unsettled(NOW, 50)).some((row) => row.runId === stopped.runId)).toBe(false);
+  });
+
+  it("lists only reservations older than the cut-off, oldest first", async () => {
+    const target = { repo: "acme/young", prNumber: 6 };
+    const young = await newRun("acme/young", 6);
+    await spend.reserve(young.runId, target, NOW, () => ({ costUsd: 1, batches: 1 }));
+    const cutoff = new Date(Date.now() - STALE_RESERVATION_MS);
+    expect((await spend.unsettled(cutoff, 50)).some((row) => row.runId === young.runId)).toBe(
+      false,
+    );
+    expect((await spend.unsettled(new Date(Date.now() + 60_000), 1)).length).toBe(1);
   });
 
   // Its own database, so other tests' settled runs don't count: PGlite starts slowly, more so
