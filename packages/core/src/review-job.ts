@@ -20,6 +20,11 @@ export const REVIEW_JOB_KINDS = [
 
 export type ReviewJobKind = (typeof REVIEW_JOB_KINDS)[number];
 
+/** How a person asked for a review: the latest commit, or the whole PR again. */
+export const REVIEW_REQUESTS = ["review", "full_review"] as const;
+
+export type ReviewRequest = (typeof REVIEW_REQUESTS)[number];
+
 /**
  * One unit of work for the dispatcher. Only what it needs to find the PR and decide what to do;
  * it fetches anything else from GitHub itself, so a stale or oversized payload never travels.
@@ -45,6 +50,12 @@ export interface ReviewJob {
   reviewId?: number;
   /** GraphQL node ID of a resolved or unresolved review thread (threads have no REST id). */
   threadNodeId?: string;
+  /**
+   * Set when a person asked for this review with an `@lgtmoose review` or `full review`
+   * command, never by the gateway. A requested review isn't debounced and runs on a paused PR;
+   * a full one also leaves earlier reviews out, so the whole PR is reviewed again.
+   */
+  requested?: ReviewRequest;
   /** ISO 8601 time the gateway received the delivery. */
   receivedAt: string;
   /**

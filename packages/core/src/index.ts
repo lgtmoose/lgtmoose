@@ -55,6 +55,7 @@ export {
 } from "./fingerprint.js";
 export {
   REVIEW_JOB_KINDS,
+  REVIEW_REQUESTS,
   SKIP_LABEL,
   isReviewJobKind,
   reviewJobGroupId,
@@ -62,6 +63,7 @@ export {
   type Ignored,
   type ReviewJob,
   type ReviewJobKind,
+  type ReviewRequest,
   type ToReviewJobOptions,
 } from "./review-job.js";
 export {

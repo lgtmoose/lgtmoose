@@ -1,3 +1,4 @@
+import { REVIEW_REQUESTS } from "@lgtmoose/core";
 import { z } from "zod";
 
 /**
@@ -17,6 +18,8 @@ export const workflowJobSchema = z.object({
     .optional(),
   /** When the job's event happened (see `ReviewJob.eventAt`): orders a PR's runs. */
   eventAt: z.iso.datetime().optional(),
+  /** Set when a person asked for the review (`ReviewJob.requested`). */
+  requested: z.enum(REVIEW_REQUESTS).optional(),
 });
 
 export type WorkflowJob = z.infer<typeof workflowJobSchema>;

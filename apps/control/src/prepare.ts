@@ -230,10 +230,15 @@ export async function prepare(
 
   const keys = runKeys(run.runId);
   const lastReviewed = run.lastReviewedSha;
-  const [resumed, reviewed] = await Promise.all([
-    resumableWork(deps, run.pullRequestId, run.runId),
-    deps.runs.reviewedFiles(run.pullRequestId),
-  ]);
+  // A full review someone asked for leaves earlier reviews out: every file is reviewed again,
+  // as on a first review. Duplicates of what earlier reviews posted are still dropped.
+  const full = job.requested === "full_review";
+  const [resumed, reviewed] = full
+    ? [[], []]
+    : await Promise.all([
+        resumableWork(deps, run.pullRequestId, run.runId),
+        deps.runs.reviewedFiles(run.pullRequestId),
+      ]);
   const work = await deps.workDir();
   try {
     const checkout = join(work.dir, "checkout");

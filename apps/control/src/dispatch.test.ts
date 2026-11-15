@@ -59,6 +59,10 @@ function fakeDeps() {
   /** Run status by execution ARN, as `review_runs` would have it. */
   const runs = new Map<string, string>();
   const reviewedHeads = new Set<string>();
+  /** PRs whose automatic reviews are paused. */
+  const pausedPrs = new Set<string>();
+  /** Jobs forwarded to the conversation queue. */
+  const forwarded: string[] = [];
   /** Our findings' status by their inline comment's ID, as `findings` would have it. */
   const threadFindings = new Map<number, string>();
   const calls: string[] = [];
@@ -119,6 +123,9 @@ function fakeDeps() {
       async reviewed(_repo, _n, headSha) {
         return reviewedHeads.has(headSha);
       },
+      async paused(repo, n) {
+        return pausedPrs.has(pr(repo, n));
+      },
       async followThread(_repo, _n, commentId, resolved, actor) {
         calls.push(`thread ${commentId} ${resolved ? "resolved" : "unresolved"} by ${actor}`);
         const status = threadFindings.get(commentId);
@@ -137,6 +144,11 @@ function fakeDeps() {
     async deadLetter(record, reason) {
       deadLettered.push({ messageId: record.messageId, reason });
     },
+    conversation: {
+      async send(job) {
+        forwarded.push(job.deliveryId);
+      },
+    },
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
   };
   const status = (name: string) => executions.get(name)?.status;
@@ -146,6 +158,8 @@ function fakeDeps() {
     recorded,
     runs,
     reviewedHeads,
+    pausedPrs,
+    forwarded,
     threadFindings,
     calls,
     logs,
@@ -396,15 +410,76 @@ describe("dispatch", () => {
     expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
-  it("defers comment jobs to M5 and ignores a push without a head", async () => {
+  it("forwards comment jobs to the conversation queue, and defers submitted reviews", async () => {
     const f = fakeDeps();
-    expect(await dispatch(f.deps, job({ kind: "comment", commentId: 3 }))).toMatchObject({
+    const comment = job({ kind: "comment", commentId: 3, deliveryId: "c-1" });
+    expect(await dispatch(f.deps, comment)).toEqual({ action: "forwarded" });
+    const inline = job({ kind: "review_comment", commentId: 4, deliveryId: "c-2" });
+    expect(await dispatch(f.deps, inline)).toEqual({ action: "forwarded" });
+    expect(f.forwarded).toEqual(["c-1", "c-2"]);
+    expect(await dispatch(f.deps, job({ kind: "review", reviewId: 5 }))).toMatchObject({
       action: "deferred",
     });
+    // Without a conversation queue, comments are dropped as before.
+    const withoutQueue: DispatchDeps = { ...f.deps };
+    delete withoutQueue.conversation;
+    expect(await dispatch(withoutQueue, comment)).toMatchObject({ action: "deferred" });
+    expect(f.executions.size).toBe(0);
+  });
+
+  it("ignores a push without a head", async () => {
+    const f = fakeDeps();
     const headless = job();
     delete headless.headSha;
     expect(await dispatch(f.deps, headless)).toEqual({ action: "ignored", reason: "no head SHA" });
     expect(f.executions.size).toBe(0);
+  });
+});
+
+describe("dispatch: pause and requested reviews", () => {
+  it("starts no automatic review on a paused PR, but keeps its event time", async () => {
+    const f = fakeDeps();
+    f.pausedPrs.add("acme/shop#12");
+    expect(await dispatch(f.deps, job())).toEqual({ action: "paused" });
+    expect(f.executions.size).toBe(0);
+    // An older push stays stale: the paused one still advanced the PR's event time.
+    const older = job({ headSha: OLD, eventAt: T1 });
+    expect(await dispatch(f.deps, older)).toMatchObject({ action: "stale" });
+  });
+
+  it("runs a review a person asked for on a paused PR, at once", async () => {
+    const f = fakeDeps();
+    f.pausedPrs.add("acme/shop#12");
+    const asked = job({ requested: "review", deliveryId: "command-7-review" });
+    expect(await dispatch(f.deps, asked)).toMatchObject({ action: "started" });
+    expect(f.executions.get(nameOf(NEW))?.input.debounceSeconds).toBe(0);
+  });
+
+  it("starts a full review of a reviewed head, once per request", async () => {
+    const f = fakeDeps();
+    f.reviewedHeads.add(NEW);
+    expect(await dispatch(f.deps, job())).toMatchObject({ action: "started" });
+    must(f.executions.get(nameOf(NEW))).status = "SUCCEEDED";
+    const full = job({ requested: "full_review", deliveryId: "command-8-full" });
+    expect(await dispatch(f.deps, full)).toMatchObject({
+      action: "retried",
+      executionArn: arn(nameOf(NEW, "command-8-full")),
+    });
+    expect(f.executions.get(nameOf(NEW, "command-8-full"))?.input.requested).toBe("full_review");
+    // The same request again (a redelivery) starts nothing new: the execution has its name.
+    await dispatch(f.deps, full);
+    expect(f.executions.size).toBe(2);
+    must(f.executions.get(nameOf(NEW, "command-8-full"))).status = "SUCCEEDED";
+    expect(await dispatch(f.deps, full)).toMatchObject({ action: "duplicate" });
+    expect(f.executions.size).toBe(2);
+  });
+
+  it("doesn't start a full review while a review of the head is running", async () => {
+    const f = fakeDeps();
+    expect(await dispatch(f.deps, job())).toMatchObject({ action: "started" });
+    const full = job({ requested: "full_review", deliveryId: "command-9-full" });
+    expect(await dispatch(f.deps, full)).toMatchObject({ action: "duplicate" });
+    expect(f.executions.has(nameOf(NEW, "command-9-full"))).toBe(false);
   });
 });
 
