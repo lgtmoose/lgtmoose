@@ -71,7 +71,7 @@ packages/poster/  posts a run: one review, inline comments, check run, summary, 
 packages/summary/ the PR summary comment and status label sync
 infra/cdk/       AWS CDK app
 infra/sandbox/   the sandbox image: pinned agent CLIs
-deploy/compose/  docker compose deployment for hosts other than AWS (not built yet)
+deploy/compose/  docker compose deployment for hosts other than AWS (core built, not runnable yet)
 docs/            the documentation site
 ```
 

@@ -1,6 +1,13 @@
-import { envWebhookSecret, logJobQueue } from "./adapters/local.js";
+import { PostgresQueue } from "@lgtmoose/db";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+import { envWebhookSecret, logJobQueue, postgresJobQueue } from "./adapters/local.js";
 import { createApp } from "./app.js";
 import { parseAllowedOrgs, requiredEnv } from "./env.js";
+import type { JobQueue } from "./ports.js";
+
+/** The job queue the docker compose runner reads (`JOBS_QUEUE` in @lgtmoose/control). */
+const JOBS_QUEUE = "jobs";
 
 /**
  * Runs the gateway as a plain Node server, for local development and docker compose.
@@ -11,8 +18,9 @@ import { parseAllowedOrgs, requiredEnv } from "./env.js";
  * GITHUB_WEBHOOK_SECRET: the App's webhook secret (required).
  * ALLOWED_ORGS: comma-separated GitHub orgs or users whose repositories may be reviewed
  * (required).
- *
- * Jobs are only logged until the pg-boss queue lands (NIC-843).
+ * DATABASE_URL: the Postgres the docker compose runner reads jobs from. Unset, jobs are only
+ * logged, for pointing a local server at real deliveries. In compose it's a database role that
+ * may only add to the job queue (deploy/compose): the internet-facing gateway can't read reviews.
  */
 function wholeNumberEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name];
@@ -42,9 +50,19 @@ const allowedOrgs = startupValue(() => parseAllowedOrgs(process.env.ALLOWED_ORGS
 /** docker compose waits 10s after SIGTERM before SIGKILL; finish in-flight requests before that. */
 const SHUTDOWN_GRACE_MS = 8_000;
 
+const databaseUrl = process.env.DATABASE_URL;
+let pool: pg.Pool | undefined;
+let queue: JobQueue = logJobQueue();
+if (databaseUrl !== undefined && databaseUrl !== "") {
+  pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+  // A dropped idle connection would otherwise crash the process; the next query reconnects.
+  pool.on("error", (error) => console.error(`Database connection dropped: ${error.message}`));
+  queue = postgresJobQueue(new PostgresQueue(drizzle({ client: pool }), JOBS_QUEUE));
+}
+
 const app = createApp(
   { version: process.env.LGTMOOSE_VERSION ?? "dev", trustProxyHops },
-  { secrets: envWebhookSecret("GITHUB_WEBHOOK_SECRET"), queue: logJobQueue(), allowedOrgs },
+  { secrets: envWebhookSecret("GITHUB_WEBHOOK_SECRET"), queue, allowedOrgs },
 );
 // Express 5 calls this on failure too, with the error, so it reports success only when listening.
 const server = app.listen(port, (error?: NodeJS.ErrnoException) => {
@@ -60,7 +78,7 @@ function shutdown(signal: string): void {
   console.log(`${signal} received, finishing in-flight requests`);
   server.close((error) => {
     if (error) console.error(`Shutdown failed: ${error.message}`);
-    process.exit(error ? 1 : 0);
+    void (pool?.end() ?? Promise.resolve()).finally(() => process.exit(error ? 1 : 0));
   });
   setTimeout(() => process.exit(1), SHUTDOWN_GRACE_MS).unref();
 }
