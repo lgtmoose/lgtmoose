@@ -1,5 +1,6 @@
 import { DEFAULT_ACCEPTANCE_THRESHOLD, DEFAULT_MIN_SAMPLES } from "@lgtmoose/core";
 import { DEFAULT_MAX_FEEDBACK_COMMENTS } from "./feedback.js";
+import { DEFAULT_MAX_EXPLANATIONS } from "./explain.js";
 import { DEFAULT_MAX_REPLY_JUDGEMENTS } from "./replies.js";
 
 /** What the control task reads from its environment, set by the Workflow stack. */
@@ -171,9 +172,27 @@ export interface ReviewSettings {
    * (tests), none are judged.
    */
   maxReplyJudgements?: number;
+  /**
+   * `LGTMOOSE_MAX_EXPLANATIONS`: the most `explain`s the explainer answers per PR per run.
+   * Left out (tests), none are answered by a model.
+   */
+  maxExplanations?: number;
 }
 
 export const DEFAULT_BATCH_TIMEOUT_MS = 20 * 60_000;
+
+/**
+ * `LGTMOOSE_MAX_EXPLANATIONS` (`maxExplanations`): the most `explain`s answered by a model per
+ * PR per run, for the control task and the conversation Lambda. Unset: the default.
+ */
+export function readMaxExplanations(env: Env): number {
+  const value = env.LGTMOOSE_MAX_EXPLANATIONS?.trim();
+  const limit = value ? Number(value) : DEFAULT_MAX_EXPLANATIONS;
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new Error("LGTMOOSE_MAX_EXPLANATIONS must be a whole number.");
+  }
+  return limit;
+}
 
 export function readReviewSettings(env: Env): ReviewSettings {
   const timeout = env.LGTMOOSE_BATCH_TIMEOUT_MS?.trim();
@@ -190,6 +209,7 @@ export function readReviewSettings(env: Env): ReviewSettings {
     model: env.LGTMOOSE_REVIEWER_MODEL?.trim() ?? "",
     batchTimeoutMs,
     maxReplyJudgements,
+    maxExplanations: readMaxExplanations(env),
     // Shadow mode is the safe side: only an explicit "false" posts to GitHub.
     shadow: env.LGTMOOSE_SHADOW?.trim() !== "false",
   };

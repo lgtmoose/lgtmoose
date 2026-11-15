@@ -9,7 +9,13 @@ import {
   type PreparedReview,
   type ResumedWork,
 } from "@lgtmoose/pipeline";
-import { REPLY_JUDGE_TIER, TICKET_CHECKER_TIER, buildReplyJudgePrompt } from "@lgtmoose/roles";
+import {
+  EXPLAINER_TIER,
+  REPLY_JUDGE_TIER,
+  TICKET_CHECKER_TIER,
+  buildReplyJudgePrompt,
+} from "@lgtmoose/roles";
+import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { z } from "zod";
@@ -24,6 +30,8 @@ export interface PrepareSettings {
   batchTimeoutMs: number;
   /** The most replies the reply judge reads in this run. Left out: none. */
   maxReplyJudgements?: number;
+  /** The most `explain`s the explainer answers in this run. Left out: none. */
+  maxExplanations?: number;
 }
 
 /**
@@ -55,6 +63,8 @@ export interface RunManifest {
   judgements?: JudgeJob[];
   /** The PR's linked tickets (NIC-839); their checker batches follow the judges'. */
   tickets?: TicketsManifest;
+  /** The `explain`s this run answers (NIC-1053); their batches follow the tickets'. */
+  explanations?: ExplainJob[];
 }
 
 /** A manifest written before incremental reviews: the review lacks the fields they added. */
@@ -413,6 +423,22 @@ export async function prepare(
       prepared,
       Math.max(-1, ...prepared.jobs.map((batch) => batch.index), ...judges.map((j) => j.index)) + 1,
     );
+    // Findings someone asked to have explained, after the tickets' batches.
+    const explains = await explainJobs(deps, {
+      pullRequestId: run.pullRequestId,
+      limit: settings.maxExplanations ?? 0,
+      repo,
+      repoName: `${target.owner}/${target.repo}`,
+      prNumber: target.number,
+      headSha: pr.headSha,
+      firstIndex:
+        Math.max(
+          -1,
+          ...prepared.jobs.map((batch) => batch.index),
+          ...judges.map((j) => j.index),
+          ...tickets.batches.map((ticket) => ticket.index),
+        ) + 1,
+    });
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);
@@ -461,6 +487,21 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(ticket.index), JSON.stringify(input));
       batches.push({ index: ticket.index });
     }
+    for (const explain of explains) {
+      if (explain.index === undefined || explain.prompt === undefined) continue;
+      const input: BatchInput = batchInputSchema.parse({
+        version: 1,
+        runId: run.runId,
+        index: explain.index,
+        prompt: explain.prompt,
+        role: "explain",
+        tier: EXPLAINER_TIER,
+        model: settings.model,
+        timeoutMs: Math.min(settings.batchTimeoutMs, EXPLAIN_TIMEOUT_MS),
+      });
+      await deps.store.putText(keys.batchInput(explain.index), JSON.stringify(input));
+      batches.push({ index: explain.index });
+    }
     const manifest: RunManifest = {
       version: MANIFEST_VERSION,
       installationId: job.installationId,
@@ -468,6 +509,9 @@ export async function prepare(
       ...(job.requested === undefined ? {} : { requested: job.requested }),
       ...(judges.length === 0 ? {} : { judgements: judges.map(({ prompt: _, ...rest }) => rest) }),
       ...(tickets.manifest === undefined ? {} : { tickets: tickets.manifest }),
+      ...(explains.length === 0
+        ? {}
+        : { explanations: explains.map(({ prompt: _, ...rest }) => rest) }),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {

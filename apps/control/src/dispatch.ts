@@ -249,14 +249,20 @@ async function review(
   eventAt: Date,
 ): Promise<DispatchResult> {
   await deps.store.advance(job.repo, job.prNumber, eventAt, false);
-  // A person's review command runs on a paused PR; a push, and a run for replies, don't.
-  const command = job.requested === "review" || job.requested === "full_review";
+  // A person's review or explain command runs on a paused PR; a push, and a run for replies,
+  // don't.
+  const command =
+    job.requested === "review" || job.requested === "full_review" || job.requested === "explain";
   if (!command && (await deps.store.paused(job.repo, job.prNumber))) {
     return { action: "paused" };
   }
-  // A run for replies is a run of its own even when the head was reviewed, like a full review:
-  // it judges the replies waiting, then posts the decision they lead to.
-  if (job.requested === "full_review" || job.requested === "replies") {
+  // A run for replies or an explain is a run of its own even when the head was reviewed, like
+  // a full review: it judges the replies (or explains the findings) waiting, then posts.
+  if (
+    job.requested === "full_review" ||
+    job.requested === "replies" ||
+    job.requested === "explain"
+  ) {
     return fullReview(deps, job, eventAt);
   }
   let name = executionName(job.repo, job.prNumber, job.headSha);

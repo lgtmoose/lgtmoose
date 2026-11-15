@@ -17,7 +17,7 @@ export function drizzleReplyStore(db: Db, now: () => Date = () => new Date()): R
       .where(and(inArray(pendingReplies.id, [...ids]), eq(pendingReplies.status, "pending")));
   };
   return {
-    async add({ repo, prNumber, findingId, commentId, author, body }) {
+    async add({ repo, prNumber, findingId, commentId, author, body, kind = "reply" }) {
       const [pull] = await db
         .select({ id: pullRequests.id })
         .from(pullRequests)
@@ -39,12 +39,13 @@ export function drizzleReplyStore(db: Db, now: () => Date = () => new Date()): R
           githubCommentId: commentId,
           author,
           body: text,
+          kind,
         })
         .onConflictDoNothing({ target: pendingReplies.githubCommentId })
         .returning({ id: pendingReplies.id });
       return rows.length > 0;
     },
-    async take(pullRequestId, limit) {
+    async take(pullRequestId, limit, what = "reply") {
       const rows = await db
         .select()
         .from(pendingReplies)
@@ -52,6 +53,9 @@ export function drizzleReplyStore(db: Db, now: () => Date = () => new Date()): R
           and(
             eq(pendingReplies.pullRequestId, pullRequestId),
             eq(pendingReplies.status, "pending"),
+            what === "reply"
+              ? eq(pendingReplies.kind, "reply")
+              : inArray(pendingReplies.kind, ["explain", "explain_pr"]),
           ),
         )
         .orderBy(asc(pendingReplies.createdAt));
@@ -71,6 +75,7 @@ export function drizzleReplyStore(db: Db, now: () => Date = () => new Date()): R
           author: row.author,
           body: row.body,
           attempts: row.attempts,
+          ...(row.kind === "reply" ? {} : { kind: row.kind }),
         }));
     },
     finish,

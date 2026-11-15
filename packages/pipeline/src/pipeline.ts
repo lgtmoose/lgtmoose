@@ -5,6 +5,7 @@ import {
   commentTitle,
   decide,
   dedupeFindings,
+  explanationSchema,
   fingerprint,
   fingerprintParts,
   judgementSchema,
@@ -14,6 +15,7 @@ import {
   coverageLevel,
   missingCore,
   ticketCoverageSchema,
+  type Explanation,
   type Finding,
   type HoldReason,
   type Judgement,
@@ -35,6 +37,7 @@ import {
   type ReadingDepth,
 } from "@lgtmoose/planner";
 import {
+  EXPLAINER_TIER,
   REPLY_JUDGE_TIER,
   TICKET_CHECKER_TIER,
   buildReviewerParts,
@@ -973,6 +976,46 @@ export async function runTicketCheck(
     return {
       index: job.index,
       coverage: result.output,
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
+/** What the explainer's run on one finding came to: an answer, or why it failed. */
+export interface ExplainOutcome {
+  index: number;
+  explanation?: Explanation;
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the explainer on one finding (its prompt from `buildExplainPrompt`), on the fast tier. A
+ * failed run is an outcome with `error`, never a throw.
+ */
+export async function runExplain(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<ExplainOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: explanationSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      tier: EXPLAINER_TIER,
+    });
+    return {
+      index: job.index,
+      explanation: result.output,
       transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };

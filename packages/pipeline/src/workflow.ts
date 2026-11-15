@@ -1,5 +1,6 @@
 import {
   FINDING_LIMITS,
+  explanationSchema,
   findingSchema,
   judgementSchema,
   ticketCoverageSchema,
@@ -91,6 +92,17 @@ export function headKeys(repo: string, prNumber: number, headSha: string) {
       if (!/^[A-Z][A-Z0-9]{0,9}-\d{1,7}$/.test(key)) throw new Error("Not a ticket key.");
       return `${root}tickets/${key}.json`;
     },
+    /**
+     * The explainer's answer for one finding at this head (or that it was flagged): later
+     * `explain`s of the finding at this head reuse it, so the model runs at most once.
+     */
+    explanation: (findingId: string) => {
+      // A row's UUID in the database; any one path segment of plain characters is safe.
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(findingId)) {
+        throw new Error("Not a finding ID.");
+      }
+      return `${root}explanations/${findingId}.json`;
+    },
   };
 }
 
@@ -139,10 +151,11 @@ export const batchInputSchema = z
     /**
      * What the batch runs: the reviewer on a batch of files (the default), the reply judge on
      * one person's reply to a finding (`buildReplyJudgePrompt`), whose output is a `judgement`,
-     * or the ticket checker on one ticket (`buildTicketCoveragePrompt`), whose output is a
-     * `coverage`.
+     * the ticket checker on one ticket (`buildTicketCoveragePrompt`), whose output is a
+     * `coverage`, or the explainer on one finding (`buildExplainPrompt`), whose output is an
+     * `explanation`.
      */
-    role: z.enum(["reviewer", "judge", "ticket"]).optional(),
+    role: z.enum(["reviewer", "judge", "ticket", "explain"]).optional(),
     /**
      * The model tier: the judge runs on `fast`. The sandbox then runs its provider's fast model
      * (`LGTMOOSE_FAST_MODEL`) instead of `model`.
@@ -204,6 +217,8 @@ export const batchOutputSchema = z
     judgement: judgementSchema.optional(),
     /** The ticket checker's checklist, for a ticket batch (`BatchInput.role`). Model output. */
     coverage: ticketCoverageSchema.optional(),
+    /** The explainer's answer, for an explain batch (`BatchInput.role`). Model output. */
+    explanation: explanationSchema.optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
@@ -211,10 +226,13 @@ export const batchOutputSchema = z
   .strict()
   .refine(
     (output) =>
-      [output.findings, output.judgement, output.coverage, output.error].filter(
+      [output.findings, output.judgement, output.coverage, output.explanation, output.error].filter(
         (part) => part !== undefined,
       ).length === 1,
-    { message: "a batch output has exactly one of findings, a judgement, a coverage or an error" },
+    {
+      message:
+        "a batch output has exactly one of findings, a judgement, a coverage, an explanation or an error",
+    },
   )
   .refine((output) => output.notes === undefined || output.findings !== undefined, {
     message: "only a batch with findings has notes",

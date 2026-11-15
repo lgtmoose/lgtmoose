@@ -1,5 +1,5 @@
 {
-  "id": "8e1cd9ac-1088-408d-924e-47613493d459",
+  "id": "df230ec6-4822-46e4-97f6-c2424ed9f589",
   "prevId": "41944921-cc39-46a8-b5f2-09c5b5c92876",
   "version": "7",
   "dialect": "postgresql",
@@ -1221,70 +1221,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.local_runners": {
-      "name": "local_runners",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "host": {
-          "name": "host",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "last_seen": {
-          "name": "last_seen",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.local_schedules": {
-      "name": "local_schedules",
-      "schema": "",
-      "columns": {
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "last_run_at": {
-          "name": "last_run_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.pending_replies": {
       "name": "pending_replies",
       "schema": "",
@@ -1325,6 +1261,14 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "pending_reply_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'reply'"
         },
         "status": {
           "name": "status",
@@ -1986,6 +1930,11 @@
       "name": "learning_status",
       "schema": "public",
       "values": ["pending", "active", "retired"]
+    },
+    "public.pending_reply_kind": {
+      "name": "pending_reply_kind",
+      "schema": "public",
+      "values": ["reply", "explain", "explain_pr"]
     },
     "public.pending_reply_status": {
       "name": "pending_reply_status",

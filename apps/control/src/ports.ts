@@ -294,6 +294,8 @@ export interface ControlDeps {
      */
     conversation?: {
       reply(target: PullTarget, commentId: number, body: string): Promise<void>;
+      /** A comment on the PR's conversation. */
+      comment(target: PullTarget, body: string): Promise<void>;
       /** Resolves a review thread by its GraphQL node ID. */
       resolveThread(threadId: string): Promise<void>;
     };

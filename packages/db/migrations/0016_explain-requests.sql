@@ -1,0 +1,2 @@
+CREATE TYPE "public"."pending_reply_kind" AS ENUM('reply', 'explain', 'explain_pr');--> statement-breakpoint
+ALTER TABLE "pending_replies" ADD COLUMN "kind" "pending_reply_kind" DEFAULT 'reply' NOT NULL;

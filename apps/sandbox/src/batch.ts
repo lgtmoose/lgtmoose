@@ -6,6 +6,7 @@ import {
   batchRunId,
   batchUrlsSchema,
   runBatch,
+  runExplain,
   runJudge,
   runTicketCheck,
   type BatchOutput,
@@ -146,6 +147,33 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     deps.log("reply judged", {
       index: input.index,
       kind: output.judgement?.kind,
+      error: output.error,
+    });
+    return output;
+  }
+  if (input.role === "explain") {
+    const explained = await runExplain(
+      harness,
+      { index: input.index, prompt: input.prompt },
+      {
+        cwd: checkout,
+        model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
+        timeoutMs: input.timeoutMs,
+        runId: batchRunId(input.runId, input.index),
+      },
+    );
+    const output: BatchOutput = batchOutputSchema.parse({
+      version: 1,
+      index: input.index,
+      ...(explained.explanation === undefined ? {} : { explanation: explained.explanation }),
+      ...(explained.error === undefined ? {} : { error: explained.error.slice(0, 4000) }),
+      transcriptKeys: explained.transcriptKeys.slice(0, 3),
+      ...(explained.usage === undefined ? {} : { usage: explained.usage }),
+    });
+    await put(deps, urls.output, JSON.stringify(output));
+    deps.log("finding explained", {
+      index: input.index,
+      answered: output.explanation !== undefined,
       error: output.error,
     });
     return output;

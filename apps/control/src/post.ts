@@ -35,6 +35,7 @@ import {
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import { TASK_MISSING } from "./ecs.js";
+import { answerExplanations } from "./explain.js";
 import {
   confirmFixes,
   replyWritesSchema,
@@ -116,6 +117,8 @@ interface PostProgress {
   findings?: boolean;
   /** What the reply judge led to is written: replies and resolved threads (`writeReplies`). */
   replies?: boolean;
+  /** The run's `explain`s are answered (`answerExplanations`). */
+  explanations?: boolean;
 }
 
 const postProgressSchema = z.object({
@@ -136,6 +139,7 @@ const postProgressSchema = z.object({
   quiet: z.boolean().optional(),
   findings: z.boolean().optional(),
   replies: z.boolean().optional(),
+  explanations: z.boolean().optional(),
 });
 
 /**
@@ -1479,6 +1483,33 @@ export async function post(
         deps.log("replies written", { runId, closed: replyWrites.closed, replied });
       }
       progress.replies = true;
+      await save();
+    }
+    // The `explain`s someone asked for: answered whatever the review came to.
+    const explained = manifest.explanations ?? [];
+    if (explained.length > 0 && !progress.explanations) {
+      const writer = github.conversation;
+      const replies = deps.replies;
+      if (writer !== undefined && replies !== undefined) {
+        const answered = await answerExplanations(
+          explained,
+          {
+            runId,
+            repo: `${target.owner}/${target.repo}`,
+            prNumber: target.number,
+            headSha: pr.headSha,
+          },
+          {
+            store: deps.store,
+            reply: (root, body) => writer.reply(target, root, body),
+            comment: (body) => writer.comment(target, body),
+            replies,
+            log: (message, fields) => deps.log(message, fields),
+          },
+        );
+        deps.log("explains answered", { runId, count: explained.length, answered });
+      }
+      progress.explanations = true;
       await save();
     }
     if (progress.coveredBy !== undefined) {
