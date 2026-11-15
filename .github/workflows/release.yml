@@ -1,0 +1,236 @@
+name: Release
+
+# Versioning and releases (NIC-847, docs/releasing.md).
+#
+# - On pull requests: the changeset gate (tools/release/check-changesets.mjs). When this workflow
+#   or the release tooling changes, also a dry run of the image build and scan: everything a
+#   release does except log in, push, attest and create the release.
+# - On pushes to main: changesets opens or updates the "Version packages" pull request. Merging
+#   it bumps the version and the changelog. It publishes nothing.
+# - On a `v*` tag, pushed by the owner (docs/releasing.md): builds the control, egress proxy and
+#   sandbox images for arm64, checks they start and scans them with Trivy, then pushes them to
+#   GHCR with an SBOM and a build provenance attestation, and creates the GitHub release with
+#   each image's digest. Nothing is pushed if a scan fails.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a release halfway through pushing images.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changesets:
+    name: changeset check
+    if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Test the release tooling
+        run: node --test tools/release/check-changesets.test.mjs tools/release/release-notes.test.mjs
+      - name: Check this pull request's changesets
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: node tools/release/check-changesets.mjs "$BASE"
+
+  # Which of the image jobs below run: a dry run on pull requests that change the release
+  # setup, the real thing on a tag.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == push && "$REF" == refs/tags/v* ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT" == pull_request ]] && git diff --name-only "origin/$BASE...HEAD" \
+              | grep -qE '^(\.github/workflows/release\.yml|tools/release/)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  version:
+    name: version pull request
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      # Opens or updates "Version packages" from the pending changesets. No `publish`: a release
+      # happens only when the owner pushes a tag.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          version: pnpm changeset version
+          title: Version packages
+          commit: Version packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  images:
+    name: image (${{ matrix.image.name }})
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        image:
+          - { name: control, file: apps/control/Dockerfile, context: . }
+          - { name: egress-proxy, file: apps/egress-proxy/Dockerfile, context: apps/egress-proxy }
+          # Without build args: the Cursor CLI isn't installed, since its checksum isn't recorded
+          # (sandboxBuildArgs in infra/cdk). Deploy from a build to use cursor-agent.
+          - { name: sandbox, file: infra/sandbox/Dockerfile, context: . }
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/lgtmoose-${{ matrix.image.name }}
+      LOCAL: lgtmoose-${{ matrix.image.name }}:release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the tag matches the version
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./apps/cli/package.json").version')"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::Tag $TAG doesn't match apps/cli/package.json's version $version."
+            exit 1
+          fi
+      # Deployments run on arm64 (IMAGE_ARCH in infra/cdk), built here under emulation.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build for arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.file }}
+          platforms: linux/arm64
+          load: true
+          tags: ${{ env.LOCAL }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+      # As security.yml checks them: each image still runs what it needs, read-only.
+      - name: Check the image starts
+        env:
+          NAME: ${{ matrix.image.name }}
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --platform linux/arm64 --read-only "$@"; }
+          case "$NAME" in
+            egress-proxy)
+              run --entrypoint node "$LOCAL" --version ;;
+            control)
+              run --entrypoint sh "$LOCAL" -c \
+                'node --version && git --version && ! command -v npm && test -f /app/dist/index.js' ;;
+            sandbox)
+              run --tmpfs /tmp -e HOME=/tmp --entrypoint sh "$LOCAL" -c \
+                'node --version && claude --version && codex --version && ! command -v npm && ! command -v cursor-agent && test -f /app/dist/index.js' ;;
+          esac
+      # The release gate: high and critical vulnerabilities with a fix fail it, as in security.yml.
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          format: table
+      - name: Log in to GHCR
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The same build again, from the cache, pushed with an SBOM and BuildKit provenance.
+      - name: Push
+        id: push
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.file }}
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          provenance: mode=max
+          sbom: true
+      # GitHub's attestation, checked with `gh attestation verify` (docs/releasing.md).
+      - name: Attest the build
+        if: needs.plan.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: GitHub release
+    needs: [plan, images]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Write the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          digest() {
+            docker buildx imagetools inspect "ghcr.io/$OWNER/lgtmoose-$1:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"'
+          }
+          node tools/release/release-notes.mjs "$TAG" "$OWNER" \
+            "$(digest control)" "$(digest sandbox)" "$(digest egress-proxy)" > notes.md
+          cat notes.md
+      - name: Create the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$TAG" --title "LGTMoose $TAG" --notes-file notes.md --verify-tag

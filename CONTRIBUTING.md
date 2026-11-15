@@ -11,6 +11,7 @@ Thanks for helping. LGTMoose is pre-alpha, so expect things to move.
 ## Pull requests
 
 - Keep PRs focused on one change and describe what changed and why.
+- Add a changeset when you change code under `apps/`, `packages/` or `infra/`: `pnpm changeset`, naming `lgtmoose`, or `pnpm changeset --empty` for a change nobody running LGTMoose would notice. See [.changeset/README.md](.changeset/README.md).
 - Add or update tests for behaviour changes. Logic in `packages/core` should stay pure and fully tested.
 - No HTTP `PATCH` routes or clients: use `PUT`.
 - No nested ternaries.
