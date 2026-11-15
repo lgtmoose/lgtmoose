@@ -10,6 +10,7 @@ import {
   headKeys,
   runKeys,
   type BatchOutput,
+  type PullComment,
   type PullReader,
   type PullRequest,
 } from "@lgtmoose/pipeline";
@@ -372,6 +373,8 @@ interface Setup {
   review?: () => { state: string; commitId: string };
   /** The PR's state when it's read. */
   state?: string;
+  /** The PR's comments when they're read; none by default. */
+  comments?: () => PullComment[];
 }
 
 function harness(setup: Setup = {}) {
@@ -445,7 +448,7 @@ function harness(setup: Setup = {}) {
   const tasks = new Map<string, string>();
   const reader: PullReader = {
     pull: async () => ({ ...pull(setup.head ?? headSha), state: setup.state ?? "open" }),
-    comments: async () => [],
+    comments: async () => setup.comments?.() ?? [],
     ...(reviewOf === undefined
       ? {}
       : {
@@ -1773,6 +1776,10 @@ describe("later runs", { timeout: 30_000 }, () => {
         events.push(`${id} ${type}`);
       };
       h.findings.disputesAnswered = async () => new Set();
+      h.findings.fixedCommentIds = async () =>
+        h.findings.rows.flatMap((row) =>
+          row.status === "fixed" && row.githubCommentId !== undefined ? [row.githubCommentId] : [],
+        );
       const github = h.deps.github.bind(h.deps);
       h.deps.github = async (installationId) => ({
         ...(await github(installationId)),
@@ -1793,6 +1800,7 @@ describe("later runs", { timeout: 30_000 }, () => {
       h: ReturnType<typeof harness>,
       n: number,
       judgement: NonNullable<BatchOutput["judgement"]>,
+      found: Finding[] = [],
     ) {
       const prepared = await prepare(h.deps, { ...JOB, requested: "replies" }, exec(n), {
         ...SETTINGS,
@@ -1806,7 +1814,7 @@ describe("later runs", { timeout: 30_000 }, () => {
           JSON.stringify(
             judges.has(batch.index)
               ? { version: 1, index: batch.index, judgement, transcriptKeys: [] }
-              : output({ index: batch.index, findings: [] }),
+              : output({ index: batch.index, findings: found }),
           ),
         );
       }
@@ -1845,6 +1853,82 @@ describe("later runs", { timeout: 30_000 }, () => {
       expect(posted).toMatchObject({ event: "APPROVE" });
       expect(r.writes).toEqual(["resolve PRRT_1"]);
       expect(r.marked).toMatchObject({ judged: ["r1"] });
+    });
+
+    /** Our inline comment on the loop finding, as GitHub lists it among the PR's comments. */
+    const ourComment = (): PullComment => ({
+      id: 1000,
+      author: "lgtmoose[bot]",
+      authorType: "bot",
+      body: "**Loop skips the last item**\n\nThe bound drops the last item from the total.",
+      path: "src/total.ts",
+      line: 3,
+      side: "RIGHT",
+    });
+    const touchTotal = async (to: string) => {
+      headSha = await commit(
+        { "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", `sum += ${to};`) },
+        `touch ${to}`,
+      );
+    };
+
+    /** A harness whose PR lists our comment once run 1 has posted it. */
+    function withOurComment() {
+      let posted = false;
+      const h = harness({
+        commentIds: true,
+        threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
+        comments: () => (posted ? [ourComment()] : []),
+      });
+      return {
+        h,
+        first: async () => {
+          await review(h, 1, [finding()]);
+          posted = true;
+          expect(h.findings.rows).toMatchObject([{ githubCommentId: 1000 }]);
+        },
+      };
+    }
+
+    it("keeps a fix open when the same run's reviewer finds it again", async () => {
+      const { h, first } = withOurComment();
+      await first();
+      const r = withReplies(h, { body: "Fixed: the bound is right now.", author: "dev" });
+      // The author touches the file and says it's fixed; the judge is persuaded.
+      await touchTotal("items[i].price!");
+
+      const { prepared, posted } = await judgedRun(h, 2, { kind: "fixed", fixed_at_head: true }, [
+        finding(),
+      ]);
+
+      // The reviewer read the file without our comment on it...
+      expect(promptOf(h, prepared.runId)).toContain("src/total.ts");
+      expect(promptOf(h, prepared.runId)).not.toContain("The bound drops the last item");
+      // ...raised it again, and wins: still open, no approval, one "still there" reply.
+      expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+      expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
+      expect(r.writes).toHaveLength(1);
+      expect(r.writes[0]).toMatch(/^reply 1000: The review of this commit found this again/);
+      // Not posted a second time: it's the same finding.
+      expect(reviews(h)).toBe(1);
+    });
+
+    it("reopens a fixed finding the reviewer raises again in a later run", async () => {
+      const { h, first } = withOurComment();
+      await first();
+      withReplies(h, { body: "Fixed now.", author: "dev" });
+      await touchTotal("items[i].price!");
+      await judgedRun(h, 2, { kind: "fixed", fixed_at_head: true });
+      expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+
+      await touchTotal("items[i].price ?? 0");
+      const { prepared, posted } = await review(h, 3, [finding()]);
+
+      // Our comment on a fixed finding doesn't stand for it: not in the prompt, and not a
+      // duplicate. The re-raise is posted, reopens the finding and counts.
+      expect(promptOf(h, prepared.runId)).not.toContain("The bound drops the last item");
+      expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+      expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
     });
 
     it("keeps a blocking finding open when the author says it's fixed but nothing changed", async () => {

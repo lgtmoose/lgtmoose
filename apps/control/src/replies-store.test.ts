@@ -129,6 +129,35 @@ describe("finding store, for replies", () => {
     expect((await findingStore.closedFindings(prId)).map((row) => row.id)).toEqual([id]);
   });
 
+  it("reopens a fixed finding the reviewer raises again, and never drops the re-raise", async () => {
+    const prId = await pull(75);
+    const id = await finding(prId, 7501);
+    await findingStore.closeForReply?.(id, "fixed", { login: "dev", commentId: 8 }, "h2");
+    expect(await findingStore.fixedCommentIds?.(prId)).toEqual([7501]);
+    // Not among the closed findings, whose re-raises are dropped.
+    expect(await findingStore.closedFindings(prId)).toEqual([]);
+    const [row] = await db.select().from(findings).where(eq(findings.id, id));
+    if (row === undefined) throw new Error("no finding");
+    await findingStore.saveFindings(prId, undefined as unknown as string, "h3", [
+      {
+        fingerprint: row.fingerprint,
+        finding: {
+          rule_category: row.ruleCategory,
+          severity: row.severity,
+          path: "src/a.ts",
+          line: 10,
+          side: "RIGHT",
+          title: row.title,
+          body: row.body,
+          evidence: "x",
+        },
+      },
+    ]);
+    expect((await findingStore.trackedFindings(prId)).map((tracked) => tracked.id)).toEqual([id]);
+    const events = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect(events.map((event) => event.type)).toEqual(["fixed", "raised"]);
+  });
+
   it("knows which disputes it answered", async () => {
     const prId = await pull(73);
     const id = await finding(prId, 7301);

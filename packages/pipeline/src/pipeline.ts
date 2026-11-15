@@ -122,6 +122,14 @@ export interface ReviewReport {
    * the finding itself): counted at that severity, and to store with it.
    */
   escalated: { fingerprint: string; severity: Severity }[];
+  /**
+   * Earlier open findings (by stored fingerprint) one of this run's findings was matched to:
+   * the reviewer raised them again at this head. A finding someone says is fixed stays open
+   * when it's here.
+   */
+  reraised: string[];
+  /** Files a batch of this run reviewed (not done by blob, not failed). */
+  reviewedNow: string[];
   /** File versions this run reviewed, to record so a later run can skip them. */
   reviewedFiles: ReviewedFile[];
   /** Other reviewers' open findings counted in the decision (`FinishOptions.others`). */
@@ -304,6 +312,13 @@ export interface PrepareOptions {
   reviewed?: readonly ReviewedBlob[];
   /** Unposted runs' finished batches: their files are done and their findings carried over. */
   resumed?: readonly ResumedWork[];
+  /**
+   * Review threads (by their first comment's ID) left out of the reviewer's context: our
+   * findings someone says are fixed. Without our comment, the reviewer isn't told not to raise
+   * them again, so it checks the code at head on its own (see `ReviewReport.reraised`). They
+   * still count for duplicate checks.
+   */
+  hiddenThreads?: ReadonlySet<number>;
 }
 
 /** What one batch's reviewer run returned. Findings are placed and checked in `finishReview`. */
@@ -529,7 +544,14 @@ export async function prepareReview(
       baseRef: pr.baseRef,
       headRef: pr.headRef,
     },
-    comments: contextComments(comments),
+    comments: contextComments(
+      comments.filter((comment) => {
+        const hidden = options.hiddenThreads;
+        if (hidden === undefined) return true;
+        const root = comment.inReplyTo ?? comment.id;
+        return root === undefined || !hidden.has(root);
+      }),
+    ),
     conventions: conventions.files,
     rulePacks,
   };
@@ -882,16 +904,20 @@ export async function finishReview(
   // alone) counts at the higher severity.
   const ourPrints = new Set(ours.map((entry) => entry.fingerprint));
   const raisedTo = new Map<string, Severity>();
+  // Every earlier finding matched at all, at any severity.
+  const reraisedPrints = new Set<string>();
   for (const dropped of deduped.dropped) {
     const { finding } = dropped;
     const matched = storedOf.get(dropped.matched) ?? dropped.matched;
     if (!ourPrints.has(matched)) continue;
+    reraisedPrints.add(matched);
     const known =
       raisedTo.get(matched) ?? ours.find((e) => e.fingerprint === matched)?.finding.severity;
     if (known === undefined || severityRank(finding.severity) < severityRank(known)) {
       raisedTo.set(matched, finding.severity);
     }
   }
+  const reraised = [...reraisedPrints];
   const escalated = ours.flatMap((entry) => {
     const severity = raisedTo.get(entry.fingerprint);
     return severity === undefined || severity === entry.finding.severity
@@ -999,6 +1025,11 @@ export async function finishReview(
     kind: prepared.kind,
     posted,
     escalated,
+    reraised,
+    // Not a file with findings cut past the limit: one of those could have been the re-raise.
+    reviewedNow: statuses.flatMap(({ file, status }) =>
+      status === "reviewed" && !unsettled.has(file.path) ? [file.path] : [],
+    ),
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
     others: others.length,
     misses: reviewerMisses(

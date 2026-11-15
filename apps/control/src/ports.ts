@@ -156,6 +156,12 @@ export interface FindingStore {
   ): Promise<void>;
   /** The findings among `ids` with a `dispute_answered` event: never answered twice. */
   disputesAnswered?(ids: readonly string[]): Promise<Set<string>>;
+  /**
+   * Our inline comments on the PR's findings closed as fixed after a reply. They aren't a
+   * reason to drop the reviewer raising the problem again, so they're left out of its context
+   * and of the duplicate check against the PR's comments: a re-raise reopens the finding.
+   */
+  fixedCommentIds?(pullRequestId: string): Promise<number[]>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */

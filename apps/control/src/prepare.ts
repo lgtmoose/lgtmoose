@@ -13,7 +13,8 @@ import { REPLY_JUDGE_TIER, buildReplyJudgePrompt } from "@lgtmoose/roles";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
-import type { ControlDeps } from "./ports.js";
+import type { ControlDeps, FindingRecord } from "./ports.js";
+import type { PendingReply } from "./replies.js";
 
 /** How the batches are run, from the control task's environment. */
 export interface PrepareSettings {
@@ -248,21 +249,42 @@ async function fileChangedSince(
  * oldest first, up to the limit), on findings still open or outdated, each with its prompt and
  * a batch index after the review's. A reply on a finding closed since is skipped.
  */
-async function judgeJobs(
+async function takeReplies(
   deps: ControlDeps,
   pullRequestId: string,
-  repo: Repo,
-  headSha: string,
-  prepared: PreparedReview,
   settings: PrepareSettings,
-): Promise<(JudgeJob & { prompt: string })[]> {
+): Promise<{ pending: PendingReply[]; open: Map<string, FindingRecord> }> {
   const limit = settings.maxReplyJudgements ?? 0;
-  if (deps.replies === undefined || limit <= 0) return [];
+  if (deps.replies === undefined || limit <= 0) return { pending: [], open: new Map() };
   const pending = await deps.replies.take(pullRequestId, limit);
-  if (pending.length === 0) return [];
+  if (pending.length === 0) return { pending, open: new Map() };
   const open = new Map(
     (await deps.findings.trackedFindings(pullRequestId)).map((record) => [record.id, record]),
   );
+  return { pending, open };
+}
+
+/**
+ * The review threads of findings someone replied on, left out of the reviewer's context: so the
+ * reviewer, not told about our comment, checks a claimed fix on its own (`hiddenThreads`).
+ */
+function repliedThreads(taken: Awaited<ReturnType<typeof takeReplies>>): Set<number> {
+  return new Set(
+    taken.pending.flatMap((reply) => {
+      const id = taken.open.get(reply.findingId)?.githubCommentId;
+      return id === undefined ? [] : [id];
+    }),
+  );
+}
+
+async function judgeJobs(
+  deps: ControlDeps,
+  { pending, open }: Awaited<ReturnType<typeof takeReplies>>,
+  repo: Repo,
+  headSha: string,
+  prepared: PreparedReview,
+): Promise<(JudgeJob & { prompt: string })[]> {
+  if (pending.length === 0 || deps.replies === undefined) return [];
   const first = Math.max(-1, ...prepared.jobs.map((job) => job.index)) + 1;
   const judges: (JudgeJob & { prompt: string })[] = [];
   const gone: string[] = [];
@@ -354,6 +376,7 @@ export async function prepare(
       token: await github.token(),
     });
     const { learnings } = deps;
+    const taken = await takeReplies(deps, run.pullRequestId, settings);
     const prepared = await prepareReview(
       {
         github: github.reader,
@@ -368,10 +391,17 @@ export async function prepare(
       target,
       repo,
       pr,
-      { reviewed, resumed },
+      {
+        reviewed,
+        resumed,
+        hiddenThreads: new Set([
+          ...repliedThreads(taken),
+          ...((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []),
+        ]),
+      },
     );
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
-    const judges = await judgeJobs(deps, run.pullRequestId, repo, pr.headSha, prepared, settings);
+    const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);

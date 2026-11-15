@@ -1,6 +1,7 @@
 import type { Judgement } from "@lgtmoose/core";
 import { describe, expect, it } from "vitest";
 import {
+  confirmFixes,
   replyWritesSchema,
   settleReplies,
   writeReplies,
@@ -30,6 +31,7 @@ function settleDeps(judgements: Record<number, Judgement | undefined>) {
         ruleCategory: "bug",
         path: "a.ts",
         status: "open",
+        fingerprint: "p1",
         githubCommentId: 100,
       },
       {
@@ -38,6 +40,7 @@ function settleDeps(judgements: Record<number, Judgement | undefined>) {
         ruleCategory: "bug",
         path: "b.ts",
         status: "open",
+        fingerprint: "p2",
         githubCommentId: 200,
       },
     ],
@@ -55,13 +58,13 @@ function settleDeps(judgements: Record<number, Judgement | undefined>) {
 }
 
 describe("settleReplies", () => {
-  it("closes what the policy allows and lists the GitHub writes", async () => {
+  it("closes what the policy allows, holds fixes for the review, and lists the writes", async () => {
     const { deps, closed } = settleDeps({
       3: { kind: "fixed", fixed_at_head: true },
       4: { kind: "declined" },
       5: { kind: "question", text: "Because it retries." },
     });
-    const writes = await settleReplies(
+    const { writes, fixes } = await settleReplies(
       [
         reply(),
         // The PR's author can't decline a blocking finding: held, with one reply.
@@ -72,24 +75,77 @@ describe("settleReplies", () => {
       ],
       deps,
     );
-    expect(closed).toEqual([{ id: "f1", status: "fixed" }]);
-    expect(writes.closed).toBe(1);
+    // The fix isn't closed yet: the run's review decides (`confirmFixes`).
+    expect(closed).toEqual([]);
+    expect(fixes).toEqual([
+      {
+        findingId: "f1",
+        fingerprint: "p1",
+        path: "a.ts",
+        commentId: 501,
+        author: "dev",
+        threadRootId: 100,
+        threadId: "thread-100",
+      },
+    ]);
+    expect(writes.closed).toBe(0);
     expect(writes.skipped).toEqual(["r4"]);
     expect(writes.judged).toEqual(["r1", "r2", "r3"]);
     expect(writes.writes).toMatchObject([
-      { findingId: "f1", threadId: "thread-100", threadRootId: 100 },
       { findingId: "f2", threadRootId: 200, replyEvent: "replied" },
       { findingId: "f1", threadRootId: 100, replyEvent: "replied" },
     ]);
-    expect(writes.writes[1]?.threadId).toBeUndefined();
+    expect(writes.writes[0]?.threadId).toBeUndefined();
     expect(replyWritesSchema.parse(JSON.parse(JSON.stringify(writes)))).toEqual(writes);
   });
 
   it("counts a failed judge as an attempt and writes nothing for it", async () => {
     const { deps, closed } = settleDeps({});
-    const writes = await settleReplies([reply()], deps);
+    const { writes } = await settleReplies([reply()], deps);
     expect(writes).toMatchObject({ failed: ["r1"], judged: [], writes: [], closed: 0 });
     expect(closed).toEqual([]);
+  });
+});
+
+describe("confirmFixes", () => {
+  const fix = (findingId: string, fingerprint: string, path: string) => ({
+    findingId,
+    fingerprint,
+    path,
+    commentId: 501,
+    author: "dev",
+    threadRootId: 100,
+    threadId: `thread-${findingId}`,
+  });
+  const empty = () => ({
+    version: 1 as const,
+    judged: [],
+    failed: [],
+    skipped: [],
+    writes: [],
+    closed: 0,
+  });
+
+  it("closes a fix only when the run reviewed its file and didn't raise it again", async () => {
+    const closed: string[] = [];
+    const writes = empty();
+    const ids = await confirmFixes(
+      [fix("ok", "p1", "a.ts"), fix("again", "p2", "a.ts"), fix("unread", "p3", "b.ts")],
+      { reraised: ["p2"], reviewedNow: ["a.ts"] },
+      writes,
+      async (id) => {
+        closed.push(id);
+        return true;
+      },
+    );
+    expect(ids).toEqual(["ok"]);
+    expect(closed).toEqual(["ok"]);
+    expect(writes.closed).toBe(1);
+    expect(writes.writes).toMatchObject([
+      { findingId: "ok", threadId: "thread-ok" },
+      { findingId: "again", reply: expect.stringContaining("found this again") },
+      { findingId: "unread", reply: expect.stringContaining("wasn't reviewed again") },
+    ]);
   });
 });
 

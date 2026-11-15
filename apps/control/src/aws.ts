@@ -626,6 +626,19 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         .insert(findingEvents)
         .values({ findingId, type, actor: "self", sha, githubCommentId: commentId });
     },
+    async fixedCommentIds(pullRequestId) {
+      const rows = await db
+        .select({ id: findings.githubCommentId })
+        .from(findings)
+        .where(
+          and(
+            eq(findings.pullRequestId, pullRequestId),
+            eq(findings.source, "self"),
+            eq(findings.status, "fixed"),
+          ),
+        );
+      return rows.flatMap((row) => (row.id === null ? [] : [row.id]));
+    },
     async disputesAnswered(ids) {
       if (ids.length === 0) return new Set();
       const rows = await db

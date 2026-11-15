@@ -20,6 +20,7 @@ import {
   runKeys,
   type BatchOutcome,
   type EarlierFinding,
+  type PreparedReview,
   type PullReader,
   type PullTarget,
   type ReviewReport,
@@ -35,10 +36,13 @@ import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import { TASK_MISSING } from "./ecs.js";
 import {
+  confirmFixes,
   replyWritesSchema,
   settleReplies,
   writeReplies,
+  type FixCandidate,
   type ReplyWrites,
+  type SettleDeps,
 } from "./judged-replies.js";
 import { readJudgement, readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
@@ -214,7 +218,16 @@ async function settleRunReplies(
     threadId: (firstCommentId: number) => string | undefined;
     pullRequestId: string;
   },
-): Promise<ReplyWrites | undefined> {
+): Promise<
+  | {
+      writes: ReplyWrites;
+      /** Already saved by an earlier attempt: nothing to decide, confirm or save again. */
+      saved: boolean;
+      fixes: FixCandidate[];
+      close: SettleDeps["close"];
+    }
+  | undefined
+> {
   const judged = manifest.judgements ?? [];
   const { findings } = deps;
   if (
@@ -225,10 +238,13 @@ async function settleRunReplies(
   ) {
     return undefined;
   }
-  const key = runKeys(runId).replies;
-  const saved = await deps.store.getText(key);
-  if (saved !== undefined) return replyWritesSchema.parse(JSON.parse(saved));
-  const close = findings.closeForReply.bind(findings);
+  const closeFinding = findings.closeForReply.bind(findings);
+  const close: SettleDeps["close"] = (id, status, reply) =>
+    closeFinding(id, status, reply, manifest.review.pr.headSha);
+  const saved = await deps.store.getText(runKeys(runId).replies);
+  if (saved !== undefined) {
+    return { writes: replyWritesSchema.parse(JSON.parse(saved)), saved: true, fixes: [], close };
+  }
   const answered = findings.disputesAnswered.bind(findings);
   const settled = await settleReplies(judged, {
     judgement: (index) => readJudgement(deps.store, runId, index),
@@ -236,15 +252,26 @@ async function settleRunReplies(
     threadId: context.threadId,
     prAuthor: context.prAuthor,
     permission: context.permission,
-    close: (id, status, reply) => close(id, status, reply, manifest.review.pr.headSha),
+    close,
     disputesAnswered: answered,
     log: (message, fields) => deps.log(message, fields),
   });
-  // Written once: an attempt racing this one decided the same replies, and its file stands.
-  const created = await deps.store.createText(key, JSON.stringify(settled));
-  if (created !== undefined) return settled;
+  return { ...settled, saved: false, close };
+}
+
+/**
+ * Saves what the judged replies led to, once: an attempt racing this one decided the same
+ * replies, and its file stands.
+ */
+async function saveReplyWrites(
+  deps: ControlDeps,
+  runId: string,
+  writes: ReplyWrites,
+): Promise<ReplyWrites> {
+  const key = runKeys(runId).replies;
+  if ((await deps.store.createText(key, JSON.stringify(writes))) !== undefined) return writes;
   const theirs = await deps.store.getText(key);
-  return theirs === undefined ? settled : replyWritesSchema.parse(JSON.parse(theirs));
+  return theirs === undefined ? writes : replyWritesSchema.parse(JSON.parse(theirs));
 }
 
 /** `read`, called the first time only: its promise is shared by every later call. */
@@ -894,7 +921,7 @@ export async function post(
   // People's replies on our findings, as the reply judge read them: the findings they close are
   // closed before the decision, so it counts them closed. What to write on GitHub waits for the
   // claim, below.
-  const replyWrites = await settleRunReplies(deps, runId, manifest, {
+  const replied = await settleRunReplies(deps, runId, manifest, {
     prAuthor: pr.author,
     permission: memo(async (login: string) =>
       github.permission === undefined ? "none" : github.permission(target, login),
@@ -1009,16 +1036,48 @@ export async function post(
               ),
             ),
           });
-    report = await finishReview(repo, prepared, outcomes, latest.headSha, {
-      earlier: earlier.open.map(withoutId),
-      closed,
-      stored: records.map((record) => ({
-        fingerprint: record.fingerprint,
-        severity: record.severity,
-      })),
-      others,
-      heldResolutions,
-    });
+    // Threads of findings closed as fixed after a reply don't stand for them: the reviewer raising
+    // one again is a new finding, which reopens it.
+    const fixedThreads = new Set((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []);
+    const reviewed: PreparedReview =
+      fixedThreads.size === 0
+        ? prepared
+        : {
+            ...prepared,
+            comments: prepared.comments.filter((comment) => {
+              const root = comment.inReplyTo ?? comment.id;
+              return root === undefined || !fixedThreads.has(root);
+            }),
+          };
+    const finish = (open: typeof earlier.open) =>
+      finishReview(repo, reviewed, outcomes, latest.headSha, {
+        earlier: open.map(withoutId),
+        closed,
+        stored: records.map((record) => ({
+          fingerprint: record.fingerprint,
+          severity: record.severity,
+        })),
+        others,
+        heldResolutions,
+      });
+    report = await finish(earlier.open);
+    // Fixes the judge saw are checked against this run's review, which read their files without
+    // our comments on them: a re-raise keeps a finding open. Those that hold up are closed, and
+    // the decision is made again without them.
+    if (replied !== undefined && replied.fixes.length > 0) {
+      const fixed = new Set(
+        await confirmFixes(replied.fixes, report, replied.writes, replied.close),
+      );
+      deps.log("claimed fixes checked against the review", {
+        runId,
+        claimed: replied.fixes.length,
+        closed: fixed.size,
+        reraised: report.reraised.length,
+        reviewed: report.reviewedNow.length,
+      });
+      if (fixed.size > 0)
+        report = await finish(earlier.open.filter((entry) => !fixed.has(entry.id)));
+    }
     if (report.others > 0 || report.misses.length > 0) {
       deps.log("other reviewers' findings", {
         runId,
@@ -1028,6 +1087,12 @@ export async function post(
     }
   } finally {
     await work.remove();
+  }
+  let replyWrites: ReplyWrites | undefined;
+  if (replied !== undefined) {
+    replyWrites = replied.saved
+      ? replied.writes
+      : await saveReplyWrites(deps, runId, replied.writes);
   }
 
   // Two claims, both held before the first write to GitHub. The run's: attempts of this run
