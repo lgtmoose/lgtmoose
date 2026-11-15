@@ -12,6 +12,7 @@ export const REVIEW_JOB_KINDS = [
   "pr_ready",
   "pr_closed",
   "pr_labeled",
+  "pr_checks",
   "comment",
   "review",
   "review_comment",
@@ -112,7 +113,17 @@ const KINDS: Record<string, Record<string, ReviewJobKind>> = {
   pull_request_review: { submitted: "review" },
   pull_request_review_comment: { created: "review_comment" },
   pull_request_review_thread: { resolved: "thread_resolved", unresolved: "thread_unresolved" },
+  // A check finishing may be what a PR's review waits for (`review.wait_for_checks`, NIC-1078).
+  // The dispatcher drops it unless the PR waits on that head, so it costs nothing elsewhere.
+  check_suite: { completed: "pr_checks" },
+  check_run: { completed: "pr_checks" },
 };
+
+/**
+ * LGTMoose's own check run (`CHECK_NAME` in @lgtmoose/poster). Its finishing is never what a
+ * review waits for, so it makes no job.
+ */
+const OWN_CHECK_NAME = "LGTMoose";
 
 export function isReviewJobKind(value: unknown): value is ReviewJobKind {
   return typeof value === "string" && (REVIEW_JOB_KINDS as readonly string[]).includes(value);
@@ -171,13 +182,41 @@ const BOT_REVIEW_REQUEST = /^[ \t]*@[A-Za-z0-9-]+[ \t]+review\b/im;
 
 /** Whether a bot's event may be a trusted agent's review trigger (see `ReviewJob.botActor`). */
 function botTrigger(kind: ReviewJobKind, payload: Json): boolean {
-  if (kind === "pr_labeled") return true;
+  // CI runs as a bot: a check finishing is a fact about the head, nobody asking for anything.
+  if (kind === "pr_labeled" || kind === "pr_checks") return true;
   if (kind !== "comment") return false;
   return BOT_REVIEW_REQUEST.test(str(record(payload.comment)?.body) ?? "");
 }
 
+/**
+ * The PR a finished check suite or check run is about: the first of its `pull_requests` whose
+ * head is the commit it checked. GitHub leaves the list empty for a fork's PR; the reconciler
+ * catches those. Shaped like a PR payload (its number and head), the rest left out.
+ */
+function checkedPullRequest(event: string, payload: Json): Json | undefined {
+  const check = record(event === "check_suite" ? payload.check_suite : payload.check_run);
+  if (check === undefined) return undefined;
+  if (event === "check_run" && str(check.name) === OWN_CHECK_NAME) return undefined;
+  const sha = str(check.head_sha);
+  if (sha === undefined) return undefined;
+  const pulls = Array.isArray(check.pull_requests) ? check.pull_requests : [];
+  for (const candidate of pulls) {
+    const pull = record(candidate);
+    if (pull !== undefined && str(record(pull.head)?.sha) === sha) {
+      const at = isoTime(check.completed_at) ?? isoTime(check.updated_at);
+      return {
+        number: pull.number,
+        head: { sha },
+        ...(at === undefined ? {} : { updated_at: at }),
+      };
+    }
+  }
+  return undefined;
+}
+
 /** The PR the event is about. issue_comment carries it as an issue with a `pull_request` key. */
 function pullRequestOf(event: string, payload: Json): Json | undefined {
+  if (event === "check_suite" || event === "check_run") return checkedPullRequest(event, payload);
   if (event !== "issue_comment") return record(payload.pull_request);
   const issue = record(payload.issue);
   return issue !== undefined && record(issue.pull_request) !== undefined ? issue : undefined;
@@ -295,7 +334,7 @@ export function toReviewJob(
     actor,
     ...trigger(kind, body),
     ...(label === undefined ? {} : { label }),
-    ...(bot && kind !== "pr_closed" ? { botActor: true as const } : {}),
+    ...(bot && kind !== "pr_closed" && kind !== "pr_checks" ? { botActor: true as const } : {}),
     receivedAt: options.receivedAt.toISOString(),
     ...(eventAt === undefined ? {} : { eventAt }),
   };

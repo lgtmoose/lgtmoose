@@ -4,6 +4,7 @@ import { SQSClient } from "@aws-sdk/client-sqs";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { databasePool } from "./database.js";
 import {
+  drizzleChecksWaits,
   drizzleDispatchStore,
   sfnExecutions,
   sqsConversationQueue,
@@ -41,6 +42,7 @@ function dispatchDeps(): Promise<DispatchDeps> {
     return {
       executions: sfnExecutions(new SFNClient({}), env.stateMachineArn),
       store: drizzleDispatchStore(drizzle({ client: pool })),
+      checksWaits: drizzleChecksWaits(drizzle({ client: pool })),
       deadLetter: sqsDeadLetter(sqs, env.deadLetterQueueUrl),
       ...(env.conversationQueueUrl === undefined
         ? {}

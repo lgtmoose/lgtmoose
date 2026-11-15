@@ -168,6 +168,20 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).not.toContain("Applied");
   });
 
+  it("notes how the run started, escaped, such as a review that didn't wait for CI (NIC-1078)", () => {
+    const text = renderSummary(
+      input({
+        notices: [
+          "This review didn't wait for CI: after 60 minutes, e2e @team still hadn't finished.",
+        ],
+      }),
+    );
+    expect(text).toContain(
+      "_This review didn\\'t wait for CI\\: after 60 minutes\\, e2e \\@\u2060team",
+    );
+    expect(renderSummary(input())).not.toContain("didn");
+  });
+
   it("lists files the PR no longer changes, with what they no longer add, escaped", () => {
     const summary = renderSummary(
       input({

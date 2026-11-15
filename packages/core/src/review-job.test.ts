@@ -435,3 +435,63 @@ describe("helpers", () => {
     expect(isReviewJobKind(undefined)).toBe(false);
   });
 });
+
+describe("toReviewJob: checks finishing (NIC-1078)", () => {
+  const ci = { login: "ci-runner[bot]", type: "Bot" };
+  const other = "f".repeat(40);
+  function checkEvent(
+    event: "check_suite" | "check_run",
+    check: Record<string, unknown> = {},
+    action = "completed",
+  ) {
+    return {
+      action,
+      [event]: {
+        name: "build",
+        head_sha: head,
+        completed_at: "2026-11-12T09:59:30Z",
+        pull_requests: [
+          { number: 9, head: { sha: other } },
+          { number: 17, head: { sha: head } },
+        ],
+        ...check,
+      },
+      repository,
+      installation,
+      sender: ci,
+    };
+  }
+
+  it.each(["check_suite", "check_run"] as const)(
+    "maps a finished %s to a check job for the PR at that head, from a bot",
+    (event) => {
+      expect(toReviewJob(event, checkEvent(event), options)).toEqual({
+        ...base,
+        kind: "pr_checks",
+        headSha: head,
+        actor: "ci-runner[bot]",
+        eventAt: "2026-11-12T09:59:30.000Z",
+      });
+    },
+  );
+
+  it("ignores a check that hasn't finished, LGTMoose's own, and one naming no PR at its head", () => {
+    expect(toReviewJob("check_run", checkEvent("check_run", {}, "created"), options)).toEqual({
+      ignored: "unsupported action: check_run.created",
+    });
+    expect(
+      toReviewJob("check_run", checkEvent("check_run", { name: "LGTMoose" }), options),
+    ).toEqual({ ignored: "not a pull request" });
+    // A fork's PR: GitHub names none. The reconciler catches it.
+    expect(
+      toReviewJob("check_suite", checkEvent("check_suite", { pull_requests: [] }), options),
+    ).toEqual({ ignored: "not a pull request" });
+    expect(
+      toReviewJob(
+        "check_suite",
+        checkEvent("check_suite", { pull_requests: [{ number: 9, head: { sha: other } }] }),
+        options,
+      ),
+    ).toEqual({ ignored: "not a pull request" });
+  });
+});

@@ -11,6 +11,7 @@ import {
   headKeys,
   runKeys,
   type BatchOutput,
+  type HeadChecks,
   type PullComment,
   type PullReader,
   type PullRequest,
@@ -21,6 +22,8 @@ import { tarArchive } from "./aws.js";
 import type { ReviewThread } from "./threads.js";
 import type {
   ArtifactStore,
+  ChecksWait,
+  ChecksWaitStore,
   FileRecord,
   FindingRecord,
   FindingStore,
@@ -384,6 +387,39 @@ interface Setup {
   config?: string;
   /** The PR's labels when it's read. */
   labels?: string[];
+  /**
+   * The head's CI as the reader serves it (`review.wait_for_checks`, NIC-1078), and the base
+   * branch's required checks. Left out, the reader can't read checks and no run waits for CI.
+   */
+  checks?: () => HeadChecks;
+  required?: string[];
+}
+
+/** `pull_request_dispatches`' wait for CI, in memory, for one PR. */
+function memoryChecksWaits() {
+  let row: ChecksWait | undefined;
+  const store: ChecksWaitStore = {
+    async get() {
+      return row;
+    },
+    async wait(_repo, _number, headSha, state, now) {
+      const before = row?.headSha === headSha ? { ...row } : undefined;
+      row = { headSha, since: before?.since ?? now, state };
+      return before;
+    },
+    async clear() {
+      row = undefined;
+    },
+  };
+  return {
+    store,
+    get row() {
+      return row;
+    },
+    set row(value: ChecksWait | undefined) {
+      row = value;
+    },
+  };
 }
 
 function harness(setup: Setup = {}) {
@@ -469,6 +505,12 @@ function harness(setup: Setup = {}) {
       ...(setup.labels === undefined ? {} : { labels: [...setup.labels] }),
     }),
     comments: async () => setup.comments?.() ?? [],
+    ...(setup.checks === undefined
+      ? {}
+      : {
+          checksAt: async () => (setup.checks as () => HeadChecks)(),
+          requiredChecks: async () => [...(setup.required ?? [])],
+        }),
     ...(configText === undefined
       ? {}
       : {
@@ -753,6 +795,186 @@ describe("prepare", () => {
       expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toMatchObject({ superseded: true });
       expect([...h.objects.keys()]).toEqual([]);
     });
+  });
+});
+
+describe("waiting for CI (NIC-1078)", () => {
+  const push = { ...JOB, kind: "pr_updated" as const, actor: "dev" };
+  const CONFIG = "review:\n  wait_for_checks: [build, test]\n  wait_timeout_minutes: 30\n";
+  const run = (name: string, status: string, conclusion?: string) => ({
+    name,
+    status,
+    conclusion,
+  });
+  const passed: HeadChecks = {
+    runs: [run("build", "completed", "success"), run("test", "completed", "skipped")],
+    statuses: [],
+  };
+  const running: HeadChecks = {
+    runs: [run("build", "completed", "success"), run("test", "in_progress")],
+    statuses: [],
+  };
+
+  function waiting(setup: Setup, waits = memoryChecksWaits()) {
+    const h = harness({ config: CONFIG, ...setup });
+    h.deps.checksWaits = waits.store;
+    return { h, waits };
+  }
+
+  it("waits for a running check without cloning, and says which in a blocking check run", async () => {
+    const { h, waits } = waiting({ checks: () => running });
+    expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toEqual({
+      runId: RUN_ID,
+      superseded: true,
+      batches: [],
+    });
+    expect(h.clones.count).toBe(0);
+    expect(waits.row).toMatchObject({ headSha, state: "pending" });
+    const [check] = shadowRecords(h.objects, "check-run");
+    expect(check).toMatchObject({
+      head_sha: headSha,
+      conclusion: "action_required",
+      title: "Waiting for CI",
+    });
+    expect(String(check?.summary)).toContain("test");
+    expect(String(check?.summary)).not.toContain("build");
+    expect(String(check?.summary)).toContain("30 minutes");
+  });
+
+  it("posts nothing new while the checks say the same, so its own check run doesn't loop", async () => {
+    const waits = memoryChecksWaits();
+    waits.row = { headSha, since: new Date(), state: "pending" };
+    const { h } = waiting({ checks: () => running }, waits);
+    const checksJob = { ...push, kind: "pr_checks" as const };
+    expect(await prepare(h.deps, checksJob, EXECUTION, SETTINGS)).toMatchObject({
+      superseded: true,
+    });
+    expect(shadowRecords(h.objects, "check-run")).toEqual([]);
+  });
+
+  it("holds on a failed check whatever the timeout, naming it", async () => {
+    const waits = memoryChecksWaits();
+    waits.row = { headSha, since: new Date(Date.now() - 3 * 3600_000), state: "pending" };
+    const failed: HeadChecks = {
+      runs: [run("build", "completed", "failure")],
+      statuses: [{ context: "test", state: "success" }],
+    };
+    const { h } = waiting({ checks: () => failed }, waits);
+    expect(
+      await prepare(h.deps, { ...push, kind: "pr_checks" }, EXECUTION, SETTINGS),
+    ).toMatchObject({ superseded: true });
+    expect(h.clones.count).toBe(0);
+    expect(waits.row?.state).toBe("failed:build");
+    const [check] = shadowRecords(h.objects, "check-run");
+    expect(check).toMatchObject({ title: "Waiting for CI to pass" });
+    expect(String(check?.summary)).toContain("build failed");
+  });
+
+  it("reviews once the checks pass, and clears the wait", async () => {
+    const waits = memoryChecksWaits();
+    waits.row = { headSha, since: new Date(), state: "pending" };
+    const { h } = waiting({ checks: () => passed }, waits);
+    expect(
+      await prepare(h.deps, { ...push, kind: "pr_checks" }, EXECUTION, SETTINGS),
+    ).toMatchObject({ superseded: false, batches: [{ index: 0 }] });
+    expect(waits.row).toBeUndefined();
+    const manifest = JSON.parse(h.objects.get(runKeys(RUN_ID).prepared) ?? "") as RunManifest;
+    expect(manifest.notices).toBeUndefined();
+  });
+
+  it("reviews after the timeout, and its summary says it didn't wait", async () => {
+    const waits = memoryChecksWaits();
+    waits.row = { headSha, since: new Date(Date.now() - 31 * 60_000), state: "pending" };
+    const { h } = waiting({ checks: () => running }, waits);
+    expect(
+      await prepare(h.deps, { ...push, kind: "pr_checks" }, EXECUTION, SETTINGS),
+    ).toMatchObject({ superseded: false });
+    const manifest = JSON.parse(h.objects.get(runKeys(RUN_ID).prepared) ?? "") as RunManifest;
+    expect(manifest.notices).toEqual([
+      "This review didn't wait for CI: after 30 minutes, test still hadn't finished.",
+    ]);
+  });
+
+  it("starts the wait again for a new head", async () => {
+    const waits = memoryChecksWaits();
+    const old = new Date(Date.now() - 3600_000);
+    waits.row = { headSha: baseSha, since: old, state: "pending" };
+    const { h } = waiting({ checks: () => running }, waits);
+    await prepare(h.deps, push, EXECUTION, SETTINGS);
+    expect(waits.row?.headSha).toBe(headSha);
+    expect(waits.row?.since.getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  it("lets a review command from someone with write access skip the wait, not the author's", async () => {
+    const { h: lead, waits } = waiting({ checks: () => running });
+    waits.row = { headSha, since: new Date(), state: "pending" };
+    expect(
+      await prepare(
+        lead.deps,
+        { ...push, requested: "review", actor: "lead" },
+        EXECUTION,
+        SETTINGS,
+      ),
+    ).toMatchObject({ superseded: false });
+    expect(waits.row).toBeUndefined();
+
+    const { h: author } = waiting({ checks: () => running });
+    expect(
+      await prepare(
+        author.deps,
+        { ...push, requested: "review", actor: "dev" },
+        EXECUTION,
+        SETTINGS,
+      ),
+    ).toMatchObject({ superseded: true });
+    expect(author.clones.count).toBe(0);
+  });
+
+  it("waits for the base branch's required checks, never its own", async () => {
+    const { h, waits } = waiting({
+      config: "review:\n  wait_for_checks: required\n",
+      required: ["ci", "LGTMoose"],
+      checks: () => ({
+        runs: [run("LGTMoose", "completed", "action_required")],
+        statuses: [{ context: "ci", state: "pending" }],
+      }),
+    });
+    expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toMatchObject({ superseded: true });
+    const [check] = shadowRecords(h.objects, "check-run");
+    expect(String(check?.summary)).toContain("ci");
+    expect(String(check?.summary)).not.toContain("LGTMoose\\,");
+    expect(waits.row?.state).toBe("pending");
+  });
+
+  it("doesn't wait when the branch requires no checks, or with the default off", async () => {
+    for (const config of ["review:\n  wait_for_checks: required\n", ""]) {
+      const { h, waits } = waiting({ config, required: [], checks: () => running });
+      expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toMatchObject({
+        superseded: false,
+      });
+      expect(waits.row).toBeUndefined();
+    }
+  });
+
+  it("judges replies only while the code waits for CI", async () => {
+    const { h } = waiting({ checks: () => running });
+    const result = await prepare(h.deps, { ...push, requested: "replies" }, EXECUTION, SETTINGS);
+    expect(result.superseded).toBe(false);
+    const manifest = JSON.parse(h.objects.get(runKeys(RUN_ID).prepared) ?? "") as RunManifest;
+    expect(manifest.conversationOnly).toBe(true);
+    expect(manifest.review.jobs).toEqual([]);
+  });
+
+  it("starts nothing for a check on a draft PR", async () => {
+    const { h, waits } = waiting({ checks: () => passed });
+    waits.row = { headSha, since: new Date(), state: "pending" };
+    const reader = (await h.deps.github(99)).reader;
+    const original = reader.pull.bind(reader);
+    reader.pull = async (target) => ({ ...(await original(target)), draft: true });
+    expect(
+      await prepare(h.deps, { ...push, kind: "pr_checks" }, EXECUTION, SETTINGS),
+    ).toMatchObject({ superseded: true });
+    expect(h.clones.count).toBe(0);
   });
 });
 

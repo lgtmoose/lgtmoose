@@ -13,6 +13,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
+import type { ChecksWait, ChecksWaitStore } from "./ports.js";
 import { needsTrustedResolver } from "./thread-policy.js";
 
 /** `arn:…:states:region:account:stateMachine:Name` → `…:execution:Name:<name>`. */
@@ -252,6 +253,64 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
         }
         return { changed: moved.length, held: held.length };
       });
+    },
+  };
+}
+
+/**
+ * The wait for CI (NIC-1078) on the PR's dispatcher record. The dispatcher creates that record
+ * before it starts any execution, so a run that waits always finds it; without one there's
+ * nothing to record and the wait starts afresh each time.
+ */
+export function drizzleChecksWaits(db: Db): ChecksWaitStore {
+  const where = (repo: string, number: number) =>
+    and(eq(pullRequestDispatches.repo, lower(repo)), eq(pullRequestDispatches.number, number));
+  const get = async (repo: string, number: number): Promise<ChecksWait | undefined> => {
+    const [row] = await db
+      .select({
+        headSha: pullRequestDispatches.checksWaitSha,
+        since: pullRequestDispatches.checksWaitSince,
+        state: pullRequestDispatches.checksWaitState,
+      })
+      .from(pullRequestDispatches)
+      .where(where(repo, number));
+    if (row?.headSha === undefined || row.headSha === null || row.since === null) return undefined;
+    return { headSha: row.headSha, since: row.since, state: row.state ?? undefined };
+  };
+  return {
+    get,
+    async wait(repo, number, headSha, state, now) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .select({
+            headSha: pullRequestDispatches.checksWaitSha,
+            since: pullRequestDispatches.checksWaitSince,
+            state: pullRequestDispatches.checksWaitState,
+          })
+          .from(pullRequestDispatches)
+          .where(where(repo, number))
+          .for("update");
+        const before =
+          row?.headSha === headSha && row.since !== null
+            ? { headSha, since: row.since, state: row.state ?? undefined }
+            : undefined;
+        await tx
+          .update(pullRequestDispatches)
+          .set({
+            checksWaitSha: headSha,
+            checksWaitSince: before?.since ?? now,
+            checksWaitState: state,
+            updatedAt: now,
+          })
+          .where(where(repo, number));
+        return before;
+      });
+    },
+    async clear(repo, number) {
+      await db
+        .update(pullRequestDispatches)
+        .set({ checksWaitSha: null, checksWaitSince: null, checksWaitState: null })
+        .where(and(where(repo, number), sql`${pullRequestDispatches.checksWaitSha} is not null`));
     },
   };
 }

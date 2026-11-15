@@ -182,6 +182,8 @@ describe("the repo config", () => {
       label: "lgtmoose:review",
       label_once: false,
       trusted_bots: [],
+      wait_for_checks: "off",
+      wait_timeout_minutes: 60,
     });
   });
 

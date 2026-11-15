@@ -92,6 +92,11 @@ export interface SummaryInput {
   noLongerChanged?: readonly { path: string; lines: readonly string[] }[];
   /** The IDs of the team's learnings in this run's prompts (NIC-1081). */
   learningsApplied?: readonly string[];
+  /**
+   * Short notes about how the run started, such as that it didn't wait for CI (NIC-1078).
+   * Written in plain code but may name checks from the repository; escaped as text.
+   */
+  notices?: readonly string[];
 }
 
 /** The most learning IDs listed in the summary; the rest are counted. */
@@ -522,6 +527,7 @@ function renderAt(
   }
   sections.push(renderChanges(input, ctx, detail));
   sections.push(renderStatus(input));
+  for (const notice of input.notices ?? []) sections.push(`_${inline(clip(notice, 300))}_`);
   const findings = renderFindings(input.findings, detail.findingRows);
   if (findings !== undefined) sections.push(findings);
   if (input.tickets !== undefined) sections.push(renderTickets(input.tickets));

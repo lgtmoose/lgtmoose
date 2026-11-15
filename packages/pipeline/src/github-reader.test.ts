@@ -253,4 +253,74 @@ describe("githubPullReader", () => {
     expect(await reader.review?.(target, 55)).toEqual({ state: "DISMISSED", commitId: SHA_A });
     await expect(reader.review?.(target, -1)).rejects.toThrow("Not a review ID");
   });
+
+  describe("CI (NIC-1078)", () => {
+    const withStatus = (status: number) => Object.assign(new Error(`HTTP ${status}`), { status });
+
+    it("reads the head's latest check runs and commit statuses", async () => {
+      const { get, calls } = fakeGet({
+        [`/repos/acme/shop/commits/${SHA_A}/check-runs?filter=latest&per_page=100&page=1`]: {
+          check_runs: [
+            { name: "build", status: "completed", conclusion: "success" },
+            { name: "test", status: "in_progress", conclusion: null },
+          ],
+        },
+        [`/repos/acme/shop/commits/${SHA_A}/status?per_page=100`]: {
+          state: "pending",
+          statuses: [{ context: "ci/legacy", state: "pending" }],
+        },
+      });
+      expect(await githubPullReader(get).checksAt?.(target, SHA_A)).toEqual({
+        runs: [
+          { name: "build", status: "completed", conclusion: "success" },
+          { name: "test", status: "in_progress", conclusion: undefined },
+        ],
+        statuses: [{ context: "ci/legacy", state: "pending" }],
+      });
+      expect(calls).toHaveLength(2);
+      await expect(githubPullReader(get).checksAt?.(target, "main")).rejects.toThrow(/SHA/);
+    });
+
+    it("counts only check runs when the App can't read commit statuses yet", async () => {
+      const reader = githubPullReader(async (path) => {
+        if (path.includes("/status")) throw withStatus(403);
+        return { check_runs: [] };
+      });
+      expect(await reader.checksAt?.(target, SHA_A)).toEqual({ runs: [], statuses: [] });
+      const broken = githubPullReader(async (path) => {
+        if (path.includes("/status")) throw withStatus(500);
+        return { check_runs: [] };
+      });
+      await expect(broken.checksAt?.(target, SHA_A)).rejects.toThrow("500");
+    });
+
+    it("reads the required checks from rulesets and classic protection, without administration", async () => {
+      const { get, calls } = fakeGet({
+        "/repos/acme/shop/rules/branches/release/1.x?per_page=100": [
+          { type: "pull_request", parameters: {} },
+          {
+            type: "required_status_checks",
+            parameters: { required_status_checks: [{ context: "build" }, { context: "test" }] },
+          },
+        ],
+        "/repos/acme/shop/branches/release/1.x": {
+          protection: {
+            required_status_checks: { contexts: ["test", "legacy"], checks: [{ context: "lint" }] },
+          },
+        },
+      });
+      expect(await githubPullReader(get).requiredChecks?.(target, "release/1.x")).toEqual([
+        "build",
+        "test",
+        "legacy",
+        "lint",
+      ]);
+      expect(calls).toHaveLength(2);
+      // Neither found: nothing required.
+      const none = githubPullReader(async () => {
+        throw withStatus(404);
+      });
+      expect(await none.requiredChecks?.(target, "main")).toEqual([]);
+    });
+  });
 });

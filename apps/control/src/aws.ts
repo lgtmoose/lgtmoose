@@ -46,6 +46,7 @@ import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from 
 import { collaboratorPermission, orgRole } from "./github-access.js";
 import { outcomeLearner } from "./outcome-learning-aws.js";
 import { s3ArtifactStore } from "./s3-store.js";
+import { drizzleChecksWaits } from "./dispatch-aws.js";
 
 export { s3ArtifactStore };
 
@@ -1015,5 +1016,6 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
       store: postgresSpend(db as unknown as Parameters<typeof postgresSpend>[0]),
       budgets: parts.budgets ?? budgetsSchema.parse({}),
     },
+    checksWaits: drizzleChecksWaits(db),
   };
 }

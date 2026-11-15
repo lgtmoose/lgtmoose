@@ -162,6 +162,36 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*\\[bot\\]$"
           }
+        },
+        "wait_for_checks": {
+          "default": "off",
+          "description": "Wait for CI before a review starts. off: don't wait. required: the base branch's required status checks. A list: the check runs or commit statuses with these names. LGTMoose's own check is never waited for.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "off",
+                "required"
+              ]
+            },
+            {
+              "minItems": 1,
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            }
+          ]
+        },
+        "wait_timeout_minutes": {
+          "default": 60,
+          "description": "With wait_for_checks: how long to wait for checks that haven't finished before reviewing anyway. A failed check holds the review until it passes; this doesn't.",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 1440
         }
       },
       "additionalProperties": false

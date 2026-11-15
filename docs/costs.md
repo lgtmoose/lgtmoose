@@ -151,6 +151,7 @@ The dashboard's Usage page shows this month's spend in your repositories against
 - **`budgets`**: hard caps on model spend per PR, per repository and per month (above).
 - **`.lgtmoose.yaml`**: `skip` globs keep files out of the review, so they cost nothing; `budgets` lowers the repository's caps.
 - **`review.trigger` and `review.on_push`** in `.lgtmoose.yaml`: review only when a PR is ready (a label, a command or a trusted agent), and only once unless asked again. A PR with ten work-in-progress pushes then costs one or two reviews instead of ten. A run that waits costs one short control task and no model time. See [When reviews run](commands.md#when-reviews-run).
+- **`review.wait_for_checks`** in `.lgtmoose.yaml`: review only once the PR's CI passes, so a push whose tests fail costs no model time. A run that reads the checks and waits costs one short control task. See [Waiting for CI](commands.md#waiting-for-ci).
 - **`reviewDebounceSeconds`**: how long a push waits for the next one before its review starts (60 by default, up to 1800). A longer wait folds more pushes into one review.
 - **Incremental reviews**: after the first review, a push reviews only the files whose change moved, and a superseded run's finished batches are reused.
 

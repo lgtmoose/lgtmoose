@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { effectiveCaps, parseRepoConfigYaml, tierPrices, type Tier } from "@lgtmoose/config";
-import { findingSchema } from "@lgtmoose/core";
+import { SKIP_LABEL, findingSchema } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import {
   batchInputSchema,
@@ -21,6 +21,14 @@ import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { reviewGate, waitingCheckRun } from "./trigger.js";
+import {
+  checksGate,
+  checksState,
+  checksToWaitFor,
+  timedOutNotice,
+  waitState,
+  waitingForChecksRun,
+} from "./checks-gate.js";
 import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord } from "./ports.js";
@@ -83,6 +91,8 @@ export interface RunManifest {
    * (not dispatched), and what the summary says.
    */
   spendCap?: { kind: CapKind; batches: number[]; reason: string };
+  /** Notes for the summary about how the run started, such as that it didn’t wait for CI. */
+  notices?: string[];
   /**
    * A run for replies or `explain` while the PR's code waits for a review trigger (NIC-1077): it
    * has judge and explainer batches only, and its post step writes their replies and nothing
@@ -387,14 +397,29 @@ async function triggered(
   pr: PullRequest,
   runId: string,
   reviewedBefore: boolean,
-): Promise<"review" | "conversation" | "skip"> {
-  if (github.reader.fileAt === undefined) return "review";
+): Promise<{ mode: "review" | "conversation" | "skip"; notices?: string[] }> {
+  if (github.reader.fileAt === undefined) return { mode: "review" };
   const config = parseRepoConfigYaml(
     await github.reader.fileAt(target, pr.baseSha, ".lgtmoose.yaml"),
   );
-  const gate = reviewGate(config.review, job, { labels: pr.labels ?? [] }, reviewedBefore);
+  const conversation = job.requested === "replies" || job.requested === "explain";
   const pull = { owner: target.owner, repo: target.repo, pull: target.number };
-  if (gate.review) {
+  // A finished check is about the head, not a PR event: on a PR that isn't open, is a draft or
+  // carries the skip label, it starts nothing (the gateway checks those for PR events).
+  if (
+    job.kind === "pr_checks" &&
+    (pr.state !== "open" || pr.draft === true || (pr.labels ?? []).includes(SKIP_LABEL))
+  ) {
+    await deps.runs.supersedeRun(runId);
+    deps.log("not triggered", { runId, reason: "the PR isn't one to review" });
+    return { mode: "skip" };
+  }
+  const gate = reviewGate(config.review, job, { labels: pr.labels ?? [] }, reviewedBefore);
+  // Its trigger says the review may start: it may still wait for the head's CI (NIC-1078).
+  const ci = gate.review
+    ? await waitForChecks(deps, github, job, target, pr, runId, config)
+    : undefined;
+  if (gate.review && ci?.wait !== true) {
     if (gate.removeLabel !== undefined) {
       try {
         await github.poster(runId, pull).labels(pull).removePrLabel(gate.removeLabel);
@@ -406,12 +431,17 @@ async function triggered(
         });
       }
     }
-    return "review";
+    return ci?.notice === undefined ? { mode: "review" } : { mode: "review", notices: [ci.notice] };
   }
-  const conversation = job.requested === "replies" || job.requested === "explain";
+  const waitMode = conversation ? "conversation" : "skip";
   if (!conversation) await deps.runs.supersedeRun(runId);
+  if (gate.review) {
+    // Waits for CI: `waitForChecks` posted its check run when it had something new to say.
+    deps.log("not triggered", { runId, reason: "waiting for CI", conversation });
+    return { mode: waitMode };
+  }
   deps.log("not triggered", { runId, reason: gate.reason, waiting: gate.waiting, conversation });
-  if (!gate.waiting) return conversation ? "conversation" : "skip";
+  if (!gate.waiting) return { mode: waitMode };
   const check = waitingCheckRun(config.review, config.gate, await github.slug?.(), reviewedBefore);
   if (check !== undefined) {
     await github.poster(runId, pull).completeCheckRun(pull, {
@@ -422,7 +452,99 @@ async function triggered(
       externalId: runId,
     });
   }
-  return conversation ? "conversation" : "skip";
+  return { mode: waitMode };
+}
+
+/** Permissions that let a person's review command start a review without waiting for CI. */
+const SKIPS_CI_WAIT: ReadonlySet<string> = new Set(["admin", "maintain", "write"]);
+
+/**
+ * The wait for CI (`review.wait_for_checks`, NIC-1078), once the trigger says the review may
+ * start. `wait` when the head's checks haven't all passed: the PR is recorded as waiting on this
+ * head (so a check finishing on it asks for a run again) and its check run says what it waits
+ * for, unless it already said the same. A review that starts clears the wait; one that starts
+ * because the wait timed out gets a `notice` for its summary.
+ *
+ * A person's `review` or `full review` from someone with write access, by GitHub's
+ * collaborators API, starts the review now. The PR's author without write access, or a trusted
+ * bot, waits like a push. A run for replies or `explain` waits too: it only judges and explains.
+ */
+async function waitForChecks(
+  deps: ControlDeps,
+  github: RunGitHub,
+  job: WorkflowJob,
+  target: ReturnType<typeof jobTarget>,
+  pr: PullRequest,
+  runId: string,
+  config: ReturnType<typeof parseRepoConfigYaml>,
+): Promise<{ wait: boolean; notice?: string }> {
+  const waits = deps.checksWaits;
+  const { reader } = github;
+  const setting = config.review.wait_for_checks;
+  const clear = async () => {
+    await waits?.clear(job.repo, job.prNumber);
+    return { wait: false };
+  };
+  if (setting === "off" || waits === undefined || reader.checksAt === undefined) return clear();
+  if (job.requested === "review" || job.requested === "full_review") {
+    const permission = github.permission;
+    const actor = job.actor;
+    if (actor !== undefined && permission !== undefined) {
+      try {
+        if (SKIPS_CI_WAIT.has(await permission(target, actor))) {
+          deps.log("CI wait skipped by a review command", { runId });
+          return clear();
+        }
+      } catch (error) {
+        // Unread: the command waits for CI like a push, rather than skip it on a guess.
+        deps.log("permission unread, the review waits for CI", {
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  const required =
+    setting === "required" && reader.requiredChecks !== undefined
+      ? await reader.requiredChecks(target, pr.baseRef)
+      : undefined;
+  const wanted = checksToWaitFor(setting, required);
+  if (wanted === undefined) return clear();
+  const state = checksState(wanted, await reader.checksAt(target, pr.headSha));
+  const now = new Date();
+  const before = await waits.get(job.repo, job.prNumber);
+  const since = before?.headSha === pr.headSha ? before.since : now;
+  const decision = checksGate({ settings: config.review, checks: state, since, now });
+  if (decision.review) {
+    await waits.clear(job.repo, job.prNumber);
+    if (decision.timedOut === undefined) return { wait: false };
+    deps.log("CI wait timed out", { runId, pending: decision.timedOut.pending.length });
+    return { wait: false, notice: timedOutNotice(decision.timedOut) };
+  }
+  const said = waitState(decision.checks);
+  const previous = await waits.wait(job.repo, job.prNumber, pr.headSha, said, now);
+  deps.log("waiting for CI", {
+    runId,
+    failed: decision.checks.failed.length,
+    pending: decision.checks.pending.length,
+  });
+  if (previous?.state === said) return { wait: true };
+  const check = waitingForChecksRun(
+    config.review,
+    config.gate,
+    await github.slug?.(),
+    decision.checks,
+  );
+  if (check !== undefined) {
+    const pull = { owner: target.owner, repo: target.repo, pull: target.number };
+    await github.poster(runId, pull).completeCheckRun(pull, {
+      headSha: pr.headSha,
+      ...check,
+      annotations: [],
+      externalId: runId,
+    });
+  }
+  return { wait: true };
 }
 
 /**
@@ -456,7 +578,7 @@ export async function prepare(
   }
 
   const lastReviewed = run.lastReviewedSha;
-  const mode = await triggered(
+  const { mode, notices } = await triggered(
     deps,
     github,
     job,
@@ -746,6 +868,7 @@ export async function prepare(
             },
           }),
       ...(conversationOnly ? { conversationOnly: true as const } : {}),
+      ...(notices === undefined ? {} : { notices }),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {

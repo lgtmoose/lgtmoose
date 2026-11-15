@@ -21,12 +21,16 @@ export const APP_EVENTS = [
   "pull_request_review_comment",
   "pull_request_review_thread",
   "issue_comment",
+  // A check finishing on a head whose review waits for CI (`review.wait_for_checks`).
+  "check_suite",
+  "check_run",
 ] as const;
 
 type Access = "read" | "write";
 
 /**
- * Least privilege for reviewing: read code, write reviews, comments, labels and check runs.
+ * Least privilege for reviewing: read code and commit statuses, write reviews, comments, labels
+ * and check runs.
  * `members` lets the learning policy check whether a commenter belongs to the org.
  */
 const PERMISSIONS = {
@@ -36,6 +40,8 @@ const PERMISSIONS = {
   pull_requests: "write",
   issues: "write",
   checks: "write",
+  // Commit statuses, for CI that reports with them (`review.wait_for_checks`).
+  statuses: "read",
 } as const satisfies Record<string, Access>;
 
 export interface AppManifest {
