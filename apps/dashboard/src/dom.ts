@@ -28,7 +28,11 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 export function table(headings: readonly string[], rows: readonly Child[][]): HTMLElement {
   const head = el("tr", {}, ...headings.map((heading) => el("th", {}, heading)));
   const body = rows.map((cells) => el("tr", {}, ...cells.map((cell) => el("td", {}, cell))));
-  return el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+  return el(
+    "div",
+    { class: "table-wrap" },
+    el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)),
+  );
 }
 
 export function replace(target: Element, ...children: Child[]): void {

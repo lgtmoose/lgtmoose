@@ -192,6 +192,65 @@ export function isGitHubHost(host: string): boolean {
   return GITHUB_DOMAINS.some((domain) => name === domain || name.endsWith(`.${domain}`));
 }
 
+/** The images a release publishes, by their key in `images.digests`. */
+export const RELEASE_IMAGES = {
+  control: "lgtmoose-control",
+  sandbox: "lgtmoose-sandbox",
+  egressProxy: "lgtmoose-egress-proxy",
+} as const;
+
+const imageDigest = z
+  .string()
+  .regex(/^sha256:[0-9a-f]{64}$/, "use an image digest, sha256: and 64 hex characters");
+
+/**
+ * Where the task images come from. `build` builds them from this checkout, as before. `release`
+ * uses a published release's images (docs/releasing.md), pinned by digest, never by tag: a tag
+ * can be moved, a digest can't. CDK copies them into the deployment's own ECR, so tasks never
+ * pull from the internet.
+ */
+export const imagesSchema = z
+  .discriminatedUnion("source", [
+    z
+      .object({
+        source: z.literal("build").describe("Build the images from this checkout, with Docker."),
+      })
+      .strict(),
+    z
+      .object({
+        source: z
+          .literal("release")
+          .describe("Use a published release's images, copied into this deployment's ECR."),
+        registry: z
+          .string()
+          .regex(
+            /^[a-z0-9.-]+(:\d+)?(\/[a-z0-9._-]+)*$/,
+            "use a registry and namespace, such as ghcr.io/lgtmoose",
+          )
+          .default("ghcr.io/lgtmoose")
+          .describe("Where the release's images are published."),
+        version: z
+          .string()
+          .regex(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/, "use a release version, such as 0.1.0")
+          .describe("The release, such as 0.1.0. It's for the record: the digests decide."),
+        digests: z
+          .object({
+            control: imageDigest.describe("The lgtmoose-control image's digest."),
+            sandbox: imageDigest.describe("The lgtmoose-sandbox image's digest."),
+            egressProxy: imageDigest.describe("The lgtmoose-egress-proxy image's digest."),
+          })
+          .strict()
+          .describe(
+            "Each image's digest, from the release notes. Verify them first (docs/releasing.md).",
+          ),
+      })
+      .strict(),
+  ])
+  .default({ source: "build" })
+  .describe(
+    "Where the control, egress proxy and sandbox images come from: build (from this checkout, the default) or release (a published release, pinned by digest).",
+  );
+
 export const deployConfigSchema = z
   .object({
     region: z
@@ -329,6 +388,11 @@ export const deployConfigSchema = z
       .describe(
         "Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch.",
       ),
+    /**
+     * Where the control, egress proxy and sandbox images come from: built from this checkout (the
+     * default), or a published release's images, pinned by digest (docs/releasing.md).
+     */
+    images: imagesSchema,
     /**
      * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier
      * model call each). Replies past it wait for the next run.
@@ -480,6 +544,15 @@ export const deployConfigSchema = z
         });
       }
       seen.add(provider.id);
+      // A release's sandbox image is built without the Cursor CLI (see docs/releasing.md).
+      if (config.images.source === "release" && provider.harness === "cursor-agent") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["providers", index, "harness"],
+          message:
+            'a release\'s sandbox image has no Cursor CLI: use images: { source: "build" } for cursor-agent',
+        });
+      }
     });
     for (const [role, providerId] of Object.entries(config.roles)) {
       if (providerId !== undefined && !seen.has(providerId)) {

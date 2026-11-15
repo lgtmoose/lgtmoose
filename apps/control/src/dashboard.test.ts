@@ -131,7 +131,10 @@ function request(
 }
 
 /** The cookie a response sets, by name: its value and attributes. */
-function cookie(cookies: string[], name: string): { value: string; attributes: string } | undefined {
+function cookie(
+  cookies: string[],
+  name: string,
+): { value: string; attributes: string } | undefined {
   const found = cookies.find((entry) => entry.startsWith(`${name}=`));
   if (found === undefined) return undefined;
   const [pair = "", ...rest] = found.split("; ");
@@ -186,7 +189,11 @@ describe("dashboard sign-in", () => {
     // Only the token's hash is kept, with what GitHub said at sign-in; no GitHub token.
     expect([...store.sessions.keys()]).toEqual([sha256Hex(session ?? "")]);
     const stored = store.sessions.get(sha256Hex(session ?? ""));
-    expect(stored).toMatchObject({ login: "Alice", orgs: ["acme"], repos: ["acme/api", "acme/web"] });
+    expect(stored).toMatchObject({
+      login: "Alice",
+      orgs: ["acme"],
+      repos: ["acme/api", "acme/web"],
+    });
     expect(JSON.stringify(stored)).not.toContain("gho_user");
   });
 

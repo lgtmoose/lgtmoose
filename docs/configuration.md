@@ -33,6 +33,14 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `alarms` | object | `{}` | Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch. |
 | `alarms.email` | string matching `^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$` |  | An address subscribed to a new SNS topic for LGTMoose's alarms. AWS emails it a confirmation link first. |
 | `alarms.topicArn` | string matching `^arn:aws[a-z-]*:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$` |  | An existing SNS topic for alarms, such as one that already pages your team. |
+| `images` | one of the forms below | `{"source":"build"}` | Where the control, egress proxy and sandbox images come from: build (from this checkout, the default) or release (a published release, pinned by digest). |
+| `images.source` (required) | `"build"` or `"release"` |  | Which form this is. |
+| `images.registry` | string matching `^[a-z0-9.-]+(:\d+)?(\/[a-z0-9._-]+)*$` | `"ghcr.io/lgtmoose"` | With `source: "release"`. Where the release's images are published. |
+| `images.version` | string matching `^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$` |  | With `source: "release"`. The release, such as 0.1.0. It's for the record: the digests decide. |
+| `images.digests` | object |  | With `source: "release"`. Each image's digest, from the release notes. Verify them first (docs/releasing.md). |
+| `images.digests.control` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-control image's digest. |
+| `images.digests.sandbox` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-sandbox image's digest. |
+| `images.digests.egressProxy` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-egress-proxy image's digest. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
@@ -46,7 +54,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `tickets.maxPerPullRequest` | integer, 1 to 10 | `3` | The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed. |
 | `tickets.teamKeys` | list of string matching `^[A-Za-z][A-Za-z0-9]{0,9}$` | `[]` | Only these teams' ticket keys count, such as ENG for ENG-123. Empty: any key the provider knows. |
 | `tickets.detailsOnPublicRepos` | boolean | `false` | Show tickets' titles, links and requirements in the summary on public repositories too. Off: a public repository's summary shows only each key, its coverage level and how many core requirements look missing. |
-| `dashboard` | boolean | `true` | Reserved for the dashboard. Not used yet: no dashboard is deployed. |
+| `dashboard` | boolean | `true` | Deploy the dashboard (Lgtmoose-Dashboard): a CloudFront site where members of allowedOrgs sign in with GitHub and see open findings and review runs for the repositories they can see. false: no dashboard stack. |
 
 Each harness accepts only some `auth` methods: `claude-code` takes `oauth-token`, `api-key`, `bedrock` and `vertex`; `codex` takes `chatgpt-login`, `access-token` and `api-key`; `cursor-agent` takes `api-key` and `service-account`; `agent-sdk` takes `api-key`, `bedrock` and `vertex`. See [Providers and auth](credentials.md).
 

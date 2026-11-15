@@ -14,11 +14,11 @@ The stack's outputs `DashboardUrl` and `OAuthCallbackUrl` hold the same URLs.
 
 ## What it shows
 
-| Page          | What's on it                                                                                       |
-| ------------- | -------------------------------------------------------------------------------------------------- |
-| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review  |
-| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                  |
-| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used  |
+| Page          | What's on it                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------- |
+| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review |
+| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                 |
+| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used |
 
 Each page can be filtered to one repository. Findings' text is shown as plain text, never rendered as HTML or Markdown.
 

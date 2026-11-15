@@ -59,7 +59,7 @@ describe("labels", () => {
 
   it("links a PR only from a valid repository and number", () => {
     expect(pullRequestUrl("acme/api", 3)).toBe("https://github.com/acme/api/pull/3");
-    expect(pullRequestUrl("acme/api\"><x", 3)).toBeUndefined();
+    expect(pullRequestUrl('acme/api"><x', 3)).toBeUndefined();
     expect(pullRequestUrl("acme/api", -1)).toBeUndefined();
   });
 });
@@ -73,7 +73,13 @@ describe("source", () => {
     expect(files.length).toBeGreaterThan(0);
     for (const name of files) {
       const text = await readFile(join(dir, name), "utf8");
-      for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("]) {
+      for (const sink of [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+      ]) {
         expect(text, `${name} uses ${sink}`).not.toContain(sink);
       }
     }

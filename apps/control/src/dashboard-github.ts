@@ -95,7 +95,8 @@ export function githubDashboard(
       },
       signal: AbortSignal.timeout(timeout),
     });
-    if (!response.ok && response.status !== 404) throw new DashboardGitHubError(what, response.status);
+    if (!response.ok && response.status !== 404)
+      throw new DashboardGitHubError(what, response.status);
     return response;
   };
   return {
@@ -123,7 +124,8 @@ export function githubDashboard(
     },
     async login(token) {
       const response = await get(token, "/user", "reading the signed-in user");
-      if (!response.ok) throw new DashboardGitHubError("reading the signed-in user", response.status);
+      if (!response.ok)
+        throw new DashboardGitHubError("reading the signed-in user", response.status);
       return userReply.parse(await response.json()).login;
     },
     async isOrgMember(token, org) {
@@ -139,7 +141,9 @@ export function githubDashboard(
     async visibleRepos(token, owners, limit) {
       const repos = new Set<string>();
       const installations = installationsReply.parse(
-        await (await get(token, `/user/installations?per_page=${PAGE}`, "listing installations")).json(),
+        await (
+          await get(token, `/user/installations?per_page=${PAGE}`, "listing installations")
+        ).json(),
       ).installations;
       for (const installation of installations) {
         const owner = installation.account?.login.toLowerCase();

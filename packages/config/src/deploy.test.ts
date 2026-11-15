@@ -49,11 +49,42 @@ describe("parseDeployConfig", () => {
       maxReplyJudgements: 10,
       feedback: { acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 },
       alarms: {},
+      images: { source: "build" },
       shadow: true,
       extraEgressHosts: [],
       learnings: { embeddings: { provider: "none" } },
       dashboard: true,
     });
+  });
+
+  it("builds the images by default, or takes a release's images pinned by digest", () => {
+    const digest = (c: string) => `sha256:${c.repeat(64)}`;
+    const release = {
+      source: "release" as const,
+      version: "0.1.0",
+      digests: { control: digest("a"), sandbox: digest("b"), egressProxy: digest("c") },
+    };
+    expect(parseDeployConfig({ ...minimal, images: release }).images).toEqual({
+      ...release,
+      registry: "ghcr.io/lgtmoose",
+    });
+    expect(
+      issuesOf({
+        ...minimal,
+        images: { ...release, digests: { ...release.digests, control: "latest" } },
+      }),
+    ).toContainEqual(expect.objectContaining({ path: "images.digests.control" }));
+    expect(
+      issuesOf({ ...minimal, images: { source: "release", version: "0.1.0" } }),
+    ).toContainEqual(expect.objectContaining({ path: "images.digests" }));
+    // A release's sandbox image has no Cursor CLI.
+    expect(
+      issuesOf({
+        ...minimal,
+        images: release,
+        providers: [{ id: "cursor", harness: "cursor-agent", auth: "api-key" }],
+      }),
+    ).toContainEqual(expect.objectContaining({ path: "providers[0].harness" }));
   });
 
   it("takes an embeddings provider for learnings, with each one's default model", () => {

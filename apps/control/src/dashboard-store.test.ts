@@ -57,7 +57,13 @@ beforeAll(async () => {
   await finding(secret, "f4", "blocking");
   const [run] = await db
     .insert(reviewRuns)
-    .values({ pullRequestId: api, headSha: "a".repeat(40), kind: "first", status: "succeeded", costUsd: "0.1234" })
+    .values({
+      pullRequestId: api,
+      headSha: "a".repeat(40),
+      kind: "first",
+      status: "succeeded",
+      costUsd: "0.1234",
+    })
     .returning({ id: reviewRuns.id });
   await db.insert(reviewRuns).values({
     pullRequestId: secret,

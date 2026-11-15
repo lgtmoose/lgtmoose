@@ -1,10 +1,4 @@
-import {
-  dashboardSessions,
-  findings,
-  providerUsage,
-  pullRequests,
-  reviewRuns,
-} from "@lgtmoose/db";
+import { dashboardSessions, findings, providerUsage, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 
@@ -90,7 +84,9 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
       const [row] = await db
         .select()
         .from(dashboardSessions)
-        .where(and(eq(dashboardSessions.tokenHash, tokenHash), gt(dashboardSessions.expiresAt, now)))
+        .where(
+          and(eq(dashboardSessions.tokenHash, tokenHash), gt(dashboardSessions.expiresAt, now)),
+        )
         .limit(1);
       return row === undefined
         ? undefined

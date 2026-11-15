@@ -8,7 +8,11 @@
   --should-fix: #9a6700;
   --nit: #59636e;
   color-scheme: light dark;
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font:
+    14px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {

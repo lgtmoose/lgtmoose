@@ -39,6 +39,11 @@ export interface DeployDeps {
   prompter: Prompter;
   /** Progress for the person. Never receives a secret. */
   out: (text: string) => void;
+  /**
+   * Checks this checkout against the latest release before a deploy (`releaseNotice`): a
+   * warning or a note to print, or nothing. Left out, no check runs.
+   */
+  releaseCheck?: () => Promise<string | undefined>;
   now?: () => Date;
 }
 
@@ -148,10 +153,15 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
     // The dashboard API's copy of the OAuth client, so it never needs the App's private key.
     const oauth = await ensureDashboardOAuth(store);
     if (oauth !== "unchanged") {
-      deps.out(`Stored the App's OAuth client in ${SECRET_NAMES.githubAppOAuth} for the dashboard.\n`);
+      deps.out(
+        `Stored the App's OAuth client in ${SECRET_NAMES.githubAppOAuth} for the dashboard.\n`,
+      );
     }
   }
   const cdk = deps.cdk({ configPath: deps.configPath, region: config.region });
+
+  const notice = await deps.releaseCheck?.();
+  if (notice !== undefined) deps.out(notice);
 
   // Every time, not just the first: it's a no-op when current, and a newer aws-cdk after
   // `git pull` can need a newer bootstrap stack.

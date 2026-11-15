@@ -46,7 +46,7 @@ The docs are in [`docs/`](docs/index.md), and published to GitHub Pages from `ma
 - [Architecture](docs/architecture.md): the components, how a review runs, and the security controls
 - [Configuration reference](docs/configuration.md), [Providers and auth](docs/credentials.md), [Rule packs](docs/rule-packs.md)
 - [Commands](docs/commands.md), [Learning](docs/learning.md), [Feedback signals](docs/feedback.md), [Ticket coverage](docs/tickets.md), [Dashboard](docs/dashboard.md), [Evals](docs/evals.md)
-- [Costs](docs/costs.md), [Troubleshooting](docs/troubleshooting.md), [Upgrading](docs/upgrading.md)
+- [Costs](docs/costs.md), [Troubleshooting](docs/troubleshooting.md), [Upgrading](docs/upgrading.md), [Releasing](docs/releasing.md)
 - [Security](docs/security.md), and the [security policy](SECURITY.md) for reporting a vulnerability
 
 ## Repository layout

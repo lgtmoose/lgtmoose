@@ -130,9 +130,13 @@ function dashboardDeps(): Promise<DashboardDeps> {
 
 export async function handler(event: HttpApiEvent) {
   try {
-    return toHttpApiResult(await handleDashboardRequest(await dashboardDeps(), fromHttpApiEvent(event)));
+    return toHttpApiResult(
+      await handleDashboardRequest(await dashboardDeps(), fromHttpApiEvent(event)),
+    );
   } catch (error) {
-    log("dashboard request failed", { error: error instanceof Error ? error.message : String(error) });
+    log("dashboard request failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return toHttpApiResult(json(500, { error: "internal" }));
   }
 }

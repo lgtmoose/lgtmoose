@@ -7,6 +7,12 @@ import { currentAccount } from "./aws-sts.js";
 import { createCdk } from "./cdk.js";
 import type { DeployDeps } from "./deploy.js";
 import { createGitHubAppApi } from "./github-app.js";
+import {
+  latestRelease,
+  localVersion,
+  NO_RELEASE_CHECK_ENV,
+  releaseNotice,
+} from "./release-check.js";
 
 /** The real thing: the CDK CLI, AWS, GitHub, the disk and a terminal. */
 export async function defaultDeployDeps(): Promise<DeployDeps> {
@@ -21,5 +27,11 @@ export async function defaultDeployDeps(): Promise<DeployDeps> {
     github: createGitHubAppApi(),
     prompter: await createInquirerPrompter(),
     out: (text) => process.stdout.write(text),
+    ...(process.env[NO_RELEASE_CHECK_ENV] === "1"
+      ? {}
+      : {
+          releaseCheck: () =>
+            releaseNotice({ local: localVersion(), latest: () => latestRelease() }),
+        }),
   };
 }

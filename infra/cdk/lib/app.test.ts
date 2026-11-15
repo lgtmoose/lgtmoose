@@ -41,6 +41,7 @@ describe("buildApp", () => {
   it("synthesizes every stack in the configured region", () => {
     expect(assembly.stacks.map((s) => s.stackName).sort()).toEqual([
       "Lgtmoose-Api",
+      "Lgtmoose-Dashboard",
       "Lgtmoose-Data",
       "Lgtmoose-Meta",
       "Lgtmoose-Network",
@@ -53,6 +54,7 @@ describe("buildApp", () => {
   it("deploys the Api and Workflow stacks after the Data stack, so migrations run first", () => {
     expect(stacks.api.dependencies).toContain(stacks.data);
     expect(stacks.workflow.dependencies).toContain(stacks.data);
+    expect(stacks.dashboard?.dependencies).toContain(stacks.data);
   });
 
   it("passes the config's allowed orgs to the gateway", () => {

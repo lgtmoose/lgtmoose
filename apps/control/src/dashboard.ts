@@ -119,7 +119,10 @@ async function login(deps: DashboardDeps): Promise<DashboardResponse> {
   );
 }
 
-async function callback(deps: DashboardDeps, request: DashboardRequest): Promise<DashboardResponse> {
+async function callback(
+  deps: DashboardDeps,
+  request: DashboardRequest,
+): Promise<DashboardResponse> {
   // The sign-in cookie is single use: cleared whatever happens next.
   const clear = [clearCookie(SIGN_IN_COOKIE)];
   if (request.query.error !== undefined) return signedOut("denied", clear);
@@ -210,7 +213,8 @@ export async function handleDashboardRequest(
     return empty(204, [clearCookie(SESSION_COOKIE)]);
   }
   if (current === undefined) {
-    const cookies = request.cookies[SESSION_COOKIE] === undefined ? [] : [clearCookie(SESSION_COOKIE)];
+    const cookies =
+      request.cookies[SESSION_COOKIE] === undefined ? [] : [clearCookie(SESSION_COOKIE)];
     return json(401, { error: "signed-out" }, cookies);
   }
   const { session } = current;

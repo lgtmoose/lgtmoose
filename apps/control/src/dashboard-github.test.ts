@@ -40,7 +40,7 @@ describe("githubDashboard", () => {
         verifier: "v",
       }),
     ).toEqual({ token: "gho_1", expiresInSeconds: 28800 });
-    expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({
+    expect(JSON.parse(calls[0]?.init.body as string)).toMatchObject({
       client_secret: "s",
       code_verifier: "v",
     });
@@ -84,7 +84,10 @@ describe("githubDashboard", () => {
         },
       },
       "/user/installations/1/repositories?per_page=100&page=1": {
-        body: { total_count: 2, repositories: [{ full_name: "Acme/Web" }, { full_name: "Acme/API" }] },
+        body: {
+          total_count: 2,
+          repositories: [{ full_name: "Acme/Web" }, { full_name: "Acme/API" }],
+        },
       },
       "/user/installations/2/repositories?per_page=100&page=1": {
         body: { total_count: 1, repositories: [{ full_name: "elsewhere/x" }] },

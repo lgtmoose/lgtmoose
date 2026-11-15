@@ -201,6 +201,82 @@
       },
       "additionalProperties": false
     },
+    "images": {
+      "default": {
+        "source": "build"
+      },
+      "description": "Where the control, egress proxy and sandbox images come from: build (from this checkout, the default) or release (a published release, pinned by digest).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "const": "build",
+              "description": "Build the images from this checkout, with Docker."
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "const": "release",
+              "description": "Use a published release's images, copied into this deployment's ECR."
+            },
+            "registry": {
+              "default": "ghcr.io/lgtmoose",
+              "description": "Where the release's images are published.",
+              "type": "string",
+              "pattern": "^[a-z0-9.-]+(:\\d+)?(\\/[a-z0-9._-]+)*$"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$",
+              "description": "The release, such as 0.1.0. It's for the record: the digests decide."
+            },
+            "digests": {
+              "type": "object",
+              "properties": {
+                "control": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "description": "The lgtmoose-control image's digest."
+                },
+                "sandbox": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "description": "The lgtmoose-sandbox image's digest."
+                },
+                "egressProxy": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "description": "The lgtmoose-egress-proxy image's digest."
+                }
+              },
+              "required": [
+                "control",
+                "sandbox",
+                "egressProxy"
+              ],
+              "additionalProperties": false,
+              "description": "Each image's digest, from the release notes. Verify them first (docs/releasing.md)."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "digests"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "maxReplyJudgements": {
       "default": 10,
       "description": "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",
@@ -333,7 +409,7 @@
     },
     "dashboard": {
       "default": true,
-      "description": "Reserved for the dashboard. Not used yet: no dashboard is deployed.",
+      "description": "Deploy the dashboard (Lgtmoose-Dashboard): a CloudFront site where members of allowedOrgs sign in with GitHub and see open findings and review runs for the repositories they can see. false: no dashboard stack.",
       "type": "boolean"
     }
   },

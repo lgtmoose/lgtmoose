@@ -64,7 +64,10 @@ interface Run {
 class SignedOut extends Error {}
 
 async function api<T>(path: string): Promise<T> {
-  const response = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  });
   if (response.status === 401) throw new SignedOut();
   if (!response.ok) throw new Error(`The dashboard API answered ${response.status}.`);
   return (await response.json()) as T;
@@ -199,7 +202,9 @@ async function renderRuns(repo: string | undefined): Promise<void> {
             prLink(run.repo, run.number),
             run.kind,
             run.status,
-            run.filesTotal === undefined ? String(run.filesDone) : `${run.filesDone}/${run.filesTotal}`,
+            run.filesTotal === undefined
+              ? String(run.filesDone)
+              : `${run.filesDone}/${run.filesTotal}`,
             duration(run.startedAt, run.finishedAt),
             money(run.costUsd),
             run.providers.length === 0 ? "—" : run.providers.join(", "),
@@ -227,7 +232,10 @@ async function render(): Promise<void> {
       renderSignIn(undefined);
       return;
     }
-    replace(main(), el("p", { role: "alert" }, error instanceof Error ? error.message : "Something went wrong."));
+    replace(
+      main(),
+      el("p", { role: "alert" }, error instanceof Error ? error.message : "Something went wrong."),
+    );
   }
 }
 

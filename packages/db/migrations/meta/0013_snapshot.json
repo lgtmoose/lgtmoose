@@ -221,12 +221,8 @@
           "name": "feedback_finding_id_findings_id_fk",
           "tableFrom": "feedback",
           "tableTo": "findings",
-          "columnsFrom": [
-            "finding_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["finding_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -315,12 +311,8 @@
           "name": "files_reviewed_run_id_review_runs_id_fk",
           "tableFrom": "files_reviewed",
           "tableTo": "review_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -421,12 +413,8 @@
           "name": "finding_events_finding_id_findings_id_fk",
           "tableFrom": "finding_events",
           "tableTo": "findings",
-          "columnsFrom": [
-            "finding_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["finding_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -627,12 +615,8 @@
           "name": "findings_pull_request_id_pull_requests_id_fk",
           "tableFrom": "findings",
           "tableTo": "pull_requests",
-          "columnsFrom": [
-            "pull_request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["pull_request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -640,12 +624,8 @@
           "name": "findings_run_id_review_runs_id_fk",
           "tableFrom": "findings",
           "tableTo": "review_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -751,12 +731,8 @@
           "name": "learning_events_learning_id_learnings_id_fk",
           "tableFrom": "learning_events",
           "tableTo": "learnings",
-          "columnsFrom": [
-            "learning_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["learning_id"],
+          "columnsTo": ["id"],
           "onDelete": "restrict",
           "onUpdate": "no action"
         }
@@ -1092,12 +1068,8 @@
           "name": "pending_replies_pull_request_id_pull_requests_id_fk",
           "tableFrom": "pending_replies",
           "tableTo": "pull_requests",
-          "columnsFrom": [
-            "pull_request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["pull_request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1105,12 +1077,8 @@
           "name": "pending_replies_finding_id_findings_id_fk",
           "tableFrom": "pending_replies",
           "tableTo": "findings",
-          "columnsFrom": [
-            "finding_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["finding_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1261,12 +1229,8 @@
           "name": "provider_usage_run_id_review_runs_id_fk",
           "tableFrom": "provider_usage",
           "tableTo": "review_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1330,10 +1294,7 @@
       "compositePrimaryKeys": {
         "pull_request_dispatches_repo_number_pk": {
           "name": "pull_request_dispatches_repo_number_pk",
-          "columns": [
-            "repo",
-            "number"
-          ]
+          "columns": ["repo", "number"]
         }
       },
       "uniqueConstraints": {},
@@ -1630,12 +1591,8 @@
           "name": "review_runs_pull_request_id_pull_requests_id_fk",
           "tableFrom": "review_runs",
           "tableTo": "pull_requests",
-          "columnsFrom": [
-            "pull_request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["pull_request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1651,10 +1608,7 @@
     "public.diff_side": {
       "name": "diff_side",
       "schema": "public",
-      "values": [
-        "LEFT",
-        "RIGHT"
-      ]
+      "values": ["LEFT", "RIGHT"]
     },
     "public.finding_event_type": {
       "name": "finding_event_type",
@@ -1674,110 +1628,57 @@
     "public.finding_source": {
       "name": "finding_source",
       "schema": "public",
-      "values": [
-        "self",
-        "bot",
-        "human"
-      ]
+      "values": ["self", "bot", "human"]
     },
     "public.finding_status": {
       "name": "finding_status",
       "schema": "public",
-      "values": [
-        "open",
-        "fixed",
-        "declined",
-        "disputed",
-        "resolved_by_human",
-        "outdated"
-      ]
+      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
     },
     "public.learning_event_type": {
       "name": "learning_event_type",
       "schema": "public",
-      "values": [
-        "proposed",
-        "applied",
-        "approved",
-        "retired"
-      ]
+      "values": ["proposed", "applied", "approved", "retired"]
     },
     "public.learning_kind": {
       "name": "learning_kind",
       "schema": "public",
-      "values": [
-        "accepted_pattern",
-        "correction",
-        "convention",
-        "scoping"
-      ]
+      "values": ["accepted_pattern", "correction", "convention", "scoping"]
     },
     "public.learning_status": {
       "name": "learning_status",
       "schema": "public",
-      "values": [
-        "pending",
-        "active",
-        "retired"
-      ]
+      "values": ["pending", "active", "retired"]
     },
     "public.pending_reply_status": {
       "name": "pending_reply_status",
       "schema": "public",
-      "values": [
-        "pending",
-        "judged",
-        "skipped"
-      ]
+      "values": ["pending", "judged", "skipped"]
     },
     "public.reaction": {
       "name": "reaction",
       "schema": "public",
-      "values": [
-        "+1",
-        "-1"
-      ]
+      "values": ["+1", "-1"]
     },
     "public.review_depth": {
       "name": "review_depth",
       "schema": "public",
-      "values": [
-        "full",
-        "move",
-        "mechanical",
-        "skipped"
-      ]
+      "values": ["full", "move", "mechanical", "skipped"]
     },
     "public.run_kind": {
       "name": "run_kind",
       "schema": "public",
-      "values": [
-        "first",
-        "incremental",
-        "comments",
-        "full"
-      ]
+      "values": ["first", "incremental", "comments", "full"]
     },
     "public.run_status": {
       "name": "run_status",
       "schema": "public",
-      "values": [
-        "queued",
-        "running",
-        "succeeded",
-        "failed",
-        "superseded",
-        "covered"
-      ]
+      "values": ["queued", "running", "succeeded", "failed", "superseded", "covered"]
     },
     "public.severity": {
       "name": "severity",
       "schema": "public",
-      "values": [
-        "blocking",
-        "should_fix",
-        "nit"
-      ]
+      "values": ["blocking", "should_fix", "nit"]
     }
   },
   "schemas": {},
