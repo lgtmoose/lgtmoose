@@ -12,6 +12,7 @@ describe("parseRepoConfigYaml", () => {
       include: [],
       registries: [],
       gate: { check_run: "required", approve: true, nit_cap: 10 },
+      injection: { allow: [] },
       labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
     };
     expect(parseRepoConfigYaml(undefined)).toEqual(expected);

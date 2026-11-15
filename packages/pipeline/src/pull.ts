@@ -21,6 +21,8 @@ export interface PullRequest {
   title: string;
   body: string;
   author: string;
+  /** The author's relationship to the repository (`author_association`), when GitHub gave it. */
+  association?: string;
   headSha: string;
   headRef: string;
   baseSha: string;
@@ -39,7 +41,7 @@ export interface PullComment {
   line?: number;
   startLine?: number;
   side?: "LEFT" | "RIGHT";
-  /** Whether a bot (an App) or a person wrote it, as GitHub says. Set for comments on the diff. */
+  /** Whether a bot (an App) or a person wrote it, as GitHub says. */
   authorType?: "bot" | "human";
   /**
    * The author's relationship to the repository, as GitHub reports it on the comment

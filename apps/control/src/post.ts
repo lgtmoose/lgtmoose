@@ -1059,6 +1059,7 @@ export async function post(
         })),
         others,
         heldResolutions,
+        ...(github.appId === undefined ? {} : { ourAppId: github.appId }),
       });
     report = await finish(earlier.open);
     // Fixes the judge saw are checked against this run's review, which read their files without

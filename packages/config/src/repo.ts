@@ -52,6 +52,17 @@ export const repoConfigSchema = z
       })
       .strict()
       .prefault({}),
+    /**
+     * The prompt-injection detector. `allow`: globs for files whose added lines aren't scanned,
+     * such as tests and docs about prompt injection. Their contents still reach the reviewer, so
+     * keep the globs narrow. The PR's title, body and comments are always scanned.
+     */
+    injection: z
+      .object({
+        allow: z.array(glob).default([]),
+      })
+      .strict()
+      .prefault({}),
     labels: z
       .object({
         pending: z.string().min(1).default("Ready for Review"),

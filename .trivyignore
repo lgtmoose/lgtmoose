@@ -1,0 +1,8 @@
+# Vulnerabilities and misconfigurations the security scans (.github/workflows/security.yml)
+# accept. One ID per line, with an expiry, and a comment above it saying why it's accepted:
+#
+#   # Only reachable through the X CLI's Y command, which the sandbox never runs.
+#   CVE-2026-12345 exp:2027-01-31
+#
+# An entry past its `exp:` date no longer applies, so the scan fails again and the acceptance is
+# looked at again. Keep this list short: prefer fixing (a newer base image digest or CLI pin).

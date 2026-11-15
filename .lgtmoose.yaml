@@ -1,0 +1,19 @@
+# LGTMoose's settings for reviewing this repository. Read from the base branch, so a PR can't
+# change how it's reviewed.
+
+injection:
+  # Files whose added lines the prompt-injection detector doesn't scan: the detector itself,
+  # the prompt code that quotes untrusted-block tags, and tests and fixtures that hold injection
+  # attempts on purpose. Their contents still reach the reviewer. Keep this list to exact files
+  # and narrow folders.
+  allow:
+    - SECURITY.md
+    - packages/pipeline/src/injection.ts
+    - packages/pipeline/src/injection.test.ts
+    - packages/pipeline/src/pipeline.test.ts
+    - packages/roles/src/untrusted.ts
+    - packages/roles/src/*.test.ts
+    - packages/roles/src/testing/**
+    - packages/evals/fixtures/injected-approval/**
+    - apps/control/src/workflow.test.ts
+    - apps/cli/src/review/review.test.ts

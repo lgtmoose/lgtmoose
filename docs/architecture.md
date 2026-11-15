@@ -90,7 +90,11 @@ At most one reply per finding per run, never a thank-you, and each with a marker
 
 ## Security controls
 
+The full threat model, with the test behind each control, is in [SECURITY.md](../SECURITY.md).
+
 - The model can't approve. The decision is a pure function of verified findings.
+- A prompt-injection detector, in plain code, scans what the reviewer read. Text aimed at an AI reviewer, chat-format markup, attempts to break out of an untrusted block, bidirectional controls and hidden Unicode on a line the PR adds raise a blocking `prompt_injection` finding there. The same in the PR's title, description, or a comment by someone outside the repository holds approval for the run. `injection.allow` in `.lgtmoose.yaml` lists files whose added lines aren't scanned (tests and docs about prompt injection). Like protected categories, its findings are dropped as duplicates only on an exact match.
+- `extraEgressHosts` refuses GitHub's hosts, so no deploy config can let the sandbox reach GitHub.
 - Learnings are written only through a policy check (author permission and provenance). The model can only propose them. `@lgtmoose/learnings` enforces it:
   - The author, the PR, the comment and the author's permission come from GitHub, never from the proposal.
   - A repo or path learning is active at once for an author with write access or higher on the repo. An org-wide one needs an owner of the org (the org memberships API), since admin on one repo is open to anyone who creates a repo. Anything else waits as `pending` until someone with that access approves it; approving and forgetting need the same access.

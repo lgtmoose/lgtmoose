@@ -9,6 +9,7 @@ import {
   fingerprintParts,
   isProtectedCategory,
   isSimilar,
+  matchesExactlyOnly,
   normalizeCode,
   titleNouns,
   type FingerprintSubject,
@@ -294,6 +295,25 @@ describe("dedupeFindings", () => {
       [{ fingerprint: fingerprint(subject(protectedSubject)) }],
     );
     expect(exact.dropped).toHaveLength(1);
+  });
+
+  it("drops a prompt-injection finding only on an exact match, like a protected one", () => {
+    const injected = { ruleCategory: "prompt_injection", title: "Text aimed at an AI reviewer" };
+    const lookalike = fingerprintParts(subject({ ruleCategory: "", title: "Text aimed at AI" }));
+    const fuzzy = dedupeFindings(
+      [candidate(injected)],
+      [{ fingerprint: fingerprint(lookalike), parts: lookalike }],
+    );
+    expect(fuzzy.kept).toHaveLength(1);
+    // The same look-alike drops an ordinary finding, so the exception is what keeps it.
+    const ordinary = dedupeFindings(
+      [candidate({ ...injected, ruleCategory: "security" })],
+      [{ fingerprint: fingerprint(lookalike), parts: lookalike }],
+    );
+    expect(ordinary.dropped).toHaveLength(1);
+    expect(matchesExactlyOnly("prompt_injection")).toBe(true);
+    expect(matchesExactlyOnly("authz")).toBe(true);
+    expect(matchesExactlyOnly("correctness")).toBe(false);
   });
 
   it("drops a repeat among the candidates themselves", () => {

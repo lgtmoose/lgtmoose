@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDeployConfig } from "./deploy.js";
+import { isGitHubHost, parseDeployConfig } from "./deploy.js";
 import { egressAllowlist } from "./egress.js";
 
 const base = { allowedOrgs: ["acme"], region: "eu-west-2" };
@@ -86,5 +86,24 @@ describe("egressAllowlist", () => {
       ],
     });
     expect(egressAllowlist(config).some((host) => host.includes("github"))).toBe(false);
+  });
+
+  it.each([
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "uploads.github.com",
+    "acme.ghe.com",
+  ])(
+    "refuses %s in extraEgressHosts, so the sandbox can never be let through to GitHub",
+    (host) => {
+      expect(() => parseDeployConfig({ ...base, extraEgressHosts: [host] })).toThrow(/GitHub/);
+    },
+  );
+
+  it("tells GitHub's hosts from lookalikes", () => {
+    expect(isGitHubHost("API.GitHub.com.")).toBe(true);
+    expect(isGitHubHost("notgithub.com")).toBe(false);
+    expect(isGitHubHost("github.example.com")).toBe(false);
   });
 });

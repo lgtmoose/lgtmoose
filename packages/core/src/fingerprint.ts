@@ -36,6 +36,18 @@ export function isProtectedCategory(category: string): boolean {
   return PROTECTED_CATEGORIES.includes(category);
 }
 
+/**
+ * The category of the prompt-injection detector's findings (in @lgtmoose/pipeline). Like a
+ * protected category, it's only dropped as a duplicate on an exact fingerprint match: otherwise
+ * the PR's author could post a look-alike comment on the line and have the finding dropped.
+ */
+export const INJECTION_CATEGORY = "prompt_injection";
+
+/** Whether a finding of this category is dropped as a duplicate only on an exact match. */
+export function matchesExactlyOnly(category: string): boolean {
+  return isProtectedCategory(category) || category === INJECTION_CATEGORY;
+}
+
 /** What a fingerprint is computed from. */
 export interface FingerprintSubject {
   /** The finding's rule category. Leave out for comments from other bots or humans. */
@@ -320,7 +332,8 @@ export interface DedupeResult<T> {
 
 /**
  * Drops findings already on the PR: an exact fingerprint match, or a fuzzy one (`isSimilar`)
- * unless the finding's category is protected. Comments from other bots and humans have no rule
+ * unless the finding's category is protected or the injection detector's (`matchesExactlyOnly`).
+ * Comments from other bots and humans have no rule
  * category, so they never match a finding exactly; they're matched fuzzily, which means a
  * protected finding is posted even if someone else already raised it. Candidates are also checked against each other,
  * in order, so two batches reporting the same problem post it once.
@@ -338,7 +351,7 @@ export function dedupeFindings<T>(
       result.dropped.push({ finding, reason: "exact", matched: print });
       continue;
     }
-    const similar = isProtectedCategory(parts.ruleCategory)
+    const similar = matchesExactlyOnly(parts.ruleCategory)
       ? undefined
       : seen.find((item) => item.parts !== undefined && isSimilar(parts, item.parts));
     if (similar !== undefined) {
