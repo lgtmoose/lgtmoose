@@ -854,6 +854,7 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
       return {
         reader: githubPullReader((path) => client.request("GET", path)),
         appId: app.appId,
+        slug,
         permission: (target, login) => collaboratorPermission(client, target, login, log),
         // GitHub Apps can call GraphQL with the installation token.
         threads: graphQlThreadReader(

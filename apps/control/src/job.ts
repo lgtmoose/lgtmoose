@@ -1,4 +1,4 @@
-import { REVIEW_REQUESTS } from "@lgtmoose/core";
+import { REVIEW_JOB_KINDS, REVIEW_REQUESTS } from "@lgtmoose/core";
 import { z } from "zod";
 
 /**
@@ -21,10 +21,15 @@ export const workflowJobSchema = z.object({
   /** Set when a person asked for the review (`ReviewJob.requested`). */
   requested: z.enum(REVIEW_REQUESTS).optional(),
   /**
-   * Who the job's event came from (`ReviewJob.actor`): for a requested review, the person who
-   * asked. Their access is read from GitHub, never taken from the job.
+   * What the job is (`ReviewJob.kind`), who caused it and, for a label, which one: whether it
+   * starts a review is decided against the repo's `review` config (`reviewGate`). Left out by
+   * jobs queued before NIC-1077, which are reviewed as before. For a requested review,
+   * `actor` is who asked: their access is read from GitHub, never taken from the job.
    */
+  kind: z.enum(REVIEW_JOB_KINDS).optional(),
   actor: z.string().min(1).max(100).optional(),
+  label: z.string().min(1).max(100).optional(),
+  botActor: z.literal(true).optional(),
 });
 
 export type WorkflowJob = z.infer<typeof workflowJobSchema>;

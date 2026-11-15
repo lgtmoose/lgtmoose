@@ -45,6 +45,9 @@ function dispatchDeps(): Promise<DispatchDeps> {
       ...(env.conversationQueueUrl === undefined
         ? {}
         : { conversation: sqsConversationQueue(sqs, env.conversationQueueUrl) }),
+      ...(env.pushDebounceSeconds === undefined
+        ? {}
+        : { pushDebounceSeconds: env.pushDebounceSeconds }),
       log,
     };
   })().catch((error: unknown) => {

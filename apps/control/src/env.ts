@@ -52,6 +52,22 @@ export interface DispatchEnv {
   databaseName: string;
   /** `CONVERSATION_QUEUE_URL`: where comment jobs go. Unset, they're dropped as before. */
   conversationQueueUrl?: string;
+  /** `LGTMOOSE_REVIEW_DEBOUNCE_SECONDS` (`reviewDebounceSeconds`): a push's wait. Unset: 60. */
+  pushDebounceSeconds?: number;
+}
+
+/**
+ * `LGTMOOSE_REVIEW_DEBOUNCE_SECONDS`: how long a push's review waits for the next push, 0 to
+ * 1800 seconds. Unset or blank: the default. Anything else is a setup error.
+ */
+export function readDebounceSeconds(env: Env): number | undefined {
+  const value = env.LGTMOOSE_REVIEW_DEBOUNCE_SECONDS?.trim();
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (!Number.isInteger(seconds) || seconds < 0 || seconds > 1800) {
+    throw new Error("LGTMOOSE_REVIEW_DEBOUNCE_SECONDS must be a whole number from 0 to 1800.");
+  }
+  return seconds;
 }
 
 /** Reads the dispatcher's settings, or says which variables are missing (blank counts). */
@@ -64,7 +80,12 @@ export function readDispatchEnv(env: Env): DispatchEnv | { missing: string[] } {
   });
   if ("missing" in read) return read;
   const conversationQueueUrl = env.CONVERSATION_QUEUE_URL?.trim();
-  return conversationQueueUrl ? { ...read, conversationQueueUrl } : read;
+  const pushDebounceSeconds = readDebounceSeconds(env);
+  return {
+    ...read,
+    ...(conversationQueueUrl ? { conversationQueueUrl } : {}),
+    ...(pushDebounceSeconds === undefined ? {} : { pushDebounceSeconds }),
+  };
 }
 
 /** What the conversation Lambda reads from its environment, set by the Workflow stack. */

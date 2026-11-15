@@ -15,6 +15,12 @@ export interface PullReader {
    * PENDING) and the commit it was submitted on. Optional: the dry run doesn't need it.
    */
   review?(target: PullTarget, reviewId: number): Promise<{ state: string; commitId: string }>;
+  /**
+   * A file's text at a commit (the contents API); undefined when there's no such file. For the
+   * repo config at the base before anything is cloned (`review.trigger`). Optional: without it,
+   * every run reviews.
+   */
+  fileAt?(target: PullTarget, sha: string, path: string): Promise<string | undefined>;
 }
 
 export interface PullRequest {
@@ -33,6 +39,8 @@ export interface PullRequest {
   baseSha: string;
   baseRef: string;
   state: string;
+  /** The PR's label names as GitHub has them now, when it gave them. */
+  labels?: string[];
 }
 
 export interface PullComment {

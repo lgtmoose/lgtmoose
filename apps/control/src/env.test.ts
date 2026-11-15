@@ -151,6 +151,33 @@ describe("readControlEnv", () => {
   });
 });
 
+describe("readDispatchEnv: the push wait", () => {
+  const vars = {
+    STATE_MACHINE_ARN: "arn:sm",
+    DEAD_LETTER_QUEUE_URL: "https://sqs/dlq",
+    DATABASE_SECRET_ARN: "arn:secret",
+    DATABASE_NAME: "lgtmoose",
+  };
+
+  it("reads LGTMOOSE_REVIEW_DEBOUNCE_SECONDS, and leaves it out when unset", () => {
+    expect(readDispatchEnv({ ...vars, LGTMOOSE_REVIEW_DEBOUNCE_SECONDS: " 300 " })).toMatchObject({
+      pushDebounceSeconds: 300,
+    });
+    expect(readDispatchEnv({ ...vars, LGTMOOSE_REVIEW_DEBOUNCE_SECONDS: "0" })).toMatchObject({
+      pushDebounceSeconds: 0,
+    });
+    expect(readDispatchEnv(vars)).not.toHaveProperty("pushDebounceSeconds");
+  });
+
+  it("refuses a wait that isn't 0 to 1800 whole seconds", () => {
+    for (const value of ["-1", "1801", "1.5", "soon"]) {
+      expect(() => readDispatchEnv({ ...vars, LGTMOOSE_REVIEW_DEBOUNCE_SECONDS: value })).toThrow(
+        /0 to 1800/,
+      );
+    }
+  });
+});
+
 describe("readDispatchEnv", () => {
   it("reads the dispatcher's variables, trimmed, or names the missing ones", () => {
     expect(

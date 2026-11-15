@@ -43,12 +43,15 @@ export {
 } from "./deploy.js";
 export {
   DEFAULT_CONVENTIONS,
+  DEFAULT_TRIGGER_LABEL,
+  REVIEW_TRIGGERS,
   parseRepoConfig,
   parseRepoConfigYaml,
   repoConfigSchema,
   statusLabels,
   type RepoConfig,
   type RepoConfigInput,
+  type ReviewTrigger,
 } from "./repo.js";
 export { egressAllowlist, providerEgressHosts } from "./egress.js";
 export {

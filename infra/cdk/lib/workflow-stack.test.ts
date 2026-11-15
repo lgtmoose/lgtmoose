@@ -688,15 +688,33 @@ describe("reconciler", () => {
     expect(secrets).toHaveLength(2);
     expect(actions(granted).some((a) => a.startsWith("states:"))).toBe(false);
     expect(actions(granted)).not.toContain("sqs:ReceiveMessage");
-    // In the artifact bucket, only writing the feedback report: no reads, nothing else.
+    // In the artifact bucket, only writing the feedback report and reading batch outputs (to
+    // settle spend for runs post never reached, NIC-1079): no other object, and no deletes.
     const s3 = granted.filter((s) => actions([s]).some((a) => a.startsWith("s3:")));
-    expect(s3.length).toBeGreaterThan(0);
-    for (const statement of s3) {
+    const writes = s3.filter((s) => actions([s]).some((a) => a.startsWith("s3:PutObject")));
+    expect(writes.length).toBeGreaterThan(0);
+    for (const statement of writes) {
       expect(
         actions([statement]).every((a) => a.startsWith("s3:PutObject") || a.startsWith("s3:Abort")),
       ).toBe(true);
       expect(JSON.stringify(statement.Resource)).toContain(FEEDBACK_REPORT_KEY);
     }
+    const reads = s3.filter((s) => !writes.includes(s));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const statement of reads) {
+      expect(
+        actions([statement]).every(
+          (a) =>
+            a.startsWith("s3:GetObject") || a.startsWith("s3:GetBucket") || a.startsWith("s3:List"),
+        ),
+      ).toBe(true);
+      // Objects only under runs/<id>/batches/<n>/output.json (and the bucket, for listing).
+      const objects = (JSON.stringify(statement.Resource).match(/\/[^"\\]*?(?=")/g) ?? []).filter(
+        (part) => part.startsWith("/") && part.length > 1,
+      );
+      for (const object of objects) expect(object).toBe("/runs/*/batches/*/output.json");
+    }
+    expect(actions(granted).some((a) => a.startsWith("s3:DeleteObject"))).toBe(false);
   });
 
   it("writes the feedback report to the artifact bucket, with the config's settings", () => {

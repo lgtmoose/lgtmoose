@@ -231,6 +231,22 @@ describe("installationGitHub", () => {
     expect(asked).toHaveLength(2);
   });
 
+  it("reads the review settings from the same config read as the status labels", async () => {
+    const yaml = "review:\n  trigger: label\n  label: ready\n";
+    const { fetchFn, asked } = fakeFetch({
+      [`/repos/acme/shop/contents/.lgtmoose.yaml?ref=${X}`]: {
+        body: { content: Buffer.from(yaml).toString("base64"), encoding: "base64" },
+      },
+    });
+    const github = installationGitHub(new GitHubClient({ token: async () => "t", fetch: fetchFn }));
+    expect(await github.reviewSettings?.("acme/shop", X)).toMatchObject({
+      trigger: "label",
+      label: "ready",
+    });
+    await github.statusLabels("acme/shop", X);
+    expect(asked).toHaveLength(1);
+  });
+
   it("picks the newest human comment made after the time given", async () => {
     const since = new Date("2026-11-14T10:00:00Z");
     const { fetchFn } = fakeFetch({

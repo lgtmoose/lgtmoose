@@ -52,6 +52,143 @@ import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
 
+/**
+ * The post step of a conversation-only run (`RunManifest.conversationOnly`, NIC-1077): a run for
+ * replies or `explain` while the PR's code waits for a review trigger. It writes what the reply
+ * judge and the explainer came to, and nothing else: no review, check run (the prepare step
+ * posted "Waiting for a trigger"), summary or label. A fix the judge saw isn't closed, since no
+ * review of this run read its file: it gets the "wasn't reviewed again" reply. The run ends
+ * superseded, so the PR's last reviewed head stays put and its new commits stay unreviewed.
+ * Attempts take turns on the run's claim and pick up from its saved progress, like `post`.
+ */
+async function postConversation(
+  deps: ControlDeps,
+  runId: string,
+  run: RunRecord,
+  manifest: RunManifest,
+  options: { attempt: PostAttempt; taskStatus: (taskArn: string) => Promise<string> },
+): Promise<PostOutput> {
+  const keys = runKeys(runId);
+  const { target, pr } = manifest.review;
+  const github = await deps.github(manifest.installationId);
+  const permission = memo(async (login: string) =>
+    github.permission === undefined ? "none" : github.permission(target, login),
+  );
+  let threads: Awaited<ReturnType<typeof github.threads.reviewThreads>> = [];
+  try {
+    threads = await github.threads.reviewThreads(target);
+  } catch (error) {
+    // Unread, a fixed finding's thread isn't resolved; it isn't closed here anyway.
+    deps.log("review threads unread", {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const replied = await settleRunReplies(deps, runId, manifest, {
+    prAuthor: pr.author,
+    permission,
+    threadId: (firstCommentId) =>
+      threads.find((thread) => thread.firstCommentId === firstCommentId)?.id,
+    pullRequestId: run.pullRequestId,
+  });
+  let replyWrites: ReplyWrites | undefined;
+  if (replied !== undefined) {
+    if (!replied.saved && replied.fixes.length > 0) {
+      // Nothing reviewed in this run: each claimed fix stays open, with one reply saying why.
+      await confirmFixes(
+        replied.fixes,
+        { reraised: [], reviewedNow: [] },
+        replied.writes,
+        replied.close,
+      );
+    }
+    replyWrites = replied.saved
+      ? replied.writes
+      : await saveReplyWrites(deps, runId, replied.writes);
+  }
+
+  const claim = await holdClaim(deps, options, keys.reviewClaim, runId);
+  const saved = await deps.store.getTagged(keys.posted);
+  const progress = readProgress(saved?.text);
+  let progressEtag = saved?.etag;
+  const save = async () => {
+    progress.attempt = options.attempt.id;
+    progress.writes = (progress.writes ?? 0) + 1;
+    const body = JSON.stringify(progress);
+    const etag =
+      progressEtag === undefined
+        ? await deps.store.createText(keys.posted, body)
+        : await deps.store.replaceText(keys.posted, body, progressEtag);
+    if (etag === undefined)
+      throw new Error("Another attempt saved this post's progress meanwhile.");
+    progressEtag = etag;
+  };
+  const writer = github.conversation;
+  const { replies } = deps;
+  if (replyWrites !== undefined && !progress.replies) {
+    const recordReply = deps.findings.recordReply?.bind(deps.findings);
+    if (writer !== undefined && replies !== undefined && recordReply !== undefined) {
+      const propose = deps.proposeLearning;
+      const written = await writeReplies(replyWrites, {
+        reply: (root, body) => writer.reply(target, root, body),
+        resolveThread: (id) => writer.resolveThread(id),
+        recordReply: (id, type, commentId) => recordReply(id, type, commentId, pr.headSha),
+        ...(propose === undefined
+          ? {}
+          : {
+              proposeLearning: (write) =>
+                propose(manifest.installationId, {
+                  text: write.learning ?? "",
+                  repo: `${target.owner}/${target.repo}`,
+                  prNumber: target.number,
+                  commentId: write.commentId,
+                  author: write.author,
+                }),
+            }),
+        replies,
+        log: (message, fields) => deps.log(message, fields),
+      });
+      deps.log("replies written", { runId, closed: replyWrites.closed, replied: written });
+    }
+    progress.replies = true;
+    await save();
+  }
+  const explained = manifest.explanations ?? [];
+  if (explained.length > 0 && !progress.explanations) {
+    if (writer !== undefined && replies !== undefined) {
+      const answered = await answerExplanations(
+        explained,
+        {
+          runId,
+          repo: `${target.owner}/${target.repo}`,
+          prNumber: target.number,
+          headSha: pr.headSha,
+        },
+        {
+          store: deps.store,
+          reply: (root, body) => writer.reply(target, root, body),
+          comment: (body) => writer.comment(target, body),
+          replies,
+          log: (message, fields) => deps.log(message, fields),
+        },
+      );
+      deps.log("explains answered", { runId, count: explained.length, answered });
+    }
+    progress.explanations = true;
+    await save();
+  }
+  await deps.runs.supersedeRun(runId);
+  await deps.store.deleteIfMatch(keys.reviewClaim, claim.etag).catch((release: unknown) => {
+    deps.log("releasing a claim failed", {
+      runId,
+      key: keys.reviewClaim,
+      error: release instanceof Error ? release.message : String(release),
+    });
+  });
+  deps.log("conversation only: posted replies, no review", { runId });
+  return { runId, posted: false, event: "COMMENT", complete: true, findings: 0, reviewed: false };
+}
+
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
   runId: string;
@@ -926,6 +1063,12 @@ export async function post(
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
   // Written by this run's own prepare step with the control task's role; still shape-checked.
   const manifest = readManifest(preparedText);
+  if (manifest.conversationOnly === true) {
+    // Its judge and explainer batches ran: settle them as for any run (NIC-1079).
+    const { target } = manifest.review;
+    await settleSpend(deps, runId, manifest, `${target.owner}/${target.repo}`);
+    return postConversation(deps, runId, run, manifest, { attempt, taskStatus });
+  }
   const prepared = manifest.review;
   const outcomes = (
     await Promise.all(

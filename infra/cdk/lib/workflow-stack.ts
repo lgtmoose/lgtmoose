@@ -141,6 +141,8 @@ export interface WorkflowStackProps extends StackProps {
   maxReplyJudgements?: number;
   /** The most `explain`s the explainer answers per PR per run (`maxExplanations`). Left out: 5. */
   maxExplanations?: number;
+  /** How long a push's review waits for the next push (`reviewDebounceSeconds`). Left out: 60. */
+  reviewDebounceSeconds?: number;
   /**
    * Spend caps and prices (`budgets`, NIC-1079), passed to the control task as JSON. With a
    * monthly cap, CloudWatch alarms at 50%, 80% and 100% of it. Left out: no caps.
@@ -440,6 +442,7 @@ export class WorkflowStack extends Stack {
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
         CONVERSATION_QUEUE_URL: this.conversationQueue.queueUrl,
+        LGTMOOSE_REVIEW_DEBOUNCE_SECONDS: String(props.reviewDebounceSeconds ?? 60),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

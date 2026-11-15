@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { RepoConfig } from "@lgtmoose/config";
 import { SKIP_LABEL, reviewJobGroupId, type ReviewJob } from "@lgtmoose/core";
 
 /**
@@ -61,6 +62,11 @@ export interface InstallationGitHub {
    * as the post step reads them. Throws when the config can't be read or isn't valid.
    */
   statusLabels(repo: string, baseSha: string): Promise<readonly string[]>;
+  /**
+   * The `review` settings of the repo config at `baseSha`: whether a PR waits for a label.
+   * Optional: without it, no missed label is looked for.
+   */
+  reviewSettings?(repo: string, baseSha: string): Promise<RepoConfig["review"]>;
   /** The newest comment by a person created after `since`, issue or review comment. */
   newestHumanComment(repo: string, number: number, since: Date): Promise<HumanComment | undefined>;
   /** Sets `target` as the PR's one status label. */
@@ -143,6 +149,11 @@ export interface ReconcileCounts {
   openPullRequests: number;
   /** Review jobs queued for heads no run had started for. */
   missedHeads: number;
+  /**
+   * Label jobs queued for PRs that carry their repo's review label (`review.trigger: label`)
+   * while their head's run waited or failed: a missed `labeled` webhook (NIC-1077).
+   */
+  missedLabels: number;
   /** Comment jobs queued for human comments newer than the record. */
   missedComments: number;
   /** Runs for replies queued: replies waiting for the reply judge that no run took. */
@@ -169,6 +180,7 @@ function emptyCounts(): ReconcileCounts {
   return {
     openPullRequests: 0,
     missedHeads: 0,
+    missedLabels: 0,
     missedComments: 0,
     pendingReplies: 0,
     labelsResynced: 0,
@@ -315,8 +327,13 @@ async function reconcilePull(
         }
       }
     } else if (record.headSha === pull.headSha) {
-      // A run started for this head and hasn't posted: running, or failed.
-      counts.unreviewed += 1;
+      // A run started for this head and hasn't posted: running, failed, or waiting for its
+      // repo's review label, which the PR now carries (a missed `labeled` webhook).
+      if (await queueMissedLabel(context, pull)) {
+        deps.log("reconcile: queued a review for a PR with its review label", fields);
+      } else {
+        counts.unreviewed += 1;
+      }
     } else if (await queueReview(context, pull, "pr_updated")) {
       deps.log("reconcile: queued a review for a missed head", {
         ...fields,
@@ -407,6 +424,41 @@ async function queueReview(
   return true;
 }
 
+/**
+ * A PR whose head waits for its repo's review label (`review.trigger: label`, from the config at
+ * its base) and carries it: the `labeled` webhook was missed, so a label job is queued as the
+ * gateway would have. Once per head: the dispatcher dedupes a head reviewed or being reviewed, and
+ * the prepare step reads the labels again. Only within the lookback window, like a missed head.
+ */
+async function queueMissedLabel(context: RepoContext, pull: OpenPull): Promise<boolean> {
+  const { github, repo } = context;
+  if (github.reviewSettings === undefined) return false;
+  const settings = await github.reviewSettings(repo, pull.baseSha);
+  if (
+    settings.trigger !== "label" ||
+    !pull.labels.some((name) => sameLabel(name, settings.label))
+  ) {
+    return false;
+  }
+  const now = (context.deps.now?.() ?? new Date()).getTime();
+  if (!(now - Date.parse(pull.updatedAt) <= context.deps.lookbackMs)) return false;
+  const deliveryId = reconcileDeliveryId(
+    `${repo.toLowerCase()}#${pull.number}@${pull.headSha}:label`,
+  );
+  await context.deps.queue.send(
+    {
+      ...jobBase(context, pull),
+      kind: "pr_labeled",
+      label: settings.label,
+      deliveryId,
+      actor: pull.author,
+    },
+    { groupId: reviewJobGroupId({ repo, prNumber: pull.number }), dedupeId: deliveryId },
+  );
+  context.counts.missedLabels += 1;
+  return true;
+}
+
 async function resyncLabel(context: RepoContext, pull: OpenPull, target: string): Promise<void> {
   if (context.deps.shadow) return;
   const statusLabels = await context.statusLabels(pull.baseSha);
@@ -437,6 +489,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
   const names: Record<keyof ReconcileCounts, string> = {
     openPullRequests: "OpenPullRequests",
     missedHeads: "MissedHeads",
+    missedLabels: "MissedLabels",
     missedComments: "MissedComments",
     pendingReplies: "PendingReplies",
     labelsResynced: "LabelsResynced",

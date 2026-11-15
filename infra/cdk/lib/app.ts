@@ -117,6 +117,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     maxReplyJudgements: config.maxReplyJudgements,
     maxExplanations: config.maxExplanations,
     budgets: config.budgets,
+    reviewDebounceSeconds: config.reviewDebounceSeconds,
     embeddings: config.learnings.embeddings,
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
     ...(config.tickets === undefined ? {} : { tickets: config.tickets }),
