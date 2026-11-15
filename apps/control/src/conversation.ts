@@ -32,7 +32,14 @@ export const REPLY_MARKER = "<!-- lgtmoose:command-reply -->";
 /** The most learnings listed by `learnings`. */
 export const MAX_LISTED_LEARNINGS = 30;
 
-export type CommentKind = "comment" | "review_comment";
+/**
+ * What a conversation job is about: an issue comment on the PR, a review comment on the diff, or
+ * the body of a submitted review (`review`, read for commands only).
+ */
+export type CommentKind = "comment" | "review_comment" | "review";
+
+/** The kinds GitHub takes reactions on: submitted reviews have no reactions API. */
+export type ReactableKind = Exclude<CommentKind, "review">;
 
 /** The comment a job is about, as GitHub reports it. */
 export interface CommentInfo {
@@ -61,7 +68,9 @@ export interface ConversationGitHub {
   /** The App's slug: the bot is `@<slug>`. */
   slug(): Promise<string>;
   /** The comment; undefined when it's gone. */
-  comment(kind: CommentKind, repo: string, commentId: number): Promise<CommentInfo | undefined>;
+  comment(kind: ReactableKind, repo: string, commentId: number): Promise<CommentInfo | undefined>;
+  /** A submitted review's body and author; undefined when it's gone. */
+  review(repo: string, number: number, reviewId: number): Promise<CommentInfo | undefined>;
   pull(repo: string, number: number): Promise<PullInfo>;
   /** The paths the PR changes, at head. */
   files(repo: string, number: number): Promise<string[]>;
@@ -69,8 +78,11 @@ export interface ConversationGitHub {
   permission(repo: string, login: string): Promise<Permission>;
   /** The org memberships API: an owner is `admin`. For a user account, only that user. */
   orgRole(org: string, login: string): Promise<OrgRole>;
-  react(kind: CommentKind, repo: string, commentId: number, content: Reaction): Promise<void>;
-  /** A reply: in the thread for a review comment, on the PR for an issue comment. */
+  react(kind: ReactableKind, repo: string, commentId: number, content: Reaction): Promise<void>;
+  /**
+   * A reply: in the thread for a review comment, on the PR for an issue comment or a submitted
+   * review (whose `commentId` is then the review's ID).
+   */
   reply(
     kind: CommentKind,
     repo: string,
@@ -171,8 +183,15 @@ const sameLogin = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 interface Context {
   deps: ConversationDeps;
   github: ConversationGitHub;
-  job: ReviewJob & { commentId: number };
+  job: ReviewJob;
   kind: CommentKind;
+  /** The comment's ID; undefined for a submitted review, which isn't a comment. */
+  commentId: number | undefined;
+  /**
+   * What the commands came from, for the IDs that make a request once: `<comment ID>` or
+   * `review-<review ID>` (the two are separate ID spaces on GitHub).
+   */
+  sourceKey: string;
   comment: CommentInfo;
   slug: string;
   owner: string;
@@ -235,13 +254,13 @@ async function reviewCommand(context: Context, full: boolean): Promise<Outcome> 
     kind: "pr_updated",
     requested: full ? "full_review" : "review",
     // One comment asks once: a redelivery dedupes on the queue and in the dispatcher.
-    deliveryId: `command-${job.commentId}-${full ? "full" : "review"}`,
+    deliveryId: `command-${context.sourceKey}-${full ? "full" : "review"}`,
     installationId: job.installationId,
     repo: job.repo,
     prNumber: job.prNumber,
     headSha: pull.headSha,
     actor: context.comment.author,
-    commentId: job.commentId,
+    ...(context.commentId === undefined ? {} : { commentId: context.commentId }),
     receivedAt: now.toISOString(),
     eventAt: job.eventAt ?? now.toISOString(),
   });
@@ -337,7 +356,8 @@ async function explainCommand(
 
 async function ignoreCommand(context: Context): Promise<Outcome> {
   const root = context.comment.threadRootId;
-  if (context.kind !== "review_comment" || root === undefined) {
+  const commentId = context.commentId;
+  if (context.kind !== "review_comment" || root === undefined || commentId === undefined) {
     return { ok: false, reply: "`ignore` works as a reply in one of my findings' threads." };
   }
   const finding = await context.deps.store.findingByComment(
@@ -366,11 +386,7 @@ async function ignoreCommand(context: Context): Promise<Outcome> {
           : "A blocking finding can only be ignored by someone with write access.",
     };
   }
-  const declined = await context.deps.store.decline(
-    finding.id,
-    context.comment.author,
-    context.job.commentId,
-  );
+  const declined = await context.deps.store.decline(finding.id, context.comment.author, commentId);
   return declined ? { ok: true } : { ok: true, reply: "This finding was already closed." };
 }
 
@@ -391,7 +407,8 @@ async function learnCommand(context: Context, text: string): Promise<Outcome> {
   const result = await proposeLearning(learningDeps(context), learningProposal(text), {
     repo: context.job.repo,
     pr: context.job.prNumber,
-    commentId: context.job.commentId,
+    // A review's ID isn't a comment ID, so a learning from a review body records none.
+    ...(context.commentId === undefined ? {} : { commentId: context.commentId }),
     author: context.comment.author,
   });
   if (result.outcome === "refused") {
@@ -418,7 +435,7 @@ async function forgetCommand(context: Context, id: string): Promise<Outcome> {
   }
   const result = await forgetLearning(learningDeps(context), id, {
     login: context.comment.author,
-    commentId: context.job.commentId,
+    ...(context.commentId === undefined ? {} : { commentId: context.commentId }),
   });
   if (result.outcome === "refused")
     return { ok: false, reply: `Not forgotten: ${inline(result.reason)}.` };
@@ -435,7 +452,7 @@ async function approveCommand(context: Context, id: string): Promise<Outcome> {
   }
   const result = await approveLearning(learningDeps(context), id, {
     login: context.comment.author,
-    commentId: context.job.commentId,
+    ...(context.commentId === undefined ? {} : { commentId: context.commentId }),
   });
   if (result.outcome === "refused") {
     return { ok: false, reply: `Not approved: ${inline(result.reason)}.` };
@@ -514,13 +531,15 @@ export async function handleConversation(
   deps: ConversationDeps,
   job: ReviewJob,
 ): Promise<ConversationResult> {
+  if (job.kind === "review") return handleReview(deps, job);
   if (job.kind !== "comment" && job.kind !== "review_comment") {
     return { action: "deferred", reason: `${job.kind} jobs arrive with M5` };
   }
   if (job.commentId === undefined) return { action: "ignored", reason: "no comment ID" };
-  const kind: CommentKind = job.kind;
+  const kind: ReactableKind = job.kind;
+  const commentId = job.commentId;
   const github = await deps.github(job.installationId);
-  const comment = await github.comment(kind, job.repo, job.commentId);
+  const comment = await github.comment(kind, job.repo, commentId);
   if (comment === undefined) return { action: "ignored", reason: "the comment is gone" };
   if (
     comment.authorIsBot ||
@@ -541,17 +560,44 @@ export async function handleConversation(
   const commands = parseCommands(comment.body, slug);
   // Not a command: a reply for the judge, if it's on one of our findings' threads.
   if (commands.length === 0) {
-    const result = await recordReply(
-      deps,
-      github,
-      { ...job, commentId: job.commentId },
-      kind,
-      comment,
-    );
+    const result = await recordReply(deps, github, { ...job, commentId }, kind, comment);
     await handled();
     return result;
   }
 
+  const { ok, names, body } = await runCommands(deps, github, job, comment, slug, commands, {
+    kind,
+    commentId,
+    sourceKey: String(commentId),
+  });
+  const reaction: Reaction = ok ? "+1" : "confused";
+  if (deps.shadow) {
+    deps.log("shadow: command reply not posted", {
+      repo: job.repo,
+      prNumber: job.prNumber,
+      commentId,
+      commands: names,
+      reaction,
+      ...(body === undefined ? {} : { reply: body }),
+    });
+  } else {
+    await github.react(kind, job.repo, commentId, reaction);
+    if (body !== undefined) await github.reply(kind, job.repo, job.prNumber, commentId, body);
+  }
+  await handled();
+  return { action: "commands", commands: names, ok, replied: body !== undefined };
+}
+
+/** Runs a comment's or review's commands in order, and builds the reply to post. */
+async function runCommands(
+  deps: ConversationDeps,
+  github: ConversationGitHub,
+  job: ReviewJob,
+  comment: CommentInfo,
+  slug: string,
+  commands: readonly Command[],
+  source: Pick<Context, "kind" | "commentId" | "sourceKey">,
+): Promise<{ ok: boolean; names: string[]; body: string | undefined; replies: string[] }> {
   const [owner = ""] = job.repo.split("/");
   let pull: Promise<PullInfo> | undefined;
   const permission = memo((login) => github.permission(job.repo, login));
@@ -562,8 +608,8 @@ export async function handleConversation(
   const context: Context = {
     deps,
     github,
-    job: { ...job, commentId: job.commentId },
-    kind,
+    job,
+    ...source,
     comment,
     slug,
     owner,
@@ -580,23 +626,53 @@ export async function handleConversation(
   const ok = outcomes.every((outcome) => outcome.ok);
   const replies = [...new Set(outcomes.flatMap((outcome) => outcome.reply ?? []))];
   const body = replies.length === 0 ? undefined : `${replies.join("\n\n")}\n\n${REPLY_MARKER}`;
-  const reaction: Reaction = ok ? "+1" : "confused";
-  const names = commands.map((command) => command.name);
+  return { ok, names: commands.map((command) => command.name), body, replies };
+}
+
+/**
+ * The `@lgtmoose` commands in a submitted review's body. Same parser and rules as a comment's,
+ * with three differences. GitHub has no reactions API for reviews, so the outcome is always a
+ * reply on the PR (an issue comment), saying "Done." when a command had nothing else to say. A
+ * review without commands is left alone: review bodies never go to the reply judge. And the
+ * review's ID isn't a comment ID, so nothing it does records one; the IDs that make a request
+ * once use `review-<ID>` instead.
+ */
+async function handleReview(deps: ConversationDeps, job: ReviewJob): Promise<ConversationResult> {
+  if (job.reviewId === undefined) return { action: "ignored", reason: "no review ID" };
+  const reviewId = job.reviewId;
+  const github = await deps.github(job.installationId);
+  const review = await github.review(job.repo, job.prNumber, reviewId);
+  if (review === undefined) return { action: "ignored", reason: "the review is gone" };
+  if (
+    review.authorIsBot ||
+    review.body.includes(REPLY_MARKER) ||
+    review.body.includes(JUDGE_REPLY_MARKER)
+  ) {
+    return { action: "ignored", reason: "a bot's review" };
+  }
+  const slug = await github.slug();
+  const commands = parseCommands(review.body, slug);
+  if (commands.length === 0) return { action: "ignored", reason: "no commands in the review" };
+
+  const { ok, names, replies } = await runCommands(deps, github, job, review, slug, commands, {
+    kind: "review",
+    commentId: undefined,
+    sourceKey: `review-${reviewId}`,
+  });
+  const text = replies.length === 0 ? [ok ? "Done." : "That didn't work."] : replies;
+  const body = `@${review.author}: ${text.join("\n\n")}\n\n${REPLY_MARKER}`;
   if (deps.shadow) {
     deps.log("shadow: command reply not posted", {
       repo: job.repo,
       prNumber: job.prNumber,
-      commentId: job.commentId,
+      reviewId,
       commands: names,
-      reaction,
-      ...(body === undefined ? {} : { reply: body }),
+      reply: body,
     });
   } else {
-    await github.react(kind, job.repo, job.commentId, reaction);
-    if (body !== undefined) await github.reply(kind, job.repo, job.prNumber, job.commentId, body);
+    await github.reply("review", job.repo, job.prNumber, reviewId, body);
   }
-  await handled();
-  return { action: "commands", commands: names, ok, replied: body !== undefined };
+  return { action: "commands", commands: names, ok, replied: true };
 }
 
 /**

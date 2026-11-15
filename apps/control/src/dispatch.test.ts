@@ -410,16 +410,20 @@ describe("dispatch", () => {
     expect(f.status(nameOf(NEW))).toBe("ABORTED");
   });
 
-  it("forwards comment jobs to the conversation queue, and defers submitted reviews", async () => {
+  it("forwards comment jobs and submitted reviews to the conversation queue", async () => {
     const f = fakeDeps();
     const comment = job({ kind: "comment", commentId: 3, deliveryId: "c-1" });
     expect(await dispatch(f.deps, comment)).toEqual({ action: "forwarded" });
     const inline = job({ kind: "review_comment", commentId: 4, deliveryId: "c-2" });
     expect(await dispatch(f.deps, inline)).toEqual({ action: "forwarded" });
-    expect(f.forwarded).toEqual(["c-1", "c-2"]);
-    expect(await dispatch(f.deps, job({ kind: "review", reviewId: 5 }))).toMatchObject({
-      action: "deferred",
+    // A review goes under its review ID, so two deliveries of it dedupe on the queue.
+    const review = job({ kind: "review", reviewId: 5, deliveryId: "r-1" });
+    expect(await dispatch(f.deps, review)).toEqual({ action: "forwarded" });
+    expect(await dispatch(f.deps, { ...review, deliveryId: "r-2" })).toEqual({
+      action: "forwarded",
     });
+    expect(f.forwarded).toEqual(["c-1", "c-2", "review-5", "review-5"]);
+    expect(await dispatch(f.deps, job({ kind: "review" }))).toMatchObject({ action: "ignored" });
     // Without a conversation queue, comments are dropped as before.
     const withoutQueue: DispatchDeps = { ...f.deps };
     delete withoutQueue.conversation;

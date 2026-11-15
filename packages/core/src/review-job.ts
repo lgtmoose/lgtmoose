@@ -248,6 +248,12 @@ export function toReviewJob(
     if (labelNames(pr.labels).includes(SKIP_LABEL)) return { ignored: `labelled ${SKIP_LABEL}` };
   }
 
+  // A submitted review matters only for the `@lgtmoose` commands in its body: an approval or
+  // a "changes requested" with no text has nothing to read.
+  if (kind === "review" && (str(record(body.review)?.body)?.trim() ?? "") === "") {
+    return { ignored: "review has no body" };
+  }
+
   const headSha = str(record(pr.head)?.sha);
   const eventAt = isoTime(pr.updated_at);
   return {

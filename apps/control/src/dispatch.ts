@@ -332,19 +332,26 @@ async function needsRetry(
 }
 
 /**
- * Comment jobs go to the conversation handler, which reads the comment on GitHub: commands now,
- * replies with M5. Submitted reviews, and everything without a conversation queue, are
- * acknowledged and dropped.
+ * Comment jobs and submitted reviews go to the conversation handler, which reads them on GitHub:
+ * commands in all three, replies for the judge in review comments. Without a conversation queue
+ * they're acknowledged and dropped.
+ *
+ * A review is forwarded under a delivery ID made from its review ID, so the conversation queue
+ * dedupes it by review: a review is submitted once, however often GitHub delivers the event.
  */
 async function conversation(deps: DispatchDeps, job: DispatchJob): Promise<DispatchResult> {
-  if (
-    deps.conversation !== undefined &&
-    (job.kind === "comment" || job.kind === "review_comment")
-  ) {
+  if (deps.conversation === undefined) {
+    return { action: "deferred", reason: `${job.kind} jobs arrive with M5` };
+  }
+  if (job.kind === "comment" || job.kind === "review_comment") {
     await deps.conversation.send(job);
     return { action: "forwarded" };
   }
-  return { action: "deferred", reason: `${job.kind} jobs arrive with M5` };
+  if (job.kind === "review" && job.reviewId !== undefined) {
+    await deps.conversation.send({ ...job, deliveryId: `review-${job.reviewId}` });
+    return { action: "forwarded" };
+  }
+  return { action: "ignored", reason: `${job.kind} job without a review ID` };
 }
 
 /**

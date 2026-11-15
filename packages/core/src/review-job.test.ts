@@ -159,15 +159,30 @@ describe("toReviewJob: comments, reviews and threads", () => {
   });
 
   it("maps a submitted review", () => {
-    const payload = prEvent("submitted", {}, { review: { id: 77, state: "commented" } });
+    const payload = prEvent(
+      "submitted",
+      {},
+      { review: { id: 77, state: "commented", body: "@lgtmoose review" } },
+    );
     expect(toReviewJob("pull_request_review", payload, options)).toEqual({
       ...base,
       kind: "review",
       headSha: head,
       reviewId: 77,
     });
-    expect(toReviewJob("pull_request_review", prEvent("dismissed"), options)).toEqual({
-      ignored: "unsupported action: pull_request_review.dismissed",
+  });
+
+  it.each(["dismissed", "edited"])("ignores a %s review", (action) => {
+    const payload = prEvent(action, {}, { review: { id: 77, body: "@lgtmoose review" } });
+    expect(toReviewJob("pull_request_review", payload, options)).toEqual({
+      ignored: `unsupported action: pull_request_review.${action}`,
+    });
+  });
+
+  it.each([null, "", "  \n "])("ignores a submitted review whose body is %j", (body) => {
+    const payload = prEvent("submitted", {}, { review: { id: 77, state: "approved", body } });
+    expect(toReviewJob("pull_request_review", payload, options)).toEqual({
+      ignored: "review has no body",
     });
   });
 
