@@ -11,6 +11,7 @@ export const REVIEW_JOB_KINDS = [
   "pr_updated",
   "pr_ready",
   "pr_closed",
+  "pr_labeled",
   "comment",
   "review",
   "review_comment",
@@ -56,6 +57,14 @@ export interface ReviewJob {
   reviewId?: number;
   /** GraphQL node ID of a resolved or unresolved review thread (threads have no REST id). */
   threadNodeId?: string;
+  /** For `pr_labeled`: the label that was added. Whether it starts a review is the repo's call. */
+  label?: string;
+  /**
+   * The actor is a bot. Bots' events are ignored, except a label added or a comment that may
+   * ask for a review, which a repo may trust from the bots it lists (`review.trusted_bots`,
+   * NIC-1077). Whoever acts on the job checks that list; nothing else a bot does counts.
+   */
+  botActor?: true;
   /**
    * Set when a person asked for this review with an `@lgtmoose review` or `full review`
    * command, never by the gateway. A requested review isn't debounced and runs on a paused PR;
@@ -94,6 +103,8 @@ const KINDS: Record<string, Record<string, ReviewJobKind>> = {
     reopened: "pr_opened",
     synchronize: "pr_updated",
     ready_for_review: "pr_ready",
+    // A label may be the repo's review trigger (`review.trigger: label`).
+    labeled: "pr_labeled",
     // Closed PRs become jobs so the dispatcher can cancel runs and clean up.
     closed: "pr_closed",
   },
@@ -149,6 +160,20 @@ function labelNames(value: unknown): string[] {
  */
 function isBot(sender: Json): boolean {
   return sender.type === "Bot" || (str(sender.login)?.endsWith("[bot]") ?? false);
+}
+
+/**
+ * A bot's comment that may be a trusted agent's `@lgtmoose review` (NIC-1077): a line that starts
+ * with an `@`-mention followed by `review`. Other bot comments are ignored here, so CI bots'
+ * chatter never reaches the queue. The conversation handler checks the repo's trusted bots.
+ */
+const BOT_REVIEW_REQUEST = /^[ \t]*@[A-Za-z0-9-]+[ \t]+review\b/im;
+
+/** Whether a bot's event may be a trusted agent's review trigger (see `ReviewJob.botActor`). */
+function botTrigger(kind: ReviewJobKind, payload: Json): boolean {
+  if (kind === "pr_labeled") return true;
+  if (kind !== "comment") return false;
+  return BOT_REVIEW_REQUEST.test(str(record(payload.comment)?.body) ?? "");
 }
 
 /** The PR the event is about. issue_comment carries it as an issue with a `pull_request` key. */
@@ -241,8 +266,9 @@ export function toReviewJob(
   const allowed = options.allowedOrgs.some((org) => org.toLowerCase() === owner.toLowerCase());
   if (!allowed) return { ignored: `owner not allowed: ${owner}` };
 
+  const bot = isBot(sender);
   if (kind !== "pr_closed") {
-    if (isBot(sender)) return { ignored: `bot sender: ${actor}` };
+    if (bot && !botTrigger(kind, body)) return { ignored: `bot sender: ${actor}` };
     // ready_for_review arrives with draft already false, so it passes this check by itself.
     if (pr.draft === true) return { ignored: "draft pull request" };
     if (labelNames(pr.labels).includes(SKIP_LABEL)) return { ignored: `labelled ${SKIP_LABEL}` };
@@ -253,6 +279,9 @@ export function toReviewJob(
   if (kind === "review" && (str(record(body.review)?.body)?.trim() ?? "") === "") {
     return { ignored: "review has no body" };
   }
+
+  const label = kind === "pr_labeled" ? str(record(body.label)?.name) : undefined;
+  if (kind === "pr_labeled" && label === undefined) return { ignored: "labeled without a label" };
 
   const headSha = str(record(pr.head)?.sha);
   const eventAt = isoTime(pr.updated_at);
@@ -265,6 +294,8 @@ export function toReviewJob(
     ...(headSha === undefined ? {} : { headSha }),
     actor,
     ...trigger(kind, body),
+    ...(label === undefined ? {} : { label }),
+    ...(bot && kind !== "pr_closed" ? { botActor: true as const } : {}),
     receivedAt: options.receivedAt.toISOString(),
     ...(eventAt === undefined ? {} : { eventAt }),
   };

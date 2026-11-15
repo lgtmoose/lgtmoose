@@ -13,6 +13,13 @@ describe("parseRepoConfigYaml", () => {
       registries: [],
       gate: { check_run: "required", approve: true, nit_cap: 10 },
       injection: { allow: [] },
+      review: {
+        trigger: "auto",
+        on_push: "auto",
+        label: "lgtmoose:review",
+        label_once: false,
+        trusted_bots: [],
+      },
       labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
     };
     expect(parseRepoConfigYaml(undefined)).toEqual(expected);

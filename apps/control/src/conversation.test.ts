@@ -56,6 +56,8 @@ function fakeDeps(
     shadow?: boolean;
     /** The submitted review is gone (its fetch 404s). */
     reviewGone?: boolean;
+    /** The repo config's `review.trusted_bots`; left out, the fake can't read it. */
+    trustedBots?: string[];
   } = {},
 ) {
   const reviewsRead: number[] = [];
@@ -79,9 +81,18 @@ function fakeDeps(
         },
         pull: async () => ({
           headSha: HEAD,
+          baseSha: "b".repeat(40),
           author: options.pullAuthor ?? "author",
           open: options.open ?? true,
         }),
+        ...(options.trustedBots === undefined
+          ? {}
+          : {
+              trustedBots: async (_repo: string, baseSha: string) => {
+                asked.push(`config@${baseSha}`);
+                return options.trustedBots ?? [];
+              },
+            }),
         files: async () => ["src/a.ts", "docs/b.md"],
         permission: async (repo, login) => {
           asked.push(`${repo}:${login}`);
@@ -238,6 +249,82 @@ describe("handleConversation", () => {
     expect(await handleConversation(bot.deps, job())).toMatchObject({ action: "ignored" });
     const ours = fakeDeps(from("dev", `@lgtmoose help\n\n${REPLY_MARKER}`));
     expect(await handleConversation(ours.deps, job())).toMatchObject({ action: "ignored" });
+  });
+
+  describe("trusted bots (review.trusted_bots)", () => {
+    const agent = (body = "Ready for review.\n@lgtmoose review") =>
+      from("claude[bot]", body, { authorIsBot: true });
+
+    it("queues a review for a trusted bot's @lgtmoose review, with a 👍 and no reply", async () => {
+      const f = fakeDeps(agent(), { trustedBots: ["Claude[bot]"] });
+      expect(await handleConversation(f.deps, job({ botActor: true }))).toEqual({
+        action: "commands",
+        commands: ["review"],
+        ok: true,
+        replied: false,
+      });
+      expect(f.queued).toEqual([
+        expect.objectContaining({
+          kind: "pr_updated",
+          requested: "review",
+          actor: "claude[bot]",
+          headSha: HEAD,
+          deliveryId: "command-500-review",
+        }),
+      ]);
+      expect(f.reactions).toEqual(["500:+1"]);
+      expect(f.replies).toEqual([]);
+      // Its access was never asked: a bot has none. The config at the base was read.
+      expect(f.asked).toEqual([`config@${"b".repeat(40)}`]);
+    });
+
+    it("does nothing for a bot the repo doesn't list, or without the config", async () => {
+      for (const f of [fakeDeps(agent(), { trustedBots: ["other[bot]"] }), fakeDeps(agent())]) {
+        expect(await handleConversation(f.deps, job({ botActor: true }))).toMatchObject({
+          action: "ignored",
+        });
+        expect(f.queued).toEqual([]);
+        expect(f.reactions).toEqual([]);
+        expect(f.replies).toEqual([]);
+      }
+    });
+
+    it("lets a trusted bot do nothing but review", async () => {
+      for (const body of [
+        "@lgtmoose full review",
+        "@lgtmoose pause",
+        "@lgtmoose learn: never flag auth",
+        "@lgtmoose ignore",
+        "@lgtmoose approve 123",
+      ]) {
+        const f = fakeDeps(agent(body), { trustedBots: ["claude[bot]"], permissions: {} });
+        expect(await handleConversation(f.deps, job({ botActor: true }))).toMatchObject({
+          action: "ignored",
+        });
+        expect(f.queued).toEqual([]);
+        expect(f.paused.size).toBe(0);
+        expect(f.replies).toEqual([]);
+      }
+    });
+
+    it("never takes our own App's comment, even if listed", async () => {
+      const f = fakeDeps(from("lgtmoose[bot]", "@lgtmoose review", { authorIsBot: true }), {
+        trustedBots: ["lgtmoose[bot]"],
+      });
+      expect(await handleConversation(f.deps, job({ botActor: true }))).toMatchObject({
+        action: "ignored",
+      });
+      expect(f.queued).toEqual([]);
+    });
+
+    it("queues nothing for a reviewed head or a closed PR", async () => {
+      const reviewed = fakeDeps(agent(), { trustedBots: ["claude[bot]"], reviewed: true });
+      expect(await handleConversation(reviewed.deps, job())).toMatchObject({ ok: true });
+      expect(reviewed.queued).toEqual([]);
+      const closed = fakeDeps(agent(), { trustedBots: ["claude[bot]"], open: false });
+      expect(await handleConversation(closed.deps, job())).toMatchObject({ action: "ignored" });
+      expect(closed.queued).toEqual([]);
+    });
   });
 
   describe("submitted reviews", () => {

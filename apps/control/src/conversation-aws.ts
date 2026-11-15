@@ -14,6 +14,7 @@ import type {
   StoredFinding,
 } from "./conversation.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
+import { repoConfigAt } from "./repo-config.js";
 
 type Log = (message: string, fields?: Record<string, unknown>) => void;
 
@@ -33,6 +34,7 @@ const reviewReply = z.object({
 const pullReply = z.object({
   state: z.string(),
   head: z.object({ sha: z.string() }),
+  base: z.object({ sha: z.string() }),
   user: userSchema,
 });
 const fileReply = z.array(z.object({ filename: z.string() }));
@@ -100,9 +102,13 @@ export function githubConversation(
       );
       return {
         headSha: reply.head.sha,
+        baseSha: reply.base.sha,
         author: reply.user?.login ?? "ghost",
         open: reply.state === "open",
       };
+    },
+    async trustedBots(repo, baseSha) {
+      return (await repoConfigAt(client, repo, baseSha)).review.trusted_bots;
     },
     async files(repo, number) {
       const rows = fileReply.parse(

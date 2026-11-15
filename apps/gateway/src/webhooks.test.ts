@@ -23,6 +23,8 @@ interface Fixture {
   pull_request: { draft: boolean; labels: { name: string }[] };
   sender: Record<string, unknown>;
   repository: { full_name: string; owner: { login: string } };
+  comment: { body: string };
+  label?: { name: string };
 }
 
 /** A fixture with some fields changed, re-serialised (and so re-signed) like a new delivery. */
@@ -155,6 +157,26 @@ describe("POST /webhooks/github: queued jobs", () => {
         options: { groupId: "acme-corp/widgets#42", dedupeId: DELIVERY },
       },
     ]);
+  });
+
+  it("queues a label added, with its name, and a bot's marked for the repo to trust or not", async () => {
+    const { app, sent } = setup();
+    const human = modified("pull_request.opened", (p) => {
+      p.action = "labeled";
+      p.label = { name: "lgtmoose:review" };
+    });
+    expect((await deliver(app, human)).status).toBe(202);
+    const agent = modified("pull_request.opened", (p) => {
+      p.action = "labeled";
+      p.label = { name: "lgtmoose:review" };
+      p.sender = { login: "claude[bot]", id: 3, type: "Bot" };
+    });
+    expect((await deliver(app, agent)).status).toBe(202);
+    expect(sent.map((entry) => entry.job)).toEqual([
+      expect.objectContaining({ kind: "pr_labeled", label: "lgtmoose:review", actor: "octo-dev" }),
+      expect.objectContaining({ kind: "pr_labeled", actor: "claude[bot]", botActor: true }),
+    ]);
+    expect(sent[0]?.job).not.toHaveProperty("botActor");
   });
 
   it.each([
@@ -349,6 +371,9 @@ describe("POST /webhooks/github: ignored deliveries", () => {
       "issue_comment",
       modified("issue_comment.created", (p) => {
         p.sender = { login: "lgtmoose-reviewer[bot]", id: 2, type: "Bot" };
+        // A bot's comment gets past the gateway only when a line asks for a review (a trusted
+        // agent's, which the conversation handler checks); our summaries and replies don't.
+        p.comment.body = "Reviewed 3 files. Comment `@lgtmoose review` to review again.";
       }),
       "bot sender: lgtmoose-reviewer[bot]",
     ],
@@ -376,8 +401,8 @@ describe("POST /webhooks/github: ignored deliveries", () => {
     [
       "unsupported actions",
       "pull_request",
-      modified("pull_request.opened", (p) => (p.action = "labeled")),
-      "unsupported action: pull_request.labeled",
+      modified("pull_request.opened", (p) => (p.action = "edited")),
+      "unsupported action: pull_request.edited",
     ],
     ["unsupported events", "push", '{"ref":"refs/heads/main"}', "unsupported event: push"],
   ];

@@ -40,6 +40,48 @@ describe("githubPullReader", () => {
     });
   });
 
+  it("reads the PR's labels as GitHub has them now", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/pulls/7": {
+        title: "Fix",
+        body: "",
+        state: "open",
+        user: { login: "dev" },
+        head: { sha: SHA_A, ref: "feature" },
+        base: { sha: SHA_B, ref: "main" },
+        labels: [{ name: "bug" }, { name: "lgtmoose:review" }],
+      },
+    });
+    expect((await githubPullReader(get).pull(target)).labels).toEqual(["bug", "lgtmoose:review"]);
+  });
+
+  it("reads a file at a commit, and nothing when there's none", async () => {
+    const calls: string[] = [];
+    const get: GitHubGet = async (path) => {
+      calls.push(path);
+      if (path.includes("missing")) throw Object.assign(new Error("Not Found"), { status: 404 });
+      if (path.includes("dir")) return [{ name: "a" }];
+      return {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from("review:\n  trigger: label\n").toString("base64"),
+      };
+    };
+    const reader = githubPullReader(get);
+    expect(await reader.fileAt?.(target, SHA_B, ".lgtmoose.yaml")).toBe(
+      "review:\n  trigger: label\n",
+    );
+    expect(calls).toEqual([`/repos/acme/shop/contents/.lgtmoose.yaml?ref=${SHA_B}`]);
+    expect(await reader.fileAt?.(target, SHA_B, "missing.yaml")).toBeUndefined();
+    expect(await reader.fileAt?.(target, SHA_B, "dir")).toBeUndefined();
+    await expect(reader.fileAt?.(target, "main", ".lgtmoose.yaml")).rejects.toThrow(/SHA/);
+    // Any other failure is the run's to retry, not a missing config.
+    const failing = githubPullReader(async () => {
+      throw Object.assign(new Error("Server Error"), { status: 500 });
+    });
+    await expect(failing.fileAt?.(target, SHA_B, ".lgtmoose.yaml")).rejects.toThrow("Server");
+  });
+
   it("keeps the author's relationship to the repository", async () => {
     const { get } = fakeGet({
       "/repos/acme/shop/pulls/7": {

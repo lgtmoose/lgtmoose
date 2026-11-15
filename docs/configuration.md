@@ -43,6 +43,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `images.digests.egressProxy` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-egress-proxy image's digest. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `maxExplanations` | integer, 0 to 20 | `5` | Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply. |
+| `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
 | `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5}` | Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have. |
@@ -78,6 +79,12 @@ Optional, at the repository's root. It's read from the PR's base branch, never f
 | `gate.nit_cap` | integer, 0 to 100 | `10` | Most nits posted in one review. The rest are counted in the summary. |
 | `injection` | object | `{}` | The prompt-injection detector. |
 | `injection.allow` | list of string | `[]` | Globs whose added lines the prompt-injection detector doesn't scan, such as its own tests. Keep them narrow. |
+| `review` | object | `{}` | When reviews run: on every push, or only when a label, a command or a trusted agent says the PR is ready. |
+| `review.trigger` | `"auto"` or `"label"` or `"command"` | `"auto"` | When a PR is reviewed. auto: when it's opened, marked ready or pushed to. label: only while it carries review.label. command: only on @lgtmoose review. |
+| `review.on_push` | `"auto"` or `"manual"` | `"auto"` | After a PR's first review. auto: each push is reviewed again. manual: only the label (being added again) or @lgtmoose review reviews it again. |
+| `review.label` | string | `"lgtmoose:review"` | The label that starts a review with trigger: label. |
+| `review.label_once` | boolean | `false` | With trigger: label, remove the label when its review starts, so the author adds it again for the next round. |
+| `review.trusted_bots` | list of string matching `^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$` | `[]` | Bot logins, such as claude[bot], whose review.label or @lgtmoose review starts a review. They can do nothing else. |
 | `labels` | object | `{}` | The three status labels LGTMoose keeps on a PR: pending, changes and approved. |
 | `labels.pending` | string | `"Ready for Review"` | Set when a review holds for a person: it was incomplete, or flagged a prompt-injection attempt. |
 | `labels.changes` | string | `"Requires Changes"` | Set when blocking or should-fix findings are open. |

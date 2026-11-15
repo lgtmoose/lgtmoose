@@ -140,6 +140,8 @@ export interface WorkflowStackProps extends StackProps {
   maxReplyJudgements?: number;
   /** The most `explain`s the explainer answers per PR per run (`maxExplanations`). Left out: 5. */
   maxExplanations?: number;
+  /** How long a push's review waits for the next push (`reviewDebounceSeconds`). Left out: 60. */
+  reviewDebounceSeconds?: number;
   /**
    * How the control task ranks learnings (`learnings.embeddings`): none (keywords), Bedrock in
    * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
@@ -431,6 +433,7 @@ export class WorkflowStack extends Stack {
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
         CONVERSATION_QUEUE_URL: this.conversationQueue.queueUrl,
+        LGTMOOSE_REVIEW_DEBOUNCE_SECONDS: String(props.reviewDebounceSeconds ?? 60),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

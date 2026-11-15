@@ -291,6 +291,13 @@
       "minimum": 0,
       "maximum": 20
     },
+    "reviewDebounceSeconds": {
+      "default": 60,
+      "description": "Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1800
+    },
     "shadow": {
       "default": true,
       "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",

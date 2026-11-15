@@ -21,7 +21,22 @@ const pullSchema = z.object({
     ref: z.string(),
     repo: z.object({ private: z.boolean() }).nullish(),
   }),
+  labels: z.array(z.object({ name: z.string() })).optional(),
 });
+
+/** One file from the contents API: base64 for a file, an array for a directory. */
+const contentsSchema = z.object({
+  type: z.literal("file"),
+  encoding: z.literal("base64"),
+  content: z.string(),
+});
+
+/** Whether a request failed with this HTTP status, from whichever client made it. */
+function hasStatus(error: unknown, status: number): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { status?: unknown }).status === status
+  );
+}
 
 const issueCommentSchema = z.object({
   id: z.number().int().optional(),
@@ -87,7 +102,22 @@ export function githubPullReader(get: GitHubGet): PullReader {
         baseSha: pr.base.sha,
         baseRef: pr.base.ref,
         state: pr.state,
+        ...(pr.labels === undefined ? {} : { labels: pr.labels.map((label) => label.name) }),
       };
+    },
+    async fileAt(target, sha, path) {
+      if (!SHA.safeParse(sha).success) throw new Error("Not a commit SHA.");
+      const encoded = path.split("/").map(encodeURIComponent).join("/");
+      let reply: unknown;
+      try {
+        reply = await get(`${base(target)}/contents/${encoded}?ref=${sha}`);
+      } catch (error) {
+        if (hasStatus(error, 404)) return undefined;
+        throw error;
+      }
+      const file = contentsSchema.safeParse(reply);
+      if (!file.success) return undefined;
+      return Buffer.from(file.data.content, "base64").toString("utf8");
     },
     async comments(target, limit) {
       const [general, inline] = await Promise.all([

@@ -1,3 +1,4 @@
+import { parseRepoConfig, type RepoConfig } from "@lgtmoose/config";
 import type { ReviewJob } from "@lgtmoose/core";
 import { describe, expect, it } from "vitest";
 import {
@@ -54,6 +55,8 @@ interface Setup {
   repos?: string[];
   failPulls?: boolean;
   syncOk?: boolean;
+  /** The repo config's `review` settings; left out, the reconciler can't read them. */
+  review?: RepoConfig["review"];
 }
 
 function setup(options: Setup = {}) {
@@ -72,6 +75,9 @@ function setup(options: Setup = {}) {
       configReads.push(baseSha);
       return STATUS;
     },
+    ...(options.review === undefined
+      ? {}
+      : { reviewSettings: async () => options.review as RepoConfig["review"] }),
     newestHumanComment: async () => options.comment,
     syncLabel: async (repo, number, target) => {
       synced.push({ repo, number, target });
@@ -187,6 +193,51 @@ describe("reconcile", () => {
     });
     expect(await reconcile(deps)).toMatchObject({ unreviewed: 1, missedHeads: 0 });
     expect(sent).toEqual([]);
+  });
+
+  describe("a missed review label (review.trigger: label)", () => {
+    const labelRepo = parseRepoConfig({ review: { trigger: "label" } }).review;
+    const waiting = new Map([[7, recorded({ headSha: HEAD, lastReviewedSha: OLD })]]);
+
+    it("queues a label job when the head's run didn't review and the PR has the label", async () => {
+      const { deps, sent } = setup({
+        pulls: [pull({ labels: ["lgtmoose:review"] })],
+        records: waiting,
+        review: labelRepo,
+      });
+      expect(await reconcile(deps)).toMatchObject({ missedLabels: 1, unreviewed: 0 });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.job).toMatchObject({
+        kind: "pr_labeled",
+        label: "lgtmoose:review",
+        headSha: HEAD,
+        prNumber: 7,
+      });
+      expect(sent[0]?.job.botActor).toBeUndefined();
+      // Once per head: the same delivery ID on every pass.
+      const again = setup({
+        pulls: [pull({ labels: ["lgtmoose:review"] })],
+        records: waiting,
+        review: labelRepo,
+      });
+      await reconcile(again.deps);
+      expect(again.sent[0]?.dedupeId).toBe(sent[0]?.dedupeId);
+    });
+
+    it("queues nothing without the label, in auto mode, or outside the lookback", async () => {
+      for (const options of [
+        { pulls: [pull({ labels: ["bug"] })], review: labelRepo },
+        { pulls: [pull({ labels: ["lgtmoose:review"] })], review: parseRepoConfig({}).review },
+        {
+          pulls: [pull({ labels: ["lgtmoose:review"], updatedAt: "2026-11-01T00:00:00Z" })],
+          review: labelRepo,
+        },
+      ]) {
+        const { deps, sent } = setup({ ...options, records: waiting });
+        expect(await reconcile(deps)).toMatchObject({ missedLabels: 0, unreviewed: 1 });
+        expect(sent).toEqual([]);
+      }
+    });
   });
 
   it("leaves drafts, skip-labelled PRs, bots' PRs and other owners alone", async () => {
@@ -378,6 +429,7 @@ describe("metricsLine", () => {
         {
           openPullRequests: 3,
           missedHeads: 1,
+          missedLabels: 6,
           missedComments: 0,
           pendingReplies: 0,
           labelsResynced: 2,
@@ -396,8 +448,9 @@ describe("metricsLine", () => {
     };
     expect(line._aws.Timestamp).toBe(1000);
     expect(line._aws.CloudWatchMetrics[0]?.Namespace).toBe("LGTMoose");
-    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(12);
+    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(13);
     expect(line).toMatchObject({
+      MissedLabels: 6,
       LearningsRetired: 5,
       FeedbackCommentsRead: 7,
       CategoriesFlagged: 2,

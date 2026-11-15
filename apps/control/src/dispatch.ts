@@ -18,8 +18,12 @@ import { workflowJobSchema } from "./job.js";
  * - It then stops the PR's executions started by older jobs, marking each run superseded
  *   first (StopExecution skips the workflow's fail step). Jobs with the same event time both
  *   run: whole-second times can't order them, and each prepare step checks the PR's real head.
- * - Pushes are debounced: the execution waits `PUSH_DEBOUNCE_SECONDS` before it does anything,
- *   so the next push in a burst stops it before it clones (see `debounceSeconds`).
+ * - Pushes are debounced: the execution waits `reviewDebounceSeconds` (a minute by default)
+ *   before it does anything, so the next push in a burst stops it before it clones (see
+ *   `debounceSeconds`).
+ * - A label added (`pr_labeled`) is handled like a push without the wait, also on a paused PR.
+ *   Whether it starts a review is the repo's `review` config, which the prepare step reads (the
+ *   dispatcher can't read GitHub): a head already reviewed, or being reviewed, is a duplicate.
  * - Closing a PR stops the executions of jobs up to the close. A reopen with the same time as
  *   the close is taken as older: the PR stays closed.
  * - A paused PR (`@lgtmoose pause`) starts no review for a push, open or ready job; its event
@@ -56,6 +60,8 @@ export const reviewJobSchema = workflowJobSchema.extend({
   commentId: z.number().int().positive().optional(),
   reviewId: z.number().int().positive().optional(),
   threadNodeId: z.string().min(1).optional(),
+  label: z.string().min(1).max(100).optional(),
+  botActor: z.literal(true).optional(),
   receivedAt: z.iso.datetime(),
   // Required: the dispatcher orders a PR's jobs by it. A job without one is invalid.
   eventAt: z.iso.datetime(),
@@ -98,11 +104,29 @@ export function executionName(
 }
 
 /**
- * Pushes wait, so the next push in a burst stops the execution before it clones. Opening a PR
- * or marking it ready starts at once: those come one at a time.
+ * Pushes wait, so the next push in a burst stops the execution before it clones. Opening a PR,
+ * marking it ready or adding a label starts at once: those come one at a time. `pushSeconds` is
+ * the deployment's `reviewDebounceSeconds`.
  */
-export function debounceSeconds(job: Pick<ReviewJob, "kind" | "requested">): number {
-  return job.kind === "pr_updated" && job.requested === undefined ? PUSH_DEBOUNCE_SECONDS : 0;
+export function debounceSeconds(
+  job: Pick<ReviewJob, "kind" | "requested">,
+  pushSeconds: number = PUSH_DEBOUNCE_SECONDS,
+): number {
+  return job.kind === "pr_updated" && job.requested === undefined ? pushSeconds : 0;
+}
+
+/**
+ * Whether a job runs on a paused PR: a person's review or explain command does, and so does a
+ * label added (it may be the repo's review trigger, NIC-1077, which the prepare step checks). A
+ * push, and a run for replies, don't.
+ */
+export function runsWhenPaused(job: Pick<ReviewJob, "kind" | "requested">): boolean {
+  return (
+    job.requested === "review" ||
+    job.requested === "full_review" ||
+    job.requested === "explain" ||
+    job.kind === "pr_labeled"
+  );
 }
 
 /** The review state machine, as the dispatcher uses it. */
@@ -178,6 +202,8 @@ export interface DispatchDeps {
    * before commands.
    */
   conversation?: { send(job: DispatchJob): Promise<void> };
+  /** How long a push's review waits (`reviewDebounceSeconds`). Left out: `PUSH_DEBOUNCE_SECONDS`. */
+  pushDebounceSeconds?: number;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -238,7 +264,7 @@ async function startExecution(
   await deps.store.record(job.repo, job.prNumber, { executionArn, headSha: job.headSha, eventAt });
   const { started } = await deps.executions.start(name, {
     ...job,
-    debounceSeconds: debounceSeconds(job),
+    debounceSeconds: debounceSeconds(job, deps.pushDebounceSeconds),
   });
   return { started, executionArn };
 }
@@ -248,12 +274,18 @@ async function review(
   job: ReviewJob & { headSha: string },
   eventAt: Date,
 ): Promise<DispatchResult> {
+  // Most bots' labels are LGTMoose's own status labels, set as it posts a review: on a head
+  // that's reviewed, a bot's label starts nothing, so nothing is recorded or started for it.
+  // (The gateway can't tell our App's bot from others: it holds only the webhook secret.)
+  if (
+    job.kind === "pr_labeled" &&
+    job.botActor === true &&
+    (await deps.store.reviewed(job.repo, job.prNumber, job.headSha))
+  ) {
+    return { action: "ignored", reason: "a bot's label on a reviewed head" };
+  }
   await deps.store.advance(job.repo, job.prNumber, eventAt, false);
-  // A person's review or explain command runs on a paused PR; a push, and a run for replies,
-  // don't.
-  const command =
-    job.requested === "review" || job.requested === "full_review" || job.requested === "explain";
-  if (!command && (await deps.store.paused(job.repo, job.prNumber))) {
+  if (!runsWhenPaused(job) && (await deps.store.paused(job.repo, job.prNumber))) {
     return { action: "paused" };
   }
   // A run for replies or an explain is a run of its own even when the head was reviewed, like
@@ -400,6 +432,7 @@ export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<Di
     case "pr_opened":
     case "pr_ready":
     case "pr_updated":
+    case "pr_labeled":
     case "pr_closed":
       break;
   }
