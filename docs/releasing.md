@@ -100,7 +100,7 @@ Tag v0.1.0 once M1–M6's acceptance criteria pass. Open now:
       [smoke-test.md](smoke-test.md)).
 - [ ] NIC-848: the pilot rollout on real repositories.
 - [x] NIC-840: the dashboard: sign-in, open findings, review runs, the learnings queue (approve and reject), provider usage and acceptance by rule category.
-- [ ] NIC-843: the docker compose deployment.
+- [ ] NIC-843: the docker compose deployment (part 1, the Postgres queue, store and runner, is in; part 2, the compose files and sandbox, is next).
 - [ ] NIC-838: the monthly learnings sync pull request (waiting on the decision between
       `contents: write` for every install and an opt-in permission).
 
