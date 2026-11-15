@@ -11,6 +11,7 @@ import { fromHttpApiEvent, json, toHttpApiResult, type HttpApiEvent } from "./da
 import { drizzleDashboardStore } from "./dashboard-store.js";
 import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
+import { readBudgets } from "./spend.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { log } from "./log.js";
 
@@ -111,6 +112,7 @@ function dashboardDeps(): Promise<DashboardDeps> {
         }
       },
       github: githubDashboard({ timeoutMs: 8000 }),
+      budgets: readBudgets(process.env),
       async oauthClient() {
         if (oauth !== undefined) return oauth;
         try {

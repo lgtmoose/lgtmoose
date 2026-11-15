@@ -13,6 +13,8 @@ import { log } from "../log.js";
 import { createDashboardServer, readSite } from "./dashboard-server.js";
 import { parseOrigin, signingKey, viewFeedbackReport } from "./dashboard-setup.js";
 import { readSecretFile } from "./secrets.js";
+import { readLocalSettings } from "./settings.js";
+import { readBudgets } from "../spend.js";
 
 /**
  * The dashboard service under docker compose (NIC-1056): the page and the dashboard API on one
@@ -28,6 +30,8 @@ import { readSecretFile } from "./secrets.js";
  * TRUST_PROXY_HOPS: proxies in front that append to X-Forwarded-For (default 0).
  * LGTMOOSE_SECRETS_DIR: the dashboard's secrets directory (default /run/lgtmoose/secrets).
  * LGTMOOSE_SITE_DIR: the built page (default /app/site). PORT: where to listen (default 3001).
+ * LGTMOOSE_CONFIG: the deploy config, read-only, for the spend caps on the Usage page. Unset,
+ *   LGTMOOSE_BUDGETS (JSON) or none.
  */
 
 const oauthSchema = z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) });
@@ -58,6 +62,12 @@ async function main(): Promise<void> {
   const port = whole("PORT", 3001, 1, 65_535);
   const trustProxyHops = whole("TRUST_PROXY_HOPS", 0, 0, 10);
   const site = await readSite(process.env.LGTMOOSE_SITE_DIR?.trim() || "/app/site");
+  // The spend caps, for the Usage page: from the runner's deploy config, mounted read-only.
+  const configPath = process.env.LGTMOOSE_CONFIG?.trim();
+  const budgets =
+    configPath === undefined || configPath === ""
+      ? readBudgets(process.env)
+      : (await readLocalSettings(configPath)).config.budgets;
   const key = await signingKey(secretsDir);
 
   const databaseUrl = required("DATABASE_URL");
@@ -92,6 +102,7 @@ async function main(): Promise<void> {
     signingKey: async () => key,
     origin: async () => origin,
     allowedOrgs,
+    budgets,
     now: () => new Date(),
     log,
   };

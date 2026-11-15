@@ -10,6 +10,8 @@ import {
   postgresExecutions,
 } from "./local.js";
 import { postgresRunners, runExclusive } from "./runners.js";
+import { pullRequests, reviewRuns } from "./schema.js";
+import { postgresSpend } from "./spend.js";
 import { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 
 /**
@@ -237,6 +239,48 @@ describe.skipIf(adminUrl === undefined)("local stand-ins on Postgres", () => {
       }),
     ).rejects.toThrow("the job failed");
     expect(await runExclusive(pool, "failing-test", 0, async () => undefined)).toBe(true);
+  });
+
+  it("never lets runs prepared at once both reserve the same spend headroom", async () => {
+    const db = drizzle({ client: pool });
+    const [pull] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "acme/spend",
+        number: 1,
+        author: "dana",
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+      })
+      .returning({ id: pullRequests.id });
+    const runs = await db
+      .insert(reviewRuns)
+      .values(
+        Array.from({ length: 8 }, () => ({
+          pullRequestId: pull?.id ?? "",
+          headSha: "a".repeat(40),
+          kind: "first" as const,
+        })),
+      )
+      .returning({ id: reviewRuns.id });
+    const now = new Date();
+    // Eight runs on their own connections, each costing $1, under a $3 monthly cap.
+    const reserved = await Promise.all(
+      runs.map(async (run) => {
+        const own = postgresSpend(drizzle({ client: pool }));
+        const { decision } = await own.reserve(
+          run.id,
+          { repo: "acme/spend", prNumber: 1 },
+          now,
+          (snapshot) => (snapshot.monthUsd + 1 <= 3 ? { costUsd: 1, batches: 1 } : undefined),
+        );
+        return decision !== undefined;
+      }),
+    );
+    expect(reserved.filter(Boolean)).toHaveLength(3);
+    const snapshot = await postgresSpend(db).snapshot({ repo: "acme/spend", prNumber: 1 }, now);
+    expect(snapshot).toMatchObject({ monthUsd: 3, prDayRuns: 3 });
   });
 
   it("lets the gateway's login add jobs and nothing else", async () => {

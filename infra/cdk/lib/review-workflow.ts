@@ -59,7 +59,7 @@ const SANDBOX_FAILED = "Lgtmoose.SandboxFailed";
 export const LEASE_WAIT = { first: Duration.seconds(20), max: Duration.minutes(2), attempts: 99 };
 
 /** The S3 prefix of a run's objects (`RUN_PREFIX` in @lgtmoose/pipeline). */
-const RUN_PREFIX = "runs/";
+export const RUN_PREFIX = "runs/";
 
 /** How long the prepare step (clone, plan, upload) and the post step may take. */
 export const CONTROL_STEP_TIMEOUT = Duration.minutes(30);

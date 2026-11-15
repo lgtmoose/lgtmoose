@@ -1,0 +1,5 @@
+---
+"lgtmoose": minor
+---
+
+Spend caps. `budgets` in the deploy config sets hard limits on estimated model cost: runs and cost per PR per UTC day, cost per repository per month, and cost for the whole deployment per month. A repository's `.lgtmoose.yaml` (read at the PR's base) can only lower its own. Cost is each batch's reported tokens times its tier's price (`budgets.prices`, Claude list prices by default). The prepare step reserves a run's estimate in a new spend ledger before any batch is dispatched, under one database lock; batches that don't fit aren't dispatched, and the review is posted incomplete with a "Spend cap reached" check run and a summary that says which cap and when it resets. `@lgtmoose review` from someone with write access runs once past the PR's own caps; the monthly caps always apply. Monthly caps alert at 50%, 80% and 100% (a log line, and on AWS the `BudgetUsed` metric and alarms), and the dashboard's Usage page shows this month's spend against the caps. Adds migration 0018 (`spend_ledger`, `review_runs.spend_cap`).

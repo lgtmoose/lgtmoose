@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { statusLabels } from "@lgtmoose/config";
+import { effectiveCaps, statusLabels } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import {
   changedPaths,
@@ -36,6 +36,7 @@ import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import { TASK_MISSING } from "./ecs.js";
 import { answerExplanations } from "./explain.js";
+import { SPEND_CAP_TITLE, runCost, spendAlerts, type DispatchedBatch } from "./spend.js";
 import {
   confirmFixes,
   replyWritesSchema,
@@ -561,6 +562,64 @@ function staleReason(now: { state: string; headSha: string }, headSha: string): 
   return undefined;
 }
 
+/**
+ * Settles the run in the spend ledger (NIC-1079) at what its dispatched batches reported, priced
+ * by tier, and raises the monthly caps' alerts. A failure here is logged, not thrown: the review
+ * is posted either way, and the reservation still counts for a day.
+ */
+async function settleSpend(
+  deps: ControlDeps,
+  runId: string,
+  manifest: RunManifest,
+  repo: string,
+): Promise<void> {
+  const { spend } = deps;
+  if (spend === undefined) return;
+  try {
+    const capped = new Set(manifest.spendCap?.batches ?? []);
+    const dispatched: DispatchedBatch[] = [
+      ...manifest.review.jobs.flatMap((job) =>
+        job.prompt === undefined || capped.has(job.index)
+          ? []
+          : [{ index: job.index, tier: "standard" as const }],
+      ),
+      ...(manifest.judgements ?? []).map((judge) => ({
+        index: judge.index,
+        tier: "fast" as const,
+      })),
+      ...(manifest.tickets?.tickets ?? []).flatMap((ticket) =>
+        ticket.index === undefined ? [] : [{ index: ticket.index, tier: "fast" as const }],
+      ),
+      ...(manifest.explanations ?? []).flatMap((explain) =>
+        explain.index === undefined ? [] : [{ index: explain.index, tier: "fast" as const }],
+      ),
+    ];
+    if (dispatched.length === 0) return;
+    const costUsd = await runCost(deps.store, runId, dispatched, spend.budgets);
+    const settled = await spend.store.settle(runId, costUsd);
+    if (settled === undefined) return;
+    deps.log("spend settled", {
+      runId,
+      costUsd: Number(costUsd.toFixed(4)),
+      estimateUsd: Number(settled.reservedUsd.toFixed(4)),
+    });
+    if (settled.wasSettled) return;
+    const caps = effectiveCaps(spend.budgets, manifest.review.config.budgets);
+    await spendAlerts(
+      spend.store,
+      { repo, addedUsd: costUsd },
+      caps,
+      new Date(),
+      (message, fields) => deps.log(message, fields),
+    );
+  } catch (error) {
+    deps.log("spend not settled", {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function costOf(report: ReviewReport): number | undefined {
   const costs = report.batches.flatMap((batch) =>
     batch.usage?.costUsd === undefined ? [] : [batch.usage.costUsd],
@@ -1005,6 +1064,9 @@ export async function post(
   // Written by this run's own prepare step with the control task's role; still shape-checked.
   const manifest = readManifest(preparedText);
   if (manifest.conversationOnly === true) {
+    // Its judge and explainer batches ran: settle them as for any run (NIC-1079).
+    const { target } = manifest.review;
+    await settleSpend(deps, runId, manifest, `${target.owner}/${target.repo}`);
     return postConversation(deps, runId, run, manifest, { attempt, taskStatus });
   }
   const prepared = manifest.review;
@@ -1202,6 +1264,11 @@ export async function post(
     const finish = (open: typeof earlier.open) =>
       finishReview(repo, reviewed, outcomes, latest.headSha, {
         ...(tickets === undefined ? {} : { tickets }),
+        ...(manifest.spendCap === undefined
+          ? {}
+          : {
+              spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
+            }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({
@@ -1300,6 +1367,9 @@ export async function post(
     progress.review = true;
     await save();
   }
+
+  // What the run's batches cost, settled in the spend ledger whether it posts or not: they ran.
+  await settleSpend(deps, runId, manifest, `${target.owner}/${target.repo}`);
 
   // Why the run no longer counts, if it doesn't. Marked superseded here, since the dispatcher
   // may never stop this execution (it may not have seen the event that made it stale).
@@ -1452,7 +1522,7 @@ export async function post(
     await poster.completeCheckRun(pull, {
       headSha: pr.headSha,
       conclusion: decision.conclusion,
-      title: CHECK_TITLE[decision.event],
+      title: manifest.spendCap === undefined ? CHECK_TITLE[decision.event] : SPEND_CAP_TITLE,
       summary: report.summary,
       annotations,
       // A retry finds the run an earlier attempt created, instead of adding another.

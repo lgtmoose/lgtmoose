@@ -5,7 +5,8 @@ import pg from "pg";
  * reads the database as the owner and the feedback report through an IAM grant on that one S3
  * key; here it gets a role with only what the dashboard store and the learning policy use:
  *
- * - reads of pull requests, findings, review runs, provider use and cooldowns, and learnings;
+ * - reads of pull requests, findings, review runs, provider use and cooldowns, learnings and the
+ *   spend ledger (NIC-1079, for the Usage page's spend against the caps);
  * - its own sessions in `dashboard_sessions` (create, read, delete);
  * - asking for a bootstrap from review history: INSERT and SELECT on `learning_bootstraps`, and
  *   reading `learning_bootstrap_items` (NIC-1080);
@@ -32,6 +33,7 @@ const READS = [
   "learnings",
   // A bootstrap's proposed learnings and their sources (NIC-1080).
   "learning_bootstrap_items",
+  "spend_ledger",
 ] as const;
 
 export async function ensureDashboardRole(

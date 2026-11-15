@@ -23,7 +23,8 @@ export const workflowJobSchema = z.object({
   /**
    * What the job is (`ReviewJob.kind`), who caused it and, for a label, which one: whether it
    * starts a review is decided against the repo's `review` config (`reviewGate`). Left out by
-   * jobs queued before NIC-1077, which are reviewed as before.
+   * jobs queued before NIC-1077, which are reviewed as before. For a requested review,
+   * `actor` is who asked: their access is read from GitHub, never taken from the job.
    */
   kind: z.enum(REVIEW_JOB_KINDS).optional(),
   actor: z.string().min(1).max(100).optional(),

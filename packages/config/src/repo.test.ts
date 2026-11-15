@@ -21,6 +21,7 @@ describe("parseRepoConfigYaml", () => {
         trusted_bots: [],
       },
       labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "Approved" },
+      budgets: { per_pull_request: {} },
     };
     expect(parseRepoConfigYaml(undefined)).toEqual(expected);
     expect(parseRepoConfigYaml("")).toEqual(expected);

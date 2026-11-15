@@ -1,3 +1,4 @@
+import { budgetsSchema } from "@lgtmoose/config";
 import { memoryLearningStore } from "@lgtmoose/learnings";
 import { describe, expect, it } from "vitest";
 import { CALLBACK_PATH, handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
@@ -96,6 +97,12 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
     },
     async cooldowns() {
       return [{ providerId: "claude", until: NOW.toISOString(), reason: "plan_limit" }];
+    },
+    async spendThisMonth(repos) {
+      return {
+        monthUsd: 42.5,
+        repos: repos.includes("acme/web") ? [{ repo: "acme/web", usd: 12.25 }] : [],
+      };
     },
   };
 }
@@ -347,6 +354,33 @@ describe("dashboard API", () => {
     expect(me.status).toBe(200);
     expect(me.headers["cache-control"]).toBe("no-store");
     expect(JSON.parse(me.body)).toMatchObject({ login: "Alice", orgs: ["acme"], repos: 2 });
+  });
+
+  it("shows spend against the caps, and the deployment's only to an org owner", async () => {
+    const usage = async (deps: DashboardDeps) => {
+      const { session } = await signIn(deps);
+      const response = await handleDashboardRequest(
+        deps,
+        request("GET", "/api/usage", { cookies: { [SESSION_COOKIE]: session ?? "" } }),
+      );
+      return (JSON.parse(response.body) as { spend: Record<string, unknown> }).spend;
+    };
+    const budgets = budgetsSchema.parse({
+      monthlyUsd: 500,
+      perRepoMonthlyUsd: 50,
+      perPullRequest: { runsPerDay: 4 },
+    });
+    expect(await usage(setup({ budgets }).deps)).toEqual({
+      month: "2026-11",
+      caps: { monthlyUsd: 500, perRepoMonthlyUsd: 50, prRunsPerDay: 4 },
+      repos: [{ repo: "acme/web", usd: 12.25 }],
+    });
+    const owner = setup({
+      budgets,
+      github: fakeGitHub({ orgRole: async (_token, org) => (org === "acme" ? "admin" : "none") }),
+    });
+    expect(await usage(owner.deps)).toMatchObject({ deploymentUsd: 42.5 });
+    expect(await usage(setup().deps)).toMatchObject({ caps: {} });
   });
 
   it("lists findings and runs only in the repositories the person can see", async () => {

@@ -34,7 +34,13 @@ import { BucketDeployment, Source } from "aws-cdk-lib/aws-s3-deployment";
 import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import type { Construct } from "constructs";
-import { DASHBOARD_CSP, FEEDBACK_REPORT_KEY, SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
+import {
+  DASHBOARD_CSP,
+  FEEDBACK_REPORT_KEY,
+  SECRET_NAMES,
+  STACK_OUTPUTS,
+  type DeployConfig,
+} from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -61,6 +67,8 @@ export interface DashboardStackProps extends StackProps {
   /** Holds the feedback report; the API may read that one key and nothing else. */
   artifactBucket: IBucket;
   allowedOrgs: readonly string[];
+  /** The deploy config's `budgets` (NIC-1079), shown against spend on the Usage page. */
+  budgets?: DeployConfig["budgets"];
   logRetention: RetentionDays;
 }
 
@@ -109,6 +117,8 @@ export class DashboardStack extends Stack {
         ORIGIN_PARAMETER_NAME,
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
+        // The spend caps, for the Usage page (NIC-1079).
+        LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
       bundling: { externalModules: ["pg-native"] },

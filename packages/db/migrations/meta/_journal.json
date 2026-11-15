@@ -120,6 +120,20 @@
       "when": 1794749792485,
       "tag": "0017_compose-runners",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1794753975031,
+      "tag": "0018_spend-caps",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794755356298,
+      "tag": "0019_learnings-bootstrap",
+      "breakpoints": true
     }
   ]
 }

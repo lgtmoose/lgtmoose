@@ -18,9 +18,11 @@ import {
   type BatchInput,
 } from "@lgtmoose/pipeline";
 import { BOOTSTRAPPER_TIER, buildBootstrapPrompt } from "@lgtmoose/roles";
+import { effectiveCaps, estimateCost, tierPrices } from "@lgtmoose/config";
 import { z } from "zod";
 import type { BootstrapStore } from "./bootstrap-store.js";
 import type { ControlDeps } from "./ports.js";
+import { reserveSpend, runCost, spendAlerts } from "./spend.js";
 import type { PrepareOutput, PrepareSettings } from "./prepare.js";
 import type { Permission } from "./thread-policy.js";
 
@@ -240,6 +242,33 @@ export function planBatches(
   return { batches, prsRead, oldestPr, capped: false };
 }
 
+/** Batches planned when the price table makes them free: still bounded. */
+const maxBatchesFree = 100;
+
+/**
+ * The plan cut to its first `kept` batches, when the spend caps let only those run: PRs whose
+ * comments all made it are read (and `oldestPr` is where a resume carries on); a PR cut in two
+ * is read again by a resume, and post's dedupe keeps its learnings from being stored twice.
+ */
+export function keepBatches(
+  plan: ReturnType<typeof planBatches>,
+  prs: readonly { pr: number; comments: readonly KeptComment[] }[],
+  kept: number,
+): ReturnType<typeof planBatches> {
+  if (kept >= plan.batches.length) return plan;
+  const batches = plan.batches.slice(0, kept);
+  let room = batches.reduce((sum, batch) => sum + batch.comments.length, 0);
+  let prsRead = 0;
+  let oldestPr: number | undefined;
+  for (const { pr, comments } of prs.slice(0, plan.prsRead)) {
+    if (comments.length > room) break;
+    room -= comments.length;
+    prsRead += 1;
+    oldestPr = pr;
+  }
+  return { batches, prsRead, oldestPr, capped: true };
+}
+
 /** Lint and format tools whose config tells the reviewer what's already enforced. */
 const TOOLS: readonly { name: string; files: readonly string[]; what: string; category: string }[] = [
   {
@@ -446,8 +475,39 @@ export async function prepareBootstrap(
     return { pr, comments: selected.kept };
   });
   const maxCostUsd = Math.min(row.maxCostUsd, bootstrap.maxCostUsd);
-  const maxBatches = Math.floor(maxCostUsd / BOOTSTRAP_BATCH_ESTIMATE_USD);
-  const plan = planBatches(prs, maxBatches);
+  const estimate =
+    deps.spend === undefined
+      ? BOOTSTRAP_BATCH_ESTIMATE_USD
+      : estimateCost(undefined, tierPrices(deps.spend.budgets).fast);
+  const planned = planBatches(prs, estimate > 0 ? Math.floor(maxCostUsd / estimate) : maxBatchesFree);
+  // The deployment's spend caps (NIC-1079): the batches are reserved in the spend ledger like a
+  // review's, under the repository's and the deployment's monthly caps. A bootstrap is no PR's,
+  // so per-PR caps don't apply. Those that don't fit aren't run.
+  const fitting =
+    deps.spend === undefined
+      ? planned.batches.length
+      : await (async () => {
+          const spend = deps.spend as NonNullable<ControlDeps["spend"]>;
+          const decision = await reserveSpend(
+            spend,
+            { runId: job.bootstrapId, repo, prNumber: 0 },
+            {
+              caps: effectiveCaps(spend.budgets),
+              override: true,
+              wanted: planned.batches.map((_, index) => ({
+                index,
+                kind: "bootstrap" as const,
+                tier: "fast" as const,
+              })),
+              now: new Date(),
+            },
+            (message, fields) => deps.log(message, fields),
+          );
+          let kept = 0;
+          while (kept < planned.batches.length && decision.runs(kept)) kept += 1;
+          return kept;
+        })();
+  const plan = keepBatches(planned, prs, fitting);
   const files = new Map<string, string | undefined>();
   for (const path of HINT_FILES) files.set(path, await github.file(repo, path));
   const hints = fileHints(files);
@@ -645,6 +705,35 @@ export async function postBootstrap(deps: ControlDeps, bootstrapId: string): Pro
       },
       [{ file: hint.file }],
     );
+  }
+  // Settled in the spend ledger (NIC-1079) at what the batches reported, priced by tier, as a
+  // review's run is: that's the cost the bootstrap records too.
+  if (deps.spend !== undefined && manifest.batches.length > 0) {
+    const spend = deps.spend;
+    try {
+      costUsd = await runCost(
+        deps.store,
+        bootstrapId,
+        manifest.batches.map((batch) => ({ index: batch.index, tier: "fast" as const })),
+        spend.budgets,
+      );
+      const settled = await spend.store.settle(bootstrapId, costUsd);
+      if (settled !== undefined && !settled.wasSettled) {
+        await spendAlerts(
+          spend.store,
+          { repo: manifest.repo, addedUsd: costUsd },
+          effectiveCaps(spend.budgets),
+          new Date(),
+          (message, fields) => deps.log(message, fields),
+        );
+      }
+    } catch (error) {
+      // The reservation still counts, and the reconciler settles it from the batch outputs.
+      deps.log("bootstrap spend not settled", {
+        bootstrapId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   await bootstrap.store.finish(bootstrapId, { proposed, costUsd });
   deps.log("bootstrap finished", { bootstrapId, repo: manifest.repo, proposed, refused, costUsd });

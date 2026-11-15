@@ -223,6 +223,8 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     expect(await get("/api/usage")).toMatchObject({
       providers: [{ providerId: "claude" }],
       cooldowns: [{ providerId: "codex" }],
+      // The spend ledger (NIC-1079), read as the dashboard's login.
+      spend: { repos: [] },
     });
     expect(await get("/api/learnings")).toMatchObject({ learnings: [{ id: learningId }] });
     // The report, through its view.
@@ -291,6 +293,9 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "update findings set status = 'outdated'",
       "delete from findings",
       "update review_runs set status = 'failed'",
+      "update spend_ledger set settled = true",
+      "delete from spend_ledger",
+      "update review_runs set spend_cap = null",
       "update dashboard_sessions set login = 'mallory'",
       "update dashboard_sessions set repos = '[\"other/repo\"]'",
       // A bootstrap, once asked for, is the runner's.

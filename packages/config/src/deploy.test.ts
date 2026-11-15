@@ -52,6 +52,7 @@ describe("parseDeployConfig", () => {
       feedback: { acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 },
       alarms: {},
       images: { source: "build" },
+      budgets: { perPullRequest: {}, prices: {} },
       shadow: true,
       extraEgressHosts: [],
       learnings: { embeddings: { provider: "none" }, maxPendingPerAuthor: 5 },
