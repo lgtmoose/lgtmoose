@@ -24,9 +24,10 @@ export type ReviewJobKind = (typeof REVIEW_JOB_KINDS)[number];
  * Why a run was asked for rather than started by a push: a person's `review` or `full review`
  * command (the latest commit, or the whole PR again), or `replies`, which the conversation
  * handler queues when a person replies on one of our findings' threads, so the reply judge
- * runs without waiting for a push.
+ * runs without waiting for a push, or `explain`, which it queues when a person asks
+ * `@lgtmoose explain` on a finding, so the explainer answers with a model.
  */
-export const REVIEW_REQUESTS = ["review", "full_review", "replies"] as const;
+export const REVIEW_REQUESTS = ["review", "full_review", "replies", "explain"] as const;
 
 export type ReviewRequest = (typeof REVIEW_REQUESTS)[number];
 

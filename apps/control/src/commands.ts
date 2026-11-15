@@ -190,7 +190,7 @@ export function helpText(slug: string): string {
     `| \`${at} full review\` | Reviews the whole PR again, ignoring earlier reviews. |`,
     `| \`${at} pause\` | Stops automatic reviews on this PR (needs write access). |`,
     `| \`${at} resume\` | Starts automatic reviews again (needs write access). |`,
-    `| \`${at} explain\` | In a finding's thread, or \`explain path:line\`: details of that finding. |`,
+    `| \`${at} explain\` | In a finding's thread, or \`explain path:line\`: explains that finding. For the PR's author or someone with write access, a model answers in a later run. |`,
     `| \`${at} ignore\` | In a finding's thread: declines it. Blocking findings need someone with write access other than the PR's author. |`,
     `| \`${at} learn: <text>\` | Proposes a learning for this repo. Tags: \`[path <glob>]\`, \`[org]\`, \`[kind <kind>]\`, \`[category <name>]\`. Applied at once with write access, otherwise pending. |`,
     `| \`${at} learnings\` | Lists the learnings that apply to this PR. |`,

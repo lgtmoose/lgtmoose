@@ -256,11 +256,21 @@ export const pendingReplyStatus = pgEnum("pending_reply_status", [
   "skipped",
 ]);
 
+export const pendingReplyKind = pgEnum("pending_reply_kind", [
+  // A reply on one of our findings' threads, for the reply judge.
+  "reply",
+  // `@lgtmoose explain` in a finding's thread: answered there by the explainer.
+  "explain",
+  // `@lgtmoose explain path:line` elsewhere: answered on the PR by the explainer.
+  "explain_pr",
+]);
+
 /**
- * People's replies on our findings' review threads, waiting for the reply judge (NIC-833). The
- * conversation handler records them; the next run judges up to its limit, oldest first, and
- * the post step acts on each judgement. The body is the comment's text as GitHub had it, with
- * credentials and personal data redacted before it's stored. It's untrusted.
+ * People's replies on our findings' review threads, waiting for the reply judge (NIC-833), and
+ * `@lgtmoose explain` requests, waiting for the explainer (NIC-1053; `kind`). The conversation
+ * handler records them; the next run takes up to its limits, oldest first, and the post step
+ * acts on each answer. The body is the comment's text as GitHub had it, with credentials and
+ * personal data redacted before it's stored. It's untrusted.
  */
 export const pendingReplies = pgTable(
   "pending_replies",
@@ -276,6 +286,7 @@ export const pendingReplies = pgTable(
     githubCommentId: bigint("github_comment_id", { mode: "number" }).notNull(),
     author: text("author").notNull(),
     body: text("body").notNull(),
+    kind: pendingReplyKind("kind").notNull().default("reply"),
     status: pendingReplyStatus("status").notNull().default("pending"),
     /** Runs that tried to judge it and got no judgement. */
     attempts: integer("attempts").notNull().default(0),

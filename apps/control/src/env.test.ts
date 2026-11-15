@@ -5,6 +5,7 @@ import {
   readControlEnv,
   readDispatchEnv,
   readReconcileEnv,
+  readMaxExplanations,
   readReviewSettings,
   readTicketSettings,
 } from "./env.js";
@@ -59,7 +60,16 @@ describe("readReviewSettings", () => {
       batchTimeoutMs: DEFAULT_BATCH_TIMEOUT_MS,
       shadow: true,
       maxReplyJudgements: 10,
+      maxExplanations: 5,
     });
+  });
+
+  it("reads the most explains answered by a model per run", () => {
+    expect(readReviewSettings({ LGTMOOSE_MAX_EXPLANATIONS: "0" }).maxExplanations).toBe(0);
+    expect(readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "3" })).toBe(3);
+    expect(readMaxExplanations({})).toBe(5);
+    expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "-1" })).toThrow();
+    expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "x" })).toThrow();
   });
 
   it("reads the most replies to judge per run", () => {

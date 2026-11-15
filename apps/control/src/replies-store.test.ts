@@ -109,6 +109,32 @@ describe("drizzleReplyStore", () => {
     await replies.failed([two.id]);
     expect(await replies.take(prId, 10)).toEqual([]);
   });
+
+  it("keeps explains apart from replies", async () => {
+    const prId = await pull(72);
+    const a = await finding(prId, 7201);
+    const base = { repo: "acme/shop", prNumber: 72, author: "dev", findingId: a };
+    await replies.add({ ...base, commentId: 21, body: "is this right?" });
+    await replies.add({ ...base, commentId: 22, body: "@lgtmoose explain", kind: "explain" });
+    await replies.add({
+      ...base,
+      commentId: 23,
+      body: "@lgtmoose explain src/a.ts:1",
+      kind: "explain_pr",
+    });
+    expect((await replies.take(prId, 10)).map((reply) => [reply.commentId, reply.kind])).toEqual([
+      [21, undefined],
+    ]);
+    // Each finding's latest explain, of either kind.
+    expect(
+      (await replies.take(prId, 10, "explain")).map((reply) => [reply.commentId, reply.kind]),
+    ).toEqual([[23, "explain_pr"]]);
+    const [skipped] = await db
+      .select({ status: pendingReplies.status })
+      .from(pendingReplies)
+      .where(eq(pendingReplies.githubCommentId, 22));
+    expect(skipped?.status).toBe("skipped");
+  });
 });
 
 describe("finding store, for replies", () => {

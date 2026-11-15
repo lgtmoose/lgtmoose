@@ -529,6 +529,81 @@ describe("handleConversation", () => {
     expect(await handleConversation(nothing.deps, job())).toMatchObject({ ok: false });
   });
 
+  describe("explain with a model", () => {
+    function withExplainer(
+      author: string,
+      body: string,
+      options: { status?: StoredFinding["status"]; permissions?: Record<string, Permission> } = {},
+      extra: Partial<CommentInfo> = {},
+    ) {
+      const findings = new Map([[900, finding({ status: options.status ?? "open" })]]);
+      const f = fakeDeps(from(author, body, extra), {
+        findings,
+        ...(options.permissions === undefined ? {} : { permissions: options.permissions }),
+      });
+      const added: { findingId: string; commentId: number; kind?: string }[] = [];
+      f.deps.replies = {
+        add: async (input) => {
+          if (added.some((entry) => entry.commentId === input.commentId)) return false;
+          added.push(input);
+          return true;
+        },
+        take: async () => [],
+        finish: async () => {},
+        failed: async () => {},
+      };
+      f.deps.maxExplanations = 5;
+      return { ...f, added };
+    }
+    const inThread = job({ kind: "review_comment", commentId: 901 });
+
+    it("asks the explainer in the finding's thread, once, and replies nothing yet", async () => {
+      const f = withExplainer("author", "@lgtmoose explain", {}, { threadRootId: 900 });
+      expect(await handleConversation(f.deps, inThread)).toMatchObject({
+        ok: true,
+        replied: false,
+      });
+      expect(f.added).toMatchObject([{ findingId: "f-1", commentId: 901, kind: "explain" }]);
+      expect(f.queued).toMatchObject([
+        { kind: "pr_updated", requested: "explain", deliveryId: "explain-901", headSha: HEAD },
+      ]);
+      expect(f.reactions).toEqual(["901:+1"]);
+      // A redelivery asks once.
+      await handleConversation(f.deps, inThread);
+      expect(f.queued).toHaveLength(1);
+    });
+
+    it("answers on the PR for an explain by place, for someone with write access", async () => {
+      const f = withExplainer("maint", "@lgtmoose explain src/a.ts:10", {
+        permissions: { maint: "write" },
+      });
+      await handleConversation(f.deps, job());
+      expect(f.added).toMatchObject([{ commentId: 500, kind: "explain_pr" }]);
+      expect(f.replies).toEqual([]);
+    });
+
+    it("keeps the stored reply for others, closed findings, and with the explainer off", async () => {
+      const visitor = withExplainer("visitor", "@lgtmoose explain", {}, { threadRootId: 900 });
+      await handleConversation(visitor.deps, inThread);
+      expect(visitor.queued).toEqual([]);
+      expect(visitor.replies[0]?.body).toContain("The loop skips the last item");
+      const closed = withExplainer(
+        "author",
+        "@lgtmoose explain",
+        { status: "fixed" },
+        { threadRootId: 900 },
+      );
+      await handleConversation(closed.deps, inThread);
+      expect(closed.queued).toEqual([]);
+      expect(closed.replies[0]?.body).toContain("The loop skips the last item");
+      const off = withExplainer("author", "@lgtmoose explain", {}, { threadRootId: 900 });
+      off.deps.maxExplanations = 0;
+      await handleConversation(off.deps, inThread);
+      expect(off.added).toEqual([]);
+      expect(off.replies[0]?.body).toContain("The loop skips the last item");
+    });
+  });
+
   it("ignores a should_fix finding for anyone, the author included", async () => {
     const findings = new Map([[900, finding()]]);
     const f = fakeDeps(from("author", "@lgtmoose ignore", { threadRootId: 900 }), { findings });

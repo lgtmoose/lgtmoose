@@ -55,6 +55,7 @@ export {
   type JudgedFinding,
   type ReplyJudgeInput,
 } from "./reply-judge.js";
+export { EXPLAINER_TIER, buildExplainPrompt, type ExplainInput } from "./explainer.js";
 export {
   CROSS_FILE_LIMITS,
   CROSS_FILE_TIER,

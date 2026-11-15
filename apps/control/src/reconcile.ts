@@ -111,8 +111,11 @@ export interface ReconcileStore {
   /**
    * The PR's oldest reply still waiting for the reply judge, and how many runs failed to judge
    * it: a run for replies is queued for it (one for each attempt, so a failed one is retried).
+   * An `explain` waiting (`kind`) asks for a run for explains instead.
    */
-  pendingReply?(pullRequestId: string): Promise<{ id: string; attempts: number } | undefined>;
+  pendingReply?(
+    pullRequestId: string,
+  ): Promise<{ id: string; attempts: number; kind?: string } | undefined>;
 }
 
 /** Where jobs go: the gateway's FIFO queue, one message group per PR. */
@@ -324,14 +327,16 @@ async function reconcilePull(
   // A reply a run never judged (one was running when it came in, say): ask for a run again.
   const waiting = await deps.store.pendingReply?.(record.id);
   if (waiting !== undefined) {
+    const requested =
+      waiting.kind === "explain" || waiting.kind === "explain_pr" ? "explain" : "replies";
     const deliveryId = reconcileDeliveryId(
-      `${repo.toLowerCase()}#${pull.number}:replies:${waiting.id}:${waiting.attempts}`,
+      `${repo.toLowerCase()}#${pull.number}:${requested}:${waiting.id}:${waiting.attempts}`,
     );
     await deps.queue.send(
       {
         ...jobBase(context, pull),
         kind: "pr_updated",
-        requested: "replies",
+        requested,
         deliveryId,
         actor: pull.author,
       },

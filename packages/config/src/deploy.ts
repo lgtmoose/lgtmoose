@@ -407,6 +407,20 @@ export const deployConfigSchema = z
         "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",
       ),
     /**
+     * The most `@lgtmoose explain` requests answered by the explainer in one run of a PR (a
+     * fast-tier model call each, at most one per finding per head). Requests past it wait for
+     * the next run.
+     */
+    maxExplanations: z
+      .number()
+      .int()
+      .min(0)
+      .max(20)
+      .default(5)
+      .describe(
+        "Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply.",
+      ),
+    /**
      * Shadow mode: the review workflow records what it would post (the review, check run,
      * summary comment and labels) to the artifact bucket and the log instead of posting it to
      * GitHub. On by default until reviews have been checked on real PRs (M1).

@@ -42,6 +42,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `images.digests.sandbox` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-sandbox image's digest. |
 | `images.digests.egressProxy` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-egress-proxy image's digest. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
+| `maxExplanations` | integer, 0 to 20 | `5` | Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
 | `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5}` | Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have. |
