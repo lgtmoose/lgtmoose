@@ -3,7 +3,13 @@ import { SFNClient } from "@aws-sdk/client-sfn";
 import { awsControlDeps } from "./aws.js";
 import { currentTaskArn, taskStatus } from "./ecs.js";
 import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
-import { readCommand, readControlEnv, readEmbeddingsSettings, readReviewSettings } from "./env.js";
+import {
+  readCommand,
+  readControlEnv,
+  readEmbeddingsSettings,
+  readReviewSettings,
+  readTicketSettings,
+} from "./env.js";
 import { runCommand } from "./run.js";
 
 /**
@@ -39,6 +45,7 @@ async function main(): Promise<void> {
   const deps = await awsControlDeps(env, {
     shadow: settings.shadow,
     embeddings: readEmbeddingsSettings(process.env),
+    tickets: readTicketSettings(process.env),
   });
   const ecs = new ECSClient({});
   try {

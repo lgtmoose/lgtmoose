@@ -28,6 +28,11 @@ export const SECRET_NAMES = {
    * plain text. Read by the control task only; sandbox tasks never see it.
    */
   openAiEmbeddings: "lgtmoose/embeddings/openai",
+  /**
+   * The Linear API key for ticket coverage (`tickets.provider: linear`), as plain text, written
+   * by `lgtmoose auth linear`. Read by the control task only; sandbox tasks never see it.
+   */
+  linearTickets: "lgtmoose/tickets/linear",
 } as const;
 
 /** Every provider credential's name starts with this, so they can be listed together. */

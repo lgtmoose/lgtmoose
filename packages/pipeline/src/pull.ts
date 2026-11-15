@@ -23,6 +23,11 @@ export interface PullRequest {
   author: string;
   /** The author's relationship to the repository (`author_association`), when GitHub gave it. */
   association?: string;
+  /**
+   * Whether the repository is private (`base.repo.private`), when GitHub gave it. Unknown is
+   * treated as public wherever it matters, such as how much of a linked ticket the summary shows.
+   */
+  repoPrivate?: boolean;
   headSha: string;
   headRef: string;
   baseSha: string;

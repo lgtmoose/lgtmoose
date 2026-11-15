@@ -41,6 +41,8 @@ A step that fails for good marks the run failed and posts nothing more: a failur
 
 People talk to LGTMoose through `@lgtmoose` commands and replies on its findings: see [Commands](commands.md). What it learns from them is in [Learning](learning.md).
 
+With a ticket provider set up, prepare also reads the tickets the PR names (in the control task, with the provider's key) and adds a ticket checker batch per ticket, run in the sandbox on the fast tier. Post shows the coverage table and counts missing core requirements as should-fix findings, capped: see [Ticket coverage](tickets.md).
+
 ## Harnesses
 
 Each vendor's official CLI runs headless behind a small adapter, restricted to read-only tools and validated with zod:

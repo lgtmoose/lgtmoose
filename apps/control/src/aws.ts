@@ -28,7 +28,8 @@ import pg from "pg";
 import { z } from "zod";
 import { drizzleLearningStore, proposeLearning } from "@lgtmoose/learnings";
 import { drizzleReplyStore } from "./replies-aws.js";
-import type { ControlEnv, EmbeddingsSettings } from "./env.js";
+import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
+import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
@@ -710,7 +711,7 @@ function log(message: string, fields: Record<string, unknown> = {}): void {
  */
 export async function awsControlDeps(
   env: ControlEnv,
-  options: { shadow: boolean; embeddings?: EmbeddingsSettings },
+  options: { shadow: boolean; embeddings?: EmbeddingsSettings; tickets?: TicketSettings },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
   const app = parseSecret(
@@ -754,6 +755,12 @@ export async function awsControlDeps(
       if (!SecretString) throw new Error(`Secret ${arn} has no string value.`);
       return SecretString;
     },
+  });
+  // Ticket coverage: the provider's key is read here, in the control task, on first use only.
+  const tickets = ticketSourceFor(options.tickets ?? { provider: "none" }, async (arn) => {
+    const { SecretString } = await secrets.send(new GetSecretValueCommand({ SecretId: arn }));
+    if (!SecretString) throw new Error(`Secret ${arn} has no string value.`);
+    return SecretString;
   });
   // The App's slug, read once with the App's own JWT.
   let slugOnce: Promise<string> | undefined;
@@ -878,6 +885,7 @@ export async function awsControlDeps(
       });
     },
     learnings: learningsRetriever(learningStore, embedder, log),
+    ...(tickets === undefined ? {} : { tickets }),
     close: () => pool.end(),
   };
 }

@@ -52,10 +52,24 @@ describe("githubPullReader", () => {
         base: { sha: SHA_B, ref: "main" },
       },
     });
-    expect(await githubPullReader(get).pull(target)).toMatchObject({
-      author: "dev",
-      association: "CONTRIBUTOR",
+    const pull = await githubPullReader(get).pull(target);
+    expect(pull).toMatchObject({ author: "dev", association: "CONTRIBUTOR" });
+    // No repository in the payload: visibility unknown.
+    expect(pull.repoPrivate).toBeUndefined();
+  });
+
+  it("keeps whether the repository is private", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/pulls/7": {
+        title: "Fix",
+        body: "",
+        state: "open",
+        user: { login: "dev" },
+        head: { sha: SHA_A, ref: "feature" },
+        base: { sha: SHA_B, ref: "main", repo: { private: true } },
+      },
     });
+    expect((await githubPullReader(get).pull(target)).repoPrivate).toBe(true);
   });
 
   it("encodes the owner and repo in the path", async () => {

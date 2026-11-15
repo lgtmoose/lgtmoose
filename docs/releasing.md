@@ -103,7 +103,6 @@ Tag v0.1.0 once M1–M6's acceptance criteria pass. Open now:
 - [ ] NIC-843: the docker compose deployment.
 - [ ] NIC-838: the monthly learnings sync pull request (waiting on the decision between
       `contents: write` for every install and an opt-in permission).
-- [ ] NIC-839: ticket providers (in review).
 
 Then:
 

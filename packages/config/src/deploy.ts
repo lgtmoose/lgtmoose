@@ -477,11 +477,46 @@ export const deployConfigSchema = z
       .strict()
       .default({ embeddings: { provider: "none" } })
       .describe("Learnings retrieval: how the learnings for each review batch are ranked."),
+    /**
+     * Ticket coverage (NIC-839): the review reads the tickets a PR names (in its branch, title,
+     * description and commits) and checks the PR against their requirements. Only Linear is
+     * built; its API key is stored by `lgtmoose auth linear` and read by the control task only.
+     * Only PRs by the repository's owners, members and collaborators get tickets read, and a
+     * public repository's summary shows no ticket text unless `detailsOnPublicRepos` is on.
+     */
     tickets: z
-      .object({ provider: z.enum(["linear", "jira", "github-issues"]) })
+      .object({
+        provider: z
+          .enum(["linear", "jira", "github-issues"])
+          .refine((provider) => provider === "linear", "only linear is built so far")
+          .describe("The ticket system: linear. jira and github-issues aren't built yet."),
+        maxPerPullRequest: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .default(3)
+          .describe(
+            "The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed.",
+          ),
+        teamKeys: z
+          .array(z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,9}$/, "a team key, such as ENG"))
+          .default([])
+          .describe(
+            "Only these teams' ticket keys count, such as ENG for ENG-123. Empty: any key the provider knows.",
+          ),
+        detailsOnPublicRepos: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Show tickets' titles, links and requirements in the summary on public repositories too. Off: a public repository's summary shows only each key, its coverage level and how many core requirements look missing.",
+          ),
+      })
       .strict()
       .optional()
-      .describe("Reserved for ticket coverage. Not used yet: no ticket provider is built."),
+      .describe(
+        "Ticket coverage: check each PR against the tickets it names. Left out: off. The provider receives no code; the model checks coverage in the sandbox.",
+      ),
     dashboard: z
       .boolean()
       .default(true)

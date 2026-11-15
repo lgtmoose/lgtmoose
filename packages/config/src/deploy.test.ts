@@ -123,7 +123,24 @@ describe("parseDeployConfig", () => {
       }),
     );
     expect(config.providers).toHaveLength(3);
-    expect(config.tickets).toEqual({ provider: "linear" });
+    expect(config.tickets).toEqual({
+      provider: "linear",
+      maxPerPullRequest: 3,
+      teamKeys: [],
+      detailsOnPublicRepos: false,
+    });
+  });
+
+  it("refuses ticket providers that aren't built and bad ticket settings", () => {
+    expect(issuesOf({ ...minimal, tickets: { provider: "jira" } })).toContainEqual(
+      expect.objectContaining({ path: "tickets.provider" }),
+    );
+    expect(
+      issuesOf({ ...minimal, tickets: { provider: "linear", maxPerPullRequest: 11 } }),
+    ).toContainEqual(expect.objectContaining({ path: "tickets.maxPerPullRequest" }));
+    expect(
+      issuesOf({ ...minimal, tickets: { provider: "linear", teamKeys: ["ENG-1"] } }),
+    ).toContainEqual(expect.objectContaining({ path: "tickets.teamKeys[0]" }));
   });
 
   it("rejects an auth method the harness doesn't support, naming the key", () => {

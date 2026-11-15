@@ -15,6 +15,8 @@
 | `auth list`                         |                                                 | Shows which providers have a credential, and stray secrets    |
 | `auth remove <id>`                  |                                                 | Schedules the credential for deletion, recoverable for 7 days |
 
+`auth linear` stores a Linear API key for [ticket coverage](tickets.md), not a model credential. It goes in `lgtmoose/tickets/linear`, and only the control task can read it.
+
 Each command stores the credential for the provider in `lgtmoose.config.ts` that uses its harness and auth method. When more than one provider fits, pick one with `--id <id>`.
 
 Before storing a plan credential, auth shows a warning about vendor terms and asks you to confirm. Plan credentials are `oauth-token`, `chatgpt-login`, a Codex `access-token` (it belongs to a ChatGPT plan) and a Cursor user `api-key` (it bills to that user's Cursor plan). A Cursor `service-account` key belongs to the team, so it gets no warning. `--accept-vendor-terms` answers yes. [Providers](providers.md) has what each vendor's terms say, with sources, and the recommended credential per vendor.

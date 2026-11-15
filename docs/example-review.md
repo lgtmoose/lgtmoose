@@ -1,6 +1,6 @@
 # Example: a review's summary comment
 
-**This is an example, not a real review.** It's the summary comment as LGTMoose's renderer (`packages/summary`) writes it for the made-up pull request in its own tests, with the ticket section left out, since no ticket provider is built yet. A real review also posts inline comments on the lines its findings cite, a check run and a status label.
+**This is an example, not a real review.** It's the summary comment as LGTMoose's renderer (`packages/summary`) writes it for the made-up pull request in its own tests, with the ticket section left out: it only appears when a ticket provider is set up (see [Ticket coverage](tickets.md)). A real review also posts inline comments on the lines its findings cite, a check run and a status label.
 
 > ## LGTMoose review
 >

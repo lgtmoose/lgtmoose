@@ -45,6 +45,7 @@ import {
   type SettleDeps,
 } from "./judged-replies.js";
 import { readJudgement, readOutcome } from "./outcomes.js";
+import { ticketReview } from "./tickets.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
@@ -1049,8 +1050,14 @@ export async function post(
               return root === undefined || !fixedThreads.has(root);
             }),
           };
+    // Linked tickets' checklists (NIC-839): this run's, or ones kept from earlier runs here.
+    const tickets =
+      manifest.tickets === undefined
+        ? undefined
+        : await ticketReview(deps.store, runId, prepared, manifest.tickets);
     const finish = (open: typeof earlier.open) =>
       finishReview(repo, reviewed, outcomes, latest.headSha, {
+        ...(tickets === undefined ? {} : { tickets }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({

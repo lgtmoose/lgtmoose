@@ -1,4 +1,9 @@
-import { FINDING_LIMITS, findingSchema, judgementSchema } from "@lgtmoose/core";
+import {
+  FINDING_LIMITS,
+  findingSchema,
+  judgementSchema,
+  ticketCoverageSchema,
+} from "@lgtmoose/core";
 import { MODEL_TIERS, transcriptKey } from "@lgtmoose/harness";
 import { z } from "zod";
 
@@ -78,6 +83,14 @@ export function headKeys(repo: string, prNumber: number, headSha: string) {
   return {
     /** Held while a run checks the head for our review and submits one, so runs take turns. */
     reviewClaim: `${root}review-claim.json`,
+    /**
+     * The ticket checker's checklist for one linked ticket at this head, with the ticket's
+     * `updatedAt` it was made from: reused by later runs at this head until the ticket changes.
+     */
+    ticketCoverage: (key: string) => {
+      if (!/^[A-Z][A-Z0-9]{0,9}-\d{1,7}$/.test(key)) throw new Error("Not a ticket key.");
+      return `${root}tickets/${key}.json`;
+    },
   };
 }
 
@@ -124,10 +137,12 @@ export const batchInputSchema = z
       .positive()
       .max(2 * 60 * 60_000),
     /**
-     * What the batch runs: the reviewer on a batch of files (the default), or the reply judge on
-     * one person's reply to a finding (`buildReplyJudgePrompt`), whose output is a `judgement`.
+     * What the batch runs: the reviewer on a batch of files (the default), the reply judge on
+     * one person's reply to a finding (`buildReplyJudgePrompt`), whose output is a `judgement`,
+     * or the ticket checker on one ticket (`buildTicketCoveragePrompt`), whose output is a
+     * `coverage`.
      */
-    role: z.enum(["reviewer", "judge"]).optional(),
+    role: z.enum(["reviewer", "judge", "ticket"]).optional(),
     /**
      * The model tier: the judge runs on `fast`. The sandbox then runs its provider's fast model
      * (`LGTMOOSE_FAST_MODEL`) instead of `model`.
@@ -187,6 +202,8 @@ export const batchOutputSchema = z
       .optional(),
     /** The reply judge's answer, for a judge batch (`BatchInput.role`). Model output. */
     judgement: judgementSchema.optional(),
+    /** The ticket checker's checklist, for a ticket batch (`BatchInput.role`). Model output. */
+    coverage: ticketCoverageSchema.optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
@@ -194,9 +211,10 @@ export const batchOutputSchema = z
   .strict()
   .refine(
     (output) =>
-      [output.findings, output.judgement, output.error].filter((part) => part !== undefined)
-        .length === 1,
-    { message: "a batch output has exactly one of findings, a judgement or an error" },
+      [output.findings, output.judgement, output.coverage, output.error].filter(
+        (part) => part !== undefined,
+      ).length === 1,
+    { message: "a batch output has exactly one of findings, a judgement, a coverage or an error" },
   )
   .refine((output) => output.notes === undefined || output.findings !== undefined, {
     message: "only a batch with findings has notes",

@@ -144,6 +144,11 @@ export interface WorkflowStackProps extends StackProps {
    */
   embeddings?: DeployConfig["learnings"]["embeddings"];
   /**
+   * Ticket coverage (`tickets`): the control task reads linked tickets with the key in
+   * `SECRET_NAMES.linearTickets`. Left out: off. Sandbox tasks never get the key.
+   */
+  tickets?: DeployConfig["tickets"];
+  /**
    * Build the sandbox image with the Cursor CLI even though its checksum isn't recorded
    * (`sandboxBuildArgs`). Off by default.
    */
@@ -224,6 +229,7 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_REPLY_JUDGEMENTS: String(props.maxReplyJudgements ?? 10),
         ...embeddingsEnvironment(embeddings),
+        ...ticketsEnvironment(props.tickets),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
@@ -243,6 +249,12 @@ export class WorkflowStack extends Stack {
       );
     } else if (embeddings.provider === "openai") {
       Secret.fromSecretNameV2(this, "OpenAiEmbeddingsKey", SECRET_NAMES.openAiEmbeddings).grantRead(
+        controlRole,
+      );
+    }
+    // Linked tickets are read in the control task, never in the sandbox: only it gets the key.
+    if (props.tickets?.provider === "linear") {
+      Secret.fromSecretNameV2(this, "LinearTicketsKey", SECRET_NAMES.linearTickets).grantRead(
         controlRole,
       );
     }
@@ -718,4 +730,19 @@ export function embeddingsEnvironment(
         LGTMOOSE_EMBEDDINGS_SECRET_ID: SECRET_NAMES.openAiEmbeddings,
       };
   }
+}
+
+/**
+ * The control task's ticket settings (`readTicketSettings` in @lgtmoose/control). The API key
+ * is passed by its secret's name, never its value.
+ */
+export function ticketsEnvironment(tickets: DeployConfig["tickets"]): Record<string, string> {
+  if (tickets === undefined) return { LGTMOOSE_TICKETS: "none" };
+  return {
+    LGTMOOSE_TICKETS: tickets.provider,
+    LGTMOOSE_TICKETS_SECRET_ID: SECRET_NAMES.linearTickets,
+    LGTMOOSE_TICKETS_MAX: String(tickets.maxPerPullRequest),
+    LGTMOOSE_TICKETS_TEAMS: tickets.teamKeys.map((team) => team.toUpperCase()).join(","),
+    LGTMOOSE_TICKETS_PUBLIC_DETAILS: String(tickets.detailsOnPublicRepos),
+  };
 }
