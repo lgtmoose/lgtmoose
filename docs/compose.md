@@ -1,7 +1,7 @@
 # docker compose
 
 LGTMoose on one host, without AWS: a gateway, a runner, an egress proxy and Postgres, in
-[deploy/compose/compose.yaml](../deploy/compose/compose.yaml). Reviews behave as on AWS. The
+[deploy/compose/compose.yaml](https://github.com/lgtmoose/lgtmoose/blob/main/deploy/compose/compose.yaml). Reviews behave as on AWS. The
 same code runs, with Postgres in place of SQS, S3 and Step Functions, and one Docker container
 per batch in place of a Fargate task.
 
