@@ -13,23 +13,44 @@ const glob = z.string().min(1, "globs can't be empty");
 
 export const repoConfigSchema = z
   .object({
-    rulepacks: z.array(z.string().min(1)).default(["generic"]),
-    conventions: z.array(glob).default([...DEFAULT_CONVENTIONS]),
+    rulepacks: z
+      .array(z.string().min(1))
+      .default(["generic"])
+      .describe(
+        "Rule packs to review with: built-in or private pack ids, and ./rules/<name>.md or ./rules/*.md from this repository. generic and security are always on.",
+      ),
+    conventions: z
+      .array(glob)
+      .default([...DEFAULT_CONVENTIONS])
+      .describe("Files of team conventions the reviewer reads, as globs."),
     /** Risk tiers, most important first. Keys are tier numbers 1–7; tests always go last. */
     tiers: z
       .record(z.string().regex(/^[1-7]$/, "tier keys are numbers 1 to 7"), z.array(glob))
-      .default({}),
+      .default({})
+      .describe(
+        "Risk tiers, most important first: keys 1 to 7, each a list of globs. Files are reviewed in tier order; tests go last.",
+      ),
     /**
      * Globs for files never to review, on top of the planner's defaults (lockfiles, build
      * output, vendored, generated and minified files, binaries). They win over `include`.
      */
-    skip: z.array(glob).default([]),
+    skip: z
+      .array(glob)
+      .default([])
+      .describe(
+        "Globs never to review, on top of the defaults (lockfiles, build output, vendored, generated and binary files). They win over include.",
+      ),
     /**
      * Globs for files to review even though a default skip matches them, such as real source in
      * `build/` or a hand-written `*.generated.ts`. `skip` globs still win, and binaries are
      * always skipped. An included lockfile is reviewed as text, without lockfile notes.
      */
-    include: z.array(glob).default([]),
+    include: z
+      .array(glob)
+      .default([])
+      .describe(
+        "Globs to review even though a default skip matches them. skip still wins, and binaries are always skipped.",
+      ),
     /**
      * Extra package hosts to trust in lockfiles, such as a private registry, on top of the
      * public ones. Packages resolved from them aren't flagged in the review summary.
@@ -43,15 +64,31 @@ export const repoConfigSchema = z
             "registries are lowercase host names",
           ),
       )
-      .default([]),
+      .default([])
+      .describe("Extra package hosts to trust in lockfiles, such as a private registry."),
     gate: z
       .object({
-        check_run: z.enum(["required", "optional", "off"]).default("required"),
-        approve: z.boolean().default(true),
-        nit_cap: z.number().int().min(0).max(100).default(10),
+        check_run: z
+          .enum(["required", "optional", "off"])
+          .default("required")
+          .describe(
+            "The LGTMoose check run. required: it fails on open blocking findings. optional: failing and held results are posted as neutral. off: no check run.",
+          ),
+        approve: z
+          .boolean()
+          .default(true)
+          .describe("false: a clean review posts COMMENT instead of APPROVE."),
+        nit_cap: z
+          .number()
+          .int()
+          .min(0)
+          .max(100)
+          .default(10)
+          .describe("Most nits posted in one review. The rest are counted in the summary."),
       })
       .strict()
-      .prefault({}),
+      .prefault({})
+      .describe("How a review's decision is posted."),
     /**
      * The prompt-injection detector. `allow`: globs for files whose added lines aren't scanned,
      * such as tests and docs about prompt injection. Their contents still reach the reviewer, so
@@ -59,18 +96,41 @@ export const repoConfigSchema = z
      */
     injection: z
       .object({
-        allow: z.array(glob).default([]),
+        allow: z
+          .array(glob)
+          .default([])
+          .describe(
+            "Globs whose added lines the prompt-injection detector doesn't scan, such as its own tests. Keep them narrow.",
+          ),
       })
       .strict()
-      .prefault({}),
+      .prefault({})
+      .describe("The prompt-injection detector."),
     labels: z
       .object({
-        pending: z.string().min(1).default("Ready for Review"),
-        changes: z.string().min(1).default("Requires Changes"),
-        approved: z.string().min(1).default("Approved"),
+        pending: z
+          .string()
+          .min(1)
+          .default("Ready for Review")
+          .describe(
+            "Set when a review holds for a person: it was incomplete, or flagged a prompt-injection attempt.",
+          ),
+        changes: z
+          .string()
+          .min(1)
+          .default("Requires Changes")
+          .describe("Set when blocking or should-fix findings are open."),
+        approved: z
+          .string()
+          .min(1)
+          .default("Approved")
+          .describe(
+            "Set when no blocking or should-fix finding is open, also with gate.approve: false.",
+          ),
       })
       .strict()
-      .prefault({}),
+      .prefault({})
+      .describe("The three status labels LGTMoose keeps on a PR: pending, changes and approved."),
   })
   .strict();
 

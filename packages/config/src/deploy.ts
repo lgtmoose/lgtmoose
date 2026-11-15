@@ -82,11 +82,25 @@ export const MAX_CREDENTIAL_CONCURRENCY = 64;
 
 const providerSchema = z
   .object({
-    id: z.string().regex(PROVIDER_ID_PATTERN, "use lowercase letters, digits and hyphens (max 32)"),
-    harness: z.enum(HARNESSES),
-    auth: z.enum(AUTH_METHODS),
+    id: z
+      .string()
+      .regex(PROVIDER_ID_PATTERN, "use lowercase letters, digits and hyphens (max 32)")
+      .describe(
+        "Your name for the provider. Its credential is stored as lgtmoose/provider/<id>, and roles refer to it.",
+      ),
+    harness: z
+      .enum(HARNESSES)
+      .describe("The agent that runs the review: claude-code, codex, cursor-agent or agent-sdk."),
+    auth: z
+      .enum(AUTH_METHODS)
+      .describe("How the harness signs in. Each harness accepts only some methods."),
     /** Models per tier, overriding `DEFAULT_TIER_MODELS` for this provider's harness. */
-    models: z.partialRecord(z.enum(TIERS), modelName).optional(),
+    models: z
+      .partialRecord(z.enum(TIERS), modelName)
+      .optional()
+      .describe(
+        "Model per tier (fast, standard, deep). Tiers left out use the harness default: haiku, sonnet and opus for Claude Code and the Agent SDK, the CLI's own model for Codex and Cursor.",
+      ),
     /**
      * Google Cloud settings for `vertex` auth. The service-account key itself is the stored
      * credential (`lgtmoose auth`); its `project_id` is used when `projectId` is left out.
@@ -100,14 +114,19 @@ const providerSchema = z
             /^(global|us|eu|[a-z]+-[a-z]+\d+)$/,
             "use global, us, eu or a region like us-east5",
           )
-          .default("global"),
+          .default("global")
+          .describe("CLOUD_ML_REGION: global, a multi-region (us, eu) or a region (us-east5)."),
         projectId: z
           .string()
           .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/, "use a Google Cloud project ID")
-          .optional(),
+          .optional()
+          .describe(
+            "Google Cloud project. Defaults to the stored service-account key's project_id.",
+          ),
       })
       .strict()
-      .optional(),
+      .optional()
+      .describe('Google Cloud settings, for auth: "vertex" only.'),
     /**
      * How many sandbox tasks may use this provider's credential at once, across every review
      * (`credentialConcurrency` has the defaults). A ChatGPT sign-in can only be 1.
@@ -178,22 +197,47 @@ export const deployConfigSchema = z
     region: z
       .string()
       .regex(/^[a-z]{2}(-gov)?-[a-z]+-\d$/, "use an AWS region such as us-east-1")
-      .default("us-east-1"),
-    profile: z.enum(["lean", "standard"]).default("lean"),
+      .default("us-east-1")
+      .describe("AWS region for every stack and secret."),
+    profile: z
+      .enum(["lean", "standard"])
+      .default("lean")
+      .describe(
+        "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, one egress proxy task. standard: NAT gateways, Aurora Serverless v2 with a reader, two proxy tasks.",
+      ),
     allowedOrgs: z
       .array(z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, "use a GitHub org or user"))
-      .min(1, "list at least one GitHub org or user"),
+      .min(1, "list at least one GitHub org or user")
+      .describe("GitHub orgs or users whose repositories LGTMoose reviews. Others are ignored."),
     /**
      * Model providers, in fallback order: when a run hits a provider's rate or plan limit, it
      * moves to the next one.
      */
-    providers: z.array(providerSchema).min(1, "configure at least one model provider"),
+    providers: z
+      .array(providerSchema)
+      .min(1, "configure at least one model provider")
+      .describe(
+        "Model providers in fallback order: a rate limit, a used-up plan or a rejected credential moves a run to the next one.",
+      ),
     /**
      * Which provider each role starts on. The rest of `providers` follow in order as fallbacks.
      * A role left out starts on the first provider.
      */
-    roles: z.partialRecord(z.enum(ROLES), z.string()).default({}),
-    maxConcurrency: z.number().int().min(1).max(64).default(4),
+    roles: z
+      .partialRecord(z.enum(ROLES), z.string())
+      .default({})
+      .describe(
+        "The provider id each role starts on. A role left out starts on the first provider; the others follow as fallbacks.",
+      ),
+    maxConcurrency: z
+      .number()
+      .int()
+      .min(1)
+      .max(64)
+      .default(4)
+      .describe(
+        "Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower.",
+      ),
     /**
      * How often the reconciler compares open PRs with what the database recorded, catching
      * missed webhooks and drifted status labels. It makes no model calls.
@@ -335,12 +379,17 @@ export const deployConfigSchema = z
           ),
       })
       .strict()
-      .default({ embeddings: { provider: "none" } }),
+      .default({ embeddings: { provider: "none" } })
+      .describe("Learnings retrieval: how the learnings for each review batch are ranked."),
     tickets: z
       .object({ provider: z.enum(["linear", "jira", "github-issues"]) })
       .strict()
-      .optional(),
-    dashboard: z.boolean().default(true),
+      .optional()
+      .describe("Reserved for ticket coverage. Not used yet: no ticket provider is built."),
+    dashboard: z
+      .boolean()
+      .default(true)
+      .describe("Reserved for the dashboard. Not used yet: no dashboard is deployed."),
   })
   .strict()
   .superRefine((config, ctx) => {

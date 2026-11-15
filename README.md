@@ -2,107 +2,77 @@
 
 A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your own AWS account with one command, and teach it by tagging `@lgtmoose` in review comments.
 
-> **Status: pre-alpha.** Nothing here reviews code yet. Follow the roadmap below.
+> **Status: pre-release.** The review workflow, commands and learnings are built, but no release has been cut and the stack hasn't yet passed its end-to-end smoke test on a real AWS account. Reviews run in shadow mode by default: they're recorded, not posted.
 
-## What it will do
+- **Reviews every PR** as a GitHub App: inline comments, a summary, a status label and a check run. Plain code, not the model, decides whether to approve.
+- **Learns from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database, and only people with write access can make them take effect.
+- **Runs on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor credentials where the vendor's terms allow it ([what each vendor's terms say](docs/providers.md)). When one provider's limit runs out, it falls back to the next.
+- **Stays in your account.** The model runs in a sandbox with no GitHub token and network access only to its model API.
 
-- **Review every PR** as a GitHub App: inline comments, a summary, a status label and a required check run.
-- **Learn from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database and synced back to the repo for review.
-- **Run on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor plan credentials where the vendor's terms allow it ([what each vendor's terms say](docs/providers.md)). Different providers can do different jobs, and it falls back to the next one when a plan runs out.
-- **Stay in your account.** The model runs in a sandbox with no GitHub token and network access only to its model API. Plain code, not the model, posts reviews, decides and writes memory.
+<!-- TODO: a screenshot of a real review, at docs/images/review.png, once the stack has run on a real repository. -->
 
-## Quickstart (planned)
+See [an example summary comment](docs/example-review.md), rendered from the test data.
+
+## Quickstart
+
+You need Node 24, pnpm 10, Docker, the AWS CLI signed in to the account to deploy to, and a GitHub organization or account to install the App in.
 
 ```bash
 git clone https://github.com/lgtmoose/lgtmoose && cd lgtmoose && pnpm install
-pnpm lgtmoose setup     # creates the GitHub App, stores its keys in AWS Secrets Manager
-pnpm lgtmoose auth bedrock   # or: claude · codex · cursor · api-key · vertex
-pnpm lgtmoose deploy    # cdk bootstrap (first time) and deploy, points the App's webhook at the gateway, prints the install link
 ```
-
-`deploy` builds the control and sandbox container images for ARM64, so it needs Docker running: Docker Desktop, or on x86 Linux, Docker with QEMU emulation for arm64 (for example `docker run --privileged --rm tonistiigi/binfmt --install arm64`).
-
-`deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`. Administrator access is simplest. A scoped role needs to assume the CDK bootstrap roles and create the bootstrap stack, plus the calls the CLI makes itself:
-
-- `sts:GetCallerIdentity`
-- `cloudformation:DescribeStacks`
-- `secretsmanager:GetSecretValue`, `CreateSecret` and `PutSecretValue` on `lgtmoose/*` (setup writes them)
-- `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
-- For `auth`: `secretsmanager:CreateSecret`, `UpdateSecret`, `TagResource` (also needed to create a tagged secret), `RestoreSecret`, `DeleteSecret` and `DescribeSecret` on `lgtmoose/provider/*`, and `secretsmanager:ListSecrets`, which can't be limited to a resource
-- For `auth bedrock`: `bedrock:ListFoundationModels`, `bedrock:GetFoundationModelAvailability` and `bedrock:ListInferenceProfiles`. Model aliases such as `sonnet` are only hinted at: Claude Code picks the model at runtime, so pin model ids in `models` to have them checked
-
-`auth` stores each provider's credential as `lgtmoose/provider/<id>`. See [docs/credentials.md](docs/credentials.md).
-
-### Bedrock with AWS credits (the default)
-
-If your AWS account has credits, run the models on Amazon Bedrock in the same account. There's no API key to store or rotate: sandbox tasks call Bedrock with their IAM task role, and the bill goes to the account.
-
-1. In the Bedrock console for your region, request access to the Anthropic models you want.
-2. Use a Bedrock provider in `lgtmoose.config.ts`, and pin each tier to a model id or inference profile:
-
-   ```ts
-   providers: [
-     {
-       id: "bedrock",
-       harness: "claude-code", // or "agent-sdk"
-       auth: "bedrock",
-       models: {
-         fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-         standard: "us.anthropic.claude-sonnet-4-6",
-         deep: "us.anthropic.claude-opus-4-8",
-       },
-     },
-   ],
-   ```
-
-3. Run `pnpm lgtmoose auth bedrock`. It checks each tier can be called in the region and lists the ids you can pin.
-4. Run `pnpm lgtmoose deploy`.
-
-Pinning matters for two reasons. Without pins, Claude Code picks the newest model of each family at runtime, so the task role may call any Anthropic model and profile. With all three tiers pinned, the task role may call only those models and their inference profiles. See [docs/credentials.md](docs/credentials.md#bedrock-with-aws-credits) for the details, Vertex AI and the `agent-sdk` harness.
-
-### Upgrading
 
 ```bash
-git pull && pnpm install && pnpm lgtmoose deploy
+pnpm lgtmoose setup
 ```
 
-### Removing it
+```bash
+pnpm lgtmoose auth bedrock
+```
 
-`pnpm lgtmoose destroy` deletes the stacks. It keeps a final snapshot of the database, the secret that unlocks it and the artifact bucket. `pnpm lgtmoose destroy --purge` deletes those too, after redeploying the Data stack from your checkout to change what deletion keeps; the database's CloudWatch logs expire on their own. Neither touches the GitHub App or its secrets.
+```bash
+pnpm lgtmoose deploy
+```
 
-One AWS account and region holds one install for now, because the secret and stack names are fixed. Put a second install, such as staging, in another account or region.
+- **`setup`** creates the GitHub App, stores its keys in AWS Secrets Manager and writes `lgtmoose.config.ts`.
+- **`auth`** stores or checks a model provider's credential: `bedrock` (the default, no key to store), `claude`, `codex`, `cursor`, `api-key` or `vertex`.
+- **`deploy`** bootstraps the AWS CDK the first time, deploys every stack, points the App's webhook at the gateway and prints the install link.
 
-### How a review runs
+Then install the App on your repositories. [Getting started](docs/index.md) covers the AWS permissions a scoped role needs, Docker on x86 Linux, and pinning Bedrock models.
 
-Each review job is one execution of the review state machine (`StateMachineArn` in the Workflow stack's outputs):
+## Documentation
 
-1. **Prepare** (control task): records the run, clones and plans the PR, and uploads the checkout and each batch's input to `runs/<run id>/` in the artifact bucket. A run for a head that's no longer the PR's head stops here as superseded.
-2. **Batches** (sandbox tasks, `maxConcurrency` at once): each runs the reviewer on one batch. Sandbox tasks have no S3 access of their own; a small Lambda hands each one presigned URLs for its own batch.
-3. **Post** (control task): reads the batches' outputs and posts one review, the check run, the summary comment and the status label. A batch without a valid output makes the review incomplete, so it can't approve.
+The docs are in [`docs/`](docs/index.md), and published to GitHub Pages from `main`.
 
-A step that fails for good marks the run failed and posts nothing more: a failure before post leaves the PR untouched. With `shadow: true` in `lgtmoose.config.ts` (the default for now), post records what it would post to `shadow/` in the bucket and the log instead.
+- [Architecture](docs/architecture.md): the components, how a review runs, and the security controls
+- [Configuration reference](docs/configuration.md), [Providers and auth](docs/credentials.md), [Rule packs](docs/rule-packs.md)
+- [Commands](docs/commands.md), [Learning](docs/learning.md), [Evals](docs/evals.md)
+- [Costs](docs/costs.md), [Troubleshooting](docs/troubleshooting.md), [Upgrading](docs/upgrading.md)
+- [Security](docs/security.md), and the [security policy](SECURITY.md) for reporting a vulnerability
 
 ## Repository layout
 
 ```
 apps/cli/        lgtmoose CLI (setup · auth · deploy · destroy · review --dry-run)
-apps/control/    control task: prepares batches and posts results; holds the GitHub App
+apps/control/    control task and Lambdas: prepares batches, posts results, commands, reconciler
+apps/gateway/    webhook gateway: verifies, dedupes and queues GitHub deliveries
 apps/sandbox/    sandbox task: runs a model on one batch; one model credential, no GitHub token
 apps/egress-proxy/ the sandbox's only way out: CONNECT proxy with an exact-host allowlist
 packages/core/   pure domain logic: findings, fingerprints, decision
+packages/config/ schemas and defaults for lgtmoose.config.ts and .lgtmoose.yaml
+packages/db/     Postgres schema and migrations
 packages/git/    local checkouts: clone at a SHA, review diffs, comment positions
 packages/harness/ agent CLIs run headless on one batch: read-only tools, zod-checked JSON
-packages/learnings/ the learnings store and its write policy: permission, scope, redaction
-packages/evals/   eval fixtures, scores and the recall gate for prompt and harness changes
+packages/learnings/ the learnings store, its write policy and retrieval
+packages/evals/   eval fixtures, scores, the recall gate and the provider matrix
 packages/pipeline/ one whole review in-process, without posting (review --dry-run, evals)
 packages/planner/ what to review and in what order: skips, risk tiers, batches, reading depth
-packages/roles/  agent roles: reviewer prompt, rule packs, untrusted-text wrapping
+packages/roles/  agent roles: reviewer and reply-judge prompts, rule packs, untrusted-text wrapping
 packages/poster/  posts a run: one review, inline comments, check run, summary, labels
 packages/summary/ the PR summary comment and status label sync
 infra/cdk/       AWS CDK app
 infra/sandbox/   the sandbox image: pinned agent CLIs
-deploy/compose/  docker compose deployment for hosts other than AWS
-docs/            architecture and design notes
+deploy/compose/  docker compose deployment for hosts other than AWS (not built yet)
+docs/            the documentation site
 ```
 
 ## Development
@@ -111,14 +81,26 @@ Requires Node 24 and pnpm 10.
 
 ```bash
 pnpm install
-pnpm run check   # format, lint, typecheck, test, build, run the built CLI, cdk synth
+```
+
+```bash
+pnpm run check   # format, lint, typecheck, test, build, run the built CLI, migrations, cdk synth
 ```
 
 The migration runner also has an integration test against a real Postgres with pgvector (`test:integration`). CI always runs it; locally it runs when `LGTMOOSE_TEST_DATABASE_URL` points at an admin connection:
 
 ```bash
 pnpm db:test:start   # the same pinned image as CI, from tools/test-postgres/Dockerfile
+```
+
+```bash
 LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres pnpm turbo run test:integration
+```
+
+After changing a config schema in `packages/config`, regenerate the JSON Schemas and the configuration reference:
+
+```bash
+pnpm --filter @lgtmoose/config schema && pnpm --filter @lgtmoose/config docs
 ```
 
 ## Roadmap
@@ -129,8 +111,6 @@ LGTMOOSE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres 
 4. **M4:** quality: parallel batches, cross-file pass, verifier, evals
 5. **M5:** conversation and learning: reply judge, commands, learnings, dashboard
 6. **M6:** public release v0.1.0
-
-See [docs/architecture.md](docs/architecture.md). Review criteria come from rule packs: see [docs/rule-packs.md](docs/rule-packs.md).
 
 ## License
 
