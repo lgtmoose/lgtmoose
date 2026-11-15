@@ -64,6 +64,8 @@ export interface RunnerDeps {
   owner: string;
   /** The most executions run at once. */
   maxExecutions: number;
+  /** Where comment jobs go (`DispatchDeps.conversation`). */
+  conversation?: DispatchDeps["conversation"];
   /** Jobs taken off the queue per tick. */
   batchSize?: number;
   /** How long a job is in flight before it's handed out again (SQS's visibility timeout). */
@@ -89,8 +91,9 @@ export function createRunner(deps: RunnerDeps) {
         body: JSON.stringify({ queue: JOBS_QUEUE, reason, body: record.body }),
       });
     },
-    // Comment jobs need the App's credentials and the conversation handler, which the compose
-    // runner doesn't wire up yet: without a conversation queue they're acknowledged and dropped.
+    // Comment jobs go to the conversation queue, which the entrypoint consumes; without one
+    // (in tests) they're acknowledged and dropped, as on AWS.
+    ...(deps.conversation === undefined ? {} : { conversation: deps.conversation }),
     log: (message, fields) => deps.log(message, fields),
   };
 

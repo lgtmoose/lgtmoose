@@ -94,6 +94,25 @@ jobs:
           exit 1
       - run: pnpm turbo run test:integration $AFFECTED
 
+  # The docker compose deployment: the file is valid with the example settings, and a sandbox
+  # container runs locked down on a real Docker daemon (read-only root, no route out of its
+  # internal network, batch files in and out, removed afterwards).
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LGTMOOSE_TEST_DOCKER: "1"
+      LGTMOOSE_TEST_IMAGE: busybox:1.37
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the compose file
+        working-directory: deploy/compose
+        run: docker compose --env-file .env.example config --quiet
+      - name: Pull the test image
+        run: docker pull "$LGTMOOSE_TEST_IMAGE"
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo run test:integration --filter=@lgtmoose/control
+
   # Builds every package, then runs the built CLI the way a user does.
   build:
     runs-on: ubuntu-latest

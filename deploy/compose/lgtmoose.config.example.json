@@ -1,0 +1,7 @@
+{
+  "$schema": "../../packages/config/schema/lgtmoose.config.schema.json",
+  "region": "us-east-1",
+  "allowedOrgs": ["your-org"],
+  "providers": [{ "id": "claude", "harness": "claude-code", "auth": "oauth-token" }],
+  "shadow": true
+}
