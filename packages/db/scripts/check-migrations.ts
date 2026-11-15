@@ -1,40 +1,20 @@
 /**
- * Fails if src/schema.ts has changes that no committed migration covers.
+ * Fails when the migrations folder is out of order, or when src/schema.ts has changes that no
+ * committed migration covers.
  *
- * Copies migrations/ into a scratch folder inside this package, runs `drizzle-kit generate`
- * against the copy with the real drizzle.config.ts (only `out` overridden), and compares the
- * result with the original. Only the schema decides the outcome: uncommitted edits elsewhere
- * don't matter, and it works outside a git checkout.
+ * 1. The folder: numbers one after another, the journal matching the files and dated in order,
+ *    and the snapshots chained (`checkMigrationChain`).
+ * 2. The schema: runs `drizzle-kit generate` against a scratch copy of migrations/ and compares
+ *    the result with the original. Only the schema decides: uncommitted edits elsewhere don't
+ *    matter, and it works outside a git checkout.
  */
-import { spawnSync } from "node:child_process";
-import {
-  cpSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import { migrationsDir, withDrizzleGenerate } from "./drizzle-scratch.js";
+import { checkMigrationChain, readMigrationFolder } from "./migration-chain.js";
 
-const packageDir = fileURLToPath(new URL("..", import.meta.url));
-const migrationsDir = join(packageDir, "migrations");
-// Inside the package, so the path drizzle-kit gets is always a plain relative one (no cross-drive
-// paths on Windows) and the scratch config can import drizzle.config.ts directly.
-const scratchDir = join(packageDir, ".migrations-check");
-const scratchOut = join(scratchDir, "out");
-const scratchConfig = join(scratchDir, "drizzle.config.ts");
 /** A clean check takes a few seconds; anything longer means drizzle-kit is stuck. */
 const TIMEOUT_MS = 120_000;
-
-/** drizzle-kit's CLI isn't in its package exports, so find it next to the package entry. */
-function drizzleKitBin(): string {
-  const entry = createRequire(import.meta.url).resolve("drizzle-kit");
-  return join(dirname(entry), "bin.cjs");
-}
 
 function files(dir: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -50,58 +30,47 @@ function files(dir: string): Map<string, string> {
 }
 
 function fail(message: string): void {
-  console.error(
-    `${message}\nRun \`pnpm --filter @lgtmoose/db generate\` and commit the new migration.`,
-  );
+  console.error(message);
   process.exitCode = 1;
 }
 
-rmSync(scratchDir, { recursive: true, force: true });
-mkdirSync(scratchDir, { recursive: true });
-try {
-  cpSync(migrationsDir, scratchOut, { recursive: true });
-  writeFileSync(
-    scratchConfig,
+const problems = checkMigrationChain(readMigrationFolder(migrationsDir));
+if (problems.length > 0) {
+  fail(
     [
-      'import base from "../drizzle.config.ts";',
-      `export default { ...base, out: "./${relative(packageDir, scratchOut).split("\\").join("/")}" };`,
-      "",
+      "The migrations folder is out of order:",
+      ...problems.map((problem) => `- ${problem}`),
+      "See packages/db/README.md for how to add a migration.",
     ].join("\n"),
   );
+}
 
-  const result = spawnSync(
-    process.execPath,
-    [drizzleKitBin(), "generate", "--config", relative(packageDir, scratchConfig)],
-    {
-      cwd: packageDir,
-      // No stdin: if drizzle-kit needs to ask whether something was renamed, it can't wait for an
-      // answer that never comes. A prompt means the schema changed, which is drift.
-      stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf8",
-      timeout: TIMEOUT_MS,
-    },
-  );
-  process.stdout.write(result.stdout ?? "");
-  process.stderr.write(result.stderr ?? "");
-  // drizzle-kit prints some failures, such as a rename prompt with no TTY, and still exits 0.
-  const printedError = /^Error\b/m.test(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-
-  if (result.error || result.status !== 0 || printedError) {
-    let reason = result.error?.message ?? `exited with ${result.status}`;
-    if (result.signal === "SIGTERM") reason = `timed out after ${TIMEOUT_MS / 1000}s`;
-    else if (printedError && result.status === 0) reason = "printed an error";
-    fail(
-      `drizzle-kit generate ${reason}. It usually does this when the schema changed in a way it ` +
-        "needs to ask about, such as a rename.",
-    );
-  } else {
+withDrizzleGenerate(
+  // No stdin: if drizzle-kit needs to ask whether something was renamed, it can't wait for an
+  // answer that never comes. A prompt means the schema changed, which is drift.
+  { stdio: ["ignore", "pipe", "pipe"], timeoutMs: TIMEOUT_MS },
+  (run) => {
+    process.stdout.write(run.output.trim() === "" ? "" : `${run.output.trim()}\n`);
+    // drizzle-kit prints some failures, such as a rename prompt with no TTY, and still exits 0.
+    const printedError = /^Error\b/m.test(run.output);
+    const generate = "Run `pnpm --filter @lgtmoose/db generate --name <name>` and commit it.";
+    if (run.error || run.status !== 0 || printedError) {
+      let reason = run.error?.message ?? `exited with ${run.status}`;
+      if (run.signal === "SIGTERM") reason = `timed out after ${TIMEOUT_MS / 1000}s`;
+      else if (printedError && run.status === 0) reason = "printed an error";
+      fail(
+        `drizzle-kit generate ${reason}. It usually does this when the schema changed in a way ` +
+          `it needs to ask about, such as a rename.\n${generate}`,
+      );
+      return;
+    }
     const before = files(migrationsDir);
-    const after = files(scratchOut);
+    const after = files(run.out);
     const changed = [...after.keys()].filter((name) => before.get(name) !== after.get(name));
     if (changed.length > 0) {
-      fail(`The schema has changes no migration covers.\nWould change: ${changed.join(", ")}`);
+      fail(
+        `The schema has changes no migration covers.\nWould change: ${changed.join(", ")}\n${generate}`,
+      );
     }
-  }
-} finally {
-  rmSync(scratchDir, { recursive: true, force: true });
-}
+  },
+);
