@@ -171,7 +171,14 @@ interface Context {
   slug: string;
   owner: string;
   pull: () => Promise<PullInfo>;
+  /** A login's permission on the PR's repository. */
   permission: (login: string) => Promise<Permission>;
+  /**
+   * A login's permission on any repository (`owner/name`), read once per repository and login
+   * per job: a learning's own repository may not be the PR's. `none` when the installation
+   * can't see it.
+   */
+  permissionOn: (repo: string, login: string) => Promise<Permission>;
 }
 
 function memo<T>(read: (key: string) => Promise<T>): (key: string) => Promise<T> {
@@ -324,7 +331,9 @@ async function ignoreCommand(context: Context): Promise<Outcome> {
 function learningDeps(context: Context): LearningDeps {
   return {
     store: context.deps.learnings,
-    permissions: (_repo, login) => context.permission(login),
+    // The permission on the repository asked about (a learning's source repository), never
+    // just the PR's: write on one repository mustn't approve or forget another's learnings.
+    permissions: (repo, login) => context.permissionOn(repo, login),
     orgRoles: (org, login) => context.github.orgRole(org, login),
     ...(context.deps.maxPendingLearnings === undefined
       ? {}
@@ -499,6 +508,11 @@ export async function handleConversation(
 
   const [owner = ""] = job.repo.split("/");
   let pull: Promise<PullInfo> | undefined;
+  const permission = memo((login) => github.permission(job.repo, login));
+  const otherPermission = memo((key) => {
+    const [repo = "", login = ""] = key.split("\n");
+    return github.permission(repo, login);
+  });
   const context: Context = {
     deps,
     github,
@@ -508,7 +522,11 @@ export async function handleConversation(
     slug,
     owner,
     pull: () => (pull ??= github.pull(job.repo, job.prNumber)),
-    permission: memo((login) => github.permission(job.repo, login)),
+    permission,
+    permissionOn: (repo, login) =>
+      repo.toLowerCase() === job.repo.toLowerCase()
+        ? permission(login)
+        : otherPermission(`${repo}\n${login}`),
   };
   const outcomes: Outcome[] = [];
   for (const command of commands) outcomes.push(await run(context, command));

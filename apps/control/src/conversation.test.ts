@@ -46,6 +46,8 @@ function fakeDeps(
   comment: CommentInfo,
   options: {
     permissions?: Record<string, Permission>;
+    /** Per repository (`owner/name`), then by login; overrides `permissions` there. */
+    repoPermissions?: Record<string, Record<string, Permission>>;
     orgRoles?: Record<string, OrgRole>;
     pullAuthor?: string;
     open?: boolean;
@@ -61,6 +63,7 @@ function fakeDeps(
   const declined: string[] = [];
   const logs: { message: string; fields?: Record<string, unknown> }[] = [];
   const learnings = memoryLearningStore();
+  const asked: string[] = [];
   const findings = options.findings ?? new Map<number, StoredFinding>();
   const deps: ConversationDeps = {
     async github() {
@@ -73,7 +76,10 @@ function fakeDeps(
           open: options.open ?? true,
         }),
         files: async () => ["src/a.ts", "docs/b.md"],
-        permission: async (_repo, login) => options.permissions?.[login] ?? "read",
+        permission: async (repo, login) => {
+          asked.push(`${repo}:${login}`);
+          return options.repoPermissions?.[repo]?.[login] ?? options.permissions?.[login] ?? "read";
+        },
         orgRole: async (_org, login) => options.orgRoles?.[login] ?? "none",
         react: async (_kind, _repo, commentId, content) => {
           reactions.push(`${commentId}:${content}`);
@@ -109,7 +115,7 @@ function fakeDeps(
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
     now: () => new Date("2026-11-15T00:00:05.000Z"),
   };
-  return { deps, reactions, replies, queued, paused, declined, learnings, logs };
+  return { deps, reactions, replies, queued, paused, declined, learnings, logs, asked };
 }
 
 const from = (author: string, body: string, extra: Partial<CommentInfo> = {}): CommentInfo => ({
@@ -414,6 +420,56 @@ describe("handleConversation", () => {
     owner.deps.learnings = f.learnings;
     await handleConversation(owner.deps, job({ commentId: 612 }));
     expect((await f.learnings.get(id))?.status).toBe("active");
+  });
+
+  it("checks access on the learning's own repository, not the PR's", async () => {
+    // A pending learning proposed on acme/billing.
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: Amounts are in cents."));
+    await handleConversation(f.deps, job({ repo: "acme/billing" }));
+    const id = f.learnings.all()[0]?.id ?? "";
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+
+    // Write on acme/shop (where the PR is), only read on acme/billing.
+    const onlyShop = {
+      "acme/shop": { maint: "write" as const },
+      "acme/billing": { maint: "read" as const },
+    };
+    for (const verb of ["approve", "forget"]) {
+      const g = fakeDeps(from("maint", `@lgtmoose ${verb} ${id}`), { repoPermissions: onlyShop });
+      g.deps.learnings = f.learnings;
+      expect(await handleConversation(g.deps, job({ commentId: 701 }))).toMatchObject({
+        ok: false,
+      });
+      expect(g.asked).toContain("acme/billing:maint");
+    }
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+
+    // With write on acme/billing, from the same acme/shop PR, it's allowed.
+    const both = {
+      "acme/shop": { maint: "write" as const },
+      "acme/billing": { maint: "write" as const },
+    };
+    const ok = fakeDeps(from("maint", `@lgtmoose approve ${id}`), { repoPermissions: both });
+    ok.deps.learnings = f.learnings;
+    await handleConversation(ok.deps, job({ commentId: 702 }));
+    expect((await f.learnings.get(id))?.status).toBe("active");
+    const gone = fakeDeps(from("maint", `@lgtmoose forget ${id}`), { repoPermissions: both });
+    gone.deps.learnings = f.learnings;
+    await handleConversation(gone.deps, job({ commentId: 703 }));
+    expect((await f.learnings.get(id))?.status).toBe("retired");
+  });
+
+  it("still needs an org owner for an org-wide learning, whatever the repository access", async () => {
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: [org] Use pnpm."));
+    await handleConversation(f.deps, job({ repo: "acme/billing" }));
+    const id = f.learnings.all()[0]?.id ?? "";
+    const g = fakeDeps(from("maint", `@lgtmoose approve ${id}`), {
+      permissions: { maint: "admin" },
+      orgRoles: { maint: "member" },
+    });
+    g.deps.learnings = f.learnings;
+    await handleConversation(g.deps, job({ commentId: 711 }));
+    expect((await f.learnings.get(id))?.status).toBe("pending");
   });
 
   it("won't approve another account's learning", async () => {
