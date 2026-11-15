@@ -209,6 +209,9 @@ describe("reviewDiff: edge cases", () => {
     expect(files["notes.md"]?.mechanical).toBe(false);
   });
 
+  // Builds a 150-file repository, two commits and a clone with real git processes: 2-4s on a
+  // shared CI runner with every package's tests running at once, too close to vitest's 5s
+  // default. Its own limit, as for the large checkout test in clone.test.ts.
   it("diffs a large PR with every blob read in one batch", async () => {
     const many = Object.fromEntries(
       Array.from({ length: 150 }, (_, i) => [`src/f${i}.ts`, `import a from "a${i}";\n`]),
@@ -222,7 +225,7 @@ describe("reviewDiff: edge cases", () => {
     const diff = await reviewDiff(await clone(head, [base]), { baseSha: base });
     expect(diff.files).toHaveLength(150);
     expect(diff.files.every((f) => f.mechanical)).toBe(true);
-  });
+  }, 60_000);
 });
 
 describe("reviewDiff: incremental review", () => {
