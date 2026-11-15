@@ -17,6 +17,17 @@ People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or
 | `forget <id>`         | write access (org owner for org-wide)                                                            | Retires one of this account's learnings.                                                                                                                                            |
 | `help`, anything else | anyone                                                                                           | The list of commands.                                                                                                                                                               |
 
+### In a review's body
+
+Commands also work in the body of a submitted review (Comment, Approve or Request changes), with the same parser and rules: outside code and quotes, five at most, and bots and LGTMoose's own reviews ignored. The differences:
+
+- GitHub has no reactions API for reviews, so there's no 👍 or 😕. LGTMoose always answers with a comment on the PR that mentions the review's author, saying "Done." when a command had nothing else to say.
+- A review without a command is left alone. Review bodies never go to the reply judge; replies in a finding's thread do.
+- `ignore`, and `explain` without `path:line`, need a finding's thread, so in a review body they say so.
+- A redelivered review runs its commands once: the conversation queue dedupes on the review's ID, and a `review` it asks for is keyed by it too (`command-review-<id>-review`).
+- Edited and dismissed reviews, and reviews with an empty body, are ignored. Editing a review doesn't rerun its commands.
+- A learning proposed from a review body records no source comment, so the per-comment guard against proposing the same learning twice doesn't cover a review redelivered after the queue's five-minute dedupe window. The per-author pending limit still bounds it.
+
 Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
 
 ## Replies on findings: the reply judge

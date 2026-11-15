@@ -7,10 +7,10 @@ import { z } from "zod";
 import type { Db } from "./database.js";
 import { drizzleDispatchStore } from "./dispatch-aws.js";
 import type {
-  CommentKind,
   ConversationDeps,
   ConversationGitHub,
   ConversationStore,
+  ReactableKind,
   StoredFinding,
 } from "./conversation.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
@@ -24,6 +24,11 @@ const commentReply = z.object({
   user: userSchema,
   in_reply_to_id: z.number().int().positive().optional(),
   created_at: z.string().optional(),
+});
+const reviewReply = z.object({
+  body: z.string().nullable().optional(),
+  user: userSchema,
+  submitted_at: z.string().nullable().optional(),
 });
 const pullReply = z.object({
   state: z.string(),
@@ -41,7 +46,7 @@ const isBot = (user: { login: string; type?: string | undefined }) =>
   user.type === "Bot" || user.login.endsWith("[bot]");
 
 /** Where a comment of each kind lives: issue comments, or review comments on the diff. */
-const commentPath = (kind: CommentKind, repo: string, id: number) =>
+const commentPath = (kind: ReactableKind, repo: string, id: number) =>
   `${repoPath(split(repo))}/${kind === "comment" ? "issues" : "pulls"}/comments/${id}`;
 
 /** GitHub for one installation, as the conversation handler uses it. */
@@ -67,6 +72,26 @@ export function githubConversation(
         // Replies on GitHub are to the thread's first comment.
         ...(kind === "review_comment" ? { threadRootId: reply.in_reply_to_id ?? reply.id } : {}),
         ...(reply.created_at === undefined ? {} : { createdAt: reply.created_at }),
+      };
+    },
+    async review(repo, number, reviewId) {
+      let reply: z.infer<typeof reviewReply>;
+      try {
+        reply = reviewReply.parse(
+          await client.request(
+            "GET",
+            `${repoPath(split(repo))}/pulls/${number}/reviews/${reviewId}`,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof GitHubError && error.status === 404) return undefined;
+        throw error;
+      }
+      return {
+        body: reply.body ?? "",
+        author: reply.user?.login ?? "ghost",
+        authorIsBot: reply.user === null ? true : isBot(reply.user),
+        ...(typeof reply.submitted_at === "string" ? { createdAt: reply.submitted_at } : {}),
       };
     },
     async pull(repo, number) {
@@ -97,6 +122,7 @@ export function githubConversation(
           body,
         });
       } else {
+        // An issue comment, and for a submitted review too: reviews take no replies or reactions.
         await client.request("POST", `${base}/issues/${number}/comments`, { body });
       }
     },
