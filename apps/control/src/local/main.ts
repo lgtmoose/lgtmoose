@@ -189,6 +189,7 @@ async function main(): Promise<void> {
     executions,
     dispatchStore: drizzleDispatchStore(db),
     conversation: queueSender(conversations),
+    pushDebounceSeconds: config.reviewDebounceSeconds,
     workflow: {
       control,
       runBatch,

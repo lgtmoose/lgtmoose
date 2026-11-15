@@ -280,6 +280,8 @@ export interface ControlDeps {
     reader: PullReader;
     /** The App's ID: its own comments aren't another reviewer's. Undefined in tests and CLI. */
     appId?: number;
+    /** The App's slug, `@<slug>` in commands: what a waiting PR's check run tells people to type. */
+    slug?: () => Promise<string>;
     /**
      * A login's permission on the PR's repository (the collaborators API): whether a resolved
      * thread on a blocking or protected finding counts (`resolutionHeld`). Without one, such a

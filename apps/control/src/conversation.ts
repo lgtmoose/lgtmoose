@@ -57,6 +57,8 @@ export interface CommentInfo {
 
 export interface PullInfo {
   headSha: string;
+  /** The base commit: where the repo config is read. Left out by older fakes. */
+  baseSha?: string;
   author: string;
   open: boolean;
 }
@@ -72,6 +74,11 @@ export interface ConversationGitHub {
   /** A submitted review's body and author; undefined when it's gone. */
   review(repo: string, number: number, reviewId: number): Promise<CommentInfo | undefined>;
   pull(repo: string, number: number): Promise<PullInfo>;
+  /**
+   * The bots the repo config at `baseSha` trusts to ask for a review (`review.trusted_bots`).
+   * Optional: without it, no bot's comment counts.
+   */
+  trustedBots?(repo: string, baseSha: string): Promise<readonly string[]>;
   /** The paths the PR changes, at head. */
   files(repo: string, number: number): Promise<string[]>;
   /** The collaborators API: a login's permission on the repository; `none` when unread. */
@@ -248,23 +255,41 @@ async function reviewCommand(context: Context, full: boolean): Promise<Outcome> 
       reply: `${short(pull.headSha)} is already reviewed. \`@${context.slug} full review\` reviews the whole PR again.`,
     };
   }
-  const { job } = context;
-  const now = context.deps.now?.() ?? new Date();
-  await context.deps.queue.send({
+  await queueRequestedReview(
+    context.deps,
+    context.job,
+    pull.headSha,
+    context.comment.author,
+    context.sourceKey,
+    { full, ...(context.commentId === undefined ? {} : { commentId: context.commentId }) },
+  );
+  return { ok: true };
+}
+
+/** Queues the review a command asked for. One comment asks once: the delivery ID dedupes. */
+async function queueRequestedReview(
+  deps: ConversationDeps,
+  job: ReviewJob,
+  headSha: string,
+  actor: string,
+  sourceKey: string,
+  options: { full: boolean; commentId?: number },
+): Promise<void> {
+  const now = deps.now?.() ?? new Date();
+  await deps.queue.send({
     kind: "pr_updated",
-    requested: full ? "full_review" : "review",
-    // One comment asks once: a redelivery dedupes on the queue and in the dispatcher.
-    deliveryId: `command-${context.sourceKey}-${full ? "full" : "review"}`,
+    requested: options.full ? "full_review" : "review",
+    // A redelivery dedupes on the queue and in the dispatcher.
+    deliveryId: `command-${sourceKey}-${options.full ? "full" : "review"}`,
     installationId: job.installationId,
     repo: job.repo,
     prNumber: job.prNumber,
-    headSha: pull.headSha,
-    actor: context.comment.author,
-    ...(context.commentId === undefined ? {} : { commentId: context.commentId }),
+    headSha,
+    actor,
+    ...(options.commentId === undefined ? {} : { commentId: options.commentId }),
     receivedAt: now.toISOString(),
     eventAt: job.eventAt ?? now.toISOString(),
   });
-  return { ok: true };
 }
 
 async function pauseCommand(context: Context, pause: boolean): Promise<Outcome> {
@@ -529,6 +554,46 @@ async function run(context: Context, command: Command): Promise<Outcome> {
   }
 }
 
+/**
+ * A bot's comment (NIC-1077). Bots are ignored, except one the repo lists in
+ * `review.trusted_bots` (its config at the PR's base, which the PR can't change) asking
+ * `@lgtmoose review` in an issue comment: a coding agent saying its PR is ready. That's all a
+ * trusted bot can do: no other command, not `full review`, and no reply, so two bots never talk
+ * to each other. LGTMoose's own comments never count. The 👍 says the review was asked for.
+ */
+async function handleBotComment(
+  deps: ConversationDeps,
+  github: ConversationGitHub,
+  job: ReviewJob & { commentId: number },
+  comment: CommentInfo,
+): Promise<ConversationResult> {
+  const ignored = { action: "ignored", reason: "a bot's comment" } as const;
+  if (job.kind !== "comment" || github.trustedBots === undefined) return ignored;
+  const slug = await github.slug();
+  if (sameLogin(comment.author, `${slug}[bot]`)) return ignored;
+  const commands = parseCommands(comment.body, slug);
+  if (!commands.some((command) => command.name === "review" && !command.full)) return ignored;
+  const pull = await github.pull(job.repo, job.prNumber);
+  if (!pull.open || pull.baseSha === undefined) return ignored;
+  const trusted = await github.trustedBots(job.repo, pull.baseSha);
+  if (!trusted.some((bot) => sameLogin(bot, comment.author))) {
+    return { action: "ignored", reason: "a bot the repository doesn't trust" };
+  }
+  if (await deps.store.reviewedHead(job.repo, job.prNumber, pull.headSha)) {
+    return { action: "commands", commands: ["review"], ok: true, replied: false };
+  }
+  await queueRequestedReview(deps, job, pull.headSha, comment.author, String(job.commentId), {
+    full: false,
+    commentId: job.commentId,
+  });
+  if (deps.shadow) {
+    deps.log("shadow: command reaction not posted", { repo: job.repo, commentId: job.commentId });
+  } else {
+    await github.react("comment", job.repo, job.commentId, "+1");
+  }
+  return { action: "commands", commands: ["review"], ok: true, replied: false };
+}
+
 /** Handles one forwarded comment job. Throws when it should be retried. */
 export async function handleConversation(
   deps: ConversationDeps,
@@ -544,13 +609,10 @@ export async function handleConversation(
   const github = await deps.github(job.installationId);
   const comment = await github.comment(kind, job.repo, commentId);
   if (comment === undefined) return { action: "ignored", reason: "the comment is gone" };
-  if (
-    comment.authorIsBot ||
-    comment.body.includes(REPLY_MARKER) ||
-    comment.body.includes(JUDGE_REPLY_MARKER)
-  ) {
+  if (comment.body.includes(REPLY_MARKER) || comment.body.includes(JUDGE_REPLY_MARKER)) {
     return { action: "ignored", reason: "a bot's comment" };
   }
+  if (comment.authorIsBot) return handleBotComment(deps, github, { ...job, commentId }, comment);
   // Handled one way or another from here: the reconciler needn't queue it again.
   const handled = async () => {
     if (comment.createdAt === undefined || deps.store.commentsThrough === undefined) return;

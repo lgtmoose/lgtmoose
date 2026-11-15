@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { parseRepoConfigYaml } from "@lgtmoose/config";
 import { findingSchema } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import {
@@ -7,6 +8,7 @@ import {
   runKeys,
   type BatchInput,
   type PreparedReview,
+  type PullRequest,
   type ResumedWork,
 } from "@lgtmoose/pipeline";
 import {
@@ -18,6 +20,7 @@ import {
 import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
+import { reviewGate, waitingCheckRun } from "./trigger.js";
 import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord } from "./ports.js";
@@ -336,6 +339,60 @@ async function judgeJobs(
   return judges;
 }
 
+type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
+
+/**
+ * Whether this run reviews the PR, by the repo's `review` config at the base (`reviewGate`,
+ * NIC-1077), read before anything is cloned. A run that doesn't review ends like a superseded
+ * one. One that waits for a trigger says so in its check run; one that isn't a trigger at all (a
+ * label that isn't the review label, say) posts nothing. With `review.label_once`, the label
+ * comes off as the review starts. Without a way to read the config (the CLI), every run reviews.
+ */
+async function triggered(
+  deps: ControlDeps,
+  github: RunGitHub,
+  job: WorkflowJob,
+  target: ReturnType<typeof jobTarget>,
+  pr: PullRequest,
+  runId: string,
+  reviewedBefore: boolean,
+): Promise<boolean> {
+  if (github.reader.fileAt === undefined) return true;
+  const config = parseRepoConfigYaml(
+    await github.reader.fileAt(target, pr.baseSha, ".lgtmoose.yaml"),
+  );
+  const gate = reviewGate(config.review, job, { labels: pr.labels ?? [] }, reviewedBefore);
+  const pull = { owner: target.owner, repo: target.repo, pull: target.number };
+  if (gate.review) {
+    if (gate.removeLabel !== undefined) {
+      try {
+        await github.poster(runId, pull).labels(pull).removePrLabel(gate.removeLabel);
+      } catch (error) {
+        // The review goes ahead; the label comes off next time.
+        deps.log("trigger label not removed", {
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return true;
+  }
+  await deps.runs.supersedeRun(runId);
+  deps.log("not triggered", { runId, reason: gate.reason, waiting: gate.waiting });
+  if (!gate.waiting) return false;
+  const check = waitingCheckRun(config.review, config.gate, await github.slug?.(), reviewedBefore);
+  if (check !== undefined) {
+    await github.poster(runId, pull).completeCheckRun(pull, {
+      headSha: pr.headSha,
+      ...check,
+      annotations: [],
+      // A retry finds the run an earlier attempt created, instead of adding another.
+      externalId: runId,
+    });
+  }
+  return false;
+}
+
 /**
  * The prepare step: records the run, clones the PR, plans it and writes each batch's input, the
  * checkout archive and the prepared review to the artifact bucket. It runs once per execution.
@@ -366,8 +423,12 @@ export async function prepare(
     return { runId: run.runId, superseded: true, batches: [] };
   }
 
-  const keys = runKeys(run.runId);
   const lastReviewed = run.lastReviewedSha;
+  if (!(await triggered(deps, github, job, target, pr, run.runId, lastReviewed !== undefined))) {
+    return { runId: run.runId, superseded: true, batches: [] };
+  }
+
+  const keys = runKeys(run.runId);
   // A full review someone asked for leaves earlier reviews out: every file is reviewed again,
   // as on a first review. Duplicates of what earlier reviews posted are still dropped.
   const full = job.requested === "full_review";

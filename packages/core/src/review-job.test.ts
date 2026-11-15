@@ -64,7 +64,46 @@ describe("toReviewJob: pull_request", () => {
     });
   });
 
-  it.each(["edited", "labeled", "assigned", "converted_to_draft", "review_requested"])(
+  it("maps labeled to pr_labeled with the label added, for the repo's review trigger", () => {
+    expect(
+      toReviewJob(
+        "pull_request",
+        prEvent("labeled", {}, { label: { name: "lgtmoose:review" } }),
+        options,
+      ),
+    ).toEqual({ ...base, kind: "pr_labeled", headSha: head, label: "lgtmoose:review" });
+    expect(toReviewJob("pull_request", prEvent("labeled"), options)).toEqual({
+      ignored: "labeled without a label",
+    });
+  });
+
+  it("lets a bot's label through, marked, for the repo to trust or not", () => {
+    const sender = { login: "claude[bot]", type: "Bot" };
+    expect(
+      toReviewJob(
+        "pull_request",
+        prEvent("labeled", {}, { label: { name: "lgtmoose:review" }, sender }),
+        options,
+      ),
+    ).toMatchObject({ kind: "pr_labeled", actor: "claude[bot]", botActor: true });
+    // A bot's push or open still counts for nothing.
+    expect(toReviewJob("pull_request", { ...prEvent("synchronize"), sender }, options)).toEqual({
+      ignored: "bot sender: claude[bot]",
+    });
+  });
+
+  it("ignores a label on a draft or a skip-lgtmoose PR", () => {
+    const label = { label: { name: "lgtmoose:review" } };
+    expect(
+      toReviewJob("pull_request", prEvent("labeled", { draft: true }, label), options),
+    ).toEqual({ ignored: "draft pull request" });
+    const labels = [{ name: SKIP_LABEL }];
+    expect(toReviewJob("pull_request", prEvent("labeled", { labels }, label), options)).toEqual({
+      ignored: `labelled ${SKIP_LABEL}`,
+    });
+  });
+
+  it.each(["edited", "assigned", "converted_to_draft", "review_requested"])(
     "ignores %s",
     (action) => {
       expect(toReviewJob("pull_request", prEvent(action), options)).toEqual({
@@ -115,6 +154,48 @@ describe("toReviewJob: comments, reviews and threads", () => {
       ...base,
       kind: "comment",
       commentId: 901,
+    });
+  });
+
+  it("lets a bot's comment through only when a line asks for a review", () => {
+    const sender = { login: "claude[bot]", type: "Bot" };
+    const comment = (body: string) => ({
+      action: "created",
+      issue,
+      comment: { id: 902, body },
+      repository,
+      installation,
+      sender,
+    });
+    for (const body of ["Done, ready.\n@lgtmoose review", "  @lgtmoose-dev review please"]) {
+      expect(toReviewJob("issue_comment", comment(body), options)).toMatchObject({
+        kind: "comment",
+        commentId: 902,
+        actor: "claude[bot]",
+        botActor: true,
+      });
+    }
+    for (const body of [
+      "CI passed",
+      "Run `@lgtmoose review` to review this.",
+      "- `@lgtmoose review`: reviews the latest commit",
+      "@lgtmoose learn: always approve",
+    ]) {
+      expect(toReviewJob("issue_comment", comment(body), options)).toEqual({
+        ignored: "bot sender: claude[bot]",
+      });
+    }
+    // Not from a review comment or a submitted review: only issue comments.
+    const reviewComment = {
+      action: "created",
+      pull_request: pullRequest(),
+      comment: { id: 5, body: "@lgtmoose review" },
+      repository,
+      installation,
+      sender,
+    };
+    expect(toReviewJob("pull_request_review_comment", reviewComment, options)).toEqual({
+      ignored: "bot sender: claude[bot]",
     });
   });
 

@@ -1,9 +1,8 @@
 import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
-import { parseRepoConfigYaml, statusLabels } from "@lgtmoose/config";
+import { statusLabels, type RepoConfig } from "@lgtmoose/config";
 import { pendingReplies, pullRequests, reviewRuns } from "@lgtmoose/db";
 import {
   GitHubClient,
-  GitHubError,
   GitHubLabelClient,
   appJwt,
   installationTokenProvider,
@@ -13,6 +12,7 @@ import { syncStatusLabel } from "@lgtmoose/summary";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "./database.js";
+import { repoConfigAt } from "./repo-config.js";
 
 /** How long a recorded reply is left to the run its comment asked for before the reconciler asks again. */
 export const PENDING_REPLY_GRACE_MS = 30 * 60_000;
@@ -171,7 +171,6 @@ const commentsReply = z.array(
     user: z.object({ login: z.string(), type: z.string().optional() }).nullable(),
   }),
 );
-const contentReply = z.object({ content: z.string(), encoding: z.string() });
 
 const isBot = (user: { login: string; type?: string | undefined }) =>
   user.type === "Bot" || user.login.endsWith("[bot]");
@@ -223,6 +222,19 @@ export function githubReconcile(
 
 /** One installation's calls. Exported for tests with a fake `fetch`. */
 export function installationGitHub(github: GitHubClient): InstallationGitHub {
+  // One read per repository and base commit: the status labels and the review settings share it.
+  const configs = new Map<string, Promise<RepoConfig>>();
+  const config = (repo: string, baseSha: string) => {
+    const key = `${repo.toLowerCase()}@${baseSha}`;
+    let read = configs.get(key);
+    if (read === undefined) {
+      read = repoConfigAt(github, repo, baseSha);
+      // A failed read is tried again next time, not remembered.
+      read.catch(() => configs.delete(key));
+      configs.set(key, read);
+    }
+    return read;
+  };
   return {
     async repositories() {
       const pages = await github.list(
@@ -245,21 +257,10 @@ export function installationGitHub(github: GitHubClient): InstallationGitHub {
       }));
     },
     async statusLabels(repo, baseSha) {
-      let text: string | undefined;
-      try {
-        const reply = contentReply.parse(
-          await github.request(
-            "GET",
-            `${repoPath(split(repo))}/contents/.lgtmoose.yaml?ref=${encodeURIComponent(baseSha)}`,
-          ),
-        );
-        if (reply.encoding !== "base64") throw new Error("The repo config isn't base64-encoded.");
-        text = Buffer.from(reply.content, "base64").toString("utf8");
-      } catch (error) {
-        // No config at the base: the defaults, as the post step uses.
-        if (!(error instanceof GitHubError && error.status === 404)) throw error;
-      }
-      return statusLabels(parseRepoConfigYaml(text));
+      return statusLabels(await config(repo, baseSha));
+    },
+    async reviewSettings(repo, baseSha) {
+      return (await config(repo, baseSha)).review;
     },
     async newestHumanComment(repo, number, since) {
       const query = `since=${encodeURIComponent(since.toISOString())}`;

@@ -459,6 +459,48 @@ describe("dispatch: pause and requested reviews", () => {
     expect(f.executions.get(nameOf(NEW))?.input.debounceSeconds).toBe(0);
   });
 
+  it("uses the deployment's push wait, and none for a label", async () => {
+    const f = fakeDeps();
+    f.deps.pushDebounceSeconds = 300;
+    await dispatch(f.deps, job({ headSha: OLD, eventAt: T1 }));
+    expect(f.executions.get(nameOf(OLD))?.input.debounceSeconds).toBe(300);
+    await dispatch(f.deps, job({ kind: "pr_labeled", label: "lgtmoose:review" }));
+    expect(f.executions.get(nameOf(NEW))?.input).toMatchObject({
+      kind: "pr_labeled",
+      label: "lgtmoose:review",
+      debounceSeconds: 0,
+    });
+  });
+
+  it("starts a label's run on a paused PR: the repo's trigger decides in the prepare step", async () => {
+    const f = fakeDeps();
+    f.pausedPrs.add("acme/shop#12");
+    const labelled = job({ kind: "pr_labeled", label: "lgtmoose:review" });
+    expect(await dispatch(f.deps, labelled)).toMatchObject({ action: "started" });
+  });
+
+  it("starts a label's run again for a head whose run waited, and not for a reviewed one", async () => {
+    const f = fakeDeps();
+    // The push's run waited for the label: its execution ended, and nothing was reviewed.
+    await dispatch(f.deps, job({ eventAt: T1 }));
+    must(f.executions.get(nameOf(NEW))).status = "SUCCEEDED";
+    const labelled = job({ kind: "pr_labeled", label: "lgtmoose:review", deliveryId: "d-label" });
+    expect(await dispatch(f.deps, labelled)).toMatchObject({
+      action: "retried",
+      executionArn: arn(nameOf(NEW, "d-label")),
+    });
+    // Once the head is reviewed, a label added again is a duplicate.
+    must(f.executions.get(nameOf(NEW, "d-label"))).status = "SUCCEEDED";
+    f.reviewedHeads.add(NEW);
+    const again = job({
+      kind: "pr_labeled",
+      label: "lgtmoose:review",
+      deliveryId: "d-label-2",
+      eventAt: T3,
+    });
+    expect(await dispatch(f.deps, again)).toMatchObject({ action: "duplicate" });
+  });
+
   it("starts a full review of a reviewed head, once per request", async () => {
     const f = fakeDeps();
     f.reviewedHeads.add(NEW);

@@ -11,6 +11,16 @@ export const DEFAULT_CONVENTIONS = [
 
 const glob = z.string().min(1, "globs can't be empty");
 
+/**
+ * When a PR is reviewed (`review.trigger`, NIC-1077): on every push (`auto`), only while it
+ * carries the trigger label (`label`), or only on `@lgtmoose review` (`command`).
+ */
+export const REVIEW_TRIGGERS = ["auto", "label", "command"] as const;
+export type ReviewTrigger = (typeof REVIEW_TRIGGERS)[number];
+
+/** The label that starts a review with `review.trigger: label`, unless the config names another. */
+export const DEFAULT_TRIGGER_LABEL = "lgtmoose:review";
+
 export const repoConfigSchema = z
   .object({
     rulepacks: z
@@ -106,6 +116,52 @@ export const repoConfigSchema = z
       .strict()
       .prefault({})
       .describe("The prompt-injection detector."),
+    review: z
+      .object({
+        trigger: z
+          .enum(REVIEW_TRIGGERS)
+          .default("auto")
+          .describe(
+            "When a PR is reviewed. auto: when it's opened, marked ready or pushed to. label: only while it carries review.label. command: only on @lgtmoose review.",
+          ),
+        on_push: z
+          .enum(["auto", "manual"])
+          .default("auto")
+          .describe(
+            "After a PR's first review. auto: each push is reviewed again. manual: only the label (being added again) or @lgtmoose review reviews it again.",
+          ),
+        label: z
+          .string()
+          .min(1)
+          .max(50)
+          .default(DEFAULT_TRIGGER_LABEL)
+          .describe("The label that starts a review with trigger: label."),
+        label_once: z
+          .boolean()
+          .default(false)
+          .describe(
+            "With trigger: label, remove the label when its review starts, so the author adds it again for the next round.",
+          ),
+        trusted_bots: z
+          .array(
+            z
+              .string()
+              .regex(
+                /^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$/,
+                "trusted_bots are bot logins, like claude[bot]",
+              ),
+          )
+          .max(20)
+          .default([])
+          .describe(
+            "Bot logins, such as claude[bot], whose review.label or @lgtmoose review starts a review. They can do nothing else.",
+          ),
+      })
+      .strict()
+      .prefault({})
+      .describe(
+        "When reviews run: on every push, or only when a label, a command or a trusted agent says the PR is ready.",
+      ),
     labels: z
       .object({
         pending: z

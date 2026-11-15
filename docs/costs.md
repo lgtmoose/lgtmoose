@@ -77,6 +77,8 @@ Every attempt is recorded in the `provider_usage` table (tokens, cost where the 
 - **`learnings.embeddings`**: `none` (the default) ranks learnings by keywords with no calls; `bedrock` or `openai` add an embeddings call per batch, and when a learning is first ranked.
 - **`tickets`**: off unless set. With Linear, each linked ticket (up to `maxPerPullRequest`, 3 by default) costs one fast-tier run per commit reviewed, plus a Linear API call. See [Ticket coverage](tickets.md).
 - **`.lgtmoose.yaml`**: `skip` globs keep files out of the review, so they cost nothing.
+- **`review.trigger` and `review.on_push`** in `.lgtmoose.yaml`: review only when a PR is ready (a label, a command or a trusted agent), and only once unless asked again. A PR with ten work-in-progress pushes then costs one or two reviews instead of ten. A run that waits costs one short control task and no model time. See [When reviews run](commands.md#when-reviews-run).
+- **`reviewDebounceSeconds`**: how long a push waits for the next one before its review starts (60 by default, up to 1800). A longer wait folds more pushes into one review.
 - **Incremental reviews**: after the first review, a push reviews only the files whose change moved, and a superseded run's finished batches are reused.
 
 The `review` and `full review` commands start a run on request; only the PR's author or someone with write access can use them, so people commenting on a public repository can't spend your model budget.

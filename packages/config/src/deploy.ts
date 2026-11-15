@@ -421,6 +421,20 @@ export const deployConfigSchema = z
         "Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply.",
       ),
     /**
+     * How long a push's review waits for the next push before it starts (NIC-1077): a newer
+     * push in that time stops it before it clones. The dispatcher reads it; it holds no GitHub
+     * credential, so this is a deployment setting, not a repo one.
+     */
+    reviewDebounceSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(1800)
+      .default(60)
+      .describe(
+        "Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it.",
+      ),
+    /**
      * Shadow mode: the review workflow records what it would post (the review, check run,
      * summary comment and labels) to the artifact bucket and the log instead of posting it to
      * GitHub. On by default until reviews have been checked on real PRs (M1).

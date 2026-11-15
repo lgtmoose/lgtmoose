@@ -375,6 +375,13 @@ interface Setup {
   state?: string;
   /** The PR's comments when they're read; none by default. */
   comments?: () => PullComment[];
+  /**
+   * The `.lgtmoose.yaml` the reader serves at the base, before the clone (`review.trigger`).
+   * Left out, the reader can't read files and every run reviews, as before.
+   */
+  config?: string;
+  /** The PR's labels when it's read. */
+  labels?: string[];
 }
 
 function harness(setup: Setup = {}) {
@@ -446,9 +453,28 @@ function harness(setup: Setup = {}) {
   const checkRunAnnotations = new Map<string, number>();
   /** ECS task statuses by ARN, as the test sets them. */
   const tasks = new Map<string, string>();
+  /** What the reader was asked for with `fileAt`, as `<sha>:<path>`. */
+  const fileReads: string[] = [];
+  /** How many clones were made. */
+  const clones = { count: 0 };
+  /** Labels taken off the PR. */
+  const removedLabels: string[] = [];
+  const { config: configText } = setup;
   const reader: PullReader = {
-    pull: async () => ({ ...pull(setup.head ?? headSha), state: setup.state ?? "open" }),
+    pull: async () => ({
+      ...pull(setup.head ?? headSha),
+      state: setup.state ?? "open",
+      ...(setup.labels === undefined ? {} : { labels: [...setup.labels] }),
+    }),
     comments: async () => setup.comments?.() ?? [],
+    ...(configText === undefined
+      ? {}
+      : {
+          fileAt: async (_target: unknown, sha: string, path: string) => {
+            fileReads.push(`${sha}:${path}`);
+            return configText;
+          },
+        }),
     ...(reviewOf === undefined
       ? {}
       : {
@@ -506,6 +532,15 @@ function harness(setup: Setup = {}) {
               externalId,
               annotations: checkRunAnnotations.get(externalId) ?? 0,
             }));
+          const labels = shadow.labels.bind(shadow);
+          shadow.labels = (ref) => {
+            const client = labels(ref);
+            return Object.assign(Object.create(client) as typeof client, {
+              removePrLabel: async (label: string) => {
+                removedLabels.push(label);
+              },
+            });
+          };
           const completeCheckRun = shadow.completeCheckRun.bind(shadow);
           shadow.completeCheckRun = async (ref, input) => {
             const done = await completeCheckRun(ref, input);
@@ -520,6 +555,7 @@ function harness(setup: Setup = {}) {
       };
     },
     async clone(options) {
+      clones.count += 1;
       const repo = await cloneAtSha(options);
       return {
         ...repo,
@@ -559,6 +595,9 @@ function harness(setup: Setup = {}) {
     reviewsOnGitHub,
     checkRunsOnGitHub,
     checkRunAnnotations,
+    fileReads,
+    clones,
+    removedLabels,
     /**
      * Puts a review of ours with this marker on the commit, and, `finished`, its run's check
      * run too: that run finished the head.
@@ -628,6 +667,81 @@ describe("prepare", () => {
     expect(result).toEqual({ runId: RUN_ID, superseded: true, batches: [] });
     expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
     expect(h.objects.size).toBe(0);
+  });
+
+  describe("review triggers (NIC-1077)", () => {
+    const LABEL_CONFIG = "review:\n  trigger: label\n";
+    const push = { ...JOB, kind: "pr_updated" as const, actor: "dev" };
+
+    it("waits for the label without cloning, and says so in a blocking check run", async () => {
+      const h = harness({ config: LABEL_CONFIG, labels: ["bug"] });
+      const result = await prepare(h.deps, push, EXECUTION, SETTINGS);
+
+      expect(result).toEqual({ runId: RUN_ID, superseded: true, batches: [] });
+      expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+      expect(h.clones.count).toBe(0);
+      // The config is read at the base: the PR can't change its own trigger.
+      expect(h.fileReads).toEqual([`${baseSha}:.lgtmoose.yaml`]);
+      const [check] = shadowRecords(h.objects, "check-run");
+      expect(check).toMatchObject({
+        head_sha: headSha,
+        conclusion: "action_required",
+        title: "Waiting for a trigger",
+      });
+      expect(String(check?.summary)).toContain("lgtmoose\\:review label");
+      expect(h.checkRunsOnGitHub.has(RUN_ID)).toBe(true);
+      // Nothing else: no batches, no manifest, no summary.
+      expect(h.objects.has(runKeys(RUN_ID).prepared)).toBe(false);
+      expect(shadowRecords(h.objects, "summary")).toEqual([]);
+    });
+
+    it("reviews once the PR carries the label, taking it off with label_once", async () => {
+      const h = harness({
+        config: `${LABEL_CONFIG}  label_once: true\n`,
+        labels: ["lgtmoose:review"],
+      });
+      const result = await prepare(
+        h.deps,
+        { ...push, kind: "pr_labeled", label: "lgtmoose:review" },
+        EXECUTION,
+        SETTINGS,
+      );
+      expect(result).toMatchObject({ superseded: false, batches: [{ index: 0 }] });
+      expect(h.clones.count).toBe(1);
+      expect(h.removedLabels).toEqual(["lgtmoose:review"]);
+    });
+
+    it("posts nothing for a label that isn't the trigger, or an untrusted bot's", async () => {
+      for (const job of [
+        { ...push, kind: "pr_labeled" as const, label: "bug" },
+        {
+          ...push,
+          kind: "pr_labeled" as const,
+          label: "lgtmoose:review",
+          actor: "renovate[bot]",
+          botActor: true as const,
+        },
+      ]) {
+        const h = harness({ config: LABEL_CONFIG, labels: ["lgtmoose:review", "bug"] });
+        expect(await prepare(h.deps, job, EXECUTION, SETTINGS)).toMatchObject({
+          superseded: true,
+        });
+        expect(h.clones.count).toBe(0);
+        expect([...h.objects.keys()]).toEqual([]);
+      }
+    });
+
+    it("reviews a command's run whatever the trigger", async () => {
+      const h = harness({ config: "review:\n  trigger: command\n" });
+      const result = await prepare(h.deps, { ...push, requested: "review" }, EXECUTION, SETTINGS);
+      expect(result).toMatchObject({ superseded: false });
+    });
+
+    it("posts no check run while waiting with gate.check_run: off", async () => {
+      const h = harness({ config: "review:\n  trigger: command\ngate:\n  check_run: off\n" });
+      expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toMatchObject({ superseded: true });
+      expect([...h.objects.keys()]).toEqual([]);
+    });
   });
 });
 

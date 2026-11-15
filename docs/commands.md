@@ -28,6 +28,26 @@ Commands also work in the body of a submitted review (Comment, Approve or Reques
 - Edited and dismissed reviews, and reviews with an empty body, are ignored. Editing a review doesn't rerun its commands.
 - A learning proposed from a review body records no source comment, so the per-comment guard against proposing the same learning twice doesn't cover a review redelivered after the queue's five-minute dedupe window. The per-author pending limit still bounds it.
 
+## When reviews run
+
+By default a PR is reviewed when it's opened, marked ready, or pushed to (each push waits `reviewDebounceSeconds`, a minute by default, so a burst of pushes is reviewed once). Drafts and PRs labelled `skip-lgtmoose` are never reviewed. A team whose PRs go through many work-in-progress pushes, or whose PRs are written by coding agents, can review only when a PR is ready instead, in `.lgtmoose.yaml`:
+
+```yaml
+review:
+  trigger: label # auto (the default), label, or command
+  on_push: manual # after the first review, a push waits for the label or a command
+  label: lgtmoose:review
+  label_once: true # the label comes off as its review starts; add it again for the next round
+  trusted_bots: [claude[bot]] # agents whose label or `@lgtmoose review` counts
+```
+
+- **`trigger: label`**: a PR is reviewed only while it carries `review.label`. Adding the label starts a review; a push to a labelled PR is reviewed as usual.
+- **`trigger: command`**: only `@lgtmoose review` (or `full review`) starts one.
+- **`on_push: manual`**: the first review runs as the trigger says; after it, a push waits until the label is added again or someone comments `@lgtmoose review`.
+- **`trusted_bots`**: bots are ignored, except the logins listed here adding the label or commenting `@lgtmoose review` on its own line. That's all a trusted bot can do: no other command, not `full review`, and no reply to it. LGTMoose's own bot never counts. A bot's pushes and opened PRs still start nothing.
+
+The setting is read from the PR's base, so a PR can't change its own trigger. The prepare step decides before it clones anything, so a run that doesn't review reads no code and spends no model time. A PR that waits gets a check run titled "Waiting for a trigger" that says how to start the review: `action_required` with `gate.check_run: required` (so code nobody reviewed can't merge on it), neutral with `optional`, none with `off`. No summary comment is posted until the first review. A requested review, a run for replies and an `explain` always run. A label that isn't `review.label`, or a label from a bot that isn't trusted, posts nothing. The reconciler queues a review for a PR that carries its label but whose head waited, in case the `labeled` webhook was missed. The App already receives `labeled`: it's an action of the `pull_request` event it subscribes to, so existing installs need no change.
+
 Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
 
 ## `explain`: the explainer
