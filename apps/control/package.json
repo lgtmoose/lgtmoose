@@ -29,6 +29,7 @@
     "@lgtmoose/db": "workspace:*",
     "@lgtmoose/git": "workspace:*",
     "@lgtmoose/learnings": "workspace:*",
+    "@lgtmoose/tickets": "workspace:*",
     "@lgtmoose/pipeline": "workspace:*",
     "@lgtmoose/poster": "workspace:*",
     "@lgtmoose/roles": "workspace:*",

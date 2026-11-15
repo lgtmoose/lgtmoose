@@ -132,7 +132,10 @@ Methods:
                             as sonnet are only hinted at; pin model ids to check them. Stores nothing
   api-key --provider <p>    Paste an API key: anthropic or openai
   vertex <key-file>         Upload a Google Cloud service-account key (JSON) for Vertex AI
-  list                      Show every provider credential, and which providers lack one
+  linear                    Paste a Linear API key for ticket coverage (tickets in
+                            lgtmoose.config.ts), stored as lgtmoose/tickets/linear. Read by
+                            the control task only, never by a sandbox
+  list                    Show every provider credential, and which providers lack one
   remove <id>               Delete provider <id>'s credential (recoverable for 7 days)
 
 Options:
@@ -207,6 +210,16 @@ const KINDS = {
         : "That doesn't look like an OpenAI API key (sk-…).";
     },
   },
+  linearKey: {
+    label: "Linear API key (Linear: Settings → Security & access → Personal API keys)",
+    validate: (value) => {
+      const plain = noSpaces(value);
+      if (plain !== true) return plain;
+      return value.trim().startsWith("lin_api_")
+        ? true
+        : "That doesn't look like a Linear personal API key (lin_api_…).";
+    },
+  },
   codexAccessToken: { label: "Codex access token", validate: noSpaces },
   cursorKey: { label: "Cursor API key", validate: noSpaces },
 } satisfies Record<string, CredentialKind>;
@@ -267,6 +280,7 @@ const METHOD_FLAGS: Record<string, readonly (keyof Flags)[]> = {
   bedrock: ["id"],
   "api-key": ["id", "provider"],
   vertex: ["id"],
+  linear: [],
   list: [],
   remove: ["yes"],
 };
@@ -508,6 +522,24 @@ async function authApiKey(flags: Flags, deps: AuthDeps): Promise<string> {
   const provider = pickProvider(config, targets, flags.id, `auth api-key --provider ${vendor}`);
   const kind = vendor === "anthropic" ? KINDS.anthropicKey : KINDS.openaiKey;
   return store(config, provider, await ask(kind, deps), deps, flags);
+}
+
+/**
+ * Stores the Linear API key for ticket coverage. The control task reads it to fetch the tickets
+ * a PR names; no sandbox task can. A personal API key is read-only in effect: LGTMoose only
+ * queries tickets, but the key carries its owner's access, so a key from an account that can
+ * only read the relevant teams is best.
+ */
+async function authLinear(deps: AuthDeps): Promise<string> {
+  const config = await loadConfig(deps);
+  const value = await ask(KINDS.linearKey, deps);
+  const { outcome } = await deps.credentials(config.region).putTicketKey(value);
+  const verb = outcome === "created" ? "Stored" : "Replaced";
+  const enabled =
+    config.tickets?.provider === "linear"
+      ? "Reviews from now on read the tickets each PR names."
+      : `Ticket coverage is off: add tickets: { provider: "linear" } to lgtmoose.config.ts, then run ${CLI} deploy.`;
+  return `${verb} the Linear API key in ${SECRET_NAMES.linearTickets} (${config.region}).\n${enabled}\n`;
 }
 
 /**
@@ -1061,6 +1093,8 @@ export async function runAuth(
         return ok(await authApiKey(flags, deps));
       case "vertex":
         return ok(await authVertex(flags, deps));
+      case "linear":
+        return ok(await authLinear(deps));
       case "list":
         return ok(await authList(deps));
       default:

@@ -111,6 +111,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     feedback: config.feedback,
     maxReplyJudgements: config.maxReplyJudgements,
     embeddings: config.learnings.embeddings,
+    ...(config.tickets === undefined ? {} : { tickets: config.tickets }),
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
       isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),

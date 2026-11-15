@@ -9,8 +9,9 @@ import {
   type PreparedReview,
   type ResumedWork,
 } from "@lgtmoose/pipeline";
-import { REPLY_JUDGE_TIER, buildReplyJudgePrompt } from "@lgtmoose/roles";
+import { REPLY_JUDGE_TIER, TICKET_CHECKER_TIER, buildReplyJudgePrompt } from "@lgtmoose/roles";
 import { jobTarget, type WorkflowJob } from "./job.js";
+import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord } from "./ports.js";
@@ -52,6 +53,8 @@ export interface RunManifest {
   requested?: WorkflowJob["requested"];
   /** The replies the reply judge reads in this run (their batches follow the review's). */
   judgements?: JudgeJob[];
+  /** The PR's linked tickets (NIC-839); their checker batches follow the judges'. */
+  tickets?: TicketsManifest;
 }
 
 /** A manifest written before incremental reviews: the review lacks the fields they added. */
@@ -402,6 +405,14 @@ export async function prepare(
     );
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
     const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
+    // Linked tickets, read here with the provider's credential; their text goes to the sandbox
+    // in the checker's prompt, the credential never does.
+    const tickets = await prepareTickets(
+      deps,
+      repo,
+      prepared,
+      Math.max(-1, ...prepared.jobs.map((batch) => batch.index), ...judges.map((j) => j.index)) + 1,
+    );
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);
@@ -436,12 +447,27 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(judge.index), JSON.stringify(input));
       batches.push({ index: judge.index });
     }
+    for (const ticket of tickets.batches) {
+      const input: BatchInput = batchInputSchema.parse({
+        version: 1,
+        runId: run.runId,
+        index: ticket.index,
+        prompt: ticket.prompt,
+        role: "ticket",
+        tier: TICKET_CHECKER_TIER,
+        model: settings.model,
+        timeoutMs: Math.min(settings.batchTimeoutMs, TICKET_TIMEOUT_MS),
+      });
+      await deps.store.putText(keys.batchInput(ticket.index), JSON.stringify(input));
+      batches.push({ index: ticket.index });
+    }
     const manifest: RunManifest = {
       version: MANIFEST_VERSION,
       installationId: job.installationId,
       review: prepared,
       ...(job.requested === undefined ? {} : { requested: job.requested }),
       ...(judges.length === 0 ? {} : { judgements: judges.map(({ prompt: _, ...rest }) => rest) }),
+      ...(tickets.manifest === undefined ? {} : { tickets: tickets.manifest }),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {

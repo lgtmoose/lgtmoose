@@ -33,7 +33,11 @@ export interface SummaryDecision {
   reasons?: readonly string[];
 }
 
-export type TicketCoverageLevel = "covered" | "partial" | "not_covered";
+/**
+ * How much of a ticket the PR covers: `unclear` when the checker couldn't judge its core
+ * requirements, `not_checked` when the check failed or didn't run.
+ */
+export type TicketCoverageLevel = "covered" | "partial" | "not_covered" | "unclear" | "not_checked";
 
 export interface TicketCoverage {
   /** The ticket provider's name, such as Linear. */
@@ -43,8 +47,15 @@ export interface TicketCoverage {
     title: string;
     url?: string;
     coverage: TicketCoverageLevel;
+    /** From the ticket checker (model output) or plain code; rendered as plain text. */
     note?: string;
+    /** Core requirements the checker found missing (model output; rendered as plain text). */
+    missing?: readonly string[];
   }[];
+  /** A line under the table, such as how missing requirements count. Plain code text. */
+  footnote?: string;
+  /** Why no tickets were read, shown instead of "No linked tickets." Plain code text. */
+  notice?: string;
 }
 
 export interface SummaryInput {
@@ -147,7 +158,12 @@ const COVERAGE_TEXT: Record<TicketCoverageLevel, string> = {
   covered: "Covered",
   partial: "Partly covered",
   not_covered: "Not covered",
+  unclear: "Unclear",
+  not_checked: "Not checked",
 };
+
+/** Missing requirements listed per ticket. */
+const MISSING_PER_TICKET = 5;
 
 /** How much detail to render; lower levels are tried when the comment is too long. */
 interface Detail {
@@ -407,19 +423,26 @@ function renderChanges(input: SummaryInput, ctx: Context, detail: Detail): strin
 function renderTickets(tickets: TicketCoverage): string {
   const lines = [`### Ticket coverage (${inline(clip(tickets.provider, 50))})`, ""];
   if (tickets.tickets.length === 0) {
-    lines.push("No linked tickets.");
+    lines.push(tickets.notice === undefined ? "No linked tickets." : `_${tickets.notice}_`);
     return lines.join("\n");
   }
   lines.push("| Ticket | Coverage | Notes |", "| --- | --- | --- |");
   for (const ticket of tickets.tickets.slice(0, LIST_LIMIT)) {
     const name = `${link(clip(ticket.key, 50), ticket.url)} ${inline(clip(ticket.title, 120))}`;
-    lines.push(
-      `| ${name} | ${COVERAGE_TEXT[ticket.coverage]} | ${inline(clip(ticket.note ?? "", 300))} |`,
-    );
+    const missing = ticket.missing ?? [];
+    const notes = [
+      ...(ticket.note === undefined || ticket.note === "" ? [] : [inline(clip(ticket.note, 300))]),
+      ...missing.slice(0, MISSING_PER_TICKET).map((text) => `Missing: ${inline(clip(text, 200))}`),
+      ...(missing.length > MISSING_PER_TICKET
+        ? [`…and ${count(missing.length - MISSING_PER_TICKET, "more missing requirement")}`]
+        : []),
+    ];
+    lines.push(`| ${name} | ${COVERAGE_TEXT[ticket.coverage]} | ${notes.join("<br>")} |`);
   }
   if (tickets.tickets.length > LIST_LIMIT) {
     lines.push("", `…and ${count(tickets.tickets.length - LIST_LIMIT, "more ticket")}.`);
   }
+  if (tickets.footnote !== undefined) lines.push("", `_${tickets.footnote}_`);
   return lines.join("\n");
 }
 

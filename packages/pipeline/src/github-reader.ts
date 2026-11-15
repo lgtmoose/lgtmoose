@@ -16,7 +16,11 @@ const pullSchema = z.object({
   user: z.object({ login: z.string() }).nullable(),
   author_association: z.string().optional(),
   head: z.object({ sha: SHA, ref: z.string() }),
-  base: z.object({ sha: SHA, ref: z.string() }),
+  base: z.object({
+    sha: SHA,
+    ref: z.string(),
+    repo: z.object({ private: z.boolean() }).nullish(),
+  }),
 });
 
 const issueCommentSchema = z.object({
@@ -75,6 +79,9 @@ export function githubPullReader(get: GitHubGet): PullReader {
         body: pr.body ?? "",
         author: pr.user?.login ?? "ghost",
         ...(pr.author_association === undefined ? {} : { association: pr.author_association }),
+        ...(pr.base.repo === null || pr.base.repo === undefined
+          ? {}
+          : { repoPrivate: pr.base.repo.private }),
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         baseSha: pr.base.sha,

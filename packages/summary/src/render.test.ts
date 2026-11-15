@@ -190,6 +190,32 @@ describe("renderSummary", () => {
     expect(text).not.toContain("<!--");
   });
 
+  it("lists a ticket's missing requirements, escaped, and the footnote", () => {
+    const text = renderSummary(
+      input({
+        tickets: {
+          provider: "Linear",
+          tickets: [
+            {
+              key: "NIC-2",
+              title: "Cents",
+              coverage: "not_covered",
+              missing: ["Round to @cents | always", "b", "c", "d", "e", "f", "g"],
+            },
+            { key: "NIC-3", title: "Logs", coverage: "not_checked", note: "the check failed" },
+          ],
+          footnote: "Coverage is a model's reading of the diff.",
+        },
+      }),
+    );
+    expect(text).toContain("Not covered");
+    expect(text).toContain("Not checked");
+    expect(text).toContain("Missing: Round to \\@");
+    expect(text).toContain("\\|");
+    expect(text).toContain("…and 2 more missing requirements");
+    expect(text).toContain("_Coverage is a model's reading of the diff._");
+  });
+
   it("leaves out ticket coverage and optional notes when there are none", () => {
     const full: Partial<SummaryInput> = input({ findingsOverLimit: 0 });
     delete full.tickets;

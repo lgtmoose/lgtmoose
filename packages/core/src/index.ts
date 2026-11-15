@@ -76,6 +76,19 @@ export {
   type ReplyKind,
 } from "./judgement.js";
 export {
+  MAX_TICKET_GAPS,
+  REQUIREMENT_STATUSES,
+  TICKET_COVERAGE_LIMITS,
+  coverageLevel,
+  missingCore,
+  requirementSchema,
+  ticketCoverageSchema,
+  type CoverageLevel,
+  type Requirement,
+  type RequirementStatus,
+  type TicketCoverageResult,
+} from "./ticket-coverage.js";
+export {
   MAX_FINDINGS_PER_VERIFIER_RUN,
   verdictSchema,
   verifierOutputSchema,

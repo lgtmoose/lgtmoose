@@ -75,6 +75,7 @@ Every attempt is recorded in the `provider_usage` table (tokens, cost where the 
 - **`maxConcurrency`**: fewer batches at once makes a big PR slower but doesn't change its total model usage.
 - **`maxReplyJudgements`**: replies judged per run, 10 by default. 0 turns the reply judge off.
 - **`learnings.embeddings`**: `none` (the default) ranks learnings by keywords with no calls; `bedrock` or `openai` add an embeddings call per batch, and when a learning is first ranked.
+- **`tickets`**: off unless set. With Linear, each linked ticket (up to `maxPerPullRequest`, 3 by default) costs one fast-tier run per commit reviewed, plus a Linear API call. See [Ticket coverage](tickets.md).
 - **`.lgtmoose.yaml`**: `skip` globs keep files out of the review, so they cost nothing.
 - **Incremental reviews**: after the first review, a push reviews only the files whose change moved, and a superseded run's finished batches are reused.
 

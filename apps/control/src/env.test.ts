@@ -6,7 +6,51 @@ import {
   readDispatchEnv,
   readReconcileEnv,
   readReviewSettings,
+  readTicketSettings,
 } from "./env.js";
+
+describe("readTicketSettings", () => {
+  it("is off when unset or none", () => {
+    expect(readTicketSettings({})).toEqual({ provider: "none" });
+    expect(readTicketSettings({ LGTMOOSE_TICKETS: "none" })).toEqual({ provider: "none" });
+  });
+
+  it("reads Linear's secret, limit and teams", () => {
+    expect(
+      readTicketSettings({
+        LGTMOOSE_TICKETS: "linear",
+        LGTMOOSE_TICKETS_SECRET_ID: "lgtmoose/tickets/linear",
+        LGTMOOSE_TICKETS_MAX: "5",
+        LGTMOOSE_TICKETS_TEAMS: "eng, web,",
+        LGTMOOSE_TICKETS_PUBLIC_DETAILS: "true",
+      }),
+    ).toEqual({
+      provider: "linear",
+      secretArn: "lgtmoose/tickets/linear",
+      maxPerPullRequest: 5,
+      teamKeys: ["ENG", "WEB"],
+      detailsOnPublicRepos: true,
+    });
+    expect(
+      readTicketSettings({
+        LGTMOOSE_TICKETS: "linear",
+        LGTMOOSE_TICKETS_SECRET_ID: "s",
+      }),
+    ).toMatchObject({ maxPerPullRequest: 3, teamKeys: [], detailsOnPublicRepos: false });
+  });
+
+  it("refuses an unknown provider, a missing secret and a bad limit", () => {
+    expect(() => readTicketSettings({ LGTMOOSE_TICKETS: "jira" })).toThrow("unknown provider");
+    expect(() => readTicketSettings({ LGTMOOSE_TICKETS: "linear" })).toThrow("SECRET_ID");
+    expect(() =>
+      readTicketSettings({
+        LGTMOOSE_TICKETS: "linear",
+        LGTMOOSE_TICKETS_SECRET_ID: "s",
+        LGTMOOSE_TICKETS_MAX: "11",
+      }),
+    ).toThrow("0 to 10");
+  });
+});
 
 describe("readReviewSettings", () => {
   it("defaults to shadow mode and the default timeout", () => {

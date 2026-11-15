@@ -71,6 +71,23 @@ describe("batchOutputSchema", () => {
     ).toBe(false);
   });
 
+  it("takes a ticket checker's coverage instead, and only a valid one", () => {
+    const base = { version: 1, index: 4, transcriptKeys: [] };
+    const coverage = { requirements: [{ text: "Round to cents", core: true, status: "met" }] };
+    expect(batchOutputSchema.safeParse({ ...base, coverage }).success).toBe(true);
+    expect(batchOutputSchema.safeParse({ ...base, coverage, findings: [] }).success).toBe(false);
+    // The checker can't set a severity or a decision.
+    expect(
+      batchOutputSchema.safeParse({
+        ...base,
+        coverage: { requirements: [{ ...coverage.requirements[0], severity: "blocking" }] },
+      }).success,
+    ).toBe(false);
+    expect(
+      batchOutputSchema.safeParse({ ...base, coverage: { ...coverage, approve: true } }).success,
+    ).toBe(false);
+  });
+
   it("refuses unknown fields", () => {
     expect(
       batchOutputSchema.safeParse({ version: 1, index: 0, transcriptKeys: [], findings: [], x: 1 })
