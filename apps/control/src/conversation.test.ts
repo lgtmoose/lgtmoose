@@ -54,8 +54,11 @@ function fakeDeps(
     findings?: Map<number, StoredFinding>;
     reviewed?: boolean;
     shadow?: boolean;
+    /** The submitted review is gone (its fetch 404s). */
+    reviewGone?: boolean;
   } = {},
 ) {
+  const reviewsRead: number[] = [];
   const reactions: string[] = [];
   const replies: { kind: string; commentId: number; body: string }[] = [];
   const queued: ReviewJob[] = [];
@@ -70,6 +73,10 @@ function fakeDeps(
       return {
         slug: async () => "lgtmoose",
         comment: async () => comment,
+        review: async (_repo, _number, reviewId) => {
+          reviewsRead.push(reviewId);
+          return options.reviewGone === true ? undefined : comment;
+        },
         pull: async () => ({
           headSha: HEAD,
           author: options.pullAuthor ?? "author",
@@ -115,7 +122,18 @@ function fakeDeps(
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
     now: () => new Date("2026-11-15T00:00:05.000Z"),
   };
-  return { deps, reactions, replies, queued, paused, declined, learnings, logs, asked };
+  return {
+    deps,
+    reactions,
+    replies,
+    queued,
+    paused,
+    declined,
+    learnings,
+    logs,
+    asked,
+    reviewsRead,
+  };
 }
 
 const from = (author: string, body: string, extra: Partial<CommentInfo> = {}): CommentInfo => ({
@@ -215,14 +233,129 @@ describe("handleConversation", () => {
     });
   });
 
-  it("ignores bots, our own replies and submitted reviews", async () => {
+  it("ignores bots and our own replies", async () => {
     const bot = fakeDeps(from("ci[bot]", "@lgtmoose review", { authorIsBot: true }));
     expect(await handleConversation(bot.deps, job())).toMatchObject({ action: "ignored" });
     const ours = fakeDeps(from("dev", `@lgtmoose help\n\n${REPLY_MARKER}`));
     expect(await handleConversation(ours.deps, job())).toMatchObject({ action: "ignored" });
-    const review = fakeDeps(from("dev", "@lgtmoose review"));
-    expect(await handleConversation(review.deps, job({ kind: "review" }))).toMatchObject({
-      action: "deferred",
+  });
+
+  describe("submitted reviews", () => {
+    /** A review job carries a review ID and no comment ID; `reviewId: false` leaves it out. */
+    const review = (options: { reviewId?: false } = {}): ReviewJob => ({
+      kind: "review",
+      deliveryId: "review-9001",
+      installationId: 7,
+      repo: "acme/shop",
+      prNumber: 12,
+      actor: "dev",
+      receivedAt: "2026-11-15T00:00:00.000Z",
+      eventAt: "2026-11-15T00:00:00.000Z",
+      ...(options.reviewId === false ? {} : { reviewId: 9001 }),
+    });
+
+    it("runs a review body's commands and replies on the PR, without a reaction", async () => {
+      const f = fakeDeps(from("author", "Mostly fine.\n\n@lgtmoose review"));
+      expect(await handleConversation(f.deps, review())).toEqual({
+        action: "commands",
+        commands: ["review"],
+        ok: true,
+        replied: true,
+      });
+      expect(f.reviewsRead).toEqual([9001]);
+      // GitHub has no reactions API for reviews: the reply on the PR is the only answer.
+      expect(f.reactions).toEqual([]);
+      expect(f.replies).toEqual([
+        { kind: "review", commentId: 9001, body: `@author: Done.\n\n${REPLY_MARKER}` },
+      ]);
+      // Keyed by the review, so a redelivered review asks for its run once.
+      expect(f.queued).toEqual([
+        expect.objectContaining({
+          kind: "pr_updated",
+          requested: "review",
+          deliveryId: "command-review-9001-review",
+          actor: "author",
+        }),
+      ]);
+      expect(f.queued[0]).not.toHaveProperty("commentId");
+    });
+
+    it("applies a comment's rules: writers only for pause, help for unknown commands", async () => {
+      const reader = fakeDeps(from("dev", "@lgtmoose pause"));
+      expect(await handleConversation(reader.deps, review())).toMatchObject({ ok: false });
+      expect(reader.paused.size).toBe(0);
+      expect(reader.replies[0]?.body).toMatch(/^@dev: .*write access/);
+      const unknown = fakeDeps(from("dev", "@lgtmoose deploy"));
+      await handleConversation(unknown.deps, review());
+      expect(unknown.replies[0]?.body).toContain("@lgtmoose full review");
+    });
+
+    it("reads commands outside code and quotes only", async () => {
+      const f = fakeDeps(from("dev", "> @lgtmoose pause\n\n```\n@lgtmoose pause\n```"));
+      expect(await handleConversation(f.deps, review())).toEqual({
+        action: "ignored",
+        reason: "no commands in the review",
+      });
+      expect(f.replies).toEqual([]);
+    });
+
+    it("leaves a review without commands alone: review bodies never go to the reply judge", async () => {
+      const f = fakeDeps(from("dev", "Please rename this."));
+      expect(await handleConversation(f.deps, review())).toEqual({
+        action: "ignored",
+        reason: "no commands in the review",
+      });
+      expect(f.queued).toEqual([]);
+      expect(f.replies).toEqual([]);
+    });
+
+    it("ignores bots, our own reviews, gone reviews and jobs without a review ID", async () => {
+      const bot = fakeDeps(from("lgtmoose[bot]", "@lgtmoose pause", { authorIsBot: true }));
+      expect(await handleConversation(bot.deps, review())).toEqual({
+        action: "ignored",
+        reason: "a bot's review",
+      });
+      const ours = fakeDeps(from("dev", `@lgtmoose help\n\n${REPLY_MARKER}`));
+      expect(await handleConversation(ours.deps, review())).toMatchObject({ action: "ignored" });
+      const gone = fakeDeps(from("dev", "@lgtmoose help"), { reviewGone: true });
+      expect(await handleConversation(gone.deps, review())).toEqual({
+        action: "ignored",
+        reason: "the review is gone",
+      });
+      const noId = fakeDeps(from("dev", "@lgtmoose help"));
+      expect(await handleConversation(noId.deps, review({ reviewId: false }))).toEqual({
+        action: "ignored",
+        reason: "no review ID",
+      });
+      expect([...bot.replies, ...ours.replies, ...gone.replies, ...noId.replies]).toEqual([]);
+    });
+
+    it("learns from a review body without recording a comment ID", async () => {
+      const f = fakeDeps(from("dev", "@lgtmoose learn: prefer early returns"), {
+        permissions: { dev: "write" },
+      });
+      expect(await handleConversation(f.deps, review())).toMatchObject({ ok: true });
+      const [learning] = await f.learnings.list({ org: "acme" });
+      expect(learning).toMatchObject({ text: "prefer early returns" });
+      expect(learning?.sourceCommentId).toBeUndefined();
+    });
+
+    it("says ignore works in a finding's thread only", async () => {
+      const f = fakeDeps(from("dev", "@lgtmoose ignore"));
+      await handleConversation(f.deps, review());
+      expect(f.replies[0]?.body).toContain("`ignore` works as a reply");
+    });
+
+    it("writes nothing to GitHub in shadow mode", async () => {
+      const f = fakeDeps(from("dev", "@lgtmoose help"), { shadow: true });
+      expect(await handleConversation(f.deps, review())).toMatchObject({ action: "commands" });
+      expect(f.replies).toEqual([]);
+      expect(f.logs).toEqual([
+        expect.objectContaining({
+          message: "shadow: command reply not posted",
+          fields: expect.objectContaining({ reviewId: 9001 }),
+        }),
+      ]);
     });
   });
 
