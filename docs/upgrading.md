@@ -32,7 +32,26 @@ Migrations only add to the schema, so a review that's running while the Data sta
 
 - **The images no longer contain npm.** The control, egress proxy and sandbox images drop npm, npx, corepack and yarn from their final stage, which removed advisories in npm's bundled packages. The sandbox's agent CLIs are installed at build time and still run. If you added your own steps to these Dockerfiles that call npm at runtime, install what you need in the build stage instead.
 - **Config keys.** New keys always have defaults. A removed or renamed key fails `deploy` with its path, so you can fix `lgtmoose.config.ts` before anything changes. The [configuration reference](configuration.md) lists every key.
+- **`standard` uses RDS PostgreSQL, not Aurora.** The `standard` profile used to create Aurora Serverless v2. It now uses the same RDS instance as `lean` (see [Switching profile](#switching-profile)). A deployment that already runs `standard` on Aurora can't be updated in place: CloudFormation would refuse to change the database's resource type. Stay on the older version, or move the data with a snapshot and restore first. No `standard` deployment is known to exist yet.
+- **Alarms can notify you.** Set `alarms.email` (LGTMoose creates an SNS topic and subscribes the address; confirm the email AWS sends) or `alarms.topicArn` (an existing topic). Every alarm in every stack then notifies it.
 - **Shadow mode.** `shadow: true` is the default. Upgrading never turns it off; set `shadow: false` yourself when you want reviews posted.
+
+## Switching profile
+
+Change `profile` in `lgtmoose.config.ts` and run `pnpm lgtmoose deploy`. Both profiles use the same RDS PostgreSQL instance, so the database is modified in place and keeps its data:
+
+- **`lean` → `standard`**: the instance grows from `db.t4g.micro` to `db.t4g.small`, gains a Multi-AZ standby, and keeps 14 days of backups instead of 7. The NAT instance is replaced by a NAT gateway in each AZ, the sandbox subnet and VPC endpoints spread to both AZs, the proxy runs two tasks, logs are kept longer, and the standard alarms are added.
+- **`standard` → `lean`**: the reverse. Logs already older than the shorter retention are deleted.
+
+What to expect:
+
+- **A short database outage.** RDS applies the class change during the deploy, not in the next maintenance window. The database restarts, which takes a few minutes; adding the Multi-AZ standby doesn't stop it. Reviews that hit the restart fail and are retried on the next push or by the reconciler. Switch outside busy hours.
+- **NAT and endpoints are replaced, not modified.** They hold no data. Outbound traffic from the app subnets and the sandbox pauses briefly while the new ones come up.
+- **Nothing is replaced that holds data.** The database, its subnet group, its parameter group and the artifact bucket keep their CloudFormation logical IDs, and none of the properties that would make CloudFormation replace the database (engine, database name, encryption, master user, subnet group) differ between the profiles. `infra/cdk/lib/data-stack.test.ts` checks this. The database is also snapshotted if CloudFormation ever deletes or replaces it, and deletion protection stays on.
+
+Before switching, you can check for yourself: `pnpm --filter @lgtmoose/cdk exec cdk diff Lgtmoose-Data` should list the database as modified, never as `[-]` destroyed or `requires replacement`.
+
+**Aurora isn't offered.** Earlier versions planned Aurora Serverless v2 for `standard`. Aurora is a different resource type (`AWS::RDS::DBCluster`), which CloudFormation can only switch to by deleting the instance and creating a new, empty cluster, so a profile switch would have lost data. Moving to Aurora would need a snapshot and restore; that isn't scripted.
 
 ## Going back
 

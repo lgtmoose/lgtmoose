@@ -11,7 +11,10 @@ import {
   StopDBInstanceCommand,
 } from "@aws-sdk/client-rds";
 
-/** lean runs an RDS instance, standard an Aurora cluster. */
+/**
+ * Both profiles run an RDS instance. A cluster is still handled for a deployment made when
+ * `standard` created Aurora.
+ */
 export type DatabaseKind = "instance" | "cluster";
 
 export interface DatabaseControl {
