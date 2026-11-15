@@ -153,6 +153,9 @@ importers:
       '@lgtmoose/summary':
         specifier: workspace:*
         version: link:../../packages/summary
+      '@lgtmoose/tickets':
+        specifier: workspace:*
+        version: link:../../packages/tickets
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(@electric-sql/pglite@0.5.16)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)
@@ -512,6 +515,16 @@ importers:
       '@lgtmoose/planner':
         specifier: workspace:*
         version: link:../planner
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  packages/tickets:
+    dependencies:
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       typescript:
         specifier: 'catalog:'

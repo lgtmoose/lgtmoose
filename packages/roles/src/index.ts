@@ -44,6 +44,12 @@ export {
   type VerifyTarget,
 } from "./verifier.js";
 export {
+  TICKET_CHECKER_TIER,
+  buildTicketCoveragePrompt,
+  type CheckedTicket,
+  type TicketCoverageInput,
+} from "./ticket-coverage.js";
+export {
   REPLY_JUDGE_TIER,
   buildReplyJudgePrompt,
   type JudgedFinding,

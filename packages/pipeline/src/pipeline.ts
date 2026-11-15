@@ -10,9 +10,14 @@ import {
   judgementSchema,
   reviewerOutputSchema,
   severityRank,
+  MAX_TICKET_GAPS,
+  coverageLevel,
+  missingCore,
+  ticketCoverageSchema,
   type Finding,
   type HoldReason,
   type Judgement,
+  type TicketCoverageResult,
   type FingerprintParts,
   type KnownFinding,
   type ReviewDecision,
@@ -31,6 +36,7 @@ import {
 } from "@lgtmoose/planner";
 import {
   REPLY_JUDGE_TIER,
+  TICKET_CHECKER_TIER,
   buildReviewerParts,
   clipBatchNotes,
   renderBatch,
@@ -40,8 +46,18 @@ import {
   type PromptLearning,
   type PullRequestComment,
 } from "@lgtmoose/roles";
-import { GITHUB_COMMENT_LIMIT, SUMMARY_MARKER_ROOM, renderSummary } from "@lgtmoose/summary";
-import { describeKinds, detectInjection, type TextInjection } from "./injection.js";
+import {
+  GITHUB_COMMENT_LIMIT,
+  SUMMARY_MARKER_ROOM,
+  renderSummary,
+  type TicketCoverage,
+} from "@lgtmoose/summary";
+import {
+  describeKinds,
+  detectInjection,
+  type InjectionKind,
+  type TextInjection,
+} from "./injection.js";
 import type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 import { reviewerMisses, type OtherReviewerFinding, type ReviewerMiss } from "./other-reviewers.js";
 
@@ -135,6 +151,8 @@ export interface ReviewReport {
   reviewedFiles: ReviewedFile[];
   /** Other reviewers' open findings counted in the decision (`FinishOptions.others`). */
   others: number;
+  /** Linked tickets' missing core requirements counted as should-fix (`FinishOptions.tickets`). */
+  ticketGaps: number;
   /** Other reviewers' findings on files we reviewed that none of ours is near: for evals. */
   misses: ReviewerMiss[];
 }
@@ -205,6 +223,76 @@ export interface FinishOptions {
    * can quote what it flagged.
    */
   ourAppId?: number;
+  /** Ticket coverage (NIC-839), when a ticket provider is configured. */
+  tickets?: TicketReview;
+}
+
+/**
+ * The tickets a PR names and how the ticket checker found the PR covers them (NIC-839), for the
+ * summary and the decision. The checker's checklists are model output: only their missing core
+ * requirements count, as should-fix findings, at most `MAX_TICKET_GAPS` per review.
+ */
+export interface TicketReview {
+  /** The provider's name, such as Linear. */
+  provider: string;
+  tickets: {
+    key: string;
+    title: string;
+    url?: string;
+    /** The checker's checklist. Undefined when the check failed or didn't run (`note` says). */
+    coverage?: TicketCoverageResult;
+    /** Why there's no checklist, in plain code text. */
+    note?: string;
+  }[];
+  /**
+   * Tickets whose text the prompt-injection detector flagged (`scanText`): they hold approval,
+   * like a flagged PR description.
+   */
+  injected: { key: string; kinds: InjectionKind[] }[];
+}
+
+/** A ticket key as providers give them; anything else isn't shown in the decision's reasons. */
+const TICKET_KEY = /^[A-Z][A-Z0-9]{0,9}-\d{1,7}$/;
+
+/**
+ * The ticket review's should-fix gaps (missing core requirements, at most `MAX_TICKET_GAPS`)
+ * and its table for the summary.
+ */
+function ticketParts(tickets: TicketReview | undefined): {
+  gaps: number;
+  table: TicketCoverage | undefined;
+} {
+  if (tickets === undefined) return { gaps: 0, table: undefined };
+  const missing = tickets.tickets.flatMap((ticket) =>
+    ticket.coverage === undefined ? [] : missingCore(ticket.coverage),
+  );
+  const gaps = Math.min(missing.length, MAX_TICKET_GAPS);
+  // The note is ours when there's no checklist; otherwise the checker's summary, if any.
+  const noteOf = (ticket: TicketReview["tickets"][number]): { note?: string } => {
+    const note = ticket.note ?? ticket.coverage?.summary;
+    return note === undefined ? {} : { note };
+  };
+  return {
+    gaps,
+    table: {
+      provider: tickets.provider,
+      tickets: tickets.tickets.map((ticket) => ({
+        key: ticket.key,
+        title: ticket.title,
+        ...(ticket.url === undefined ? {} : { url: ticket.url }),
+        coverage: ticket.coverage === undefined ? "not_checked" : coverageLevel(ticket.coverage),
+        ...noteOf(ticket),
+        ...(ticket.coverage === undefined
+          ? {}
+          : { missing: missingCore(ticket.coverage).map((req) => req.text) }),
+      })),
+      footnote:
+        `Coverage is a model's reading of the diff against each ticket, so check it. ` +
+        `Each missing core requirement counts as a should-fix finding, up to ${MAX_TICKET_GAPS} per review` +
+        (missing.length > MAX_TICKET_GAPS ? ` (${missing.length} found)` : "") +
+        "; it never blocks the merge on its own.",
+    },
+  };
 }
 
 /**
@@ -827,6 +915,46 @@ export async function runJudge(
   }
 }
 
+/** What the ticket checker's run on one ticket came to: a checklist, or why it failed. */
+export interface TicketOutcome {
+  index: number;
+  coverage?: TicketCoverageResult;
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the ticket checker on one ticket (its prompt from `buildTicketCoveragePrompt`), on the
+ * fast tier. A failed run is an outcome with `error`, never a throw.
+ */
+export async function runTicketCheck(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<TicketOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: ticketCoverageSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      tier: TICKET_CHECKER_TIER,
+    });
+    return {
+      index: job.index,
+      coverage: result.output,
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
 /**
  * Places, deduplicates and decides on the batches' findings, and renders the summary: what would
  * be posted. `repo` is read for the cited code (blobs only, so a partial clone without a checkout
@@ -989,13 +1117,17 @@ export async function finishReview(
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
   const complete = failedBatches === 0 && unreviewed.length === 0;
 
+  // A ticket's missing core requirements count as should-fix findings, capped: model judgement,
+  // so they can hold approval but never block on their own.
+  const tickets = ticketParts(options.tickets);
+  const ticketsInjected = options.tickets?.injected ?? [];
   const decision = decide(
-    open,
+    [...open, ...Array.from({ length: tickets.gaps }, () => ({ severity: "should_fix" as const }))],
     {
       complete,
-      // Text in the title, body or comments aimed at the reviewer. Hits on added lines are
-      // blocking findings instead, which hold approval on their own.
-      injectionFlagged: injection.text.length > 0,
+      // Text in the title, body, comments or linked tickets aimed at the reviewer. Hits on added
+      // lines are blocking findings instead, which hold approval on their own.
+      injectionFlagged: injection.text.length > 0 || ticketsInjected.length > 0,
       headMoved: latestHeadSha !== pr.headSha,
     },
     config,
@@ -1005,6 +1137,17 @@ export async function finishReview(
     ...(failedBatches > 0 ? [`${count(failedBatches, "batch", "batches")} failed`] : []),
     ...(decision.outcome === "skipped" ? [] : unreviewed),
     ...decision.holds.flatMap((hold) => holdReasons(hold, injection.text)),
+    ...(decision.holds.includes("prompt_injection")
+      ? ticketsInjected.map(
+          (hit) =>
+            `${HOLD_TEXT.prompt_injection} in ${TICKET_KEY.test(hit.key) ? `ticket ${hit.key}` : "a linked ticket"}: ${describeKinds(hit.kinds)}`,
+        )
+      : []),
+    ...(tickets.gaps > 0
+      ? [
+          `${tickets.gaps === 1 ? "a linked ticket's core requirement looks" : `${tickets.gaps} of the linked tickets' core requirements look`} missing (see Ticket coverage)`,
+        ]
+      : []),
     ...((options.heldResolutions ?? 0) > 0
       ? [
           `${options.heldResolutions === 1 ? "a resolved review thread still counts" : `${options.heldResolutions} resolved review threads still count`}: a blocking or protected finding counts as resolved only when someone other than the PR's author, with write access, resolves it`,
@@ -1026,6 +1169,7 @@ export async function finishReview(
       rulePackProblems: prepared.rulePackProblems ?? [],
       findingsOverLimit: overLimit,
       noLongerChanged: prepared.noLongerChanged,
+      ...(tickets.table === undefined ? {} : { tickets: tickets.table }),
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );
@@ -1065,6 +1209,7 @@ export async function finishReview(
     ),
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
     others: others.length,
+    ticketGaps: tickets.gaps,
     misses: reviewerMisses(
       others,
       new Set(

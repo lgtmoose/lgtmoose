@@ -67,6 +67,7 @@ function harness(
   } = {},
 ) {
   const puts: { label: CredentialLabel; value: string }[] = [];
+  const ticketKeys: string[] = [];
   const removed: { providerId: string; days: number }[] = [];
   const out: string[] = [];
   const answers = [...(options.answers ?? [])];
@@ -85,6 +86,10 @@ function harness(
     remove: (providerId, days) => {
       removed.push({ providerId, days });
       return Promise.resolve(options.remove ?? { status: "scheduled" });
+    },
+    putTicketKey: (value) => {
+      ticketKeys.push(value);
+      return Promise.resolve({ outcome: "created" });
     },
   };
   const run = vi.fn<InteractiveRunner>(options.run ?? (() => Promise.resolve(0)));
@@ -140,13 +145,52 @@ function harness(
     const result = await runAuth(argv, () => Promise.resolve(deps));
     return { ...result, all: [...out, result.stdout, result.stderr].join("") };
   };
-  return { go, puts, removed, out, run, validated, confirms, legacyAsked, reruns, bedrockCalls };
+  return {
+    go,
+    puts,
+    ticketKeys,
+    removed,
+    out,
+    run,
+    validated,
+    confirms,
+    legacyAsked,
+    reruns,
+    bedrockCalls,
+  };
 }
 
 const SECRETS = [OAUTH, ANTHROPIC_KEY, "SECRET-REFRESH", "SECRET-ACCESS", "SECRET-CURSOR"];
 function expectNoSecrets(text: string) {
   for (const secret of SECRETS) expect(text).not.toContain(secret);
 }
+
+describe("auth linear", () => {
+  it("stores a Linear API key without echoing it, and says when tickets are off", async () => {
+    const h = harness({ answers: ["sk-not-linear", "lin_api_SECRET"] });
+    const result = await h.go(["linear"]);
+    expect(result.exitCode).toBe(0);
+    expect(h.ticketKeys).toEqual(["lin_api_SECRET"]);
+    expect(h.validated[0]).toContain("lin_api_");
+    expect(result.stdout).toContain("lgtmoose/tickets/linear (eu-west-2)");
+    expect(result.stdout).toContain("Ticket coverage is off");
+    expect(result.all).not.toContain("lin_api_SECRET");
+    expect(h.puts).toEqual([]);
+  });
+
+  it("says reviews read tickets once they're on", async () => {
+    const h = harness({
+      answers: ["lin_api_SECRET"],
+      config: { ...baseConfig, tickets: { provider: "linear" } },
+    });
+    expect((await h.go(["linear"])).stdout).toContain("read the tickets each PR names");
+  });
+
+  it("takes no flags", async () => {
+    const result = await runAuth(["linear", "--id", "x"], vi.fn());
+    expect(result.stderr).toContain("auth linear doesn't take --id");
+  });
+});
 
 describe("auth", () => {
   it("prints help and rejects unknown methods and stray flags before building deps", async () => {

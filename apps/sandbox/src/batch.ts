@@ -7,6 +7,7 @@ import {
   batchUrlsSchema,
   runBatch,
   runJudge,
+  runTicketCheck,
   type BatchOutput,
   type BatchUrls,
 } from "@lgtmoose/pipeline";
@@ -145,6 +146,33 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     deps.log("reply judged", {
       index: input.index,
       kind: output.judgement?.kind,
+      error: output.error,
+    });
+    return output;
+  }
+  if (input.role === "ticket") {
+    const checked = await runTicketCheck(
+      harness,
+      { index: input.index, prompt: input.prompt },
+      {
+        cwd: checkout,
+        model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
+        timeoutMs: input.timeoutMs,
+        runId: batchRunId(input.runId, input.index),
+      },
+    );
+    const output: BatchOutput = batchOutputSchema.parse({
+      version: 1,
+      index: input.index,
+      ...(checked.coverage === undefined ? {} : { coverage: checked.coverage }),
+      ...(checked.error === undefined ? {} : { error: checked.error.slice(0, 4000) }),
+      transcriptKeys: checked.transcriptKeys.slice(0, 3),
+      ...(checked.usage === undefined ? {} : { usage: checked.usage }),
+    });
+    await put(deps, urls.output, JSON.stringify(output));
+    deps.log("ticket checked", {
+      index: input.index,
+      requirements: output.coverage?.requirements.length,
       error: output.error,
     });
     return output;

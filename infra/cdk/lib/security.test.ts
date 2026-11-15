@@ -34,6 +34,8 @@ beforeAll(() => {
     allowedOrgs: ["lgtmoose"],
     providers: PROVIDERS,
     extraEgressHosts: ["gateway.example.com"],
+    // Ticket coverage on: its key is the control task's, never a sandbox's.
+    tickets: { provider: "linear" },
   });
   const stacks = buildApp(config, appWithoutBundling());
   workflow = Template.fromStack(stacks.workflow).toJSON().Resources as Resources;
@@ -100,6 +102,8 @@ describe("sandbox controls", () => {
     const hosts = container?.Environment.find((e) => e.Name === "ALLOWED_HOSTS")?.Value ?? "";
     expect(hosts).toContain("api.anthropic.com");
     expect(hosts.split(",").filter((host) => isGitHubHost(host))).toEqual([]);
+    // Tickets are read by the control task: the sandbox can't reach the ticket system either.
+    expect(hosts.split(",")).not.toContain("api.linear.app");
   });
 
   it("refuses a GitHub host in extraEgressHosts at config time", () => {
@@ -125,6 +129,7 @@ describe("sandbox controls", () => {
           expect(resource).not.toBe('"*"');
           expect(resource).not.toContain(SECRET_NAMES.githubApp);
           expect(resource).not.toContain(SECRET_NAMES.githubWebhook);
+          expect(resource).not.toContain(SECRET_NAMES.linearTickets);
           expect(resource).not.toMatch(/DatabaseSecret|DbSecret|Database.*Secret/i);
           expect(resource).toContain(SECRET_NAMES.provider(provider));
         }

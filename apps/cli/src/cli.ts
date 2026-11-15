@@ -10,7 +10,7 @@ export const VERSION = "0.0.0";
 /** Every command, with the one-line summary help shows. */
 export const COMMANDS = {
   setup: "Create the GitHub App and write lgtmoose.config.ts",
-  auth: "Store a model provider's credential: claude, codex, cursor, bedrock, api-key, list, remove",
+  auth: "Store a model provider's credential: claude, codex, cursor, bedrock, api-key, linear, list, remove",
   deploy: "Deploy every CDK stack and point the App's webhook at it",
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",

@@ -224,6 +224,35 @@ export function readEmbeddingsSettings(env: Env): EmbeddingsSettings {
 }
 
 /**
+ * Ticket coverage (NIC-839), from `LGTMOOSE_TICKETS` (`linear`, or `none` / unset for off),
+ * `LGTMOOSE_TICKETS_SECRET_ID` (the provider's API key's secret), `LGTMOOSE_TICKETS_MAX` (the
+ * most tickets checked per PR) and `LGTMOOSE_TICKETS_TEAMS` (comma-separated team keys; empty
+ * for any). The Workflow stack sets them from `tickets` in the deploy config.
+ */
+export type TicketSettings =
+  | { provider: "none" }
+  | { provider: "linear"; secretArn: string; maxPerPullRequest: number; teamKeys: string[] };
+
+export function readTicketSettings(env: Env): TicketSettings {
+  const provider = env.LGTMOOSE_TICKETS?.trim() ?? "";
+  if (provider === "" || provider === "none") return { provider: "none" };
+  if (provider !== "linear") {
+    throw new Error(`LGTMOOSE_TICKETS names an unknown provider: ${provider}.`);
+  }
+  const secretArn = env.LGTMOOSE_TICKETS_SECRET_ID?.trim() ?? "";
+  if (secretArn === "") throw new Error("LGTMOOSE_TICKETS_SECRET_ID is needed for Linear.");
+  const max = Number(env.LGTMOOSE_TICKETS_MAX?.trim() || "3");
+  if (!Number.isSafeInteger(max) || max < 0 || max > 10) {
+    throw new Error("LGTMOOSE_TICKETS_MAX must be a whole number from 0 to 10.");
+  }
+  const teamKeys = (env.LGTMOOSE_TICKETS_TEAMS ?? "")
+    .split(",")
+    .map((team) => team.trim().toUpperCase())
+    .filter((team) => team !== "");
+  return { provider, secretArn, maxPerPullRequest: max, teamKeys };
+}
+
+/**
  * One step of the review workflow, from the variables the state machine sets per task
  * (container overrides). Each names the execution, so the run can be found and failed.
  */

@@ -79,7 +79,16 @@ export interface CredentialStore {
   list(): Promise<StoredCredential[]>;
   /** Schedules the provider's credential for deletion. */
   remove(providerId: string, recoveryDays: number): Promise<RemoveResult>;
+  /**
+   * Stores the Linear API key for ticket coverage in `SECRET_NAMES.linearTickets`: creates the
+   * secret, or stores a new version of an existing one. One scheduled for deletion is refused,
+   * with how to restore it.
+   */
+  putTicketKey(value: string): Promise<{ outcome: "created" | "updated" }>;
 }
+
+/** The kind tag on the ticket provider's key. */
+export const TICKET_CREDENTIAL_KIND = "ticket-credential";
 
 export function credentialTags(label: CredentialLabel): { Key: string; Value: string }[] {
   return [
@@ -234,6 +243,45 @@ export function awsCredentialStore(
   }
 
   return {
+    async putTicketKey(value) {
+      const name = SECRET_NAMES.linearTickets;
+      try {
+        await client.send(
+          new CreateSecretCommand({
+            Name: name,
+            SecretString: value,
+            Description:
+              "Linear API key for LGTMoose ticket coverage. Written by lgtmoose auth linear; read by the control task only.",
+            Tags: [
+              { Key: PROVIDER_CREDENTIAL_TAGS.app, Value: "lgtmoose" },
+              { Key: PROVIDER_CREDENTIAL_TAGS.kind, Value: TICKET_CREDENTIAL_KIND },
+            ],
+          }),
+        );
+        return { outcome: "created" };
+      } catch (error) {
+        if (isScheduledForDeletion(error)) {
+          throw new Error(
+            `${name} (${region}) is scheduled for deletion. Restore it first with ` +
+              `aws secretsmanager restore-secret --secret-id ${name} --region ${region}, then run this again.`,
+            { cause: error },
+          );
+        }
+        if (errorName(error) !== "ResourceExistsException") throw context(name, error);
+      }
+      try {
+        await client.send(
+          new UpdateSecretCommand({
+            SecretId: name,
+            SecretString: value,
+            ClientRequestToken: randomUUID(),
+          }),
+        );
+      } catch (error) {
+        throw context(name, error);
+      }
+      return { outcome: "updated" };
+    },
     async put(label, value, putOptions = {}) {
       const { rerun } = putOptions;
       const name = SECRET_NAMES.provider(label.providerId);

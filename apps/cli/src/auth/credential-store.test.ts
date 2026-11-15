@@ -37,6 +37,51 @@ function fake(responses: ((command: unknown) => unknown)[]) {
   return { client, sent };
 }
 
+describe("awsCredentialStore.putTicketKey", () => {
+  it("creates the Linear key's secret, tagged, or stores a new version of it", async () => {
+    const created = fake([() => ({})]);
+    expect(await awsCredentialStore(created.client, "eu-west-2").putTicketKey("K")).toEqual({
+      outcome: "created",
+    });
+    const create = created.sent[0] as CreateSecretCommand;
+    expect(create.input).toMatchObject({
+      Name: "lgtmoose/tickets/linear",
+      SecretString: "K",
+      Tags: [
+        { Key: "app", Value: "lgtmoose" },
+        { Key: "lgtmoose:kind", Value: "ticket-credential" },
+      ],
+    });
+
+    const updated = fake([
+      () => {
+        throw awsErr("ResourceExistsException");
+      },
+      () => ({}),
+    ]);
+    expect(await awsCredentialStore(updated.client, "eu-west-2").putTicketKey("K2")).toEqual({
+      outcome: "updated",
+    });
+    const update = updated.sent[1] as UpdateSecretCommand;
+    expect(update).toBeInstanceOf(UpdateSecretCommand);
+    expect(update.input).toMatchObject({ SecretId: "lgtmoose/tickets/linear", SecretString: "K2" });
+  });
+
+  it("refuses a key scheduled for deletion, saying how to restore it", async () => {
+    const { client } = fake([
+      () => {
+        throw awsErr(
+          "InvalidRequestException",
+          "You can't create this secret because a secret with this name is already scheduled for deletion.",
+        );
+      },
+    ]);
+    await expect(awsCredentialStore(client, "eu-west-2").putTicketKey("K")).rejects.toThrow(
+      "restore-secret --secret-id lgtmoose/tickets/linear",
+    );
+  });
+});
+
 describe("awsCredentialStore", () => {
   it("creates the secret with its description and tags", async () => {
     const { client, sent } = fake([() => ({})]);

@@ -38,8 +38,10 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `learnings.embeddings.provider` (required) | `"none"` or `"bedrock"` or `"openai"` |  | Which form this is. |
 | `learnings.embeddings.model` | string matching `^amazon\.titan-embed-text-v2(?::\d+)?$` | `"amazon.titan-embed-text-v2:0"` | With `provider: "bedrock"`. |
 | `learnings.embeddings.model` | string matching <code>^text-embedding-3-(?:small&#124;large)$</code> | `"text-embedding-3-small"` | With `provider: "openai"`. |
-| `tickets` | object |  | Reserved for ticket coverage. Not used yet: no ticket provider is built. |
-| `tickets.provider` | `"linear"` or `"jira"` or `"github-issues"` |  |  |
+| `tickets` | object |  | Ticket coverage: check each PR against the tickets it names. Left out: off. The provider receives no code; the model checks coverage in the sandbox. |
+| `tickets.provider` | `"linear"` or `"jira"` or `"github-issues"` |  | The ticket system: linear. jira and github-issues aren't built yet. |
+| `tickets.maxPerPullRequest` | integer, 1 to 10 | `3` | The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed. |
+| `tickets.teamKeys` | list of string matching `^[A-Za-z][A-Za-z0-9]{0,9}$` | `[]` | Only these teams' ticket keys count, such as ENG for ENG-123. Empty: any key the provider knows. |
 | `dashboard` | boolean | `true` | Reserved for the dashboard. Not used yet: no dashboard is deployed. |
 
 Each harness accepts only some `auth` methods: `claude-code` takes `oauth-token`, `api-key`, `bedrock` and `vertex`; `codex` takes `chatgpt-login`, `access-token` and `api-key`; `cursor-agent` takes `api-key` and `service-account`; `agent-sdk` takes `api-key`, `bedrock` and `vertex`. See [Providers and auth](credentials.md).

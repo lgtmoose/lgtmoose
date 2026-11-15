@@ -769,4 +769,34 @@ describe("learnings embeddings", () => {
     expect(JSON.stringify(reads)).toContain(SECRET_NAMES.openAiEmbeddings);
     expect(sandboxes).not.toContain(SECRET_NAMES.openAiEmbeddings);
   }, 120_000);
+
+  // Ticket coverage (NIC-839) follows the same rule: the control task reads the ticket system's
+  // key; no sandbox role or task can.
+  it("reads no tickets by default, with no Linear key access", () => {
+    const { env, granted, sandboxes } = inspect(template);
+    expect(env.LGTMOOSE_TICKETS).toBe("none");
+    expect(env).not.toHaveProperty("LGTMOOSE_TICKETS_SECRET_ID");
+    expect(JSON.stringify(granted)).not.toContain(SECRET_NAMES.linearTickets);
+    expect(sandboxes).not.toContain(SECRET_NAMES.linearTickets);
+  });
+
+  it("gives the control task the Linear key by its secret's name, and only it", () => {
+    const config = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token" }],
+      tickets: { provider: "linear", maxPerPullRequest: 2, teamKeys: ["eng"] },
+    });
+    const { env, granted, sandboxes } = inspect(
+      Template.fromStack(buildApp(config, appWithoutBundling()).workflow),
+    );
+    expect(env).toMatchObject({
+      LGTMOOSE_TICKETS: "linear",
+      LGTMOOSE_TICKETS_SECRET_ID: SECRET_NAMES.linearTickets,
+      LGTMOOSE_TICKETS_MAX: "2",
+      LGTMOOSE_TICKETS_TEAMS: "ENG",
+    });
+    const reads = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(JSON.stringify(reads)).toContain(SECRET_NAMES.linearTickets);
+    expect(sandboxes).not.toContain(SECRET_NAMES.linearTickets);
+  }, 120_000);
 });

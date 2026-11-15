@@ -2,6 +2,7 @@ import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { LearningsForBatch, PullReader, PullTarget } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
+import type { TicketProvider } from "@lgtmoose/tickets";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 import type { Permission } from "./thread-policy.js";
 import type { ReplyStore } from "./replies.js";
@@ -323,4 +324,10 @@ export interface ControlDeps {
   learnings?: (
     query: { org: string; repo: string } & Parameters<LearningsForBatch>[0],
   ) => ReturnType<LearningsForBatch>;
+  /**
+   * Ticket coverage (NIC-839): the ticket provider, which reads tickets here in the control task
+   * with its own credential (the sandbox never gets it), and the most tickets checked per PR.
+   * Left out, tickets aren't read.
+   */
+  tickets?: { provider: TicketProvider; maxPerPullRequest: number };
 }
