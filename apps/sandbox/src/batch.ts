@@ -6,6 +6,7 @@ import {
   batchRunId,
   batchUrlsSchema,
   runBatch,
+  runBootstrap,
   runExplain,
   runJudge,
   runTicketCheck,
@@ -174,6 +175,34 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     deps.log("finding explained", {
       index: input.index,
       answered: output.explanation !== undefined,
+      error: output.error,
+    });
+    return output;
+  }
+  if (input.role === "bootstrap") {
+    // Past review comments only (NIC-1080): the checkout is an empty archive.
+    const distilled = await runBootstrap(
+      harness,
+      { index: input.index, prompt: input.prompt },
+      {
+        cwd: checkout,
+        model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
+        timeoutMs: input.timeoutMs,
+        runId: batchRunId(input.runId, input.index),
+      },
+    );
+    const output: BatchOutput = batchOutputSchema.parse({
+      version: 1,
+      index: input.index,
+      ...(distilled.candidates === undefined ? {} : { candidates: distilled.candidates }),
+      ...(distilled.error === undefined ? {} : { error: distilled.error.slice(0, 4000) }),
+      transcriptKeys: distilled.transcriptKeys.slice(0, 3),
+      ...(distilled.usage === undefined ? {} : { usage: distilled.usage }),
+    });
+    await put(deps, urls.output, JSON.stringify(output));
+    deps.log("comments distilled", {
+      index: input.index,
+      candidates: output.candidates?.length,
       error: output.error,
     });
     return output;

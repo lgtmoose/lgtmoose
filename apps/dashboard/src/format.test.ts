@@ -10,6 +10,7 @@ import {
   percent,
   parseRoute,
   pullRequestUrl,
+  reviewCommentUrl,
   routeHash,
   severityLabel,
   signInMessage,
@@ -25,6 +26,19 @@ describe("routes", () => {
     });
     expect(parseRoute("")).toEqual({ page: "repos" });
     expect(parseRoute("#/whatever")).toEqual({ page: "repos" });
+  });
+
+  it("reads the bootstrap page, and links to a source comment it builds itself", () => {
+    expect(parseRoute("#/bootstrap")).toEqual({ page: "bootstrap" });
+    expect(routeHash({ page: "bootstrap" })).toBe("#/bootstrap");
+    expect(reviewCommentUrl("acme/api", 7, 42, true)).toBe(
+      "https://github.com/acme/api/pull/7#discussion_r42",
+    );
+    expect(reviewCommentUrl("acme/api", 7, 42, false)).toBe(
+      "https://github.com/acme/api/pull/7#pullrequestreview-42",
+    );
+    expect(reviewCommentUrl("javascript:alert(1)", 7, 42, true)).toBeUndefined();
+    expect(reviewCommentUrl("acme/api", 7, -1, true)).toBeUndefined();
   });
 
   it("drops a repository that isn't owner/name", () => {

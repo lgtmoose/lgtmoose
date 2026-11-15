@@ -14,14 +14,15 @@ The stack's outputs `DashboardUrl` and `OAuthCallbackUrl` hold the same URLs.
 
 ## What it shows
 
-| Page          | What's on it                                                                                                                                                                                                                         |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review                                                                                                                                    |
-| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                                                                                                                                                    |
-| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used                                                                                                                                    |
-| Learnings     | [Learnings](learning.md) by status: pending ones with **Approve** and **Reject**, active ones with **Reject**, and retired ones. Each shows its scope, author, source PR and use                                                     |
-| Usage         | Each provider's batches, tokens, cost, limit hits and fallbacks in your repositories over the last 30 days, this month's estimated spend against the [spend caps](costs.md#spend-caps), and the providers sitting out a cooldown now |
-| Acceptance    | The [feedback report](feedback.md)'s acceptance by rule category, and its declined findings in your repositories                                                                                                                     |
+| Page               | What's on it                                                                                                                                                                                                                                                                              |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repositories       | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review                                                                                                                                                                                         |
+| Open findings      | Open findings, most severe first, with the PR, file and line, and who raised them                                                                                                                                                                                                         |
+| Review runs        | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used                                                                                                                                                                                         |
+| Learnings          | [Learnings](learning.md) by status: pending ones with **Approve** and **Reject**, active ones with **Reject**, and retired ones. Each shows its scope, author, source PR and use                                                                                                          |
+| Learn from history | Start a [bootstrap](learning.md#starting-with-your-history) on a repository you can write to, follow the bootstraps of your repositories, and approve or reject what they proposed, each with links to the comments it rests on, one at a time or with **Approve all** and **Reject all** |
+| Usage              | Each provider's batches, tokens, cost, limit hits and fallbacks in your repositories over the last 30 days, this month's estimated spend against the [spend caps](costs.md#spend-caps), and the providers sitting out a cooldown now                                                      |
+| Acceptance         | The [feedback report](feedback.md)'s acceptance by rule category, and its declined findings in your repositories                                                                                                                                                                          |
 
 Findings, runs and repositories can be filtered to one repository. Findings' and learnings' text is shown as plain text, never rendered as HTML or Markdown.
 
@@ -37,6 +38,8 @@ Below the list, the Learnings page shows the learnings proposed in the last 7 da
 - An org-wide learning needs an owner of the org. For a user account in `allowedOrgs`, that user.
 
 The dashboard learns your access when you sign in: the repositories listing GitHub returns for your own token includes your permission on each, and the org memberships API gives your role. Both are kept in your session. The dashboard never asks the App, so its private key stays out of the dashboard. The catch: a change on GitHub reaches the dashboard at your next sign-in, so access that was taken away lasts up to 8 hours. Signing out and in again picks up a change at once.
+
+**Approve all** and **Reject all** on the **Learn from history** page do the same for each pending learning a bootstrap proposed, one at a time through the policy: each gets its own event, and those you don't have the access for stay pending and are counted as refused. Asking for a bootstrap needs write access to the repository, as GitHub said at sign-in, since it spends model time.
 
 ### Usage and acceptance
 

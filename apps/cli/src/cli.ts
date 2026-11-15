@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import type { AuthDeps } from "./auth/auth.js";
 import type { DeployDeps } from "./deploy/deploy.js";
 import type { FeedbackDeps } from "./feedback/feedback.js";
+import type { LearningsDeps } from "./learnings/learnings.js";
 import type { ReviewEnvironmentFactory } from "./review/review.js";
 import type { SetupDeps } from "./setup/setup.js";
 
@@ -15,6 +16,7 @@ export const COMMANDS = {
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
   feedback: "Acceptance of findings per rule category: report, export-declined",
+  learnings: "Learn from a repository's review history: bootstrap --repo owner/name",
 } as const;
 
 export type Command = keyof typeof COMMANDS;
@@ -44,6 +46,8 @@ export interface RunOptions {
   reviewEnvironment?: ReviewEnvironmentFactory;
   /** Builds feedback's I/O: the deploy config, AWS, GitHub and the disk by default. */
   feedbackDeps?: () => Promise<FeedbackDeps>;
+  /** Builds learnings' I/O: the deploy config, CloudFormation and S3 by default. */
+  learningsDeps?: () => Promise<LearningsDeps>;
 }
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
@@ -82,6 +86,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
       options.feedbackDeps ??
       (async () => (await import("./feedback/deps.js")).defaultFeedbackDeps());
     return runFeedback(argv.slice(1), getDeps);
+  }
+
+  if (argv[0] === "learnings") {
+    const { runLearnings } = await import("./learnings/learnings.js");
+    const getDeps =
+      options.learningsDeps ??
+      (async () => (await import("./learnings/deps.js")).defaultLearningsDeps());
+    return runLearnings(argv.slice(1), getDeps);
   }
 
   const { values, positionals } = parseArgs({

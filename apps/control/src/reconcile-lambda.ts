@@ -1,6 +1,21 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { SQSClient } from "@aws-sdk/client-sqs";
+import { BOOTSTRAP_REQUEST_PREFIX } from "@lgtmoose/config";
+import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
+import {
+  bootstrapRequestFileSchema,
+  type BootstrapRequestFile,
+  type BootstrapStarter,
+} from "./bootstrap-start.js";
+import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import {
   drizzleLearningStore,
   retireUnusedLearnings,
@@ -12,7 +27,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { GitHubClient, installationTokenProvider } from "@lgtmoose/poster";
-import { readMaxPendingLearnings, readReconcileEnv, readRepeatThreshold } from "./env.js";
+import {
+  readBootstrapMaxCost,
+  readMaxPendingLearnings,
+  readReconcileEnv,
+  readRepeatThreshold,
+} from "./env.js";
 import { outcomeLearner } from "./outcome-learning-aws.js";
 import { collectFeedback, type FeedbackDeps } from "./feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "./feedback-aws.js";
@@ -49,6 +69,42 @@ type LambdaDeps = ReconcileDeps & {
 };
 
 let deps: Promise<LambdaDeps> | undefined;
+
+/** Requests taken in per run, at most. */
+const REQUESTS_PER_RUN = 20;
+
+/**
+ * Takes the CLI's bootstrap requests out of the artifact bucket: each valid one is returned, and
+ * every one read is deleted, so a bad request isn't read again.
+ */
+export async function takeBootstrapRequests(
+  s3: Pick<S3Client, "send">,
+  bucket: string,
+  log: (message: string, fields?: Record<string, unknown>) => void,
+): Promise<BootstrapRequestFile[]> {
+  const listed = await s3.send(
+    new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: BOOTSTRAP_REQUEST_PREFIX,
+      MaxKeys: REQUESTS_PER_RUN,
+    }),
+  );
+  const requests: BootstrapRequestFile[] = [];
+  for (const object of listed.Contents ?? []) {
+    if (object.Key === undefined) continue;
+    try {
+      const reply = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: object.Key }));
+      const text = (await reply.Body?.transformToString("utf8")) ?? "";
+      const parsed = bootstrapRequestFileSchema.safeParse(JSON.parse(text));
+      if (parsed.success) requests.push(parsed.data);
+      else log("bootstrap request ignored: not valid", { key: object.Key });
+    } catch {
+      log("bootstrap request ignored: unreadable", { key: object.Key });
+    }
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: object.Key }));
+  }
+  return requests;
+}
 
 /** Built once per container: the pool outlives invocations. */
 function reconcileDeps(): Promise<LambdaDeps> {
@@ -113,8 +169,32 @@ function reconcileDeps(): Promise<LambdaDeps> {
                 { findingId: comment.findingId },
               ]),
           };
+    // Bootstraps from review history (NIC-1080): started on the review workflow, with the CLI's
+    // requests taken from the artifact bucket.
+    const stateMachineArn = env.stateMachineArn;
+    const sfn = new SFNClient({});
+    const bootstraps: BootstrapStarter | undefined =
+      stateMachineArn === undefined
+        ? undefined
+        : {
+            store: drizzleBootstrapStore(db),
+            async startExecution(name, input) {
+              const started = await sfn.send(
+                new StartExecutionCommand({ stateMachineArn, name, input: JSON.stringify(input) }),
+              );
+              if (started.executionArn === undefined) {
+                throw new Error("StartExecution returned no execution ARN.");
+              }
+              return started.executionArn;
+            },
+            ...(bucket === undefined
+              ? {}
+              : { incoming: () => takeBootstrapRequests(s3, bucket, log) }),
+            maxCostUsd: readBootstrapMaxCost(process.env) ?? BOOTSTRAP_DEFAULTS.maxCostUsd,
+          };
     return {
       feedback,
+      ...(bootstraps === undefined ? {} : { bootstraps }),
       spend: { store: postgresSpend(db), budgets: readBudgets(process.env) },
       runOutputs:
         bucket === undefined ? { getText: async () => undefined } : s3ArtifactStore(s3, bucket),

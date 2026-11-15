@@ -36,6 +36,9 @@ import pg from "pg";
 import { z } from "zod";
 import { drizzleLearningStore, proposeLearning } from "@lgtmoose/learnings";
 import { drizzleReplyStore } from "./replies-aws.js";
+import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
+import { githubBootstrap } from "./bootstrap-github.js";
+import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -729,6 +732,7 @@ export async function awsControlDeps(
     embeddings?: EmbeddingsSettings;
     tickets?: TicketSettings;
     maxPendingLearnings?: number;
+    bootstrapMaxCostUsd?: number;
     repeatThreshold?: number;
     /** The deploy config's `budgets` (`LGTMOOSE_BUDGETS`). Left out: no caps. */
     budgets?: Budgets;
@@ -795,6 +799,9 @@ export async function awsControlDeps(
       ...(options.maxPendingLearnings === undefined
         ? {}
         : { maxPendingLearnings: options.maxPendingLearnings }),
+      ...(options.bootstrapMaxCostUsd === undefined
+        ? {}
+        : { bootstrapMaxCostUsd: options.bootstrapMaxCostUsd }),
       ...(options.repeatThreshold === undefined
         ? {}
         : { repeatThreshold: options.repeatThreshold }),
@@ -815,6 +822,8 @@ export interface ControlParts {
   tickets?: NonNullable<ControlDeps["tickets"]>;
   /** `learnings.maxPendingPerAuthor`; left out, the policy's default. */
   maxPendingLearnings?: number;
+  /** `learnings.bootstrapMaxCostUsd`; left out, `BOOTSTRAP_DEFAULTS.maxCostUsd`. */
+  bootstrapMaxCostUsd?: number;
   /** `learnings.repeatThreshold` (NIC-1081); left out, the default. */
   repeatThreshold?: number;
   /** The deploy config's `budgets` (NIC-1079); left out, no caps, but spend is still recorded. */
@@ -985,6 +994,23 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
       log,
     }),
     ...(tickets === undefined ? {} : { tickets }),
+    bootstrap: {
+      store: drizzleBootstrapStore(db),
+      async github(installationId) {
+        const client = new GitHubClient({
+          token: installationTokenProvider({
+            appId: app.appId,
+            privateKey: app.privateKey,
+            installationId,
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        });
+        return githubBootstrap(client, log);
+      },
+      learnings: learningStore,
+      maxCostUsd: parts.bootstrapMaxCostUsd ?? BOOTSTRAP_DEFAULTS.maxCostUsd,
+    },
     spend: {
       store: postgresSpend(db as unknown as Parameters<typeof postgresSpend>[0]),
       budgets: parts.budgets ?? budgetsSchema.parse({}),

@@ -9,6 +9,8 @@ import { handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import { githubDashboard } from "./dashboard-github.js";
 import { fromHttpApiEvent, json, toHttpApiResult, type HttpApiEvent } from "./dashboard-http.js";
 import { drizzleDashboardStore } from "./dashboard-store.js";
+import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
+import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import { readBudgets } from "./spend.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { log } from "./log.js";
@@ -95,6 +97,7 @@ function dashboardDeps(): Promise<DashboardDeps> {
     return {
       store: drizzleDashboardStore(db),
       learnings: drizzleLearningStore(db),
+      bootstraps: { store: drizzleBootstrapStore(db), maxPrs: BOOTSTRAP_DEFAULTS.maxPrs },
       async feedbackReport() {
         try {
           const object = await s3.send(

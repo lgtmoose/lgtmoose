@@ -113,3 +113,12 @@ export {
   type FeedbackReport,
   type FeedbackStatus,
 } from "./feedback.js";
+export {
+  BOOTSTRAP_COMMENT_ID,
+  BOOTSTRAP_KINDS,
+  BOOTSTRAP_LIMITS,
+  bootstrapCandidateSchema,
+  bootstrapOutputSchema,
+  type BootstrapCandidate,
+  type BootstrapOutput,
+} from "./bootstrap.js";

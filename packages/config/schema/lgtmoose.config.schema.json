@@ -459,7 +459,8 @@
           "provider": "none"
         },
         "maxPendingPerAuthor": 5,
-        "repeatThreshold": 2
+        "repeatThreshold": 2,
+        "bootstrapMaxCostUsd": 5
       },
       "description": "Learnings: how the learnings for each review batch are ranked, how many pending learnings one author may have, and when repeated rejections make one.",
       "type": "object",
@@ -527,6 +528,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        },
+        "bootstrapMaxCostUsd": {
+          "default": 5,
+          "description": "The most estimated model cost, in USD, of one bootstrap from a repository's review history (lgtmoose learnings bootstrap). A request can ask for less, never more.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000
         },
         "repeatThreshold": {
           "default": 2,

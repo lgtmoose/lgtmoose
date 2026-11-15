@@ -1,5 +1,6 @@
 import { parseRepoConfigYaml, type RepoConfig } from "@lgtmoose/config";
 import {
+  bootstrapOutputSchema,
   citedCode,
   codeOccurrence,
   commentTitle,
@@ -15,6 +16,7 @@ import {
   coverageLevel,
   missingCore,
   ticketCoverageSchema,
+  type BootstrapCandidate,
   type Explanation,
   type Finding,
   type HoldReason,
@@ -37,6 +39,7 @@ import {
   type ReadingDepth,
 } from "@lgtmoose/planner";
 import {
+  BOOTSTRAPPER_TIER,
   EXPLAINER_TIER,
   REPLY_JUDGE_TIER,
   TICKET_CHECKER_TIER,
@@ -1035,6 +1038,47 @@ export async function runExplain(
     return {
       index: job.index,
       explanation: result.output,
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
+/** What the bootstrapper's run on one batch of comments came to: candidates, or why it failed. */
+export interface BootstrapOutcome {
+  index: number;
+  candidates?: BootstrapCandidate[];
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the bootstrapper (NIC-1080) on one batch of past review comments (its prompt from
+ * `buildBootstrapPrompt`), on the fast tier. A failed run is an outcome with `error`, never a
+ * throw.
+ */
+export async function runBootstrap(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<BootstrapOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: bootstrapOutputSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      tier: BOOTSTRAPPER_TIER,
+    });
+    return {
+      index: job.index,
+      candidates: result.output.candidates,
       transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };

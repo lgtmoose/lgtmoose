@@ -519,6 +519,14 @@ export const deployConfigSchema = z
           .describe(
             "The most pending learnings one author without write access may have in an org. A new learn: past it is refused and nothing is stored.",
           ),
+        bootstrapMaxCostUsd: z
+          .number()
+          .min(0)
+          .max(1000)
+          .default(5)
+          .describe(
+            "The most estimated model cost, in USD, of one bootstrap from a repository's review history (lgtmoose learnings bootstrap). A request can ask for less, never more.",
+          ),
         /**
          * On how many PRs of a repo findings about the same thing must be declined, disputed or
          * 👎'd before LGTMoose proposes a learning not to raise it (NIC-1081).
@@ -534,7 +542,12 @@ export const deployConfigSchema = z
           ),
       })
       .strict()
-      .default({ embeddings: { provider: "none" }, maxPendingPerAuthor: 5, repeatThreshold: 2 })
+      .default({
+        embeddings: { provider: "none" },
+        maxPendingPerAuthor: 5,
+        repeatThreshold: 2,
+        bootstrapMaxCostUsd: 5,
+      })
       .describe(
         "Learnings: how the learnings for each review batch are ranked, how many pending learnings one author may have, and when repeated rejections make one.",
       ),

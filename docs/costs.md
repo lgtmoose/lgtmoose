@@ -88,6 +88,8 @@ budgets: {
 | `perRepoMonthlyUsd`            | estimated cost per repository           | the 1st of the month, UTC | only a change to the deploy config                                |
 | `monthlyUsd`                   | estimated cost for the whole deployment | the 1st of the month, UTC | only a change to the deploy config                                |
 
+A [bootstrap from review history](learning.md#starting-with-your-history) counts against the monthly caps, the repository's and the deployment's, like a review run. It belongs to no PR, so the per-PR caps don't apply to it. It also has its own cap, `learnings.bootstrapMaxCostUsd` (5 USD by default).
+
 A repository can set lower caps for itself in `.lgtmoose.yaml`, never higher ones. The file is read at the PR's base, like the rest of it, so a PR can't change its own caps:
 
 ```yaml
@@ -103,11 +105,11 @@ budgets:
 
 Each batch's cost is the tokens its harness reported (input, output, cache reads and cache writes) times its model tier's price, in USD per million tokens. The defaults are the list prices of the Claude models the tiers map to by default:
 
-| Tier       | Input | Output | Cache read | Cache write | Used by                                |
-| ---------- | ----- | ------ | ---------- | ----------- | -------------------------------------- |
-| `fast`     | 1     | 5      | 0.10       | 1.25        | reply judge, ticket checker, explainer |
-| `standard` | 3     | 15     | 0.30       | 3.75        | reviewer                               |
-| `deep`     | 5     | 25     | 0.50       | 6.25        | (not used yet)                         |
+| Tier       | Input | Output | Cache read | Cache write | Used by                                              |
+| ---------- | ----- | ------ | ---------- | ----------- | ---------------------------------------------------- |
+| `fast`     | 1     | 5      | 0.10       | 1.25        | reply judge, ticket checker, explainer, bootstrapper |
+| `standard` | 3     | 15     | 0.30       | 3.75        | reviewer                                             |
+| `deep`     | 5     | 25     | 0.50       | 6.25        | (not used yet)                                       |
 
 Set `budgets.prices` for other models or a negotiated price, per tier and per field; unset fields keep the defaults. The same price applies to an API key, Bedrock and a plan sign-in, so a cap means the same whichever provider ran. For a plan, the estimate is what the same tokens would cost at API prices. A batch whose harness reported no tokens counts at its reported cost, or else at 60,000 input and 6,000 output tokens.
 

@@ -1,5 +1,6 @@
 import {
   FINDING_LIMITS,
+  bootstrapOutputSchema,
   explanationSchema,
   findingSchema,
   judgementSchema,
@@ -152,10 +153,11 @@ export const batchInputSchema = z
      * What the batch runs: the reviewer on a batch of files (the default), the reply judge on
      * one person's reply to a finding (`buildReplyJudgePrompt`), whose output is a `judgement`,
      * the ticket checker on one ticket (`buildTicketCoveragePrompt`), whose output is a
-     * `coverage`, or the explainer on one finding (`buildExplainPrompt`), whose output is an
-     * `explanation`.
+     * `coverage`, the explainer on one finding (`buildExplainPrompt`), whose output is an
+     * `explanation`, or the bootstrapper on a batch of a repository's past review comments
+     * (`buildBootstrapPrompt`, NIC-1080), whose output is `candidates`.
      */
-    role: z.enum(["reviewer", "judge", "ticket", "explain"]).optional(),
+    role: z.enum(["reviewer", "judge", "ticket", "explain", "bootstrap"]).optional(),
     /**
      * The model tier: the judge runs on `fast`. The sandbox then runs its provider's fast model
      * (`LGTMOOSE_FAST_MODEL`) instead of `model`.
@@ -219,6 +221,11 @@ export const batchOutputSchema = z
     coverage: ticketCoverageSchema.optional(),
     /** The explainer's answer, for an explain batch (`BatchInput.role`). Model output. */
     explanation: explanationSchema.optional(),
+    /**
+     * The bootstrapper's candidate learnings, for a bootstrap batch (`BatchInput.role`). Model
+     * output: proposals only, which the post step checks and stores as pending.
+     */
+    candidates: bootstrapOutputSchema.shape.candidates.optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
@@ -226,12 +233,17 @@ export const batchOutputSchema = z
   .strict()
   .refine(
     (output) =>
-      [output.findings, output.judgement, output.coverage, output.explanation, output.error].filter(
-        (part) => part !== undefined,
-      ).length === 1,
+      [
+        output.findings,
+        output.judgement,
+        output.coverage,
+        output.explanation,
+        output.candidates,
+        output.error,
+      ].filter((part) => part !== undefined).length === 1,
     {
       message:
-        "a batch output has exactly one of findings, a judgement, a coverage, an explanation or an error",
+        "a batch output has exactly one of findings, a judgement, a coverage, an explanation, candidates or an error",
     },
   )
   .refine((output) => output.notes === undefined || output.findings !== undefined, {

@@ -71,6 +71,12 @@ export const CDK_CONTEXT = {
 export const FEEDBACK_REPORT_KEY = "reports/feedback/latest.json";
 
 /**
+ * Where `lgtmoose learnings bootstrap` leaves its requests in the artifact bucket (NIC-1080), one
+ * JSON object per request, for the reconciler to take in and remove.
+ */
+export const BOOTSTRAP_REQUEST_PREFIX = "requests/learnings-bootstrap/";
+
+/**
  * The dashboard's Content-Security-Policy, on every response, the page and the API: scripts and
  * styles from its own origin only (the page has no inline script or style), no framing, no
  * plugins, and the API the only place it connects to. Sign-in leaves by navigation, which CSP
