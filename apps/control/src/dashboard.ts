@@ -1,3 +1,13 @@
+import { feedbackReportSchema } from "@lgtmoose/core";
+import {
+  approveLearning,
+  forgetLearning,
+  summarizeLearning,
+  type Learning,
+  type LearningDeps,
+  type LearningStatus,
+  type LearningStore,
+} from "@lgtmoose/learnings";
 import { z } from "zod";
 import { authorizeUrl, type DashboardGitHub } from "./dashboard-github.js";
 import {
@@ -33,10 +43,17 @@ import type { DashboardSession, DashboardStore } from "./dashboard-store.js";
  *   sign-in, within the allowed orgs.
  * - **Writes:** a request that changes anything must come from the dashboard's own origin
  *   (`Origin`, and `Sec-Fetch-Site` when the browser sends it), on top of SameSite.
+ * - **Learnings:** approving and rejecting go through `approveLearning` and `forgetLearning`, with
+ *   the session's login as the actor. Their permission checks read what GitHub said about the
+ *   person at sign-in (write access per repository, owner per org), never the App's key, so a
+ *   grant GitHub has since taken away lasts until the session ends, at most `SESSION_HOURS`.
  */
 
 export interface DashboardDeps {
   store: DashboardStore;
+  learnings: LearningStore;
+  /** The feedback report (`FEEDBACK_REPORT_KEY`) as stored, or undefined when there's none yet. */
+  feedbackReport(): Promise<unknown>;
   github: DashboardGitHub;
   /** The App's OAuth client; undefined until setup or deploy has stored it. */
   oauthClient(): Promise<{ clientId: string; clientSecret: string } | undefined>;
@@ -60,6 +77,8 @@ const SIGN_IN_SECONDS = 10 * 60;
 export const REPO_LIMIT = 2000;
 const FINDINGS_LIMIT = 500;
 const RUNS_LIMIT = 100;
+/** How far back provider usage is summed. */
+export const USAGE_DAYS = 30;
 
 /** Why sign-in didn't finish, as the page is told in `#/signed-out?error=…`: codes only. */
 export type SignInError = "denied" | "expired" | "github" | "not-configured" | "not-member";
@@ -155,18 +174,20 @@ async function callback(
     const { token } = exchanged;
     const user = await deps.github.login(token);
     const orgs: string[] = [];
+    const ownerOrgs: string[] = [];
     for (const org of deps.allowedOrgs) {
       const name = org.toLowerCase();
-      // A user account in allowedOrgs has one member: its own login.
-      if (name === user.toLowerCase() || (await deps.github.isOrgMember(token, org))) {
-        orgs.push(name);
-      }
+      // A user account in allowedOrgs has one member, who owns it: its own login.
+      const role = name === user.toLowerCase() ? "admin" : await deps.github.orgRole(token, org);
+      if (role === "none") continue;
+      orgs.push(name);
+      if (role === "admin") ownerOrgs.push(name);
     }
     if (orgs.length === 0) {
       deps.log("dashboard sign-in refused: not a member of an allowed org", { login: user });
       return signedOut("not-member", clear);
     }
-    const repos = await deps.github.visibleRepos(token, new Set(orgs), REPO_LIMIT);
+    const { repos, writeRepos } = await deps.github.visibleRepos(token, new Set(orgs), REPO_LIMIT);
     const now = deps.now();
     const hours = SESSION_HOURS * 3600;
     const seconds = Math.min(hours, exchanged.expiresInSeconds ?? hours);
@@ -175,6 +196,8 @@ async function callback(
       login: user,
       orgs,
       repos,
+      writeRepos,
+      ownerOrgs,
       expiresAt: new Date(now.getTime() + seconds * 1000),
     });
     await deps.store.deleteExpired(now);
@@ -194,6 +217,132 @@ function scope(session: DashboardSession, repo: string | undefined): string[] | 
   const name = repo.toLowerCase();
   if (!REPO_PARAM.test(name) || !session.repos.includes(name)) return undefined;
   return [name];
+}
+
+const LEARNING_STATUSES: readonly LearningStatus[] = ["pending", "active", "retired"];
+/** The most learnings one list shows, newest first. */
+const LEARNINGS_LIMIT = 200;
+const LEARNING_ACTION = /^\/api\/learnings\/([0-9a-f-]{36})\/(approve|reject)$/;
+
+/** Whether the person may see a learning: one of their repositories', or an org-wide one of theirs. */
+function canSee(session: DashboardSession, learning: Learning): boolean {
+  return learning.repo === undefined
+    ? session.orgs.includes(learning.org.toLowerCase())
+    : session.repos.includes(learning.repo.toLowerCase());
+}
+
+/** A learning as the dashboard shows it: its text is untrusted, and the page shows it as text. */
+function learningView(learning: Learning) {
+  return {
+    id: learning.id,
+    status: learning.status,
+    kind: learning.kind,
+    category: learning.category,
+    scope: summarizeLearning(learning).scope,
+    org: learning.org,
+    repo: learning.repo,
+    text: learning.text,
+    author: learning.author,
+    sourceRepo: learning.sourceRepo,
+    sourcePr: learning.sourcePr,
+    hits: learning.hits,
+    createdAt: learning.createdAt.toISOString(),
+    lastUsedAt: learning.lastUsedAt?.toISOString(),
+    retiredAt: learning.retiredAt?.toISOString(),
+  };
+}
+
+/**
+ * The learnings policy's permission readers, answered from the session: what GitHub said about
+ * the signed-in person at sign-in. Anyone else has no access.
+ */
+function sessionAccess(session: DashboardSession): Omit<LearningDeps, "store"> {
+  const isSelf = (login: string) => login.toLowerCase() === session.login.toLowerCase();
+  return {
+    async permissions(repo, login) {
+      const name = repo.toLowerCase();
+      if (!isSelf(login) || !session.repos.includes(name)) return "none";
+      return session.writeRepos.includes(name) ? "write" : "read";
+    },
+    async orgRoles(org, login) {
+      const name = org.toLowerCase();
+      if (!isSelf(login) || !session.orgs.includes(name)) return "none";
+      return session.ownerOrgs.includes(name) ? "admin" : "member";
+    },
+  };
+}
+
+async function listLearnings(
+  deps: DashboardDeps,
+  session: DashboardSession,
+  status: string | undefined,
+): Promise<DashboardResponse> {
+  const wanted = status ?? "pending";
+  if (!(LEARNING_STATUSES as readonly string[]).includes(wanted)) {
+    return json(400, { error: "unknown status" });
+  }
+  const lists = await Promise.all(
+    session.orgs.map((org) => deps.learnings.list({ org, status: wanted as LearningStatus })),
+  );
+  const learnings = lists
+    .flat()
+    .filter((learning) => canSee(session, learning))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, LEARNINGS_LIMIT)
+    .map(learningView);
+  return json(200, { learnings });
+}
+
+async function changeLearning(
+  deps: DashboardDeps,
+  session: DashboardSession,
+  id: string,
+  action: "approve" | "reject",
+): Promise<DashboardResponse> {
+  const learning = await deps.learnings.get(id);
+  // One the person can't see doesn't exist, as far as they can tell.
+  if (learning === undefined || !canSee(session, learning)) {
+    return json(404, { error: "no such learning" });
+  }
+  const policy: LearningDeps = { store: deps.learnings, ...sessionAccess(session) };
+  const actor = { login: session.login };
+  const result =
+    action === "approve"
+      ? await approveLearning(policy, id, actor)
+      : await forgetLearning(policy, id, actor);
+  if (result.outcome === "refused") return json(403, { error: result.reason });
+  deps.log("dashboard learning changed", {
+    id,
+    action,
+    outcome: result.outcome,
+    login: session.login,
+  });
+  return json(200, {
+    outcome: result.outcome,
+    learning: result.learning === undefined ? undefined : learningView(result.learning),
+  });
+}
+
+/** The feedback report's categories, and its declined findings in the person's repositories. */
+async function acceptance(
+  deps: DashboardDeps,
+  session: DashboardSession,
+): Promise<DashboardResponse> {
+  const stored = await deps.feedbackReport();
+  if (stored === undefined) return json(200, { report: null });
+  const report = feedbackReportSchema.safeParse(stored);
+  if (!report.success) {
+    deps.log("dashboard feedback report unreadable");
+    return json(200, { report: null });
+  }
+  return json(200, {
+    report: {
+      ...report.data,
+      declined: report.data.declined.filter((entry) =>
+        session.repos.includes(entry.repo.toLowerCase()),
+      ),
+    },
+  });
 }
 
 /** Handles one request to `/api/*`. */
@@ -218,12 +367,18 @@ export async function handleDashboardRequest(
     return json(401, { error: "signed-out" }, cookies);
   }
   const { session } = current;
+  const action = request.method === "POST" ? LEARNING_ACTION.exec(request.path) : null;
+  if (action?.[1] !== undefined && (action[2] === "approve" || action[2] === "reject")) {
+    return changeLearning(deps, session, action[1], action[2]);
+  }
   switch (route) {
     case "GET /api/me":
       return json(200, {
         login: session.login,
         orgs: session.orgs,
         repos: session.repos.length,
+        writeRepos: session.writeRepos.length,
+        ownerOrgs: session.ownerOrgs,
         expiresAt: session.expiresAt.toISOString(),
       });
     case "GET /api/repos":
@@ -238,6 +393,19 @@ export async function handleDashboardRequest(
       if (repos === undefined) return json(404, { error: "no such repository" });
       return json(200, { runs: await deps.store.recentRuns(repos, RUNS_LIMIT) });
     }
+    case "GET /api/learnings":
+      return listLearnings(deps, session, request.query.status);
+    case "GET /api/usage": {
+      const now = deps.now();
+      const since = new Date(now.getTime() - USAGE_DAYS * 24 * 3600 * 1000);
+      return json(200, {
+        days: USAGE_DAYS,
+        providers: await deps.store.providerUse(session.repos, since),
+        cooldowns: await deps.store.cooldowns(now),
+      });
+    }
+    case "GET /api/acceptance":
+      return acceptance(deps, session);
     default:
       return json(404, { error: "not found" });
   }

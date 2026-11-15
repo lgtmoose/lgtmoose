@@ -466,6 +466,13 @@ export const dashboardSessions = pgTable(
     orgs: jsonb("orgs").$type<string[]>().notNull(),
     /** Lowercased owner/name of every repository the person can see through the App. */
     repos: jsonb("repos").$type<string[]>().notNull(),
+    /**
+     * Of `repos`, those where GitHub said at sign-in that the person has write access or more:
+     * what approving or retiring a repo's learning needs (NIC-840).
+     */
+    writeRepos: jsonb("write_repos").$type<string[]>().notNull().default([]),
+    /** Of `orgs`, those the person owns (org role `admin`; a user account's own login). */
+    ownerOrgs: jsonb("owner_orgs").$type<string[]>().notNull().default([]),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: createdAt(),
   },

@@ -1,6 +1,6 @@
 # Dashboard
 
-The dashboard shows open findings and review runs for the repositories you can see on GitHub. Members of the organizations in `allowedOrgs` sign in with GitHub; nobody else can.
+The dashboard shows open findings, review runs, learnings, provider usage and acceptance by rule category for the repositories you can see on GitHub. You can approve and reject learnings there. Members of the organizations in `allowedOrgs` sign in with GitHub; nobody else can.
 
 It's deployed by default as the `Lgtmoose-Dashboard` stack. Set `dashboard: false` in `lgtmoose.config.ts` to leave it out.
 
@@ -14,28 +14,44 @@ The stack's outputs `DashboardUrl` and `OAuthCallbackUrl` hold the same URLs.
 
 ## What it shows
 
-| Page          | What's on it                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------------- |
-| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review |
-| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                 |
-| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used |
+| Page          | What's on it                                                                                                                                                                     |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review                                                                                |
+| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                                                                                                |
+| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used                                                                                |
+| Learnings     | [Learnings](learning.md) by status: pending ones with **Approve** and **Reject**, active ones with **Reject**, and retired ones. Each shows its scope, author, source PR and use |
+| Usage         | Each provider's batches, tokens, cost, limit hits and fallbacks in your repositories over the last 30 days, and the providers sitting out a cooldown now                         |
+| Acceptance    | The [feedback report](feedback.md)'s acceptance by rule category, and its declined findings in your repositories                                                                 |
 
-Each page can be filtered to one repository. Findings' text is shown as plain text, never rendered as HTML or Markdown.
+Findings, runs and repositories can be filtered to one repository. Findings' and learnings' text is shown as plain text, never rendered as HTML or Markdown.
 
-Not built yet: the pending learnings queue (approve and reject), the learnings list, provider usage and limit hits, and acceptance by rule category ([Feedback signals](feedback.md) has those numbers in its report). They come in a follow-up PR.
+### Approving and rejecting learnings
+
+**Approve** makes a pending learning active. **Reject** retires a pending or active one, like `@lgtmoose forget <id>`: its row and its history stay. Both go through the same policy as the PR commands, with you as the actor, so the `learning_events` history records your login:
+
+- A repository or path learning needs write access or higher on that repository.
+- An org-wide learning needs an owner of the org. For a user account in `allowedOrgs`, that user.
+
+The dashboard learns your access when you sign in: the repositories listing GitHub returns for your own token includes your permission on each, and the org memberships API gives your role. Both are kept in your session. The dashboard never asks the App, so its private key stays out of the dashboard. The catch: a change on GitHub reaches the dashboard at your next sign-in, so access that was taken away lasts up to 8 hours. Signing out and in again picks up a change at once.
+
+### Usage and acceptance
+
+- Usage counts batches in your repositories only. Cooldowns apply to every review in the deployment, so everyone signed in sees them.
+- The acceptance numbers per category cover every repository LGTMoose reviews, as the reconciler's report does; the dashboard can't split them by repository. Its list of declined findings shows only those in your repositories. Without a report yet (the reconciler writes one each day), the page says so.
 
 ## How sign-in works
 
 - The dashboard is one CloudFront distribution: the page from a private S3 bucket, and its API at `/api/*`. The browser only ever talks to that one origin, so there's no CORS and the session cookie is first-party.
 - **Sign in with GitHub** uses the App's OAuth with a `state` value and PKCE. The code GitHub sends back is exchanged by the dashboard API, with the client secret, never in the browser.
-- With your GitHub token, the API checks that you're an active member of an allowed org (for a user account in `allowedOrgs`, that you're that user), and lists the repositories you can see through the App's installations there. Then it drops the token: it's never stored or sent to the browser.
-- You get a session for 8 hours, or less if GitHub's token expires sooner. The browser keeps a random token in an HttpOnly, Secure, SameSite=Lax cookie (`__Host-lgtmoose_session`); the database keeps only its SHA-256, with your login, orgs and repositories. Signing out deletes it.
+- With your GitHub token, the API checks that you're an active member of an allowed org (for a user account in `allowedOrgs`, that you're that user) and whether you own it, and lists the repositories you can see through the App's installations there, with your permission on each. Then it drops the token: it's never stored or sent to the browser.
+- You get a session for 8 hours, or less if GitHub's token expires sooner. The browser keeps a random token in an HttpOnly, Secure, SameSite=Lax cookie (`__Host-lgtmoose_session`); the database keeps only its SHA-256, with your login, orgs, the orgs you own, your repositories and the ones you can write to. Signing out deletes it.
 - Every API answer is limited to the repositories you could see at sign-in. A repository you can't see answers "not found".
 
 ## Security
 
-- The dashboard API is its own Lambda, separate from the internet-facing webhook gateway. It can read the database, `lgtmoose/github-app-oauth` and a signing key the stack generates. It can't read the App's private key, the webhook secret or any model credential.
-- Requests that change anything (today, only signing out) must come from the dashboard's own origin (`Origin`, and `Sec-Fetch-Site` when the browser sends it).
+- The dashboard API is its own Lambda, separate from the internet-facing webhook gateway. It can read the database, `lgtmoose/github-app-oauth`, a signing key the stack generates, and one object in the artifact bucket: the feedback report, `reports/feedback/latest.json`. It can't read the App's private key, the webhook secret, any model credential, transcripts or anything else in that bucket.
+- Requests that change anything (signing out, approving and rejecting learnings) must be POSTs from the dashboard's own origin (`Origin`, and `Sec-Fetch-Site` when the browser sends it), with the session cookie.
+- A learning outside your repositories and orgs answers "not found", whether or not it exists.
 - CloudFront sends these headers on every response: a Content-Security-Policy that allows scripts, styles and connections only from the dashboard itself and no framing, HSTS for two years, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 - The API is throttled to 10 requests a second (bursts of 20).
 
@@ -43,10 +59,12 @@ See [Security](security.md) and the threat model in `SECURITY.md`.
 
 ## Known limits
 
-- What you can see is fixed at sign-in: someone removed from the org or a repository keeps what their session shows for up to 8 hours.
+- What you can see and change is fixed at sign-in: someone removed from the org or a repository, or whose write access or ownership is taken away, keeps what their session shows and can still approve and reject there for up to 8 hours. Sign-out ends it at once; there's no way yet to end someone else's session except deleting their rows from `dashboard_sessions`.
 - A person with a session sees every open finding in their repositories, including its text, as they would on GitHub.
 - Only repositories of the App's installations on allowed orgs are listed, at most 2000 per person.
 - The dashboard's API Gateway URL is reachable directly too, but browsers never send the session cookie there.
 - There's no custom domain yet: the dashboard is at its `cloudfront.net` address.
 - Runs show their providers only where usage was recorded; otherwise "—".
+- Acceptance by category is deployment-wide, not per repository (see above). Its per-category numbers say nothing about any one repository's findings.
+- The learnings page shows the newest 200 learnings of a status, without paging.
 - `lgtmoose destroy` leaves `lgtmoose/github-app-oauth` in Secrets Manager, like the App's other secrets.

@@ -1,4 +1,11 @@
-import { dashboardSessions, findings, providerUsage, pullRequests, reviewRuns } from "@lgtmoose/db";
+import {
+  dashboardSessions,
+  findings,
+  providerCooldowns,
+  providerUsage,
+  pullRequests,
+  reviewRuns,
+} from "@lgtmoose/db";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 
@@ -11,7 +18,32 @@ export interface DashboardSession {
   login: string;
   orgs: string[];
   repos: string[];
+  /** Of `repos`, those GitHub said at sign-in the person can write to. */
+  writeRepos: string[];
+  /** Of `orgs`, those the person owns. */
+  ownerOrgs: string[];
   expiresAt: Date;
+}
+
+/** One provider's use by review runs in the person's repositories, over a window. */
+export interface ProviderUse {
+  providerId: string;
+  /** Batches (attempts) recorded. */
+  batches: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  /** Attempts that hit a rate or plan limit. */
+  limitHits: number;
+  /** Attempts that moved on to another provider. */
+  fallbacks: number;
+}
+
+/** A provider sitting out after a limit, for every run of the deployment. */
+export interface ProviderCooldown {
+  providerId: string;
+  until: string;
+  reason: string;
 }
 
 export interface RepoSummary {
@@ -67,6 +99,10 @@ export interface DashboardStore {
   openFindings(repos: readonly string[], limit: number): Promise<OpenFinding[]>;
   /** The newest review runs in `repos`, at most `limit`. */
   recentRuns(repos: readonly string[], limit: number): Promise<RunSummary[]>;
+  /** Provider use by runs in `repos` since `since`, by provider. */
+  providerUse(repos: readonly string[], since: Date): Promise<ProviderUse[]>;
+  /** Providers cooling down at `now`. */
+  cooldowns(now: Date): Promise<ProviderCooldown[]>;
 }
 
 const SEVERITY_ORDER = sql`case ${findings.severity} when 'blocking' then 0 when 'should_fix' then 1 else 2 end`;
@@ -90,7 +126,14 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         .limit(1);
       return row === undefined
         ? undefined
-        : { login: row.login, orgs: row.orgs, repos: row.repos, expiresAt: row.expiresAt };
+        : {
+            login: row.login,
+            orgs: row.orgs,
+            repos: row.repos,
+            writeRepos: row.writeRepos,
+            ownerOrgs: row.ownerOrgs,
+            expiresAt: row.expiresAt,
+          };
     },
     async deleteSession(tokenHash) {
       await db.delete(dashboardSessions).where(eq(dashboardSessions.tokenHash, tokenHash));
@@ -217,6 +260,46 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         startedAt: iso(row.startedAt),
         finishedAt: iso(row.finishedAt),
         createdAt: row.createdAt.toISOString(),
+      }));
+    },
+    async providerUse(repos, since) {
+      if (repos.length === 0) return [];
+      const rows = await db
+        .select({
+          providerId: providerUsage.providerId,
+          batches: sql<number>`count(*)`,
+          inputTokens: sql<number>`coalesce(sum(${providerUsage.inputTokens}), 0)`,
+          outputTokens: sql<number>`coalesce(sum(${providerUsage.outputTokens}), 0)`,
+          costUsd: sql<string>`coalesce(sum(${providerUsage.costUsd}), 0)`,
+          limitHits: sql<number>`count(*) filter (where ${providerUsage.limitHit})`,
+          fallbacks: sql<number>`count(*) filter (where ${providerUsage.fellBackTo} is not null)`,
+        })
+        .from(providerUsage)
+        .innerJoin(reviewRuns, eq(providerUsage.runId, reviewRuns.id))
+        .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
+        .where(and(inRepos(repos), gt(providerUsage.createdAt, since)))
+        .groupBy(providerUsage.providerId)
+        .orderBy(providerUsage.providerId);
+      return rows.map((row) => ({
+        providerId: row.providerId,
+        batches: Number(row.batches),
+        inputTokens: Number(row.inputTokens),
+        outputTokens: Number(row.outputTokens),
+        costUsd: Number(row.costUsd),
+        limitHits: Number(row.limitHits),
+        fallbacks: Number(row.fallbacks),
+      }));
+    },
+    async cooldowns(now) {
+      const rows = await db
+        .select()
+        .from(providerCooldowns)
+        .where(gt(providerCooldowns.until, now))
+        .orderBy(providerCooldowns.providerId);
+      return rows.map((row) => ({
+        providerId: row.providerId,
+        until: row.until.toISOString(),
+        reason: row.reason,
       }));
     },
   };

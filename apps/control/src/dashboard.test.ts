@@ -1,3 +1,4 @@
+import { memoryLearningStore } from "@lgtmoose/learnings";
 import { describe, expect, it } from "vitest";
 import { CALLBACK_PATH, handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import type { DashboardGitHub } from "./dashboard-github.js";
@@ -78,6 +79,24 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
         createdAt: NOW.toISOString(),
       }));
     },
+    async providerUse(repos) {
+      return repos.length === 0
+        ? []
+        : [
+            {
+              providerId: "claude",
+              batches: repos.length,
+              inputTokens: 10,
+              outputTokens: 5,
+              costUsd: 0.25,
+              limitHits: 1,
+              fallbacks: 1,
+            },
+          ];
+    },
+    async cooldowns() {
+      return [{ providerId: "claude", until: NOW.toISOString(), reason: "plan_limit" }];
+    },
   };
 }
 
@@ -94,22 +113,25 @@ function fakeGitHub(overrides: Partial<DashboardGitHub> = {}): DashboardGitHub &
     async login() {
       return "Alice";
     },
-    async isOrgMember(_token, org) {
-      return org === "acme";
+    async orgRole(_token, org) {
+      return org === "acme" ? "member" : "none";
     },
     async visibleRepos() {
-      return ["acme/api", "acme/web"];
+      return { repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] };
     },
     ...overrides,
   };
 }
 
-function setup(overrides: Partial<DashboardDeps> = {}) {
+function setup(overrides: Partial<DashboardDeps> = {}, report?: unknown) {
   const store = memoryStore();
   const github = fakeGitHub();
+  const learnings = memoryLearningStore();
   const logs: string[] = [];
   const deps: DashboardDeps = {
     store,
+    learnings,
+    feedbackReport: async () => report,
     github,
     oauthClient: async () => ({ clientId: "Iv1.client", clientSecret: "secret" }),
     signingKey: async () => KEY,
@@ -119,7 +141,7 @@ function setup(overrides: Partial<DashboardDeps> = {}) {
     log: (message) => logs.push(message),
     ...overrides,
   };
-  return { deps, store, github, logs };
+  return { deps, store, github, learnings, logs };
 }
 
 function request(
@@ -198,7 +220,7 @@ describe("dashboard sign-in", () => {
   });
 
   it("refuses someone who isn't a member of an allowed org", async () => {
-    const { deps, store } = setup({ github: fakeGitHub({ isOrgMember: async () => false }) });
+    const { deps, store } = setup({ github: fakeGitHub({ orgRole: async () => "none" }) });
     const { back, session } = await signIn(deps);
     expect(back.headers.location).toBe("/#/signed-out?error=not-member");
     expect(session).toBeUndefined();
@@ -208,7 +230,10 @@ describe("dashboard sign-in", () => {
   it("counts a user account in allowedOrgs as its own owner's", async () => {
     const { deps, store } = setup({
       allowedOrgs: ["alice"],
-      github: fakeGitHub({ isOrgMember: async () => false, visibleRepos: async () => ["alice/x"] }),
+      github: fakeGitHub({
+        orgRole: async () => "none",
+        visibleRepos: async () => ({ repos: ["alice/x"], writeRepos: [] }),
+      }),
     });
     const { session } = await signIn(deps);
     expect(store.sessions.get(sha256Hex(session ?? ""))?.orgs).toEqual(["alice"]);

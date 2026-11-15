@@ -1,5 +1,10 @@
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { SECRET_NAMES, STACK_OUTPUTS, parseDeployConfig } from "@lgtmoose/config";
+import {
+  FEEDBACK_REPORT_KEY,
+  SECRET_NAMES,
+  STACK_OUTPUTS,
+  parseDeployConfig,
+} from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { DASHBOARD_CSP, ORIGIN_PARAMETER_NAME } from "./dashboard-stack.js";
@@ -117,6 +122,20 @@ describe("DashboardStack", () => {
     expect(policies).not.toContain("lgtmoose/provider/");
     expect(policies).not.toContain('"sqs:');
     expect(policies).not.toContain('"Action":"secretsmanager:*"');
+  });
+
+  it("lets the API read the feedback report and nothing else in the artifact bucket", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ ARTIFACT_BUCKET: Match.anyValue() }) },
+      VpcConfig: Match.anyValue(),
+    });
+    const policies = apiRolePolicies();
+    expect(policies).toContain(`/${FEEDBACK_REPORT_KEY}`);
+    expect(policies).toContain("s3:GetObject");
+    // No wildcard over the bucket's objects, and no writes.
+    expect(policies).not.toMatch(/\/\*"/);
+    expect(policies).not.toContain("s3:PutObject");
+    expect(policies).not.toContain("s3:DeleteObject");
   });
 
   it("publishes the dashboard's origin for its API, and the URLs operators need", () => {
