@@ -1,6 +1,11 @@
 # GitHub Pages builds this folder with Jekyll (.github/workflows/docs.yml). The pages are plain
 # Markdown that also reads well on github.com: links between them are relative `.md` links, which
 # jekyll-relative-links turns into page links, and titles come from each page's first heading.
+# Set here so the build doesn't depend on the Pages API, which only answers once Pages is
+# enabled for the repository.
+repository: lgtmoose/lgtmoose
+url: https://lgtmoose.github.io
+baseurl: /lgtmoose
 title: LGTMoose
 description: A self-hosted, open-source AI pull request reviewer.
 theme: jekyll-theme-primer
