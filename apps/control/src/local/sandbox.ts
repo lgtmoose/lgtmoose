@@ -27,6 +27,30 @@ import type { BatchRunner } from "./workflow.js";
 
 /** What the sandbox's local I/O treats as its batch's URLs (apps/sandbox `local-io.ts`). */
 export const LOCAL_BATCH_ORIGIN = "https://batch.invalid";
+/** Every sandbox's label. */
+export const SANDBOX_LABEL = "lgtmoose.sandbox";
+/** The runner that started a sandbox (NIC-1056). */
+export const RUNNER_LABEL = "lgtmoose.runner";
+
+/**
+ * Removes the sandboxes a stopped runner left behind: those labelled with `runnerId` or with a
+ * runner that isn't `live`. A sandbox with no runner label was started before runners were
+ * labelled (NIC-1056), by a runner that has stopped since. A live runner's are never removed.
+ */
+export async function removeStrandedSandboxes(
+  docker: Pick<Docker, "listByLabel" | "remove">,
+  runnerId: string,
+  live: ReadonlySet<string>,
+): Promise<number> {
+  let removed = 0;
+  for (const container of await docker.listByLabel(`${SANDBOX_LABEL}=1`)) {
+    const owner = container.labels[RUNNER_LABEL];
+    if (owner !== undefined && owner !== runnerId && live.has(owner)) continue;
+    await docker.remove(container.id);
+    removed += 1;
+  }
+  return removed;
+}
 /** Inside the container: the batch's volume, and the directory the sandbox reads and writes. */
 const BATCH_MOUNT = "/batch";
 const BATCH_DIR = `${BATCH_MOUNT}/io`;
@@ -64,6 +88,8 @@ export interface DockerBatchDeps {
   providers: readonly SandboxProvider[];
   image: string;
   network: string;
+  /** The runner process starting the sandboxes: their `lgtmoose.runner` label (NIC-1056). */
+  runnerId: string;
   /** The egress proxy, as sandboxes reach it on their network. */
   proxyUrl: string;
   timeoutMs: number;
@@ -142,7 +168,11 @@ async function runContainer(
     image: deps.image,
     network: deps.network,
     name: `lgtmoose-sandbox-${batch.runId.slice(0, 24)}-${batch.index}-${randomBytes(3).toString("hex")}`,
-    labels: { "lgtmoose.sandbox": "1", "lgtmoose.run": batch.runId },
+    labels: {
+      [SANDBOX_LABEL]: "1",
+      [RUNNER_LABEL]: deps.runnerId,
+      "lgtmoose.run": batch.runId,
+    },
     batchPath: BATCH_MOUNT,
     memoryBytes: deps.memoryBytes,
     cpus: deps.cpus,

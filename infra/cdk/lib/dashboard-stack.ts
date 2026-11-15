@@ -34,7 +34,7 @@ import { BucketDeployment, Source } from "aws-cdk-lib/aws-s3-deployment";
 import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import type { Construct } from "constructs";
-import { FEEDBACK_REPORT_KEY, SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
+import { DASHBOARD_CSP, FEEDBACK_REPORT_KEY, SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -45,20 +45,10 @@ const SITE_BUILD = join(REPO_ROOT, "apps/dashboard/scripts/build.mjs");
 export const ORIGIN_PARAMETER_NAME = "/lgtmoose/dashboard/origin";
 
 /**
- * Served on every dashboard response, the page and the API: scripts and styles from this origin
- * only (the page has no inline script or style), no framing, no plugins, and the API the only
- * place it connects to. Sign-in leaves by navigation, which CSP doesn't restrict.
+ * Served on every dashboard response, the page and the API (see `DASHBOARD_CSP` in
+ * @lgtmoose/config, which the compose dashboard server sends too).
  */
-export const DASHBOARD_CSP = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self'",
-  "img-src 'self'",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-].join("; ");
+export { DASHBOARD_CSP };
 
 export interface DashboardStackProps extends StackProps {
   vpc: IVpc;

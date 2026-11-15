@@ -222,17 +222,24 @@ export class Docker {
     );
   }
 
-  /** Containers with a label, to clean up what a crashed runner left. */
-  async listByLabel(label: string): Promise<string[]> {
+  /** Containers with a label, and their labels, to clean up what a stopped runner left. */
+  async listByLabel(label: string): Promise<{ id: string; labels: Record<string, string> }[]> {
     const filters = encodeURIComponent(JSON.stringify({ label: [label] }));
     const reply = await this.call("list", {
       method: "GET",
       path: `/containers/json?all=1&filters=${filters}`,
     });
-    const containers = JSON.parse(reply.toString("utf8")) as { Id?: unknown }[];
-    return containers.flatMap((container) =>
-      typeof container.Id === "string" ? [container.Id] : [],
-    );
+    const containers = JSON.parse(reply.toString("utf8")) as { Id?: unknown; Labels?: unknown }[];
+    return containers.flatMap((container) => {
+      if (typeof container.Id !== "string") return [];
+      const labels: Record<string, string> = {};
+      if (typeof container.Labels === "object" && container.Labels !== null) {
+        for (const [name, value] of Object.entries(container.Labels)) {
+          if (typeof value === "string") labels[name] = value;
+        }
+      }
+      return [{ id: container.Id, labels }];
+    });
   }
 }
 

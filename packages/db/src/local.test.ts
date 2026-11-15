@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgresQueue, postgresArtifactStore, postgresExecutions } from "./local.js";
 import { MIGRATIONS_FOLDER } from "./migrate.js";
+import { postgresRunners } from "./runners.js";
 
 const client = new PGlite({ extensions: { vector } });
 const db = drizzle(client);
@@ -197,7 +199,25 @@ describe("postgresExecutions", () => {
     const mine = await executions.claim("runner-a", 10);
     expect(mine.map((e) => e.name)).toContain("pr-3-abc");
     expect((await executions.claim("runner-b", 10)).map((e) => e.name)).not.toContain("pr-3-abc");
-    expect((await executions.orphaned("runner-b")).map((e) => e.name)).toContain("pr-3-abc");
-    expect((await executions.orphaned("runner-a")).map((e) => e.name)).not.toContain("pr-3-abc");
+    const arn = executions.arnOf("pr-3-abc");
+    // runner-a beats: its execution stays its own.
+    const runners = postgresRunners(db);
+    await runners.register("runner-a", "host-a");
+    expect((await executions.takeOrphans("runner-b", 60_000)).map((e) => e.arn)).not.toContain(arn);
+    // runner-a stopped a while ago: runner-b takes it, to fail it.
+    await db.execute(
+      sql`update local_runners set last_seen = now() - interval '5 minutes' where id = 'runner-a'`,
+    );
+    expect(await executions.takeOrphans("runner-b", 60_000)).toContainEqual({
+      arn,
+      previousOwner: "runner-a",
+    });
+    expect((await executions.get(arn))?.owner).toBe("runner-b");
+    // Nobody takes their own.
+    expect((await executions.takeOrphans("runner-b", 60_000)).map((e) => e.arn)).not.toContain(arn);
+    // runner-a owns nothing now: its row goes; runner-b's live one stays.
+    await runners.register("runner-b", "host-b");
+    expect(await runners.pruneStale(60_000)).toBe(1);
+    expect(await runners.live(60_000)).toEqual(new Set(["runner-b"]));
   });
 });

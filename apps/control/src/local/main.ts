@@ -1,10 +1,14 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { SECRET_NAMES } from "@lgtmoose/config";
+import { hostname } from "node:os";
+import { FEEDBACK_REPORT_KEY, SECRET_NAMES } from "@lgtmoose/config";
 import {
+  ensureDashboardRole,
   ensureGatewayRole,
   PostgresQueue,
   postgresArtifactStore,
   postgresExecutions,
+  postgresRunners,
+  runExclusive,
 } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER, runMigrations } from "@lgtmoose/db/migrate";
 import { drizzleLearningStore, retireUnusedLearnings } from "@lgtmoose/learnings";
@@ -28,7 +32,7 @@ import { drizzleReplyStore } from "../replies-aws.js";
 import { ticketSourceFor } from "../tickets.js";
 import { Docker, socketTransport } from "./docker.js";
 import { DEAD_QUEUE, JOBS_QUEUE, createRunner } from "./runner.js";
-import { dockerBatchRunner } from "./sandbox.js";
+import { dockerBatchRunner, removeStrandedSandboxes } from "./sandbox.js";
 import { fileCredentialSecrets, readSecretFile } from "./secrets.js";
 import { consumeConversations, every, queueSender, sweep } from "./services.js";
 import { checkEgressHosts, readLocalSettings } from "./settings.js";
@@ -36,12 +40,18 @@ import { checkEgressHosts, readLocalSettings } from "./settings.js";
 /**
  * The docker compose runner (NIC-843): one long-running process that does what the dispatcher
  * Lambda, the review state machine, the control and sandbox tasks, the conversation Lambda and
- * the scheduled Lambdas do on AWS, on one host, over Postgres and the Docker socket.
+ * the scheduled Lambdas do on AWS, over Postgres and the Docker socket. Several may run against
+ * one database (NIC-1056): each beats in `local_runners`, cleans up only after runners whose
+ * heartbeat is stale, and runs each scheduled job only while it holds that job's advisory lock.
  */
 
 const CONVERSATION_QUEUE = "conversation";
 const GITHUB_TIMEOUT_MS = 30_000;
 const TICK_MS = 1_000;
+/** How often a runner beats. LGTMOOSE_RUNNER_STALE_SECONDS must be well above it. */
+const HEARTBEAT_MS = 10_000;
+/** How often a runner looks for runners that stopped, to fail their runs. */
+const RECOVER_MS = 60_000;
 
 const appSecretSchema = z.object({
   appId: z.coerce.number().int().positive(),
@@ -74,22 +84,33 @@ async function main(): Promise<void> {
 
   // The schema first, then the gateway's login, which can only add jobs.
   await runMigrations({ connectionString: databaseUrl, migrationsFolder: MIGRATIONS_FOLDER });
+  // And the dashboard's, which reads reviews and changes only sessions and learnings' status.
   const gatewayPassword = process.env.LGTMOOSE_GATEWAY_DB_PASSWORD?.trim();
-  if (gatewayPassword !== undefined && gatewayPassword !== "") {
+  const dashboardPassword = process.env.LGTMOOSE_DASHBOARD_DB_PASSWORD?.trim();
+  {
     const client = new pg.Client({ connectionString: databaseUrl });
     await client.connect();
     try {
-      await ensureGatewayRole(client, gatewayPassword);
+      // Runners starting together would race on `create role`: one at a time.
+      await client.query("select pg_advisory_lock(hashtextextended('lgtmoose:roles', 0))");
+      if (gatewayPassword !== undefined && gatewayPassword !== "") {
+        await ensureGatewayRole(client, gatewayPassword);
+      }
+      if (dashboardPassword !== undefined && dashboardPassword !== "") {
+        await ensureDashboardRole(client, dashboardPassword, { reportKey: FEEDBACK_REPORT_KEY });
+      }
     } finally {
       await client.end();
     }
   }
+  const staleMs = whole("LGTMOOSE_RUNNER_STALE_SECONDS", 120, 45, 3600) * 1000;
 
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 10 });
   pool.on("error", (error) => log("database connection dropped", { error: error.message }));
   const db = drizzle({ client: pool });
   const store = postgresArtifactStore(db);
   const executions = postgresExecutions(db);
+  const runners = postgresRunners(db);
   const jobs = new PostgresQueue(db, JOBS_QUEUE);
   const dead = new PostgresQueue(db, DEAD_QUEUE);
   const conversations = new PostgresQueue(db, CONVERSATION_QUEUE);
@@ -128,11 +149,13 @@ async function main(): Promise<void> {
       `The sandbox network ${network} doesn't exist: start the runner with docker compose.`,
     );
   }
-  // Sandboxes a previous runner process left behind.
-  for (const id of await docker.listByLabel("lgtmoose.sandbox=1")) await docker.remove(id);
+  const owner = `runner-${randomUUID()}`;
+  const host = hostname();
+  await runners.register(owner, host);
+  // Sandboxes runners that have stopped left behind; never a live runner's.
+  await removeStrandedSandboxes(docker, owner, await runners.live(staleMs));
 
   const secrets = fileCredentialSecrets(secretsDir);
-  const owner = `runner-${randomUUID()}`;
   const runBatch = dockerBatchRunner({
     docker,
     store,
@@ -140,6 +163,7 @@ async function main(): Promise<void> {
     providers: settings.providers,
     image: required("LGTMOOSE_SANDBOX_IMAGE"),
     network,
+    runnerId: owner,
     proxyUrl: process.env.LGTMOOSE_PROXY_URL?.trim() || "http://egress-proxy:3128",
     timeoutMs: 30 * 60_000,
     memoryBytes: whole("LGTMOOSE_SANDBOX_MEMORY_MB", 4096, 512, 65_536) * 1024 * 1024,
@@ -174,10 +198,12 @@ async function main(): Promise<void> {
         maxReplyJudgements: config.maxReplyJudgements,
       },
       maxConcurrency: config.maxConcurrency,
+      runnerAlive: async (id) => (await runners.live(staleMs)).has(id),
       attempts: 3,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     },
     owner,
+    staleMs,
     maxExecutions: whole("LGTMOOSE_MAX_EXECUTIONS", 2, 1, 32),
     log,
   });
@@ -268,12 +294,45 @@ async function main(): Promise<void> {
     });
 
   await runner.recover();
-  log("runner started", { owner, providers: settings.providers.map((provider) => provider.id) });
+  log("runner started", {
+    owner,
+    host,
+    providers: settings.providers.map((provider) => provider.id),
+  });
 
-  const stops = [
-    every("reconcile", config.reconcileIntervalMinutes * 60_000, reconcileOnce, log, 60_000),
-    every("credential health", 6 * 3_600_000, health, log, 30_000),
+  /**
+   * A scheduled job, run by one runner at a time and about once per interval between them all:
+   * each runner's timer fires every `intervalMs`, and the job runs only where the lock is free
+   * and it hasn't run for half an interval.
+   */
+  const scheduled = (
+    name: string,
+    intervalMs: number,
+    task: () => Promise<unknown>,
+    firstAfterMs: number,
+  ) =>
     every(
+      name,
+      intervalMs,
+      () => runExclusive(pool, name, intervalMs / 2, task),
+      log,
+      firstAfterMs,
+    );
+  const stops = [
+    every("heartbeat", HEARTBEAT_MS, () => runners.heartbeat(owner, host), log),
+    every(
+      "recovery",
+      RECOVER_MS,
+      async () => {
+        await runner.recover();
+        await removeStrandedSandboxes(docker, owner, await runners.live(staleMs));
+        await runners.pruneStale(staleMs);
+      },
+      log,
+    ),
+    scheduled("reconcile", config.reconcileIntervalMinutes * 60_000, reconcileOnce, 60_000),
+    scheduled("credential health", 6 * 3_600_000, health, 30_000),
+    scheduled(
       "retention sweep",
       24 * 3_600_000,
       async () =>
@@ -281,7 +340,6 @@ async function main(): Promise<void> {
           "swept",
           await sweep({ artifacts: store, executions, queues: [jobs, dead, conversations] }),
         ),
-      log,
       5 * 60_000,
     ),
   ];
@@ -307,8 +365,9 @@ async function main(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, TICK_MS));
   }
   await Promise.all(stops.map((stopTask) => stopTask()));
-  // Running reviews finish; a later start fails what doesn't (`recover`).
+  // Running reviews finish; another runner, or a later start, fails what doesn't (`recover`).
   await runner.idle();
+  await runners.remove(owner);
   await pool.end();
 }
 

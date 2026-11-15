@@ -7,7 +7,13 @@ import { promisify } from "node:util";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import type { ReviewJob } from "@lgtmoose/core";
-import { PostgresQueue, postgresArtifactStore, postgresExecutions, reviewRuns } from "@lgtmoose/db";
+import {
+  PostgresQueue,
+  postgresArtifactStore,
+  postgresExecutions,
+  postgresRunners,
+  reviewRuns,
+} from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { cloneAtSha } from "@lgtmoose/git";
 import { runKeys, type BatchOutput, type PullRequest } from "@lgtmoose/pipeline";
@@ -181,8 +187,10 @@ function setup(options: { runBatch?: BatchRunner } = {}) {
       maxConcurrency: 2,
       attempts: 1,
       sleep: async () => undefined,
+      runnerAlive: async () => false,
     },
     owner,
+    staleMs: 60_000,
     maxExecutions: 2,
     log,
   });
@@ -324,5 +332,17 @@ describe("the compose runner", () => {
     expect(await t.runner.recover()).toBeGreaterThanOrEqual(1);
     expect(await t.executions.status(t.executions.arnOf(name))).toBe("FAILED");
     expect(t.logs.some((entry) => entry.fields?.error === RUNNER_RESTARTED)).toBe(true);
+  }, 60_000);
+
+  it("leaves a live runner's runs alone", async () => {
+    const t = setup();
+    const name = executionNameFor(t.prNumber);
+    await t.executions.start(name, { ...t.job(), debounceSeconds: 0 });
+    // Another runner, beating, runs it.
+    await postgresRunners(db).register("a-live-runner", "host-b");
+    await t.executions.claim("a-live-runner", 100);
+    await t.runner.recover();
+    const execution = await t.executions.get(t.executions.arnOf(name));
+    expect(execution).toMatchObject({ status: "RUNNING", owner: "a-live-runner" });
   }, 60_000);
 });
