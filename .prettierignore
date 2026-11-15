@@ -6,3 +6,5 @@ LICENSE
 packages/config/schema
 # Fixture sources: their line numbers are in fixture.json, so formatting must not move them.
 packages/evals/fixtures
+# Generated from the zod schemas: `pnpm --filter @lgtmoose/config docs` writes it, and a test checks it.
+docs/configuration.md

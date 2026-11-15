@@ -1,0 +1,67 @@
+name: Docs
+
+# Builds docs/ with GitHub Pages' Jekyll on every PR that touches it, and publishes it to GitHub
+# Pages from main. The repository's Pages source must be set to "GitHub Actions" (Settings →
+# Pages). The configuration reference in docs/configuration.md is generated from the zod schemas;
+# the main CI's tests check it's up to date.
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push to main replaces a queued one, but never cancels one that's
+# deploying.
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by commit, like every action in this workflow.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Jekyll doesn't fail on a broken link, so links between pages are checked first. The
+      # runner's own Node is enough: the checker has no dependencies.
+      - name: Check links between pages
+        run: |
+          node --test tools/docs/check-links.test.mjs
+          node tools/docs/check-links.mjs docs
+      - name: Build the site
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
+        with:
+          source: ./docs
+          destination: ./_site
+      - name: Upload the site
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ./_site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job can publish, and only from main.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
