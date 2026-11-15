@@ -55,3 +55,9 @@ export const CDK_CONTEXT = {
    */
   allowUnverifiedCursor: "lgtmoose:allowUnverifiedCursor",
 } as const;
+
+/**
+ * Where the reconciler keeps the latest feedback report (NIC-841) in the artifact bucket, for
+ * `lgtmoose feedback report` and the dashboard to read.
+ */
+export const FEEDBACK_REPORT_KEY = "reports/feedback/latest.json";

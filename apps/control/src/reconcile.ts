@@ -154,6 +154,10 @@ export interface ReconcileCounts {
   skippedStale: number;
   /** Active learnings retired for going unused 90 days (`retireUnusedLearnings`). */
   learningsRetired: number;
+  /** Our inline comments whose reactions were read into `feedback` (NIC-841). */
+  feedbackCommentsRead: number;
+  /** Rule categories below the feedback acceptance threshold, for a person to look at. */
+  categoriesFlagged: number;
   /** Installations, repositories or PRs that couldn't be checked, and failed label syncs. */
   errors: number;
 }
@@ -169,6 +173,8 @@ function emptyCounts(): ReconcileCounts {
     unreviewed: 0,
     skippedStale: 0,
     learningsRetired: 0,
+    feedbackCommentsRead: 0,
+    categoriesFlagged: 0,
     errors: 0,
   };
 }
@@ -433,6 +439,8 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     unreviewed: "Unreviewed",
     skippedStale: "SkippedStale",
     learningsRetired: "LearningsRetired",
+    feedbackCommentsRead: "FeedbackCommentsRead",
+    categoriesFlagged: "CategoriesFlagged",
     errors: "ReconcileErrors",
   };
   const entries = Object.entries(names) as [keyof ReconcileCounts, string][];

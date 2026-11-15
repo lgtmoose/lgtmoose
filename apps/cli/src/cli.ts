@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import type { AuthDeps } from "./auth/auth.js";
 import type { DeployDeps } from "./deploy/deploy.js";
+import type { FeedbackDeps } from "./feedback/feedback.js";
 import type { ReviewEnvironmentFactory } from "./review/review.js";
 import type { SetupDeps } from "./setup/setup.js";
 
@@ -13,6 +14,7 @@ export const COMMANDS = {
   deploy: "Deploy every CDK stack and point the App's webhook at it",
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
+  feedback: "Acceptance of findings per rule category: report, export-declined",
 } as const;
 
 export type Command = keyof typeof COMMANDS;
@@ -40,6 +42,8 @@ export interface RunOptions {
   deployDeps?: () => Promise<DeployDeps>;
   /** Builds the review dry run's I/O from its flags: GitHub, git and Claude Code by default. */
   reviewEnvironment?: ReviewEnvironmentFactory;
+  /** Builds feedback's I/O: the deploy config, AWS, GitHub and the disk by default. */
+  feedbackDeps?: () => Promise<FeedbackDeps>;
 }
 
 export async function run(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
@@ -70,6 +74,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
       options.reviewEnvironment ??
       (async (flags) => (await import("./review/deps.js")).defaultReviewEnvironment(flags));
     return runReviewCommand(argv.slice(1), environment);
+  }
+
+  if (argv[0] === "feedback") {
+    const { runFeedback } = await import("./feedback/feedback.js");
+    const getDeps =
+      options.feedbackDeps ??
+      (async () => (await import("./feedback/deps.js")).defaultFeedbackDeps());
+    return runFeedback(argv.slice(1), getDeps);
   }
 
   const { values, positionals } = parseArgs({

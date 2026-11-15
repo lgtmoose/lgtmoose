@@ -205,6 +205,11 @@ export const findings = pgTable(
     status: findingStatus("status").notNull().default("open"),
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
     githubThreadId: text("github_thread_id"),
+    /**
+     * When the reactions on this finding's inline comment were last read into `feedback`
+     * (NIC-841). The reconciler reads the least recently checked first, a few per run.
+     */
+    feedbackCheckedAt: timestamp("feedback_checked_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

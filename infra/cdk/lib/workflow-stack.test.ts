@@ -1,5 +1,10 @@
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { SECRET_NAMES, STACK_OUTPUTS, parseDeployConfig } from "@lgtmoose/config";
+import {
+  FEEDBACK_REPORT_KEY,
+  SECRET_NAMES,
+  STACK_OUTPUTS,
+  parseDeployConfig,
+} from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type LgtmooseStacks } from "./app.js";
 import { PROXY_URL } from "./proxy-stack.js";
@@ -655,10 +660,28 @@ describe("reconciler", () => {
     ]);
     const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
     expect(secrets).toHaveLength(2);
-    expect(actions(granted).some((a) => a.startsWith("s3:") || a.startsWith("states:"))).toBe(
-      false,
-    );
+    expect(actions(granted).some((a) => a.startsWith("states:"))).toBe(false);
     expect(actions(granted)).not.toContain("sqs:ReceiveMessage");
+    // In the artifact bucket, only writing the feedback report: no reads, nothing else.
+    const s3 = granted.filter((s) => actions([s]).some((a) => a.startsWith("s3:")));
+    expect(s3.length).toBeGreaterThan(0);
+    for (const statement of s3) {
+      expect(
+        actions([statement]).every((a) => a.startsWith("s3:PutObject") || a.startsWith("s3:Abort")),
+      ).toBe(true);
+      expect(JSON.stringify(statement.Resource)).toContain(FEEDBACK_REPORT_KEY);
+    }
+  });
+
+  it("writes the feedback report to the artifact bucket, with the config's settings", () => {
+    const [, fn] = reconciler();
+    const env = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(env.ARTIFACT_BUCKET).toBeDefined();
+    expect(env).toMatchObject({
+      FEEDBACK_ACCEPTANCE_THRESHOLD: "0.5",
+      FEEDBACK_MIN_SAMPLES: "10",
+      FEEDBACK_MAX_COMMENTS: "100",
+    });
   });
 
   it("takes its interval from the config", () => {

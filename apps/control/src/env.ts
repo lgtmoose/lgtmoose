@@ -1,3 +1,5 @@
+import { DEFAULT_ACCEPTANCE_THRESHOLD, DEFAULT_MIN_SAMPLES } from "@lgtmoose/core";
+import { DEFAULT_MAX_FEEDBACK_COMMENTS } from "./feedback.js";
 import { DEFAULT_MAX_REPLY_JUDGEMENTS } from "./replies.js";
 
 /** What the control task reads from its environment, set by the Workflow stack. */
@@ -100,6 +102,10 @@ export interface ReconcileEnv {
   shadow: boolean;
   /** `RECONCILE_LOOKBACK_HOURS`: reviews are queued only for PRs updated this recently. */
   lookbackHours: number;
+  /** `ARTIFACT_BUCKET`: where the feedback report goes. Without it, none is written. */
+  artifactBucket?: string;
+  /** Feedback signals (NIC-841): `FEEDBACK_*`. */
+  feedback: { threshold: number; minSamples: number; maxComments: number };
 }
 
 export const DEFAULT_RECONCILE_LOOKBACK_HOURS = 24;
@@ -124,11 +130,31 @@ export function readReconcileEnv(env: Env): ReconcileEnv | { missing: string[] }
   if (!Number.isSafeInteger(lookbackHours) || lookbackHours <= 0) {
     throw new Error("RECONCILE_LOOKBACK_HOURS must be a whole number of hours.");
   }
+  const threshold = Number(
+    env.FEEDBACK_ACCEPTANCE_THRESHOLD?.trim() || DEFAULT_ACCEPTANCE_THRESHOLD,
+  );
+  if (!(threshold >= 0 && threshold <= 1)) {
+    throw new Error("FEEDBACK_ACCEPTANCE_THRESHOLD must be a number from 0 to 1.");
+  }
+  const whole = (name: string, fallback: number, min: number) => {
+    const value = Number(env[name]?.trim() || fallback);
+    if (!Number.isSafeInteger(value) || value < min) {
+      throw new Error(`${name} must be a whole number of at least ${min}.`);
+    }
+    return value;
+  };
+  const artifactBucket = env.ARTIFACT_BUCKET?.trim();
   return {
     ...read,
     allowedOrgs,
     shadow: env.LGTMOOSE_SHADOW?.trim() !== "false",
     lookbackHours,
+    ...(artifactBucket ? { artifactBucket } : {}),
+    feedback: {
+      threshold,
+      minSamples: whole("FEEDBACK_MIN_SAMPLES", DEFAULT_MIN_SAMPLES, 1),
+      maxComments: whole("FEEDBACK_MAX_COMMENTS", DEFAULT_MAX_FEEDBACK_COMMENTS, 0),
+    },
   };
 }
 

@@ -6,18 +6,20 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 
 ## Components
 
-| Component         | Runs on                               | Holds GitHub credentials | Job                                                                       |
-| ----------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
-| Gateway           | Lambda behind API Gateway             | Webhook secret only      | Verify HMAC, dedupe deliveries, enqueue                                   |
-| Queue             | SQS FIFO, group = `owner/repo#pr`     | No                       | Order jobs per PR                                                         |
-| Dispatcher        | Lambda                                | No                       | Start a Step Functions run, supersede older runs                          |
-| Review workflow   | Step Functions                        | No                       | prepare → map batches → cross-file → map verify → post                    |
-| Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                   |
-| Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch  |
-| Credential broker | Lambdas + Secrets Manager             | No                       | Lease each sandbox task one model credential; write back refreshed tokens |
-| Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands; replies queued for the judge. No model calls.       |
-| Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels. No model calls.     |
-| State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                             |
+| Component         | Runs on                               | Holds GitHub credentials | Job                                                                                   |
+| ----------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------- |
+| Gateway           | Lambda behind API Gateway             | Webhook secret only      | Verify HMAC, dedupe deliveries, enqueue                                               |
+| Queue             | SQS FIFO, group = `owner/repo#pr`     | No                       | Order jobs per PR                                                                     |
+| Dispatcher        | Lambda                                | No                       | Start a Step Functions run, supersede older runs                                      |
+| Review workflow   | Step Functions                        | No                       | prepare → map batches → cross-file → map verify → post                                |
+| Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                               |
+| Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch              |
+| Credential broker | Lambdas + Secrets Manager             | No                       | Lease each sandbox task one model credential; write back refreshed tokens             |
+| Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands; replies queued for the judge. No model calls.                   |
+| Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels, read reactions. No model calls. |
+| State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                                         |
+
+The reconciler also reads reactions on LGTMoose's inline comments and writes the feedback report: see [feedback signals](feedback.md).
 
 The reconciler runs every `reconcileIntervalMinutes` (30 by default). It queues a review only for a PR updated within `reconcileLookbackHours` (24 by default, at least the interval) whose head no run has started for. Older PRs are counted as `SkippedStale` and left alone, so a first run after a deploy, or a newly added repository, doesn't review every old open PR. Status-label re-syncs and the restore after a force-push back to a reviewed commit apply to every open PR, however old.
 

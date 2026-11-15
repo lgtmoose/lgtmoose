@@ -136,12 +136,34 @@ describe("readReconcileEnv", () => {
       allowedOrgs: ["acme", "beta"],
       shadow: true,
       lookbackHours: 24,
+      feedback: { threshold: 0.5, minSamples: 10, maxComments: 100 },
     });
     expect(
       readReconcileEnv({ ...env, LGTMOOSE_SHADOW: "false", RECONCILE_LOOKBACK_HOURS: "6" }),
     ).toMatchObject({ shadow: false, lookbackHours: 6 });
     expect(() => readReconcileEnv({ ...env, RECONCILE_LOOKBACK_HOURS: "1.5" })).toThrow(
       "RECONCILE_LOOKBACK_HOURS",
+    );
+  });
+
+  it("reads the feedback settings and the artifact bucket", () => {
+    expect(
+      readReconcileEnv({
+        ...env,
+        ARTIFACT_BUCKET: "artifacts",
+        FEEDBACK_ACCEPTANCE_THRESHOLD: "0.3",
+        FEEDBACK_MIN_SAMPLES: "5",
+        FEEDBACK_MAX_COMMENTS: "0",
+      }),
+    ).toMatchObject({
+      artifactBucket: "artifacts",
+      feedback: { threshold: 0.3, minSamples: 5, maxComments: 0 },
+    });
+    expect(() => readReconcileEnv({ ...env, FEEDBACK_ACCEPTANCE_THRESHOLD: "2" })).toThrow(
+      "FEEDBACK_ACCEPTANCE_THRESHOLD",
+    );
+    expect(() => readReconcileEnv({ ...env, FEEDBACK_MIN_SAMPLES: "0" })).toThrow(
+      "FEEDBACK_MIN_SAMPLES",
     );
   });
 
