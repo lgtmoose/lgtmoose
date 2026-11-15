@@ -99,7 +99,7 @@ Tag v0.1.0 once M1–M6's acceptance criteria pass. Open now:
 - [ ] NIC-853: the AWS smoke test passes on a real account (needs the account set up, see
       [smoke-test.md](smoke-test.md)).
 - [ ] NIC-848: the pilot rollout on real repositories.
-- [ ] NIC-840: the dashboard.
+- [ ] NIC-840: the dashboard. Sign-in, open findings and review runs are built; the learnings queue, provider usage and acceptance pages are a follow-up.
 - [ ] NIC-843: the docker compose deployment (part 1, the Postgres queue, store and runner, is in; part 2, the compose files and sandbox, is next).
 - [ ] NIC-838: the monthly learnings sync pull request (waiting on the decision between
       `contents: write` for every install and an opt-in permission).

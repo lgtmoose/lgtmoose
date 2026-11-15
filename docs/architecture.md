@@ -18,6 +18,7 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 | Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands; replies queued for the judge. No model calls.                   |
 | Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels, read reactions. No model calls. |
 | State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                                         |
+| Dashboard         | CloudFront + S3, its own API Lambda   | OAuth client only        | GitHub sign-in for org members; open findings and runs ([Dashboard](dashboard.md))    |
 
 The reconciler also reads reactions on LGTMoose's inline comments and writes the feedback report: see [feedback signals](feedback.md).
 

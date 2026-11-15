@@ -1,0 +1,21 @@
+{
+  "name": "@lgtmoose/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The LGTMoose dashboard: a static page served by CloudFront, calling the dashboard API at /api.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
+    "test": "vitest run"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "catalog:"
+  }
+}

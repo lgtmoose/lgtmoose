@@ -220,3 +220,49 @@ export async function storeAppSecrets(
     );
   }
 }
+
+const oauthSchema = z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) });
+
+function parseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Makes sure `lgtmoose/github-app-oauth` holds the App's OAuth client, copied from
+ * `lgtmoose/github-app`, for the dashboard's sign-in. The dashboard API reads only this copy,
+ * never the App's private key. Rewritten when the App's client changed (a new App from setup).
+ */
+export async function ensureDashboardOAuth(
+  store: SetupSecretStore,
+): Promise<"created" | "updated" | "unchanged"> {
+  const raw = await store.read(SECRET_NAMES.githubApp);
+  if (raw === undefined) {
+    throw new Error(`${SECRET_NAMES.githubApp} doesn't exist. Run ${CLI} setup first.`);
+  }
+  const app = oauthSchema.safeParse(parseJson(raw));
+  if (!app.success) {
+    throw new Error(
+      `${SECRET_NAMES.githubApp} has no clientId and clientSecret, which the dashboard's sign-in ` +
+        `needs. Run ${CLI} setup and create a new App, or set dashboard: false.`,
+    );
+  }
+  const wanted = { clientId: app.data.clientId, clientSecret: app.data.clientSecret };
+  const current = await store.read(SECRET_NAMES.githubAppOAuth);
+  const stored = current === undefined ? undefined : oauthSchema.safeParse(parseJson(current));
+  if (
+    stored?.success === true &&
+    stored.data.clientId === wanted.clientId &&
+    stored.data.clientSecret === wanted.clientSecret
+  ) {
+    return "unchanged";
+  }
+  return store.write(
+    SECRET_NAMES.githubAppOAuth,
+    JSON.stringify(wanted),
+    "OAuth client of the LGTMoose GitHub App, for the dashboard's sign-in. Written by lgtmoose deploy.",
+  );
+}

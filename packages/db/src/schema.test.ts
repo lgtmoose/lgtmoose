@@ -47,6 +47,7 @@ describe("migrations", () => {
     );
     expect(tables.rows.map((row) => row.tablename)).toEqual([
       "artifacts",
+      "dashboard_sessions",
       "dispatched_executions",
       "feedback",
       "files_reviewed",

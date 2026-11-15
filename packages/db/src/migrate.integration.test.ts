@@ -54,6 +54,7 @@ describe.skipIf(adminUrl === undefined)("runMigrations on Postgres", () => {
     );
     expect(tables.map((row) => row.tablename)).toEqual([
       "artifacts",
+      "dashboard_sessions",
       "dispatched_executions",
       "feedback",
       "files_reviewed",

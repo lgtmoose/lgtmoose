@@ -520,7 +520,9 @@ export const deployConfigSchema = z
     dashboard: z
       .boolean()
       .default(true)
-      .describe("Reserved for the dashboard. Not used yet: no dashboard is deployed."),
+      .describe(
+        "Deploy the dashboard (Lgtmoose-Dashboard): a CloudFront site where members of allowedOrgs sign in with GitHub and see open findings and review runs for the repositories they can see. false: no dashboard stack.",
+      ),
   })
   .strict()
   .superRefine((config, ctx) => {
