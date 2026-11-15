@@ -2,7 +2,7 @@
 
 The dashboard shows open findings, review runs, learnings, provider usage and acceptance by rule category for the repositories you can see on GitHub. You can approve and reject learnings there. Members of the organizations in `allowedOrgs` sign in with GitHub; nobody else can.
 
-It's deployed by default as the `Lgtmoose-Dashboard` stack. Set `dashboard: false` in `lgtmoose.config.ts` to leave it out.
+It's deployed by default as the `Lgtmoose-Dashboard` stack. Set `dashboard: false` in `lgtmoose.config.ts` to leave it out. With [docker compose](compose.md), it's the `dashboard` service: see [The dashboard](compose.md#the-dashboard) there for setting it up.
 
 ## Setting it up
 
@@ -55,6 +55,8 @@ The dashboard learns your access when you sign in: the repositories listing GitH
 - CloudFront sends these headers on every response: a Content-Security-Policy that allows scripts, styles and connections only from the dashboard itself and no framing, HSTS for two years, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 - The API is throttled to 10 requests a second (bursts of 20).
 
+Under docker compose, one Node server sends the same headers and does the same checks, with the same rate limit per client address. It holds a database login of its own, which can read reviews and change only its sessions and learnings' status, and reads the feedback report through a view of that one artifact. It has the OAuth client and its signing key, in a secrets directory of its own, and no Docker socket or App private key. See [The dashboard](compose.md#the-dashboard).
+
 See [Security](security.md) and the threat model in `SECURITY.md`.
 
 ## Known limits
@@ -62,8 +64,8 @@ See [Security](security.md) and the threat model in `SECURITY.md`.
 - What you can see and change is fixed at sign-in: someone removed from the org or a repository, or whose write access or ownership is taken away, keeps what their session shows and can still approve and reject there for up to 8 hours. Sign-out ends it at once; there's no way yet to end someone else's session except deleting their rows from `dashboard_sessions`.
 - A person with a session sees every open finding in their repositories, including its text, as they would on GitHub.
 - Only repositories of the App's installations on allowed orgs are listed, at most 2000 per person.
-- The dashboard's API Gateway URL is reachable directly too, but browsers never send the session cookie there.
-- There's no custom domain yet: the dashboard is at its `cloudfront.net` address.
+- On AWS, the dashboard's API Gateway URL is reachable directly too, but browsers never send the session cookie there.
+- On AWS there's no custom domain yet: the dashboard is at its `cloudfront.net` address. Under docker compose it's at `DASHBOARD_ORIGIN`, behind your reverse proxy.
 - Runs show their providers only where usage was recorded; otherwise "—".
 - Acceptance by category is deployment-wide, not per repository (see above). Its per-category numbers say nothing about any one repository's findings.
 - The learnings page shows the newest 200 learnings of a status, without paging.

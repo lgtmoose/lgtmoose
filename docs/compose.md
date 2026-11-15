@@ -1,6 +1,7 @@
 # docker compose
 
-LGTMoose on one host, without AWS: a gateway, a runner, an egress proxy and Postgres, in
+LGTMoose on one host, without AWS: a gateway, one or more runners, an egress proxy, Postgres and
+optionally the dashboard, in
 [deploy/compose/compose.yaml](https://github.com/lgtmoose/lgtmoose/blob/main/deploy/compose/compose.yaml). Reviews behave as on AWS. The
 same code runs, with Postgres in place of SQS, S3 and Step Functions, and one Docker container
 per batch in place of a Fargate task.
@@ -9,19 +10,23 @@ Read [The Docker socket](#the-docker-socket) before you run it.
 
 ## What runs
 
-| Service        | Does                                                                                                       | Reaches                                                                               |
-| -------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `gateway`      | Verifies GitHub's webhooks and queues jobs                                                                 | The internet (inbound, on `GATEWAY_PORT`), Postgres as a login that may only add jobs |
-| `runner`       | The dispatcher, the review workflow, prepare and post, `@lgtmoose` commands and replies, and the schedules | Postgres, GitHub, the secrets directory, the Docker socket                            |
-| `egress-proxy` | Lets sandboxes reach the model APIs in `LGTMOOSE_EGRESS_HOSTS`, and nothing else                           | The internet (outbound), the sandbox network                                          |
-| sandboxes      | One per batch, started and removed by the runner: run the reviewer on that batch                           | The sandbox network only: the egress proxy is their one way out                       |
-| `postgres`     | Jobs, runs, findings, learnings, artifacts                                                                 | The internal database network only                                                    |
+| Service        | Does                                                                                                       | Reaches                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `gateway`      | Verifies GitHub's webhooks and queues jobs                                                                 | The internet (inbound, on `GATEWAY_PORT`), Postgres as a login that may only add jobs                    |
+| `runner`       | The dispatcher, the review workflow, prepare and post, `@lgtmoose` commands and replies, and the schedules | Postgres, GitHub, the secrets directory, the Docker socket                                               |
+| `dashboard`    | The [dashboard](dashboard.md)'s page and API, on one origin. Optional: the `dashboard` profile             | The internet (inbound, on `DASHBOARD_PORT`, and GitHub), Postgres as its own login, `secrets/dashboard/` |
+| `egress-proxy` | Lets sandboxes reach the model APIs in `LGTMOOSE_EGRESS_HOSTS`, and nothing else                           | The internet (outbound), the sandbox network                                                             |
+| sandboxes      | One per batch, started and removed by the runner: run the reviewer on that batch                           | The sandbox network only: the egress proxy is their one way out                                          |
+| `postgres`     | Jobs, runs, findings, learnings, artifacts                                                                 | The internal database network only                                                                       |
 
-On a schedule, the runner also:
+On a schedule, the runners also:
 
-- runs the reconciler every `reconcileIntervalMinutes`, with retiring unused learnings and reading feedback;
-- checks the stored credentials every 6 hours;
-- once a day, deletes artifacts and ended runs older than 30 days, as the S3 lifecycle rule does on AWS.
+- run the reconciler every `reconcileIntervalMinutes`, with retiring unused learnings and reading feedback;
+- check the stored credentials every 6 hours;
+- once a day, delete artifacts and ended runs older than 30 days, as the S3 lifecycle rule does on AWS.
+
+With several runners, each of these runs on one of them at a time, about once per interval
+between them (see [More than one runner](#more-than-one-runner)).
 
 ## Setting it up
 
@@ -110,6 +115,84 @@ GitHub has to reach the gateway over HTTPS. The gateway listens on `GATEWAY_BIND
 Every delivery is checked against `GITHUB_WEBHOOK_SECRET` before anything else, so an exposed
 gateway refuses forged webhooks either way.
 
+## The dashboard
+
+The [dashboard](dashboard.md) runs as the `dashboard` service: one Node server for the page and
+its API, on one origin, with the same sign-in, sessions and checks as on AWS. It's in the
+`dashboard` profile, so it starts only when you ask for it.
+
+1. In the GitHub App's settings, note its **Client ID** and generate a **client secret**, and add
+   the callback URL `https://<your dashboard host>/api/auth/callback` under **Identifying and
+   authorizing users → Callback URL**.
+
+2. Put the OAuth client in a directory of the dashboard's own, `secrets/dashboard/`. It sees
+   only this directory: not the App's private key or any other secret.
+
+   ```bash
+   mkdir -p secrets/dashboard
+   ```
+
+   The file `secrets/dashboard/lgtmoose__github-app-oauth` holds JSON:
+   `{ "clientId": "Iv1.…", "clientSecret": "…" }`. Then `chmod 700` the directory, `chmod 600`
+   the file, and `chown 10001` both, as for `secrets/`: on its first start the dashboard
+   generates its session signing key and stores it there, as
+   `lgtmoose__dashboard-signing-key`. Delete that file to sign everyone out at the next start.
+
+3. In `.env`, set `DASHBOARD_DB_PASSWORD` (16+ characters) and `DASHBOARD_ORIGIN`, the https
+   address people open it at, without a path: `https://lgtmoose.example.com`. Sign-in redirects
+   there, and changes are accepted only from it.
+
+4. Start it with the others:
+
+   ```bash
+   docker compose --profile dashboard up -d
+   ```
+
+   The runner creates the dashboard's database login at start, so restart the runner if you
+   set `DASHBOARD_DB_PASSWORD` after it started.
+
+5. Point your reverse proxy's dashboard host at `DASHBOARD_BIND:DASHBOARD_PORT`,
+   `127.0.0.1:3001` by default, over HTTPS, and set `TRUST_PROXY_HOPS` as for the gateway. The
+   session cookie is `__Host-` and `Secure`, so the dashboard works over HTTPS only.
+
+What it can do:
+
+- **Its database login** (`lgtmoose_dashboard`) reads pull requests, findings, review runs,
+  provider use and cooldowns, and learnings; creates, reads and deletes its own sessions; and
+  approves or retires a learning (`status`, `updated_at` and `retired_at` on `learnings`, and a
+  new `learning_events` row). It reads the feedback report through a view of that one artifact:
+  not the `artifacts` table, which holds transcripts and run data. It can't read the job queue
+  or executions, change findings or runs, or delete anything but sessions.
+- **No Docker socket and no App private key.** The OAuth client and its signing key are the
+  only secrets it holds. Who may approve or reject a learning is decided as on AWS, from what
+  GitHub said about the person at sign-in.
+- **The same headers as CloudFront sends** on every response, the page and the API: the same
+  Content-Security-Policy, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: no-referrer`. Only `GET` and `POST` reach the API, at 10 requests a second
+  (bursts of 20) per client address, the address `TRUST_PROXY_HOPS` says to trust.
+
+## More than one runner
+
+Several runners can share one database and the host's Docker, for more reviews at once:
+
+```bash
+docker compose up -d --scale runner=2
+```
+
+- **Jobs and reviews.** Runners take jobs, comment jobs and executions with `FOR UPDATE SKIP
+LOCKED`, so each goes to one runner, and a PR's jobs are still handled one at a time, in order.
+  `LGTMOOSE_MAX_EXECUTIONS` is per runner.
+- **Heartbeats.** Each runner process registers in `local_runners` and beats every 10 seconds.
+  Its executions record its ID, and its sandboxes carry its ID in the `lgtmoose.runner` label.
+- **A runner that stops.** At start and every minute, each runner fails the executions of
+  runners whose heartbeat is older than `LGTMOOSE_RUNNER_STALE_SECONDS` (120 by default), as a
+  lost Fargate task fails its step on AWS, and removes their sandboxes. A live runner's
+  executions and sandboxes are never touched. Keep the threshold well above the heartbeat: a
+  runner that can't reach the database for longer than it counts as stopped.
+- **Schedules.** The reconciler, the credential check and the retention sweep each run behind a
+  Postgres advisory lock, on one runner at a time, and only when they haven't run for half
+  their interval, so they run about once per interval between all the runners.
+
 ## The Docker socket
 
 **The runner holds the Docker socket, and the Docker socket is root on the host.** Whatever can
@@ -153,8 +236,9 @@ docker compose --profile build build
 docker compose up -d
 ```
 
-The runner applies new migrations at start. Reviews running when it stops are failed on the
-next start and redone on the next push or reconcile.
+The runner applies new migrations at start. Reviews running when a runner stops are failed by
+another runner, or by the next start, once its heartbeat is stale, and redone on the next push
+or reconcile.
 
 ```bash
 docker compose down
@@ -164,6 +248,5 @@ stops everything and keeps the database volume; `docker compose down -v` deletes
 
 ## Not built yet
 
-- The dashboard (an AWS stack) has no compose service.
 - Release images (`images.source: release`) apply to AWS only; compose builds from the checkout.
 - Bedrock and Vertex providers, and Bedrock embeddings.

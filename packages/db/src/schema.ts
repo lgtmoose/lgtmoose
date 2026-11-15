@@ -540,6 +540,29 @@ export const localExecutions = pgTable(
 );
 
 /**
+ * docker compose runners (NIC-1056): one row per runner process, its heartbeat in `last_seen`.
+ * A runner whose heartbeat is stale has stopped: its executions and sandboxes are another
+ * runner's to clean up, and a live runner's never are.
+ */
+export const localRunners = pgTable("local_runners", {
+  /** The runner process's ID, as `local_executions.owner` and its sandboxes' label hold it. */
+  id: text("id").primaryKey(),
+  /** The host (container) it runs on, for people reading the table. */
+  host: text("host").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  lastSeen: timestamp("last_seen", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * docker compose schedules (NIC-1056): when each of the runners' scheduled jobs last ran, so
+ * that with several runners each job runs about once per interval, not once per runner.
+ */
+export const localSchedules = pgTable("local_schedules", {
+  name: text("name").primaryKey(),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }).notNull(),
+});
+
+/**
  * Dashboard sign-ins (NIC-840). The browser holds only a random token in an HttpOnly cookie; the
  * row is found by the token's SHA-256, so reading the table never yields a usable cookie. No
  * GitHub token is stored: what the signed-in person may see is read from GitHub once, at sign-in,

@@ -59,6 +59,8 @@ describe("migrations", () => {
       "learnings",
 
       "local_executions",
+      "local_runners",
+      "local_schedules",
       "pending_replies",
       "provider_cooldowns",
       "provider_usage",

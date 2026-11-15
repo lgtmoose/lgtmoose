@@ -8,9 +8,13 @@ FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23f
 RUN corepack enable
 WORKDIR /repo
 COPY . .
-RUN pnpm install --frozen-lockfile --filter "@lgtmoose/control..." \
+# The dashboard's static page too, for the docker compose dashboard service (dist/local/
+# dashboard-main.js serves it from /app/site); unused on AWS, where CloudFront serves it.
+RUN pnpm install --frozen-lockfile --filter "@lgtmoose/control..." --filter @lgtmoose/dashboard \
   && pnpm --filter "@lgtmoose/control..." run build \
-  && pnpm --filter @lgtmoose/control deploy --legacy --prod /out
+  && pnpm --filter @lgtmoose/dashboard run build \
+  && pnpm --filter @lgtmoose/control deploy --legacy --prod /out \
+  && cp -r apps/dashboard/dist /out/site
 
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 

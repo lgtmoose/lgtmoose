@@ -27,7 +27,9 @@ describe.skipIf(!enabled)("sandbox containers on Docker", () => {
   }, 60_000);
 
   afterAll(async () => {
-    for (const id of await docker.listByLabel(`lgtmoose.test=${NETWORK}`)) await docker.remove(id);
+    for (const { id } of await docker.listByLabel(`lgtmoose.test=${NETWORK}`)) {
+      await docker.remove(id);
+    }
     await transport({ method: "DELETE", path: `/v1.43/networks/${NETWORK}` });
   });
 
@@ -77,6 +79,7 @@ describe.skipIf(!enabled)("sandbox containers on Docker", () => {
     } finally {
       await docker.remove(id);
     }
-    expect(await docker.listByLabel(`lgtmoose.test=${NETWORK}`)).not.toContain(id);
+    const left = await docker.listByLabel(`lgtmoose.test=${NETWORK}`);
+    expect(left.map((container) => container.id)).not.toContain(id);
   }, 120_000);
 });

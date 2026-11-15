@@ -37,11 +37,14 @@ export interface LocalWorkflowDeps {
   executions: LocalExecutions;
   runBatch: BatchRunner;
   settings: PrepareSettings;
-  /**
-   * This runner, as the post step's review claim names it (an ECS task ARN on AWS). A claim held
-   * by another runner counts as stopped: one host runs one runner.
-   */
+  /** This runner, as the post step's review claim names it (an ECS task ARN on AWS). */
   owner: string;
+  /**
+   * Whether another runner is alive (its heartbeat isn't stale), for a review claim it holds:
+   * a live runner's claim stands, as a running ECS task's does; a stopped runner's can be taken
+   * over (NIC-1056).
+   */
+  runnerAlive(runnerId: string): Promise<boolean>;
   /** The most batches of one run reviewed at once (the map state's `maxConcurrency`). */
   maxConcurrency: number;
   /** How many times prepare and post are tried before the run fails (the states' retries). */
@@ -163,7 +166,8 @@ export async function runExecution(
       post(control, prepared.runId, {
         running,
         attempt: { id: randomUUID(), taskArn: deps.owner },
-        taskStatus: async (holder) => (holder === deps.owner ? "RUNNING" : "STOPPED"),
+        taskStatus: async (holder) =>
+          holder === deps.owner || (await deps.runnerAlive(holder)) ? "RUNNING" : "STOPPED",
         executionStatus: (executionArn) => deps.executions.status(executionArn),
       }),
     );

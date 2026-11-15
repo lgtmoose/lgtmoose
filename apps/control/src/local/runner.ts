@@ -19,8 +19,10 @@ export const RUNNER_RESTARTED = "Lgtmoose.RunnerRestarted";
  *    Lambda's own code), which starts, dedupes and stops executions;
  * 2. picks up executions that nobody runs yet and runs each (`runExecution`) in the background,
  *    up to `maxExecutions` at once.
- * At start, executions a previous runner process left running are failed, as a lost ECS task
- * fails its step: the next push or the reconciler reviews the PR again.
+ * Several runners may share one database (NIC-1056). Each beats in `local_runners`; at start and
+ * every so often (`recover`), a runner fails the executions of runners whose heartbeat is stale,
+ * as a lost ECS task fails its step: the next push or the reconciler reviews the PR again. A
+ * live runner's executions are never touched.
  */
 
 /** The queue the gateway puts jobs on (`JOBS_QUEUE` in the gateway's server.ts). */
@@ -49,7 +51,7 @@ export interface RunnerDeadQueue {
 /** What the runner needs of `postgresExecutions` in @lgtmoose/db. */
 export interface RunnerExecutions extends Executions {
   claim(owner: string, max: number): Promise<{ arn: string; input: unknown }[]>;
-  orphaned(owner: string): Promise<{ arn: string }[]>;
+  takeOrphans(owner: string, staleMs: number): Promise<{ arn: string; previousOwner: string }[]>;
   finish(arn: string, status: "SUCCEEDED" | "FAILED", cause?: string): Promise<void>;
 }
 
@@ -62,6 +64,11 @@ export interface RunnerDeps {
   workflow: Omit<LocalWorkflowDeps, "executions" | "owner">;
   /** This process: unique per start, so a restart can tell its own executions from orphans. */
   owner: string;
+  /**
+   * How long a runner's heartbeat may be silent before it counts as stopped and its executions
+   * are failed: well above the heartbeat interval.
+   */
+  staleMs: number;
   /** The most executions run at once. */
   maxExecutions: number;
   /** Where comment jobs go (`DispatchDeps.conversation`). */
@@ -146,9 +153,9 @@ export function createRunner(deps: RunnerDeps) {
   }
 
   return {
-    /** Fails the executions a previous runner process left running. */
+    /** Fails the executions runners that have stopped left running (stale heartbeats). */
     async recover(): Promise<number> {
-      const orphans = await deps.executions.orphaned(deps.owner);
+      const orphans = await deps.executions.takeOrphans(deps.owner, deps.staleMs);
       for (const orphan of orphans) {
         try {
           await fail(deps.workflow.control, orphan.arn, RUNNER_RESTARTED);
@@ -159,7 +166,10 @@ export function createRunner(deps: RunnerDeps) {
           });
         }
         await deps.executions.finish(orphan.arn, "FAILED", "the runner restarted");
-        deps.log("orphaned execution failed", { executionArn: orphan.arn });
+        deps.log("orphaned execution failed", {
+          executionArn: orphan.arn,
+          owner: orphan.previousOwner,
+        });
       }
       return orphans.length;
     },

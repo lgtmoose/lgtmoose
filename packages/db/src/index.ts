@@ -11,6 +11,8 @@ export {
   type QueuedMessage,
 } from "./local.js";
 export { GATEWAY_ROLE, ensureGatewayRole } from "./gateway-role.js";
+export { DASHBOARD_REPORT_VIEW, DASHBOARD_ROLE, ensureDashboardRole } from "./dashboard-role.js";
+export { postgresRunners, runExclusive, type LockClient, type PostgresRunners } from "./runners.js";
 export {
   DbCooldownStore,
   insertProviderUsage,

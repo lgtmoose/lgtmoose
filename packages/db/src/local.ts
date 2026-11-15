@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { and, eq, sql } from "drizzle-orm";
-import { artifacts, jobQueue, localExecutions } from "./schema.js";
+import { artifacts, jobQueue, localExecutions, localRunners } from "./schema.js";
 import type { Database } from "./usage.js";
 
 /**
- * docker compose (NIC-843): Postgres stand-ins for SQS FIFO, S3 and Step Functions' executions,
- * for a single host. Each keeps the guarantees the code built on the AWS services relies on; the
- * comments say which. Unused on AWS.
+ * docker compose (NIC-843): Postgres stand-ins for SQS FIFO, S3 and Step Functions' executions.
+ * Each keeps the guarantees the code built on the AWS services relies on, with several runners
+ * at once (NIC-1056); the comments say which. Unused on AWS.
  */
 
 /** Rows from a raw query, from node-postgres and PGlite alike. */
@@ -327,22 +327,38 @@ export function postgresExecutions(db: Database) {
       return found.filter((execution): execution is LocalExecution => execution !== undefined);
     },
     /**
-     * Running executions owned by a runner other than `owner`: their runner stopped (a single
-     * host runs one runner). They're failed by the new runner, as a lost ECS task fails its step.
+     * Takes the running executions whose runner has stopped, for `owner` to fail, as a lost ECS
+     * task fails its step: those owned by a runner with no heartbeat in the last `staleMs` (or
+     * no row at all). A live runner's are never taken, and two runners recovering at once never
+     * take the same one. If `owner` stops before failing them, they're its own, and recovered
+     * once its heartbeat is stale in turn.
      */
-    async orphaned(owner: string): Promise<LocalExecution[]> {
-      const found = await db
-        .select({ arn: localExecutions.arn })
-        .from(localExecutions)
-        .where(
-          and(
-            eq(localExecutions.status, "RUNNING"),
-            sql`${localExecutions.owner} is not null`,
-            sql`${localExecutions.owner} <> ${owner}`,
-          ),
-        );
-      const all = await Promise.all(found.map((row) => read(row.arn)));
-      return all.filter((execution): execution is LocalExecution => execution !== undefined);
+    async takeOrphans(
+      owner: string,
+      staleMs: number,
+    ): Promise<{ arn: string; previousOwner: string }[]> {
+      const taken = await rows<{ arn: string; previous_owner: string }>(
+        db,
+        sql`
+          update ${localExecutions} x set owner = ${owner}, updated_at = now()
+          from (
+            select e.arn, e.owner from ${localExecutions} e
+            where e.status = 'RUNNING'
+              and e.owner is not null
+              and e.owner <> ${owner}
+              and not exists (
+                select 1 from ${localRunners} r
+                where r.id = e.owner
+                  and r.last_seen > now() - make_interval(secs => ${staleMs / 1000})
+              )
+          ) stale
+          -- Compare and set on the owner: a run another runner took meanwhile has a new owner
+          -- when this update gets its row, so it's left alone. (A row lock with SKIP LOCKED
+          -- isn't enough: its recheck doesn't look at local_runners again.)
+          where x.arn = stale.arn and x.owner = stale.owner and x.status = 'RUNNING'
+          returning x.arn, stale.owner as previous_owner`,
+      );
+      return taken.map((row) => ({ arn: row.arn, previousOwner: row.previous_owner }));
     },
     /** Deletes executions that ended before `before` (the retention sweep). */
     async pruneEnded(before: Date): Promise<number> {

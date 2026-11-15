@@ -2,7 +2,12 @@ import { runKeys, type BatchOutput } from "@lgtmoose/pipeline";
 import { describe, expect, it } from "vitest";
 import type { CredentialSecrets } from "../credentials.js";
 import type { SandboxContainer } from "./docker.js";
-import { dockerBatchRunner, LOCAL_BATCH_ORIGIN, type SandboxProvider } from "./sandbox.js";
+import {
+  dockerBatchRunner,
+  LOCAL_BATCH_ORIGIN,
+  removeStrandedSandboxes,
+  type SandboxProvider,
+} from "./sandbox.js";
 import { readTar, writeTar } from "./tar.js";
 
 const RUN = "0f0f0f0f-1111-4222-8333-444455556666";
@@ -178,6 +183,7 @@ async function setup(providers: SandboxProvider[], behave: Parameters<typeof fak
     providers,
     image: "lgtmoose-sandbox:test",
     network: "lgtmoose-sandbox",
+    runnerId: "runner-test",
     proxyUrl: "http://egress-proxy:3128",
     timeoutMs: 60_000,
     memoryBytes: 1 << 30,
@@ -203,7 +209,11 @@ describe("the docker batch runner", () => {
     expect([...(container?.copiedIn.keys() ?? [])].sort()).toEqual(
       [keys.batchUrls(0), keys.batchInput(0), keys.checkout].map((key) => `io/${name(key)}`).sort(),
     );
-    expect(container?.spec).toMatchObject({ network: "lgtmoose-sandbox", batchPath: "/batch" });
+    expect(container?.spec).toMatchObject({
+      network: "lgtmoose-sandbox",
+      batchPath: "/batch",
+      labels: { "lgtmoose.sandbox": "1", "lgtmoose.runner": "runner-test", "lgtmoose.run": RUN },
+    });
     expect(container?.spec.env).toMatchObject({
       LGTMOOSE_PROVIDER: "claude",
       LGTMOOSE_PROVIDER_CREDENTIAL: "claude-token",
@@ -263,5 +273,27 @@ describe("the docker batch runner", () => {
     await t.run();
     expect(t.fake.created).toHaveLength(2);
     expect(t.fake.created.every((c) => c.removed)).toBe(true);
+  });
+});
+
+describe("removeStrandedSandboxes", () => {
+  it("removes this runner's and stopped runners' sandboxes, never a live runner's", async () => {
+    const containers = [
+      { id: "mine", labels: { "lgtmoose.sandbox": "1", "lgtmoose.runner": "runner-a" } },
+      { id: "live", labels: { "lgtmoose.sandbox": "1", "lgtmoose.runner": "runner-b" } },
+      { id: "stale", labels: { "lgtmoose.sandbox": "1", "lgtmoose.runner": "runner-c" } },
+      // Started before sandboxes were labelled with their runner.
+      { id: "unlabelled", labels: { "lgtmoose.sandbox": "1" } },
+    ];
+    const removed: string[] = [];
+    const docker = {
+      listByLabel: async (label: string) => (label === "lgtmoose.sandbox=1" ? containers : []),
+      remove: async (id: string) => {
+        removed.push(id);
+      },
+    };
+    const live = new Set(["runner-a", "runner-b"]);
+    expect(await removeStrandedSandboxes(docker, "runner-a", live)).toBe(3);
+    expect(removed.sort()).toEqual(["mine", "stale", "unlabelled"]);
   });
 });

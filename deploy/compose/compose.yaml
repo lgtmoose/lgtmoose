@@ -3,12 +3,19 @@
 #   cp .env.example .env            # then fill it in
 #   docker compose build            # the runner, gateway, egress proxy and sandbox images
 #   docker compose up -d
+#   docker compose --profile dashboard up -d      # with the dashboard
+#   docker compose up -d --scale runner=2         # more than one runner
 #
 # What each service can reach:
 # - gateway:      the internet (webhooks come in on GATEWAY_PORT) and Postgres, as a login that
 #                 can only add jobs. No Docker socket, no App key.
+# - dashboard:    the internet (people sign in on DASHBOARD_PORT, and it asks GitHub who they
+#                 are), Postgres as a login that reads reviews and changes only sessions and
+#                 learnings' status, and secrets/dashboard/ only: the OAuth client and its own
+#                 signing key. No Docker socket, no App key. Optional: the `dashboard` profile.
 # - runner:       Postgres, GitHub (through the egress network), the secrets directory, and the
-#                 Docker socket, to start sandboxes. The only service with the socket.
+#                 Docker socket, to start sandboxes. The only service with the socket. Several
+#                 may run (`--scale runner=N`): each fails only stopped runners' reviews.
 # - egress-proxy: the internet, for LGTMOOSE_EGRESS_HOSTS only, and the sandbox network.
 # - sandboxes:    started by the runner, one per batch, on the internal sandbox network only:
 #                 their one way out is the egress proxy. No socket, no GitHub token, no host path.
@@ -59,6 +66,11 @@ services:
       HOME: /tmp
       TMPDIR: /work
       LGTMOOSE_GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env}
+      # The dashboard's login: created when set, for the `dashboard` profile.
+      LGTMOOSE_DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:-}
+      # How long a runner's heartbeat (every 10 s) may be silent before other runners fail its
+      # reviews and remove its sandboxes.
+      LGTMOOSE_RUNNER_STALE_SECONDS: ${LGTMOOSE_RUNNER_STALE_SECONDS:-120}
       LGTMOOSE_CONFIG: /config/lgtmoose.config.json
       LGTMOOSE_SECRETS_DIR: /run/lgtmoose/secrets
       LGTMOOSE_SANDBOX_IMAGE: lgtmoose-sandbox:local
@@ -102,6 +114,32 @@ services:
       - ${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-3000}:3000
     networks: [db, web]
 
+  dashboard:
+    <<: *hardened
+    # The runner's image, with the dashboard's page in /app/site.
+    image: lgtmoose-control:local
+    entrypoint: ["node", "/app/dist/local/dashboard-main.js"]
+    profiles: [dashboard]
+    depends_on:
+      runner:
+        condition: service_started
+    environment:
+      # The login the runner creates: reads reviews; changes sessions and learnings' status only.
+      DATABASE_URL: postgres://lgtmoose_dashboard:${DASHBOARD_DB_PASSWORD:-}@postgres:5432/lgtmoose
+      # Where people open it, https://<host>: the OAuth callback is <origin>/api/auth/callback.
+      DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-}
+      ALLOWED_ORGS: ${ALLOWED_ORGS:?set ALLOWED_ORGS in .env}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+      LGTMOOSE_SECRETS_DIR: /run/lgtmoose/secrets
+      LGTMOOSE_SITE_DIR: /app/site
+      PORT: "3001"
+    volumes:
+      # Its own secrets only: the OAuth client, and the signing key it generates on first start.
+      - ./secrets/dashboard:/run/lgtmoose/secrets
+    ports:
+      - ${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-3001}:3001
+    networks: [db, web]
+
   egress-proxy:
     <<: *hardened
     build:
@@ -132,7 +170,7 @@ networks:
     internal: true
   # Outbound for the runner (GitHub) and the proxy (model APIs).
   egress: {}
-  # Inbound webhooks to the gateway.
+  # Inbound webhooks to the gateway, and the dashboard's visitors and its calls to GitHub.
   web: {}
 
 volumes:

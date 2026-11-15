@@ -69,3 +69,20 @@ export const CDK_CONTEXT = {
  * `lgtmoose feedback report` and the dashboard to read.
  */
 export const FEEDBACK_REPORT_KEY = "reports/feedback/latest.json";
+
+/**
+ * The dashboard's Content-Security-Policy, on every response, the page and the API: scripts and
+ * styles from its own origin only (the page has no inline script or style), no framing, no
+ * plugins, and the API the only place it connects to. Sign-in leaves by navigation, which CSP
+ * doesn't restrict. CloudFront sends it on AWS and the dashboard server under docker compose.
+ */
+export const DASHBOARD_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
