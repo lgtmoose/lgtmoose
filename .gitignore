@@ -16,4 +16,4 @@ lgtmoose.config.ts
 eval-report/
 
 # Scratch folder for packages/db check-migrations
-.migrations-check/
+.migrations-scratch/

@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "lint": "oxlint --type-aware --deny-warnings -c ../../.oxlintrc.json .",
     "test": "vitest run --exclude \"**/*.integration.test.ts\"",
-    "generate": "drizzle-kit generate",
+    "generate": "tsx scripts/generate.ts",
     "check-migrations": "tsx scripts/check-migrations.ts",
     "test:integration": "vitest run integration"
   },

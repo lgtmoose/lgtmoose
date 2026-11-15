@@ -7,7 +7,7 @@
 **/coverage
 .git
 .claude
-.migrations-check
+.migrations-scratch
 *.log
 .env
 .env.*
