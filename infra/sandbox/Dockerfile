@@ -91,6 +91,16 @@ RUN if [ "${INSTALL_CURSOR_AGENT}" = "1" ]; then \
 ENV DISABLE_AUTOUPDATER=1 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
+# npm installed the CLIs above; nothing runs it after that (the CLIs don't update themselves:
+# auto-update is off and the root filesystem is read-only). Removing npm, npx, corepack and
+# yarn takes their bundled packages, and those packages' advisories, out of the image. The
+# CLIs, installed globally next to npm, stay, and must still run.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-v* \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn \
+  /usr/local/bin/yarnpkg \
+  && claude --version \
+  && codex --version
+
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin lgtmoose
 COPY --from=build --chown=root:root /out /app
 USER lgtmoose

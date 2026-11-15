@@ -14,6 +14,7 @@ const pullSchema = z.object({
   body: z.string().nullable(),
   state: z.string(),
   user: z.object({ login: z.string() }).nullable(),
+  author_association: z.string().optional(),
   head: z.object({ sha: SHA, ref: z.string() }),
   base: z.object({ sha: SHA, ref: z.string() }),
 });
@@ -21,21 +22,20 @@ const pullSchema = z.object({
 const issueCommentSchema = z.object({
   id: z.number().int().optional(),
   body: z.string().nullable().optional(),
-  user: z.object({ login: z.string() }).nullable(),
+  user: z.object({ login: z.string(), type: z.string().optional() }).nullable(),
+  author_association: z.string().optional(),
+  performed_via_github_app: z.object({ id: z.number().int() }).nullable().optional(),
+  html_url: z.string().optional(),
 });
 
 const reviewSchema = z.object({ state: z.string(), commit_id: z.string() });
 
 const reviewCommentSchema = issueCommentSchema.extend({
-  user: z.object({ login: z.string(), type: z.string().optional() }).nullable(),
   path: z.string(),
   line: z.number().int().positive().nullable().optional(),
   start_line: z.number().int().positive().nullable().optional(),
   side: z.enum(["LEFT", "RIGHT"]).nullable().optional(),
-  author_association: z.string().optional(),
   in_reply_to_id: z.number().int().positive().optional(),
-  performed_via_github_app: z.object({ id: z.number().int() }).nullable().optional(),
-  html_url: z.string().optional(),
 });
 
 /** A bot per GitHub: an App's account (`type: "Bot"`), or a `[bot]` login. */
@@ -74,6 +74,7 @@ export function githubPullReader(get: GitHubGet): PullReader {
         title: pr.title,
         body: pr.body ?? "",
         author: pr.user?.login ?? "ghost",
+        ...(pr.author_association === undefined ? {} : { association: pr.author_association }),
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         baseSha: pr.base.sha,
@@ -87,7 +88,18 @@ export function githubPullReader(get: GitHubGet): PullReader {
         list(`${base(target)}/pulls/${target.number}/comments`, reviewCommentSchema, limit),
       ]);
       const comments: PullComment[] = [
-        ...general.map((c) => ({ author: c.user?.login ?? "ghost", body: c.body ?? "" })),
+        // General comments carry who wrote them too, for the prompt-injection detector. Without a
+        // `path` they're never taken for other reviewers' findings.
+        ...general.map((c) => ({
+          author: c.user?.login ?? "ghost",
+          body: c.body ?? "",
+          authorType: authorTypeOf(c.user),
+          ...(c.author_association === undefined ? {} : { association: c.author_association }),
+          ...(typeof c.performed_via_github_app?.id === "number"
+            ? { viaAppId: c.performed_via_github_app.id }
+            : {}),
+          ...(c.html_url === undefined ? {} : { url: c.html_url }),
+        })),
         ...inline.map((c) => ({
           ...(c.id === undefined ? {} : { id: c.id }),
           author: c.user?.login ?? "ghost",

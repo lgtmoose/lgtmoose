@@ -9,6 +9,7 @@ export {
   TIERS,
   credentialConcurrency,
   defineConfig,
+  isGitHubHost,
   isPlanCredential,
   deployConfigSchema,
   modelFor,

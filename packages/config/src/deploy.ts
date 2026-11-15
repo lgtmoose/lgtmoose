@@ -154,6 +154,25 @@ const hostname = z
     "use an exact lowercase hostname, without scheme, port or wildcard",
   );
 
+/** GitHub's own domains (github.com, its API, raw content, assets, uploads and ghe.com). */
+const GITHUB_DOMAINS = [
+  "github.com",
+  "githubusercontent.com",
+  "githubassets.com",
+  "githubapp.com",
+  "ghe.com",
+] as const;
+
+/**
+ * Whether a host is one of GitHub's, which `extraEgressHosts` refuses: the sandbox holds no
+ * GitHub token, and an allowed GitHub host would let a steered model write to it with any token
+ * it was given in the PR. A GitHub Enterprise Server on its own domain can't be told apart.
+ */
+export function isGitHubHost(host: string): boolean {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  return GITHUB_DOMAINS.some((domain) => name === domain || name.endsWith(`.${domain}`));
+}
+
 export const deployConfigSchema = z
   .object({
     region: z
@@ -232,7 +251,12 @@ export const deployConfigSchema = z
      * gateway. Exact hostnames only; everything else, GitHub included, is refused.
      */
     extraEgressHosts: z
-      .array(hostname)
+      .array(
+        hostname.refine(
+          (host) => !isGitHubHost(host),
+          "GitHub's hosts can't be allowed: the model sandbox must never reach GitHub",
+        ),
+      )
       .default([])
       .describe(
         "Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only.",

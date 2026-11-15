@@ -41,6 +41,7 @@ import {
   type PullRequestComment,
 } from "@lgtmoose/roles";
 import { GITHUB_COMMENT_LIMIT, SUMMARY_MARKER_ROOM, renderSummary } from "@lgtmoose/summary";
+import { describeKinds, detectInjection, type TextInjection } from "./injection.js";
 import type { PullComment, PullReader, PullRequest, PullTarget } from "./pull.js";
 import { reviewerMisses, type OtherReviewerFinding, type ReviewerMiss } from "./other-reviewers.js";
 
@@ -199,6 +200,11 @@ export interface FinishOptions {
    * summary says why.
    */
   heldResolutions?: number;
+  /**
+   * Our GitHub App's ID: the prompt-injection detector leaves our own comments out, since they
+   * can quote what it flagged.
+   */
+  ourAppId?: number;
 }
 
 /**
@@ -347,6 +353,25 @@ const HOLD_TEXT: Record<Exclude<HoldReason, "incomplete">, string> = {
   prompt_injection: "a prompt-injection attempt was flagged",
   approve_disabled: "approvals are turned off (gate.approve: false)",
 };
+
+/** Why a hit outside the diff held approval, for the summary. Logins are shown only if valid. */
+function injectionReason(hit: TextInjection): string {
+  let where = "the PR's description";
+  if (hit.source === "title") where = "the PR's title";
+  if (hit.source === "comment") {
+    const login = hit.author ?? "";
+    // The summary escapes it besides.
+    where = `a comment by ${/^[A-Za-z0-9-]+(\[bot\])?$/.test(login) ? login : "an unknown author"}`;
+  }
+  return `${HOLD_TEXT.prompt_injection} in ${where}: ${describeKinds(hit.kinds)}`;
+}
+
+/** The summary's lines for a hold: one per flagged text for a prompt-injection hold. */
+function holdReasons(hold: HoldReason, injected: readonly TextInjection[]): string[] {
+  if (hold === "incomplete") return [];
+  if (hold === "prompt_injection") return injected.map(injectionReason);
+  return [HOLD_TEXT[hold]];
+}
 
 /** The blob ID of a path at a commit, when it's a regular file. */
 async function blobAt(repo: Repo, sha: string, path: string): Promise<string | undefined> {
@@ -868,6 +893,14 @@ export async function finishReview(
     batches.push(outcome.notes === undefined ? report : { ...report, notes: outcome.notes });
   }
 
+  // The prompt-injection detector, in plain code over what the reviewer read: a hit on an added
+  // line is a blocking finding there; one in the title, body or a comment holds approval.
+  const injection = detectInjection(prepared, {
+    allow: (config as Partial<RepoConfig>).injection?.allow ?? [],
+    ...(options.ourAppId === undefined ? {} : { ourAppId: options.ourAppId }),
+  });
+  inline.push(...injection.findings);
+
   const statuses = batchFileStatuses(prepared, batches);
 
   // Duplicates: anything already raised on the PR, or twice in this run.
@@ -960,9 +993,9 @@ export async function finishReview(
     open,
     {
       complete,
-      // No prompt-injection detector yet: the prompt tells the model to report attempts as
-      // security findings instead.
-      injectionFlagged: false,
+      // Text in the title, body or comments aimed at the reviewer. Hits on added lines are
+      // blocking findings instead, which hold approval on their own.
+      injectionFlagged: injection.text.length > 0,
       headMoved: latestHeadSha !== pr.headSha,
     },
     config,
@@ -971,7 +1004,7 @@ export async function finishReview(
     ...(decision.outcome === "skipped" ? ["the PR's head moved during the run"] : []),
     ...(failedBatches > 0 ? [`${count(failedBatches, "batch", "batches")} failed`] : []),
     ...(decision.outcome === "skipped" ? [] : unreviewed),
-    ...decision.holds.flatMap((hold) => (hold === "incomplete" ? [] : [HOLD_TEXT[hold]])),
+    ...decision.holds.flatMap((hold) => holdReasons(hold, injection.text)),
     ...((options.heldResolutions ?? 0) > 0
       ? [
           `${options.heldResolutions === 1 ? "a resolved review thread still counts" : `${options.heldResolutions} resolved review threads still count`}: a blocking or protected finding counts as resolved only when someone other than the PR's author, with write access, resolves it`,

@@ -40,6 +40,24 @@ describe("githubPullReader", () => {
     });
   });
 
+  it("keeps the author's relationship to the repository", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/pulls/7": {
+        title: "Fix",
+        body: "",
+        state: "open",
+        user: { login: "dev" },
+        author_association: "CONTRIBUTOR",
+        head: { sha: SHA_A, ref: "feature" },
+        base: { sha: SHA_B, ref: "main" },
+      },
+    });
+    expect(await githubPullReader(get).pull(target)).toMatchObject({
+      author: "dev",
+      association: "CONTRIBUTOR",
+    });
+  });
+
   it("encodes the owner and repo in the path", async () => {
     const { get, calls } = fakeGet({});
     await githubPullReader(get)
@@ -68,7 +86,7 @@ describe("githubPullReader", () => {
       ],
     });
     expect(await githubPullReader(get).comments(target, 50)).toEqual([
-      { author: "a", body: "Looks good" },
+      { author: "a", body: "Looks good", authorType: "human" },
       {
         author: "ghost",
         body: "Off by one",
@@ -78,6 +96,33 @@ describe("githubPullReader", () => {
         authorType: "human",
       },
       { author: "c", body: "Outdated", path: "src/a.ts", authorType: "human" },
+    ]);
+  });
+
+  it("keeps who wrote a general comment, for the prompt-injection detector", async () => {
+    const { get } = fakeGet({
+      "/repos/acme/shop/issues/7/comments?per_page=100&page=1": [
+        {
+          body: "Thanks!",
+          user: { login: "lgtmoose[bot]", type: "Bot" },
+          author_association: "NONE",
+          performed_via_github_app: { id: 7 },
+          html_url: "https://github.com/acme/shop/pull/7#issuecomment-1",
+        },
+        { body: "Nice", user: { login: "dev" }, author_association: "MEMBER" },
+      ],
+      "/repos/acme/shop/pulls/7/comments?per_page=100&page=1": [],
+    });
+    expect(await githubPullReader(get).comments(target, 50)).toEqual([
+      {
+        author: "lgtmoose[bot]",
+        body: "Thanks!",
+        authorType: "bot",
+        association: "NONE",
+        viaAppId: 7,
+        url: "https://github.com/acme/shop/pull/7#issuecomment-1",
+      },
+      { author: "dev", body: "Nice", authorType: "human", association: "MEMBER" },
     ]);
   });
 

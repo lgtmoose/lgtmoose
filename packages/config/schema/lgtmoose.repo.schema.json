@@ -90,6 +90,21 @@
       },
       "additionalProperties": false
     },
+    "injection": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "allow": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "default": {},
       "type": "object",

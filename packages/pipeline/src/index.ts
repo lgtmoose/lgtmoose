@@ -59,3 +59,14 @@ export {
   type BatchUrls,
 } from "./workflow.js";
 export { FileTranscriptStore } from "./transcripts.js";
+export {
+  INJECTION_CATEGORY,
+  MAX_INJECTION_FINDINGS,
+  describeKinds,
+  detectInjection,
+  scanText,
+  type InjectionKind,
+  type InjectionScan,
+  type InjectionSource,
+  type TextInjection,
+} from "./injection.js";

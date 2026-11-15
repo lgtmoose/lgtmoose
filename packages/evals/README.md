@@ -4,7 +4,7 @@ Runs the review pipeline (the one behind `lgtmoose review --dry-run`) on fixture
 
 ## Fixtures
 
-Each directory under `fixtures/` is one PR. The golden set (see [fixtures/README.md](fixtures/README.md)) has 16 seeded bugs and 6 clean changes.
+Each directory under `fixtures/` is one PR. The golden set (see [fixtures/README.md](fixtures/README.md)) has 17 seeded bugs and 6 clean changes.
 
 - `base/`: the repository before the PR.
 - `head/` (optional): files the PR adds or changes, laid over `base/`.

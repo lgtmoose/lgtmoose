@@ -19,6 +19,14 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+# npm, npx, corepack and yarn come with the base image, but the control task runs only node
+# and git (dependencies are installed in the build stage). Removing them takes their bundled
+# packages, and those packages' advisories, out of the image.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-v* \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn \
+  /usr/local/bin/yarnpkg \
+  && node --version
+
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin lgtmoose
 COPY --from=build --chown=root:root /out /app
 USER lgtmoose
