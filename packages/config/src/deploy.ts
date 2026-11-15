@@ -296,7 +296,10 @@ export const deployConfigSchema = z
           ),
       })
       .strict()
-      .default({ acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 }),
+      .default({ acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 })
+      .describe(
+        "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
+      ),
     /**
      * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier
      * model call each). Replies past it wait for the next run.

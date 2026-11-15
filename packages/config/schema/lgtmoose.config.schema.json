@@ -155,6 +155,7 @@
         "minSamples": 10,
         "maxCommentsPerRun": 100
       },
+      "description": "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
       "type": "object",
       "properties": {
         "acceptanceThreshold": {

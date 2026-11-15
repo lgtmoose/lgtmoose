@@ -26,6 +26,10 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `maxConcurrency` | integer, 1 to 64 | `4` | Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower. |
 | `reconcileIntervalMinutes` | integer, 5 to 1440 | `30` | Minutes between reconciler runs, which catch missed webhooks and drifted status labels. |
 | `reconcileLookbackHours` | integer, 1 to 720 | `24` | Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval. |
+| `feedback` | object | `{"acceptanceThreshold":0.5,"minSamples":10,"maxCommentsPerRun":100}` | Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md. |
+| `feedback.acceptanceThreshold` | number, 0 to 1 | `0.5` | Acceptance below which a rule category is flagged for a person to look at. |
+| `feedback.minSamples` | integer, 1 to 10000 | `10` | Accepted plus rejected findings a category needs before it's judged. |
+| `feedback.maxCommentsPerRun` | integer, 0 to 1000 | `100` | Most inline comments whose reactions one reconciler run reads (one GitHub call each). 0 stops reading them. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
