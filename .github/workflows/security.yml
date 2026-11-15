@@ -89,6 +89,34 @@ jobs:
           CONTEXT: ${{ matrix.image.context }}
           TAG: lgtmoose-${{ matrix.image.name }}:scan
         run: docker build --file "$FILE" --tag "$TAG" "$CONTEXT"
+      # The images have npm, npx, corepack and yarn removed: check what each runs still works,
+      # with a read-only root filesystem as in the task.
+      - name: Check the image still starts
+        env:
+          NAME: ${{ matrix.image.name }}
+          TAG: lgtmoose-${{ matrix.image.name }}:scan
+        run: |
+          set -euo pipefail
+          case "$NAME" in
+            egress-proxy)
+              docker run --detach --name proxy --read-only -p 3128:3128 \
+                -e ALLOWED_HOSTS=api.anthropic.com "$TAG"
+              for attempt in $(seq 1 20); do
+                if curl -fsS http://127.0.0.1:3128/healthz; then echo; exit 0; fi
+                sleep 1
+              done
+              docker logs proxy
+              exit 1
+              ;;
+            control)
+              docker run --rm --read-only --entrypoint sh "$TAG" -c \
+                'node --version && git --version && ! command -v npm && test -f /app/dist/index.js'
+              ;;
+            sandbox)
+              docker run --rm --read-only --tmpfs /tmp -e HOME=/tmp --entrypoint sh "$TAG" -c \
+                'node --version && claude --version && codex --version && ! command -v npm && test -f /app/dist/index.js'
+              ;;
+          esac
       # Pinned by commit: it runs with the job's token. Its own actions are pinned by commit too.
       - name: Scan for vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
