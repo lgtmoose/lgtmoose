@@ -143,6 +143,8 @@ export interface WorkflowStackProps extends StackProps {
    * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
    */
   embeddings?: DeployConfig["learnings"]["embeddings"];
+  /** `learnings.maxPendingPerAuthor`: the most pending learnings one author may have. */
+  maxPendingLearnings?: number;
   /**
    * Ticket coverage (`tickets`): the control task reads linked tickets with the key in
    * `SECRET_NAMES.linearTickets`. Left out: off. Sandbox tasks never get the key.
@@ -230,6 +232,7 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_MAX_REPLY_JUDGEMENTS: String(props.maxReplyJudgements ?? 10),
         ...embeddingsEnvironment(embeddings),
         ...ticketsEnvironment(props.tickets),
+        LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
@@ -506,6 +509,7 @@ export class WorkflowStack extends Stack {
         DATABASE_NAME: props.databaseName,
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
         LGTMOOSE_SHADOW: String(props.shadow),
+        LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

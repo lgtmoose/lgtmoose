@@ -50,7 +50,15 @@ export interface LearningDeps {
   store: LearningStore;
   permissions: PermissionReader;
   orgRoles: OrgRoleReader;
+  /**
+   * The most pending learnings one author may have in an org (`learnings.maxPendingPerAuthor`,
+   * default `DEFAULT_MAX_PENDING_PER_AUTHOR`). Anyone can propose one, so on a public repository
+   * this stops one person filling the queue. Authors whose learnings apply at once aren't counted.
+   */
+  maxPendingPerAuthor?: number;
 }
+
+export const DEFAULT_MAX_PENDING_PER_AUTHOR = 5;
 
 /** Where a proposal came from: GitHub's facts about the comment, never the model's. */
 export interface LearningSource {
@@ -232,6 +240,23 @@ export async function proposeLearning(
     { org: owner, repo, sourceRepo: full },
     source.author,
   );
+  if (!active) {
+    const limit = deps.maxPendingPerAuthor ?? DEFAULT_MAX_PENDING_PER_AUTHOR;
+    // A retried proposal of a stored one isn't counted against itself.
+    const pending = await deps.store.countPending(
+      owner,
+      source.author,
+      source.commentId === undefined
+        ? undefined
+        : { sourceRepo: full, sourceCommentId: source.commentId },
+    );
+    if (pending >= limit) {
+      return {
+        outcome: "refused",
+        reason: `${source.author} already has ${pending} pending learnings here (the limit is ${limit}); ask someone with write access to approve or forget some first`,
+      };
+    }
+  }
   const { learning, created } = await deps.store.insert(
     {
       org: owner,

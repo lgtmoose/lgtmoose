@@ -79,6 +79,7 @@ describe("parseCommand", () => {
     expect(parseCommand("learn use zod")).toEqual({ name: "learn", text: "use zod" });
     const id = "0d6f6a2e-5b1c-4f43-9a8b-1c2d3e4f5a6b";
     expect(parseCommand(`forget ${id.toUpperCase()}`)).toEqual({ name: "forget", id });
+    expect(parseCommand(`approve ${id}`)).toEqual({ name: "approve", id });
   });
 
   it("takes anything else as unknown", () => {
@@ -86,6 +87,8 @@ describe("parseCommand", () => {
     expect(parseCommand("full speed")).toEqual({ name: "unknown", word: "full" });
     expect(parseCommand("forget")).toEqual({ name: "unknown", word: "forget" });
     expect(parseCommand("forget a b")).toEqual({ name: "unknown", word: "forget" });
+    expect(parseCommand("approve")).toEqual({ name: "unknown", word: "approve" });
+    expect(parseCommand("approve this please")).toEqual({ name: "unknown", word: "approve" });
     expect(parseCommand("explain here")).toEqual({ name: "unknown", word: "explain" });
     expect(parseCommand("learn:")).toEqual({ name: "unknown", word: "learn" });
   });
@@ -140,6 +143,7 @@ describe("helpText", () => {
       "ignore",
       "learn:",
       "learnings",
+      "approve",
       "forget",
       "help",
     ]) {

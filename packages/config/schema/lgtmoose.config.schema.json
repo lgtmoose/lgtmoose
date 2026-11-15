@@ -302,9 +302,10 @@
       "default": {
         "embeddings": {
           "provider": "none"
-        }
+        },
+        "maxPendingPerAuthor": 5
       },
-      "description": "Learnings retrieval: how the learnings for each review batch are ranked.",
+      "description": "Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have.",
       "type": "object",
       "properties": {
         "embeddings": {
@@ -363,6 +364,13 @@
               "additionalProperties": false
             }
           ]
+        },
+        "maxPendingPerAuthor": {
+          "default": 5,
+          "description": "The most pending learnings one author without write access may have in an org. A new learn: past it is refused and nothing is stored.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
         }
       },
       "additionalProperties": false

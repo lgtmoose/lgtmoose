@@ -1,5 +1,6 @@
 import type { ReviewJob, Severity } from "@lgtmoose/core";
 import {
+  approveLearning,
   forgetLearning,
   learningsForPullRequest,
   proposeLearning,
@@ -121,6 +122,8 @@ export interface ConversationDeps {
   github(installationId: number): Promise<ConversationGitHub>;
   store: ConversationStore;
   learnings: LearningStore;
+  /** The most pending learnings one author may have (`LearningDeps.maxPendingPerAuthor`). */
+  maxPendingLearnings?: number;
   /**
    * Replies on our findings' threads, waiting for the reply judge. Left out, replies are
    * deferred as before.
@@ -323,6 +326,9 @@ function learningDeps(context: Context): LearningDeps {
     store: context.deps.learnings,
     permissions: (_repo, login) => context.permission(login),
     orgRoles: (org, login) => context.github.orgRole(org, login),
+    ...(context.deps.maxPendingLearnings === undefined
+      ? {}
+      : { maxPendingPerAuthor: context.deps.maxPendingLearnings }),
   };
 }
 
@@ -364,6 +370,31 @@ async function forgetCommand(context: Context, id: string): Promise<Outcome> {
   if (result.outcome === "unchanged")
     return { ok: true, reply: "That learning is already retired." };
   return { ok: true };
+}
+
+async function approveCommand(context: Context, id: string): Promise<Outcome> {
+  // Only this account's learnings: an ID from elsewhere is as good as unknown.
+  const learning = await context.deps.learnings.get(id);
+  if (learning === undefined || !sameLogin(learning.org, context.owner)) {
+    return { ok: false, reply: "There's no such learning here." };
+  }
+  const result = await approveLearning(learningDeps(context), id, {
+    login: context.comment.author,
+    commentId: context.job.commentId,
+  });
+  if (result.outcome === "refused") {
+    return { ok: false, reply: `Not approved: ${inline(result.reason)}.` };
+  }
+  if (result.outcome === "unchanged") {
+    return {
+      ok: true,
+      reply:
+        result.learning?.status === "active"
+          ? "That learning is already active."
+          : "Only a pending learning can be approved.",
+    };
+  }
+  return { ok: true, reply: `Learning \`${result.learning.id}\` is active.` };
 }
 
 async function learningsCommand(context: Context): Promise<Outcome> {
@@ -416,6 +447,8 @@ async function run(context: Context, command: Command): Promise<Outcome> {
       return learnCommand(context, command.text);
     case "forget":
       return forgetCommand(context, command.id);
+    case "approve":
+      return approveCommand(context, command.id);
     case "learnings":
       return learningsCommand(context);
   }

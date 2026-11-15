@@ -203,6 +203,58 @@ describe("proposeLearning", () => {
   });
 });
 
+describe("the pending limit per author", () => {
+  const proposeFrom = (d: LearningDeps, author: string, commentId: number) =>
+    proposeLearning(d, repoScoped, { ...source, author, commentId });
+
+  it("refuses a pending learning past the limit and stores nothing", async () => {
+    const d = { ...deps({}), maxPendingPerAuthor: 2 };
+    expect((await proposeFrom(d, "eve", 1)).outcome).toBe("pending");
+    expect((await proposeFrom(d, "Eve", 2)).outcome).toBe("pending");
+    const third = await proposeFrom(d, "eve", 3);
+    expect(third).toMatchObject({ outcome: "refused" });
+    if (third.outcome !== "refused") throw new Error("not refused");
+    expect(third.reason).toContain("the limit is 2");
+    expect(await d.store.list({ org: "acme", status: "pending" })).toHaveLength(2);
+  });
+
+  it("counts each author on their own", async () => {
+    const d = { ...deps({}), maxPendingPerAuthor: 1 };
+    expect((await proposeFrom(d, "eve", 1)).outcome).toBe("pending");
+    expect((await proposeFrom(d, "mallory", 2)).outcome).toBe("pending");
+  });
+
+  it("defaults to 5", async () => {
+    const d = deps({});
+    for (let i = 1; i <= 5; i++) expect((await proposeFrom(d, "eve", i)).outcome).toBe("pending");
+    expect((await proposeFrom(d, "eve", 6)).outcome).toBe("refused");
+  });
+
+  it("doesn't limit authors whose learnings apply at once", async () => {
+    const d = { ...deps({ dana: "write" }), maxPendingPerAuthor: 1 };
+    for (let i = 1; i <= 3; i++) {
+      expect((await proposeFrom(d, "dana", i)).outcome).toBe("active");
+    }
+  });
+
+  it("doesn't count a retried proposal against itself", async () => {
+    const d = { ...deps({}), maxPendingPerAuthor: 1 };
+    const first = await proposeFrom(d, "eve", 1);
+    const again = await proposeFrom(d, "eve", 1);
+    expect(again).toMatchObject({ outcome: "pending", created: false });
+    if (first.outcome === "refused" || again.outcome === "refused") throw new Error("refused");
+    expect(again.learning.id).toBe(first.learning.id);
+  });
+
+  it("stops counting a learning once it's approved or retired", async () => {
+    const d = { ...deps({ dana: "write" }), maxPendingPerAuthor: 1 };
+    const first = await proposeFrom(d, "eve", 1);
+    if (first.outcome === "refused") throw new Error("refused");
+    await forgetLearning(d, first.learning.id, { login: "dana" });
+    expect((await proposeFrom(d, "eve", 2)).outcome).toBe("pending");
+  });
+});
+
 describe("approveLearning and forgetLearning", () => {
   async function pending(d: ReturnType<typeof deps>, scope: object = { level: "repo" }) {
     const result = await proposeLearning(d, { ...repoScoped, scope }, source);

@@ -365,6 +365,82 @@ describe("handleConversation", () => {
     expect((await f.learnings.get(id))?.status).toBe("retired");
   });
 
+  it("approves a pending learning only for someone with write access", async () => {
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: Prefer zod."));
+    await handleConversation(f.deps, job());
+    const id = f.learnings.all()[0]?.id ?? "";
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+
+    const reader = fakeDeps(from("visitor", `@lgtmoose approve ${id}`));
+    reader.deps.learnings = f.learnings;
+    expect(await handleConversation(reader.deps, job({ commentId: 601 }))).toMatchObject({
+      ok: false,
+    });
+    expect(reader.replies[0]?.body).toContain("Not approved");
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+
+    const maint = fakeDeps(from("maint", `@lgtmoose approve ${id}`), {
+      permissions: { maint: "write" },
+    });
+    maint.deps.learnings = f.learnings;
+    await handleConversation(maint.deps, job({ commentId: 602 }));
+    expect(maint.replies[0]?.body).toContain("is active");
+    expect((await f.learnings.get(id))?.status).toBe("active");
+    const events = await f.learnings.events(id);
+    expect(events.at(-1)).toMatchObject({ type: "approved", actor: "maint" });
+
+    const again = fakeDeps(from("maint", `@lgtmoose approve ${id}`), {
+      permissions: { maint: "write" },
+    });
+    again.deps.learnings = f.learnings;
+    await handleConversation(again.deps, job({ commentId: 603 }));
+    expect(again.replies[0]?.body).toContain("already active");
+  });
+
+  it("needs an org owner to approve an org-wide learning", async () => {
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: [org] Use pnpm."));
+    await handleConversation(f.deps, job());
+    const id = f.learnings.all()[0]?.id ?? "";
+    const admin = fakeDeps(from("repoadmin", `@lgtmoose approve ${id}`), {
+      permissions: { repoadmin: "admin" },
+      orgRoles: { repoadmin: "member" },
+    });
+    admin.deps.learnings = f.learnings;
+    await handleConversation(admin.deps, job({ commentId: 611 }));
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+    const owner = fakeDeps(from("boss", `@lgtmoose approve ${id}`), {
+      orgRoles: { boss: "admin" },
+    });
+    owner.deps.learnings = f.learnings;
+    await handleConversation(owner.deps, job({ commentId: 612 }));
+    expect((await f.learnings.get(id))?.status).toBe("active");
+  });
+
+  it("won't approve another account's learning", async () => {
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: Use pnpm."));
+    await handleConversation(f.deps, job({ repo: "other/app" }));
+    const id = f.learnings.all()[0]?.id ?? "";
+    const g = fakeDeps(from("maint", `@lgtmoose approve ${id}`), {
+      permissions: { maint: "admin" },
+    });
+    g.deps.learnings = f.learnings;
+    expect(await handleConversation(g.deps, job())).toMatchObject({ ok: false });
+    expect(g.replies[0]?.body).toContain("no such learning");
+    expect((await f.learnings.get(id))?.status).toBe("pending");
+  });
+
+  it("refuses a learn: past the author's pending limit, storing nothing", async () => {
+    const f = fakeDeps(from("visitor", "@lgtmoose learn: Prefer zod."));
+    f.deps.maxPendingLearnings = 1;
+    await handleConversation(f.deps, job());
+    const g = fakeDeps(from("visitor", "@lgtmoose learn: Prefer pnpm."));
+    g.deps.learnings = f.learnings;
+    g.deps.maxPendingLearnings = 1;
+    expect(await handleConversation(g.deps, job({ commentId: 621 }))).toMatchObject({ ok: false });
+    expect(g.replies[0]?.body).toContain("Not learned");
+    expect(f.learnings.all()).toHaveLength(1);
+  });
+
   it("won't forget another account's learning", async () => {
     const f = fakeDeps(from("maint", "@lgtmoose learn: Use pnpm."), {
       permissions: { maint: "write" },

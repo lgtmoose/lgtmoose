@@ -7,10 +7,17 @@ import {
   readCommand,
   readControlEnv,
   readEmbeddingsSettings,
+  readMaxPendingLearnings,
   readReviewSettings,
   readTicketSettings,
 } from "./env.js";
 import { runCommand } from "./run.js";
+
+/** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
+function maxPending(): { maxPendingLearnings?: number } {
+  const limit = readMaxPendingLearnings(process.env);
+  return limit === undefined ? {} : { maxPendingLearnings: limit };
+}
 
 /**
  * Entry point of the control task. The review state machine starts it once per step, with
@@ -46,6 +53,7 @@ async function main(): Promise<void> {
     shadow: settings.shadow,
     embeddings: readEmbeddingsSettings(process.env),
     tickets: readTicketSettings(process.env),
+    ...maxPending(),
   });
   const ecs = new ECSClient({});
   try {

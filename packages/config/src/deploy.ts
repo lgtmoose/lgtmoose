@@ -473,10 +473,21 @@ export const deployConfigSchema = z
           .describe(
             "How learnings are ranked against a batch's diff: bedrock or openai embeddings, or none for keywords. The provider receives learning text and diffs.",
           ),
+        maxPendingPerAuthor: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(5)
+          .describe(
+            "The most pending learnings one author without write access may have in an org. A new learn: past it is refused and nothing is stored.",
+          ),
       })
       .strict()
-      .default({ embeddings: { provider: "none" } })
-      .describe("Learnings retrieval: how the learnings for each review batch are ranked."),
+      .default({ embeddings: { provider: "none" }, maxPendingPerAuthor: 5 })
+      .describe(
+        "Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have.",
+      ),
     /**
      * Ticket coverage (NIC-839): the review reads the tickets a PR names (in its branch, title,
      * description and commits) and checks the PR against their requirements. Only Linear is

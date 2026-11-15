@@ -196,6 +196,20 @@ export function readReviewSettings(env: Env): ReviewSettings {
 }
 
 /**
+ * The most pending learnings one author may have in an org, from
+ * `LGTMOOSE_MAX_PENDING_LEARNINGS` (`learnings.maxPendingPerAuthor`). Unset: the policy's default.
+ */
+export function readMaxPendingLearnings(env: Env): number | undefined {
+  const value = env.LGTMOOSE_MAX_PENDING_LEARNINGS?.trim() ?? "";
+  if (value === "") return undefined;
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("LGTMOOSE_MAX_PENDING_LEARNINGS must be a whole number of at least 1.");
+  }
+  return limit;
+}
+
+/**
  * How learnings are ranked, from `LGTMOOSE_EMBEDDINGS` (`bedrock:<model>`, `openai:<model>`, or
  * `none` / unset for keywords) and, for OpenAI, `LGTMOOSE_EMBEDDINGS_SECRET_ID`, the key's
  * secret. The Workflow stack sets both from `learnings.embeddings`.
