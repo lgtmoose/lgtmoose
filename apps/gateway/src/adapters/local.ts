@@ -1,5 +1,23 @@
 import type { JobQueue, WebhookSecretSource } from "../ports.js";
 
+/** What the gateway needs of `PostgresQueue` in @lgtmoose/db: sending, nothing else. */
+export interface QueueSender {
+  send(message: { groupId: string; dedupeId: string; body: string }): Promise<boolean>;
+}
+
+/**
+ * Jobs on the Postgres job queue (docker compose). It keeps SQS FIFO's guarantees: in order per
+ * PR (the group), and a redelivery with the same delivery ID (the dedupe ID) dropped. The body
+ * is the job as JSON, as on SQS, so the dispatcher reads both the same way.
+ */
+export function postgresJobQueue(queue: QueueSender): JobQueue {
+  return {
+    async send(job, { groupId, dedupeId }) {
+      await queue.send({ groupId, dedupeId, body: JSON.stringify(job) });
+    },
+  };
+}
+
 /** The webhook secret from an environment variable, for server.ts and docker compose. */
 export function envWebhookSecret(
   name = "GITHUB_WEBHOOK_SECRET",

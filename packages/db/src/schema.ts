@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  bigserial,
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -447,6 +449,82 @@ export const dispatchedExecutions = pgTable(
     index("dispatched_executions_active_idx")
       .on(t.repo, t.number)
       .where(sql`${t.stoppedAt} is null`),
+  ],
+);
+
+// docker compose (NIC-843): what the AWS deployment keeps in SQS, S3 and Step Functions, kept in
+// Postgres instead on a single host. Unused on AWS.
+
+/** Bytes, as `bytea`. */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => "bytea",
+});
+
+/**
+ * The job queues (`jobs`, `conversation` and `dead`): SQS FIFO's guarantees on Postgres. A
+ * group's messages are delivered one at a time, in order: a message is handed out only when no
+ * older message of its group is still waiting or in flight. A repeat of a `dedupe_id` in the
+ * same queue is dropped while the first is kept, which is until a day after it's done.
+ */
+export const jobQueue = pgTable(
+  "job_queue",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    queue: text("queue").notNull(),
+    groupId: text("group_id").notNull(),
+    dedupeId: text("dedupe_id").notNull(),
+    body: text("body").notNull(),
+    /** Until when the message is in flight with a consumer; null when it's waiting. */
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    receiveCount: integer("receive_count").notNull().default(0),
+    /** Set once it's handled or dead-lettered: kept a while, for deduplication. */
+    doneAt: timestamp("done_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("job_queue_dedupe_key").on(t.queue, t.dedupeId),
+    index("job_queue_waiting_idx")
+      .on(t.queue, t.groupId, t.id)
+      .where(sql`${t.doneAt} is null`),
+  ],
+);
+
+/**
+ * The artifact store: S3's objects, with the conditional writes the post step's claims and the
+ * credential leases rely on. Every write gives the object a new random `etag`.
+ */
+export const artifacts = pgTable("artifacts", {
+  key: text("key").primaryKey(),
+  body: bytea("body").notNull(),
+  etag: text("etag").notNull(),
+  contentType: text("content_type").notNull().default("text/plain"),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * Review workflow executions the local runner runs, by name, as Step Functions keeps them.
+ * `arn` is `local:execution:<name>`.
+ */
+export const localExecutions = pgTable(
+  "local_executions",
+  {
+    arn: text("arn").primaryKey(),
+    name: text("name").notNull(),
+    input: jsonb("input").notNull(),
+    /** RUNNING, SUCCEEDED, FAILED or ABORTED, as Step Functions names them. */
+    status: text("status").notNull(),
+    /** Why it was stopped or failed. */
+    cause: text("cause"),
+    /** The runner process that runs it, while it runs. */
+    owner: text("owner"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("local_executions_name_key").on(t.name),
+    index("local_executions_running_idx")
+      .on(t.createdAt)
+      .where(sql`${t.status} = 'RUNNING'`),
   ],
 );
 

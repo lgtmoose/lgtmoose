@@ -46,14 +46,19 @@ describe("migrations", () => {
       "select tablename from pg_tables where schemaname = 'public' order by tablename",
     );
     expect(tables.rows.map((row) => row.tablename)).toEqual([
+      "artifacts",
       "dashboard_sessions",
       "dispatched_executions",
       "feedback",
       "files_reviewed",
       "finding_events",
       "findings",
+
+      "job_queue",
       "learning_events",
       "learnings",
+
+      "local_executions",
       "pending_replies",
       "provider_cooldowns",
       "provider_usage",

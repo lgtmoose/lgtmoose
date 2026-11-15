@@ -10,7 +10,7 @@ import {
   secretsManagerWebhookSecret,
   sqsJobQueue,
 } from "./aws.js";
-import { envWebhookSecret, logJobQueue } from "./local.js";
+import { envWebhookSecret, logJobQueue, postgresJobQueue } from "./local.js";
 
 const job: ReviewJob = {
   kind: "pr_opened",
@@ -142,6 +142,20 @@ describe("local adapters", () => {
     const lines: string[] = [];
     await logJobQueue((line) => lines.push(line)).send(job, { groupId: "g", dedupeId: "d" });
     expect(JSON.parse(lines[0] ?? "")).toMatchObject({ groupId: "g", dedupeId: "d", job });
+  });
+
+  it("puts jobs on the Postgres queue as JSON, with the PR's group and the delivery's dedupe ID", async () => {
+    const sent: { groupId: string; dedupeId: string; body: string }[] = [];
+    const queue = postgresJobQueue({
+      send: async (message) => {
+        sent.push(message);
+        return true;
+      },
+    });
+    await queue.send(job, { groupId: "acme-corp/widgets#42", dedupeId: job.deliveryId });
+    expect(sent).toEqual([
+      { groupId: "acme-corp/widgets#42", dedupeId: job.deliveryId, body: JSON.stringify(job) },
+    ]);
   });
 });
 
