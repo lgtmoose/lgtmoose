@@ -1,0 +1,74 @@
+{
+  "description": "A maintainer teaches with learn: [kind scoping] that one-off tools in tools/ don't need tests. Later tools shouldn't raise it, and missing tests for src/ code must still be raised.",
+  "family": "scoping",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "li": "maintain" },
+  "correction": {
+    "type": "learn",
+    "author": "li",
+    "comment": "@lgtmoose learn: [path tools/**] [kind scoping] [category tests] tools/ holds one-off maintenance tools; missing tests there are fine."
+  },
+  "base": {
+    "README.md": "# Repo\n",
+    "src/slug.ts": "export const slug = (s: string) => s.toLowerCase();\n"
+  },
+  "prs": [
+    {
+      "title": "Add a tool to rename branches",
+      "files": {
+        "tools/rename.ts": "export function rename(name: string) {\n  return name.replace(/^feature\\//, \"feat/\");\n}\n"
+      },
+      "target": {
+        "category": "tests",
+        "severity": "nit",
+        "path": "tools/rename.ts",
+        "line": 1,
+        "lines": [1, 3],
+        "title": "Missing tests for the new tool",
+        "topic": "missing tests"
+      }
+    },
+    {
+      "title": "Add a stats tool and trim slugs",
+      "files": {
+        "tools/stats.ts": "export function stats(lines: string[]) {\n  return lines.filter((line) => line.trim() !== \"\").length;\n}\n",
+        "src/slug.ts": "export const slug = (s: string) => s.trim().toLowerCase();\n"
+      },
+      "target": {
+        "category": "tests",
+        "severity": "nit",
+        "path": "tools/stats.ts",
+        "line": 1,
+        "lines": [1, 3],
+        "title": "Missing tests for the new tool",
+        "topic": "missing tests"
+      },
+      "keep": [
+        {
+          "category": "tests",
+          "severity": "should_fix",
+          "path": "src/slug.ts",
+          "line": 1,
+          "title": "Missing tests for the slug change",
+          "topic": "missing tests"
+        }
+      ]
+    },
+    {
+      "title": "Add a cleanup tool",
+      "files": {
+        "tools/cleanup.ts": "export function cleanup(paths: string[]) {\n  return paths.filter((path) => !path.endsWith(\".tmp\"));\n}\n"
+      },
+      "target": {
+        "category": "tests",
+        "severity": "nit",
+        "path": "tools/cleanup.ts",
+        "line": 1,
+        "lines": [1, 3],
+        "title": "Missing tests for the new tool",
+        "topic": "missing tests"
+      }
+    }
+  ]
+}

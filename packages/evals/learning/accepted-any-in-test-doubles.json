@@ -1,0 +1,63 @@
+{
+  "description": "A maintainer teaches with learn: [kind accepted_pattern] that any in test doubles is accepted. Later test files shouldn't raise it.",
+  "family": "accepted_pattern",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "admin" },
+  "correction": {
+    "type": "learn",
+    "author": "maya",
+    "comment": "@lgtmoose learn: [kind accepted_pattern] [category tests] Typing test doubles with any in test files is accepted here; don't flag any in test doubles."
+  },
+  "base": {
+    "README.md": "# Cart\n",
+    "src/cart.ts": "export function total(items: { price: number }[]) {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n"
+  },
+  "prs": [
+    {
+      "title": "Test the cart total",
+      "files": {
+        "src/cart.test.ts": "import { total } from \"./cart\";\nconst items: any = [{ price: 2 }, { price: 3 }];\nif (total(items) !== 5) throw new Error(\"wrong total\");\n"
+      },
+      "target": {
+        "category": "tests",
+        "also": ["convention", "correctness"],
+        "severity": "nit",
+        "path": "src/cart.test.ts",
+        "line": 2,
+        "title": "Avoid any in test doubles",
+        "topic": "any in test doubles"
+      }
+    },
+    {
+      "title": "Test an empty cart",
+      "files": {
+        "src/empty.test.ts": "import { total } from \"./cart\";\nconst none: any = [];\nif (total(none) !== 0) throw new Error(\"not empty\");\n"
+      },
+      "target": {
+        "category": "tests",
+        "also": ["convention", "correctness"],
+        "severity": "nit",
+        "path": "src/empty.test.ts",
+        "line": 2,
+        "title": "Avoid any in test doubles",
+        "topic": "any in test doubles"
+      }
+    },
+    {
+      "title": "Test a cart with a refund",
+      "files": {
+        "src/refund.test.ts": "import { total } from \"./cart\";\nconst refund: any = [{ price: 5 }, { price: -5 }];\nif (total(refund) !== 0) throw new Error(\"refund missed\");\n"
+      },
+      "target": {
+        "category": "tests",
+        "also": ["convention", "correctness"],
+        "severity": "nit",
+        "path": "src/refund.test.ts",
+        "line": 2,
+        "title": "Avoid any in test doubles",
+        "topic": "any in test doubles"
+      }
+    }
+  ]
+}

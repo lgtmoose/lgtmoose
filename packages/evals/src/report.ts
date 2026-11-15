@@ -1,6 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { inline } from "@lgtmoose/summary";
 import { z } from "zod";
+import {
+  REPEAT_TOLERANCE,
+  checkLearning,
+  type LearningTotals,
+  type ScenarioScore,
+} from "./learning.js";
 import { recallByTag, totals, type EvalTotals, type FixtureScore } from "./score.js";
 
 /** The marker the CI job finds its own PR comment by, to edit it instead of adding another. */
@@ -21,6 +27,12 @@ export const baselineSchema = z
     model: z.string(),
     fixtures: z.number().int().min(0),
     measuredAt: z.string(),
+    /**
+     * The learning-speed family's repeat-after-correction rate, and the model it was measured
+     * with. Left out until a model run measures it: then the rate isn't compared.
+     */
+    learningRepeatRate: z.number().min(0).max(1).optional(),
+    learningModel: z.string().optional(),
   })
   .strict();
 
@@ -39,6 +51,39 @@ export interface EvalReport {
   startedAt: string;
   totals: EvalTotals;
   fixtures: FixtureScore[];
+  /** The learning-speed family's run (NIC-1082), when it ran. */
+  learning?: LearningReport;
+}
+
+export interface LearningReport {
+  model: string;
+  totals: LearningTotals;
+  scenarios: ScenarioScore[];
+}
+
+/**
+ * The learning gate for a model run: collateral and untrusted learnings in prompts always fail
+ * it; the repeat rate fails it when it's more than `REPEAT_TOLERANCE` above the baseline's.
+ * Without a baseline rate, or with a model other than the one the baseline was measured with,
+ * the rate isn't compared.
+ */
+export function checkLearningBaseline(
+  learning: LearningReport,
+  baseline: Baseline | undefined,
+): GateResult {
+  const comparable =
+    baseline?.learningRepeatRate !== undefined &&
+    (baseline.learningModel === undefined || baseline.learningModel === learning.model);
+  const max = comparable ? (baseline.learningRepeatRate ?? 0) + REPEAT_TOLERANCE : 1;
+  const { ok, problems } = checkLearning(learning.totals, max);
+  if (!ok) return { ok, message: `The learning gate fails: ${problems.join("; ")}.` };
+  const rate = percent(learning.totals.repeatRate);
+  return {
+    ok,
+    message: comparable
+      ? `Repeat after correction ${rate} against a baseline of ${percent(baseline.learningRepeatRate ?? 0)}; no collateral.`
+      : `Repeat after correction ${rate} (no learning baseline for ${learning.model} yet); no collateral.`,
+  };
 }
 
 export function buildReport(
@@ -86,6 +131,12 @@ export function baselineFrom(report: EvalReport): Baseline {
     model: report.model,
     fixtures: report.fixtures.length,
     measuredAt: report.startedAt,
+    ...(report.learning === undefined
+      ? {}
+      : {
+          learningRepeatRate: report.learning.totals.repeatRate,
+          learningModel: report.learning.model,
+        }),
   };
 }
 

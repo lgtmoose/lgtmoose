@@ -5,6 +5,16 @@
   "description": "Control task for the review workflow: prepares batches and posts results. Holds the GitHub App credentials; never runs a model.",
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./commands": {
+      "types": "./dist/commands.d.ts",
+      "default": "./dist/commands.js"
+    },
+    "./outcome-learning": {
+      "types": "./dist/outcome-learning.d.ts",
+      "default": "./dist/outcome-learning.js"
+    }
+  },
   "files": [
     "dist"
   ],

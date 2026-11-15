@@ -1,0 +1,60 @@
+{
+  "description": "A maintainer declines a finding about snake_case column names with a reason, then replies remember. Later PRs with snake_case columns shouldn't raise it.",
+  "family": "convention",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "remember",
+    "author": "maya",
+    "reason": "Our database columns are snake_case by convention; the ORM maps them to camelCase fields."
+  },
+  "base": {
+    "README.md": "# Orders\n",
+    "src/db/table.ts": "export function table(name: string, columns: string[]) {\n  return { name, columns };\n}\n"
+  },
+  "prs": [
+    {
+      "title": "Add the orders table",
+      "files": {
+        "src/db/orders.ts": "import { table } from \"./table\";\nexport const orders = table(\"orders\", [\"order_id\", \"created_at\"]);\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/db/orders.ts",
+        "line": 2,
+        "title": "Column names use snake_case instead of camelCase",
+        "topic": "snake_case"
+      }
+    },
+    {
+      "title": "Add the refunds table",
+      "files": {
+        "src/db/refunds.ts": "import { table } from \"./table\";\nexport const refunds = table(\"refunds\", [\"refund_id\", \"order_id\"]);\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/db/refunds.ts",
+        "line": 2,
+        "title": "Column names use snake_case instead of camelCase",
+        "topic": "snake_case"
+      }
+    },
+    {
+      "title": "Add the customers table",
+      "files": {
+        "src/db/customers.ts": "import { table } from \"./table\";\nexport const customers = table(\"customers\", [\"customer_id\", \"signed_up_at\"]);\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/db/customers.ts",
+        "line": 2,
+        "title": "Column names use snake_case instead of camelCase",
+        "topic": "snake_case"
+      }
+    }
+  ]
+}

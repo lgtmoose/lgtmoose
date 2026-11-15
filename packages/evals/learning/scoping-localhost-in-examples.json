@@ -1,0 +1,63 @@
+{
+  "description": "Two maintainers decline a hard-coded localhost URL finding in examples/ on two PRs. Outcome learning proposes the learning after the second, and the third example shouldn't raise it.",
+  "family": "scoping",
+  "expect": "learns",
+  "signals": 2,
+  "permissions": { "maya": "write", "li": "admin" },
+  "correction": {
+    "type": "repeat",
+    "authors": ["li", "maya"],
+    "reason": "Examples run against a local server on purpose; a localhost URL in an example is what readers expect."
+  },
+  "base": {
+    "README.md": "# Client\n",
+    "src/client.ts": "export const client = (url: string) => ({ url });\n"
+  },
+  "prs": [
+    {
+      "title": "Add the basic example",
+      "files": {
+        "examples/basic.ts": "import { client } from \"../src/client\";\nexport const api = client(\"http://localhost:8080\");\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention", "wiring"],
+        "severity": "nit",
+        "path": "examples/basic.ts",
+        "line": 2,
+        "title": "Hard-coded localhost URL in the example",
+        "topic": "localhost URL"
+      }
+    },
+    {
+      "title": "Add the streaming example",
+      "files": {
+        "examples/stream.ts": "import { client } from \"../src/client\";\nexport const stream = client(\"http://localhost:8080/stream\");\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention", "wiring"],
+        "severity": "nit",
+        "path": "examples/stream.ts",
+        "line": 2,
+        "title": "Hard-coded localhost URL in the example",
+        "topic": "localhost URL"
+      }
+    },
+    {
+      "title": "Add the retry example",
+      "files": {
+        "examples/retry.ts": "import { client } from \"../src/client\";\nexport const retry = client(\"http://localhost:8080/retry\");\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention", "wiring"],
+        "severity": "nit",
+        "path": "examples/retry.ts",
+        "line": 2,
+        "title": "Hard-coded localhost URL in the example",
+        "topic": "localhost URL"
+      }
+    }
+  ]
+}

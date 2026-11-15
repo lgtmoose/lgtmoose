@@ -77,6 +77,11 @@ export interface ReviewDeps {
   workDir(): Promise<{ dir: string; remove(): Promise<void> }>;
   /** Progress for the person running it, on stderr. Never receives a secret or model output. */
   progress(line: string): void;
+  /**
+   * The learnings each batch's prompt gets (see `PrepareDeps.learnings`). Left out, prompts have
+   * none, as for `lgtmoose review --dry-run`; the learning-speed evals pass their own store.
+   */
+  learnings?: LearningsForBatch;
 }
 
 export interface ReviewOptions {

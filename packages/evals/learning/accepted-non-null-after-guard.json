@@ -1,0 +1,63 @@
+{
+  "description": "A maintainer declines a non-null assertion finding (the value was checked by a guard) and replies remember. Later PRs with the same pattern shouldn't raise it.",
+  "family": "accepted_pattern",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "li": "maintain" },
+  "correction": {
+    "type": "remember",
+    "author": "li",
+    "reason": "validate() has already checked the value, so the non-null assertion after it is our accepted pattern."
+  },
+  "base": {
+    "README.md": "# Accounts\n",
+    "src/validate.ts": "export function validate(value: string | undefined): asserts value is string {\n  if (value === undefined) throw new Error(\"missing\");\n}\n"
+  },
+  "prs": [
+    {
+      "title": "Read the account name",
+      "files": {
+        "src/name.ts": "import { validate } from \"./validate\";\nexport function name(input: { name?: string }) {\n  validate(input.name);\n  return input.name!.trim();\n}\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention"],
+        "severity": "nit",
+        "path": "src/name.ts",
+        "line": 4,
+        "title": "Non-null assertion operator used on an optional value",
+        "topic": "non-null assertion"
+      }
+    },
+    {
+      "title": "Read the account email",
+      "files": {
+        "src/email.ts": "import { validate } from \"./validate\";\nexport function email(input: { email?: string }) {\n  validate(input.email);\n  return input.email!.toLowerCase();\n}\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention"],
+        "severity": "nit",
+        "path": "src/email.ts",
+        "line": 4,
+        "title": "Non-null assertion operator used on an optional value",
+        "topic": "non-null assertion"
+      }
+    },
+    {
+      "title": "Read the account phone",
+      "files": {
+        "src/phone.ts": "import { validate } from \"./validate\";\nexport function phone(input: { phone?: string }) {\n  validate(input.phone);\n  return input.phone!.replace(/ /g, \"\");\n}\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["convention"],
+        "severity": "nit",
+        "path": "src/phone.ts",
+        "line": 4,
+        "title": "Non-null assertion operator used on an optional value",
+        "topic": "non-null assertion"
+      }
+    }
+  ]
+}

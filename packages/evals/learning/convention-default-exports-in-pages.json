@@ -1,0 +1,72 @@
+{
+  "description": "A maintainer teaches with learn: that pages use a default export by convention. A missing authorization check on a later page must still be raised: the learning doesn't name it.",
+  "family": "convention",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "learn",
+    "author": "maya",
+    "comment": "@lgtmoose learn: Pages in pages/ use a default export, as our framework expects; don't ask for a named export instead of a default export there."
+  },
+  "base": {
+    "README.md": "# Site\n",
+    "src/session.ts": "export function session() {\n  return { user: { role: \"guest\" } };\n}\n"
+  },
+  "prs": [
+    {
+      "title": "Add the about page",
+      "files": {
+        "pages/about.tsx": "export default function About() {\n  return <h1>About us</h1>;\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "pages/about.tsx",
+        "line": 1,
+        "title": "Prefer a named export over a default export",
+        "topic": "default export"
+      }
+    },
+    {
+      "title": "Add the admin page",
+      "files": {
+        "pages/admin.tsx": "import { session } from \"../src/session\";\nexport default function Admin() {\n  const { user } = session();\n  return <h1>Admin for {user.role}</h1>;\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "pages/admin.tsx",
+        "line": 2,
+        "title": "Prefer a named export over a default export",
+        "topic": "default export"
+      },
+      "keep": [
+        {
+          "category": "authz",
+          "also": ["security"],
+          "severity": "blocking",
+          "path": "pages/admin.tsx",
+          "line": 3,
+          "lines": [2, 4],
+          "title": "Admin page renders without an authorization check",
+          "topic": "authorization check"
+        }
+      ]
+    },
+    {
+      "title": "Add the pricing page",
+      "files": {
+        "pages/pricing.tsx": "export default function Pricing() {\n  return <h1>Pricing</h1>;\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "pages/pricing.tsx",
+        "line": 1,
+        "title": "Prefer a named export over a default export",
+        "topic": "default export"
+      }
+    }
+  ]
+}

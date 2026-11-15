@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { FileTranscriptStore } from "@lgtmoose/pipeline";
 import { loadFixtures, type Fixture } from "./fixture.js";
+import { learningTotals, loadScenarios, runScenarios, type Scenario } from "./learning.js";
+import { renderLearningMarkdown } from "./learning-report.js";
 import {
   matrixAssignments,
   matrixRan,
@@ -19,30 +21,42 @@ import {
   baselineFrom,
   buildReport,
   checkBaseline,
+  checkLearningBaseline,
   readBaseline,
   renderMarkdown,
   type Baseline,
   type EvalReport,
   type GateResult,
+  type LearningReport,
 } from "./report.js";
 import { runFixtures } from "./run.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 
+/** Learning scenarios run at once: each one's PRs still run in order. */
+const LEARNING_CONCURRENCY = 4;
+
 const HELP = `Usage: lgtmoose-evals [options]
 
 Runs the review pipeline (the one behind \`lgtmoose review --dry-run\`) with Claude Code on every
-fixture, scores the findings and writes report.md and report.json. Needs a model credential in
-the environment, as the dry run does. Exits 1 when recall falls below the baseline, and 2 when
-the evals couldn't run (bad fixtures or options, or every fixture run failed, as without a
-model credential).
+fixture, scores the findings and writes report.md and report.json. Then runs the learning-speed
+scenarios in learning/ on the fast model: a correction after each review, and the next PR shows
+whether it stuck. Needs a model credential in the environment, as the dry run does. Exits 1 when
+recall falls below the baseline or the learning gate fails (any collateral in a protected
+category, any untrusted learning in a prompt, or a repeat rate above the baseline's), and 2 when
+the evals couldn't run (bad fixtures or options, or every fixture run failed, as without a model
+credential).
 
 Options:
   --fixtures <dir>     Another fixture directory, run with this package's fixtures/
                        (repeatable). LGTMOOSE_EVAL_FIXTURES adds more, separated by "${delimiter}".
                        For private fixtures kept outside this repository.
   --no-public          Leave out this package's fixtures/ and run only the extra ones
-  --only <name>        Run only this fixture (repeatable); the baseline isn't checked
+  --only <name>        Run only this fixture or learning scenario (repeatable); the baseline
+                       isn't checked (collateral still fails the run)
+  --no-learning        Leave out the learning-speed scenarios
+  --learning-model <name>
+                       Reviewer model for the learning scenarios (default: haiku, the fast tier)
   --out <dir>          Where to write the report and transcripts (default: ./eval-report)
   --baseline <file>    Baseline to compare with (default: this package's baseline.json)
   --update-baseline    Write this run's numbers to the baseline file instead of gating
@@ -61,7 +75,7 @@ Provider matrix (instead of the single Claude Code run and its baseline gate):
                        (repeatable). Only roles the pipeline runs today can be set: reviewer
   --results <dir>      Also keep a timestamped copy of matrix.json here, to compare runs later
 
-A matrix run writes matrix.md (the side-by-side table) and matrix.json to --out, and each
+A matrix run doesn't run the learning scenarios. It writes matrix.md (the side-by-side table) and matrix.json to --out, and each
 configuration's report.md, report.json and transcripts to a folder of its own. A provider
 without a credential is skipped, and limit hits are counted, not fatal. It exits 2 when no
 configuration could run, and 0 otherwise.
@@ -91,6 +105,8 @@ async function main(argv: readonly string[]): Promise<number> {
       fixtures: { type: "string", multiple: true },
       "no-public": { type: "boolean" },
       only: { type: "string", multiple: true },
+      "no-learning": { type: "boolean" },
+      "learning-model": { type: "string" },
       out: { type: "string" },
       baseline: { type: "string" },
       "update-baseline": { type: "boolean" },
@@ -151,11 +167,18 @@ async function main(argv: readonly string[]): Promise<number> {
     );
   }
   let fixtures = await loadFixtures(roots);
+  let scenarios: Scenario[] =
+    matrix || values["no-learning"] ? [] : await loadScenarios(join(PACKAGE_DIR, "learning"));
   if (values.only !== undefined) {
     const only = new Set(values.only);
     fixtures = fixtures.filter((fixture) => only.has(fixture.name));
-    const missing = [...only].filter((name) => !fixtures.some((f) => f.name === name));
-    if (missing.length > 0) throw new Error(`No fixture named ${missing.join(", ")}.`);
+    scenarios = scenarios.filter((scenario) => only.has(scenario.name));
+    const missing = [...only].filter(
+      (name) => !fixtures.some((f) => f.name === name) && !scenarios.some((s) => s.name === name),
+    );
+    if (missing.length > 0) {
+      throw new Error(`No fixture or learning scenario named ${missing.join(", ")}.`);
+    }
   }
 
   await mkdir(out, { recursive: true });
@@ -180,15 +203,43 @@ async function main(argv: readonly string[]): Promise<number> {
       env: process.env,
       ...(values.claude === undefined ? {} : { binaryPath: values.claude }),
     });
+    const progress = (line: string) => process.stderr.write(`${line}\n`);
     const scores = await runFixtures(fixtures, {
       harness,
       model,
       batchTimeoutMs: Math.round(minutes * 60_000),
       workRoot,
-      progress: (line) => process.stderr.write(`${line}\n`),
+      progress,
     });
-    const report = buildReport(scores, model, startedAt);
+    let learning: LearningReport | undefined;
+    if (scenarios.length > 0) {
+      const learningModel = values["learning-model"] ?? "haiku";
+      const scored = await runScenarios(scenarios, {
+        harness,
+        model: learningModel,
+        batchTimeoutMs: Math.round(minutes * 60_000),
+        workRoot,
+        progress,
+        concurrency: LEARNING_CONCURRENCY,
+      });
+      learning = { model: learningModel, totals: learningTotals(scored), scenarios: scored };
+    }
+    const report: EvalReport = {
+      ...buildReport(scores, model, startedAt),
+      ...(learning === undefined ? {} : { learning }),
+    };
     const baseline = await readBaseline(baselinePath);
+    // Collateral and untrusted learnings fail any run; the repeat rate is compared with the
+    // baseline's only on the whole set, as recall is.
+    const learningGate =
+      learning === undefined
+        ? undefined
+        : learning.totals.failedRuns === learning.scenarios.length
+          ? { ok: false, message: "Every learning scenario's reviews failed." }
+          : checkLearningBaseline(
+              learning,
+              values["update-baseline"] || values.only !== undefined ? undefined : baseline,
+            );
     // A failed run (a timeout, a rate limit, no credential) scores as misses, which would read
     // as a recall drop. Report it as "couldn't run" instead, and never make it the baseline.
     const failed = report.totals.failedRuns;
@@ -207,13 +258,25 @@ async function main(argv: readonly string[]): Promise<number> {
             baselinePath,
           });
     await writeFile(join(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
-    await writeFile(join(out, "report.md"), renderMarkdown(report, baseline, gate));
-    process.stderr.write(`${gate.message}\nReport: ${join(out, "report.md")}\n`);
+    const markdown = [
+      renderMarkdown(report, baseline, gate),
+      ...(learning === undefined || learningGate === undefined
+        ? []
+        : [renderLearningMarkdown(learning.scenarios, learningGate, learning.model)]),
+    ].join("\n");
+    await writeFile(join(out, "report.md"), markdown);
+    process.stderr.write(
+      `${gate.message}\n${learningGate === undefined ? "" : `${learningGate.message}\n`}Report: ${join(out, "report.md")}\n`,
+    );
     if (failed > 0) return 2;
-    if (values["update-baseline"]) {
+    if (learning !== undefined && learning.totals.failedRuns === learning.scenarios.length) {
+      return 2;
+    }
+    // A run with collateral never becomes the baseline.
+    if (values["update-baseline"] && learningGate?.ok !== false) {
       await writeFile(baselinePath, `${JSON.stringify(baselineFrom(report), null, 2)}\n`);
     }
-    return gate.ok ? 0 : 1;
+    return gate.ok && learningGate?.ok !== false ? 0 : 1;
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }
