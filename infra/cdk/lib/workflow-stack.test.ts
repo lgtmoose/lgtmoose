@@ -505,6 +505,32 @@ describe("review state machine", () => {
       LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
     });
   });
+
+  it("passes the spend caps to the control task, and alarms only with a monthly cap", () => {
+    const [container] = taskDefinition("control").ContainerDefinitions as {
+      Environment: { Name: string; Value: unknown }[];
+    }[];
+    const env = Object.fromEntries((container?.Environment ?? []).map((e) => [e.Name, e.Value]));
+    expect(JSON.parse(String(env.LGTMOOSE_BUDGETS))).toEqual({ perPullRequest: {}, prices: {} });
+    expect(Object.keys(resources).filter((id) => id.startsWith("BudgetAlarm"))).toEqual([]);
+
+    const capped = buildApp(
+      parseDeployConfig({
+        allowedOrgs: ["lgtmoose"],
+        providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token" }],
+        budgets: { monthlyUsd: 200 },
+      }),
+      appWithoutBundling(),
+    );
+    const alarms = Template.fromStack(capped.workflow).findResources("AWS::CloudWatch::Alarm", {
+      Properties: { MetricName: "BudgetUsed", Namespace: "LGTMoose" },
+    });
+    expect(
+      Object.values(alarms)
+        .map((alarm) => (alarm.Properties as { Threshold: number }).Threshold)
+        .sort((a, b) => a - b),
+    ).toEqual([50, 80, 100]);
+  }, 120_000);
 });
 
 describe("dispatcher", () => {

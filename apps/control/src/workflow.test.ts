@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { budgetsSchema } from "@lgtmoose/config";
 import { severityRank, type Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
 import {
@@ -36,6 +37,7 @@ import {
   type PostAttempt,
 } from "./post.js";
 import { RESUME_RUNS, prepare, readManifest, type RunManifest } from "./prepare.js";
+import type { SpendSnapshot, SpendStore } from "./spend.js";
 import { POST_FAILED, PREPARE_FAILED, runCommand, type StepDeps } from "./run.js";
 
 const exec = promisify(execFile);
@@ -3297,5 +3299,131 @@ describe("runCommand", () => {
     );
     expect(h.runs.runs.get(RUN_ID)).toMatchObject({ status: "failed", error: "States.TaskFailed" });
     expect([...h.objects.keys()].filter((key) => key.startsWith("shadow/"))).toEqual([]);
+  });
+});
+
+describe("spend caps (NIC-1079)", () => {
+  /** The spend ledger in memory: what's spent, and what runs reserve and settle. */
+  function memorySpend(spent: Partial<SpendSnapshot> = {}, lastCapped?: string) {
+    const reserved = new Map<string, { costUsd: number; batches: number; settled?: number }>();
+    const capped = new Map<string, string>();
+    const snapshot = (): SpendSnapshot => ({
+      prDayRuns: 0,
+      prDayUsd: 0,
+      repoMonthUsd: 0,
+      monthUsd: 0,
+      averageBatchUsd: 1,
+      ...spent,
+    });
+    const store: SpendStore = {
+      snapshot: async () => snapshot(),
+      async reserve(runId, _target, _now, decide) {
+        const seen = snapshot();
+        const decision = decide(seen);
+        if (decision !== undefined && decision.batches > 0 && !reserved.has(runId)) {
+          reserved.set(runId, { costUsd: decision.costUsd, batches: decision.batches });
+        }
+        return { snapshot: seen, decision };
+      },
+      async settle(runId, costUsd) {
+        const row = reserved.get(runId);
+        if (row === undefined) return undefined;
+        const wasSettled = row.settled !== undefined;
+        const reservedUsd = row.settled ?? row.costUsd;
+        row.settled = costUsd;
+        return { repo: "acme/shop", month: "2026-11", reservedUsd, wasSettled };
+      },
+      markCapped: async (runId, kind) => {
+        capped.set(runId, kind);
+      },
+      lastCapped: async () => lastCapped,
+      monthTotals: async () => ({ monthUsd: 0, repos: new Map() }),
+    };
+    return { store, reserved, capped };
+  }
+
+  const budgets = (input: unknown) => budgetsSchema.parse(input);
+
+  it("reserves a run's estimate and settles it at what its batches reported", async () => {
+    const h = harness();
+    const spend = memorySpend();
+    h.deps.spend = { store: spend.store, budgets: budgets({ monthlyUsd: 100 }) };
+    const result = await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    expect(result.batches).toEqual([{ index: 0 }]);
+    expect(spend.reserved.get(RUN_ID)).toEqual({ costUsd: 1, batches: 1 });
+    h.objects.set(
+      runKeys(RUN_ID).batchOutput(0),
+      JSON.stringify(output({ usage: { inputTokens: 100_000, outputTokens: 10_000 } })),
+    );
+    await post(h.deps, RUN_ID);
+    // 100k input and 10k output at the standard tier's $3 and $15 a million.
+    expect(spend.reserved.get(RUN_ID)?.settled).toBeCloseTo(0.45, 6);
+    expect(spend.capped.size).toBe(0);
+  });
+
+  it("dispatches nothing past a cap, and posts an incomplete review that says which", async () => {
+    const h = harness();
+    const spend = memorySpend({ monthUsd: 100 });
+    h.deps.spend = { store: spend.store, budgets: budgets({ monthlyUsd: 100 }) };
+    const result = await prepare(h.deps, JOB, EXECUTION, SETTINGS);
+    expect(result).toMatchObject({ superseded: false, batches: [] });
+    expect(h.objects.has(runKeys(RUN_ID).batchInput(0))).toBe(false);
+    expect(spend.reserved.size).toBe(0);
+    expect(spend.capped.get(RUN_ID)).toBe("monthly");
+    const manifest = JSON.parse(h.objects.get(runKeys(RUN_ID).prepared) ?? "") as RunManifest;
+    expect(manifest.spendCap).toMatchObject({ kind: "monthly", batches: [0] });
+
+    expect(await post(h.deps, RUN_ID)).toMatchObject({ posted: true, complete: false });
+    const [check] = shadowRecords(h.objects, "check-run");
+    expect(check).toMatchObject({ title: "Spend cap reached", conclusion: "action_required" });
+    const [summary] = shadowRecords(h.objects, "summary-comment");
+    // Escaped, as every reason in the summary is.
+    expect(String(summary?.body)).toContain("monthly spend cap of \\$100\\.00");
+    expect(String(summary?.body)).not.toContain("failed");
+    const [review] = shadowRecords(h.objects, "review");
+    expect(review).toMatchObject({ event: "COMMENT" });
+  });
+
+  it("posts nothing when the head's last posted run was stopped by the same cap", async () => {
+    const h = harness();
+    const spend = memorySpend({ monthUsd: 100 }, "monthly");
+    h.deps.spend = { store: spend.store, budgets: budgets({ monthlyUsd: 100 }) };
+    expect(await prepare(h.deps, JOB, EXECUTION, SETTINGS)).toMatchObject({ superseded: true });
+    expect(h.runs.runs.get(RUN_ID)?.status).toBe("superseded");
+    // Before the clone: no checkout was written.
+    expect(h.files.size).toBe(0);
+  });
+
+  it("lifts the PR's caps for a review asked for by someone with write access", async () => {
+    const spent = { prDayRuns: 5 };
+    const caps = budgets({ perPullRequest: { runsPerDay: 5 } });
+    const asked = { ...JOB, requested: "review" as const };
+
+    const lead = harness();
+    lead.deps.spend = { store: memorySpend(spent).store, budgets: caps };
+    expect(
+      (await prepare(lead.deps, { ...asked, actor: "lead" }, EXECUTION, SETTINGS)).batches,
+    ).toEqual([{ index: 0 }]);
+
+    // Read access, or no command at all: the cap stands.
+    for (const job of [
+      { ...asked, actor: "reader" },
+      { ...JOB, actor: "lead" },
+    ]) {
+      const h = harness();
+      const spend = memorySpend(spent);
+      h.deps.spend = { store: spend.store, budgets: caps };
+      expect((await prepare(h.deps, job, EXECUTION, SETTINGS)).batches).toEqual([]);
+      expect(spend.capped.get(RUN_ID)).toBe("pr_runs");
+    }
+  });
+
+  it("never lifts the monthly caps, whoever asks", async () => {
+    const h = harness();
+    const spend = memorySpend({ repoMonthUsd: 20 });
+    h.deps.spend = { store: spend.store, budgets: budgets({ perRepoMonthlyUsd: 20 }) };
+    const job = { ...JOB, requested: "review" as const, actor: "lead" };
+    expect((await prepare(h.deps, job, EXECUTION, SETTINGS)).batches).toEqual([]);
+    expect(spend.capped.get(RUN_ID)).toBe("repo_monthly");
   });
 });

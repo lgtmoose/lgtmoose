@@ -5,7 +5,8 @@ import pg from "pg";
  * reads the database as the owner and the feedback report through an IAM grant on that one S3
  * key; here it gets a role with only what the dashboard store and the learning policy use:
  *
- * - reads of pull requests, findings, review runs, provider use and cooldowns, and learnings;
+ * - reads of pull requests, findings, review runs, provider use and cooldowns, learnings and the
+ *   spend ledger (NIC-1079, for the Usage page's spend against the caps);
  * - its own sessions in `dashboard_sessions` (create, read, delete);
  * - approving or retiring a learning: UPDATE of `status`, `updated_at` and `retired_at` on
  *   `learnings`, and INSERT on `learning_events`. Whether a person may is decided by
@@ -28,6 +29,7 @@ const READS = [
   "provider_usage",
   "provider_cooldowns",
   "learnings",
+  "spend_ledger",
 ] as const;
 
 export async function ensureDashboardRole(

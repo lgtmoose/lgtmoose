@@ -277,6 +277,147 @@
         }
       ]
     },
+    "budgets": {
+      "description": "Spend caps: the most estimated model cost per PR, per repository and per month. A repository's .lgtmoose.yaml can only lower its own. See docs/costs.md.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "perPullRequest": {
+          "description": "Caps per PR per UTC day. `@lgtmoose review` from someone with write access runs once past them.",
+          "default": {},
+          "type": "object",
+          "properties": {
+            "runsPerDay": {
+              "description": "Most review runs that call a model, per PR per UTC day.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "costPerDayUsd": {
+              "description": "Most estimated model cost per PR per UTC day, in USD.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "additionalProperties": false
+        },
+        "perRepoMonthlyUsd": {
+          "description": "Most estimated model cost per repository per UTC calendar month, in USD.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "monthlyUsd": {
+          "description": "Most estimated model cost for the whole deployment per UTC calendar month, in USD.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "prices": {
+          "description": "USD per million tokens by model tier, for the cost estimate. Unset fields keep the defaults (Claude list prices).",
+          "default": {},
+          "type": "object",
+          "properties": {
+            "fast": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "description": "USD per million input tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "output": {
+                  "description": "USD per million output tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheRead": {
+                  "description": "USD per million cache-read tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheWrite": {
+                  "description": "USD per million cache-write tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                }
+              },
+              "additionalProperties": false,
+              "description": "This tier's prices, in USD per million tokens."
+            },
+            "standard": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "description": "USD per million input tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "output": {
+                  "description": "USD per million output tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheRead": {
+                  "description": "USD per million cache-read tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheWrite": {
+                  "description": "USD per million cache-write tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                }
+              },
+              "additionalProperties": false,
+              "description": "This tier's prices, in USD per million tokens."
+            },
+            "deep": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "description": "USD per million input tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "output": {
+                  "description": "USD per million output tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheRead": {
+                  "description": "USD per million cache-read tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "cacheWrite": {
+                  "description": "USD per million cache-write tokens.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                }
+              },
+              "additionalProperties": false,
+              "description": "This tier's prices, in USD per million tokens."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "maxReplyJudgements": {
       "default": 10,
       "description": "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",

@@ -142,6 +142,40 @@
         }
       },
       "additionalProperties": false
+    },
+    "budgets": {
+      "description": "Spend caps for this repository. They can only lower the deployment's caps, never raise them.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "per_pull_request": {
+          "description": "Caps per PR per UTC day.",
+          "default": {},
+          "type": "object",
+          "properties": {
+            "runs_per_day": {
+              "description": "Most review runs that call a model, per PR per UTC day.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "cost_per_day_usd": {
+              "description": "Most estimated model cost per PR per UTC day, in USD.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "additionalProperties": false
+        },
+        "monthly_usd": {
+          "description": "Most estimated model cost for this repository per UTC calendar month, in USD.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

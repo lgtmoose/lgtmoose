@@ -1,6 +1,7 @@
 import {
   dashboardSessions,
   findings,
+  postgresSpend,
   providerCooldowns,
   providerUsage,
   pullRequests,
@@ -103,6 +104,14 @@ export interface DashboardStore {
   providerUse(repos: readonly string[], since: Date): Promise<ProviderUse[]>;
   /** Providers cooling down at `now`. */
   cooldowns(now: Date): Promise<ProviderCooldown[]>;
+  /**
+   * This month's estimated spend (the spend ledger, NIC-1079): the deployment's, and each of
+   * `repos` that spent anything, most first.
+   */
+  spendThisMonth(
+    repos: readonly string[],
+    now: Date,
+  ): Promise<{ monthUsd: number; repos: { repo: string; usd: number }[] }>;
 }
 
 const SEVERITY_ORDER = sql`case ${findings.severity} when 'blocking' then 0 when 'should_fix' then 1 else 2 end`;
@@ -289,6 +298,18 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         limitHits: Number(row.limitHits),
         fallbacks: Number(row.fallbacks),
       }));
+    },
+    async spendThisMonth(repos, now) {
+      const totals = await postgresSpend(
+        db as unknown as Parameters<typeof postgresSpend>[0],
+      ).monthTotals(repos, now);
+      const byLower = new Map(repos.map((repo) => [repo.toLowerCase(), repo]));
+      return {
+        monthUsd: totals.monthUsd,
+        repos: [...totals.repos]
+          .map(([repo, usd]) => ({ repo: byLower.get(repo) ?? repo, usd }))
+          .sort((a, b) => b.usd - a.usd || a.repo.localeCompare(b.repo)),
+      };
     },
     async cooldowns(now) {
       const rows = await db

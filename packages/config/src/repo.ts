@@ -1,5 +1,6 @@
 import { parse as parseYaml, YAMLParseError } from "yaml";
 import { z } from "zod";
+import { repoBudgetsSchema } from "./budgets.js";
 import { ConfigError, toConfigError } from "./errors.js";
 
 export const DEFAULT_CONVENTIONS = [
@@ -131,6 +132,11 @@ export const repoConfigSchema = z
       .strict()
       .prefault({})
       .describe("The three status labels LGTMoose keeps on a PR: pending, changes and approved."),
+    /**
+     * Spend caps for this repository (NIC-1079): lower than the deployment's, never higher. Read
+     * at the PR's base, like the rest of this file, so a PR can't change its own.
+     */
+    budgets: repoBudgetsSchema,
   })
   .strict();
 

@@ -21,3 +21,13 @@ export {
   type ProviderUsageAttempt,
   type ProviderUsageRow,
 } from "./usage.js";
+export {
+  MIN_HISTORY_BATCHES,
+  RESERVATION_TTL_MS,
+  postgresSpend,
+  spendPeriod,
+  type PostgresSpend,
+  type SpendReservation,
+  type SpendSnapshot,
+  type SpendTarget,
+} from "./spend.js";

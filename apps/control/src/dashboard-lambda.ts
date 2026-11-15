@@ -9,6 +9,7 @@ import { handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import { githubDashboard } from "./dashboard-github.js";
 import { fromHttpApiEvent, json, toHttpApiResult, type HttpApiEvent } from "./dashboard-http.js";
 import { drizzleDashboardStore } from "./dashboard-store.js";
+import { readBudgets } from "./spend.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { log } from "./log.js";
 
@@ -108,6 +109,7 @@ function dashboardDeps(): Promise<DashboardDeps> {
         }
       },
       github: githubDashboard({ timeoutMs: 8000 }),
+      budgets: readBudgets(process.env),
       async oauthClient() {
         if (oauth !== undefined) return oauth;
         try {

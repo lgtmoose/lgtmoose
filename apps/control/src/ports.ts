@@ -1,3 +1,4 @@
+import type { Budgets } from "@lgtmoose/config";
 import type { Finding, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { LearningsForBatch, PullReader, PullTarget } from "@lgtmoose/pipeline";
@@ -6,6 +7,7 @@ import type { TicketProvider } from "@lgtmoose/tickets";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 import type { Permission } from "./thread-policy.js";
 import type { ReplyStore } from "./replies.js";
+import type { SpendStore } from "./spend.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
@@ -337,4 +339,9 @@ export interface ControlDeps {
     maxPerPullRequest: number;
     detailsOnPublicRepos?: boolean;
   };
+  /**
+   * Spend caps (NIC-1079): the ledger and the deploy config's `budgets`. Left out (tests, the
+   * CLI), nothing is capped or recorded.
+   */
+  spend?: { store: SpendStore; budgets: Budgets };
 }

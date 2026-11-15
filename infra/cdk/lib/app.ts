@@ -116,6 +116,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     feedback: config.feedback,
     maxReplyJudgements: config.maxReplyJudgements,
     maxExplanations: config.maxExplanations,
+    budgets: config.budgets,
     embeddings: config.learnings.embeddings,
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
     ...(config.tickets === undefined ? {} : { tickets: config.tickets }),
@@ -139,6 +140,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
       databaseName: DATABASE_NAME,
       artifactBucket: data.artifactBucket,
       allowedOrgs: config.allowedOrgs,
+      budgets: config.budgets,
       logRetention: config.profile === "lean" ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
     });
     // It reads the database, so it deploys after the migrations.

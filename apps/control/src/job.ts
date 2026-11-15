@@ -20,6 +20,11 @@ export const workflowJobSchema = z.object({
   eventAt: z.iso.datetime().optional(),
   /** Set when a person asked for the review (`ReviewJob.requested`). */
   requested: z.enum(REVIEW_REQUESTS).optional(),
+  /**
+   * Who the job's event came from (`ReviewJob.actor`): for a requested review, the person who
+   * asked. Their access is read from GitHub, never taken from the job.
+   */
+  actor: z.string().min(1).max(100).optional(),
 });
 
 export type WorkflowJob = z.infer<typeof workflowJobSchema>;

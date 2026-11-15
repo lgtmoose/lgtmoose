@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { budgetsSchema } from "./budgets.js";
 import { toConfigError } from "./errors.js";
 
 /** Which auth methods each harness accepts. Mirrors the providers table in docs/architecture.md. */
@@ -393,6 +394,12 @@ export const deployConfigSchema = z
      * default), or a published release's images, pinned by digest (docs/releasing.md).
      */
     images: imagesSchema,
+    /**
+     * Spend caps (NIC-1079): the most estimated model cost per PR per day, per repository per
+     * month and for the deployment per month, and the price table the estimate uses. Unset, no
+     * cap applies. A repository's `.lgtmoose.yaml` can only lower its own.
+     */
+    budgets: budgetsSchema,
     /**
      * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier
      * model call each). Replies past it wait for the next run.

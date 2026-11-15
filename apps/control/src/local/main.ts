@@ -138,6 +138,7 @@ async function main(): Promise<void> {
     embedder,
     ...(tickets === undefined ? {} : { tickets }),
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
+    budgets: config.budgets,
   });
 
   const docker = new Docker(

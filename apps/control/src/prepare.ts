@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { effectiveCaps, tierPrices, type Tier } from "@lgtmoose/config";
 import { findingSchema } from "@lgtmoose/core";
 import type { Repo } from "@lgtmoose/git";
 import {
@@ -22,6 +23,16 @@ import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord } from "./ports.js";
 import type { PendingReply } from "./replies.js";
+import {
+  RUN_ALL,
+  capReason,
+  liftsPrCaps,
+  planSpend,
+  quietlyCapped,
+  reserveSpend,
+  type CapKind,
+  type PlannedBatch,
+} from "./spend.js";
 
 /** How the batches are run, from the control task's environment. */
 export interface PrepareSettings {
@@ -65,7 +76,15 @@ export interface RunManifest {
   tickets?: TicketsManifest;
   /** The `explain`s this run answers (NIC-1053); their batches follow the tickets'. */
   explanations?: ExplainJob[];
+  /**
+   * The spend cap that kept batches from running (NIC-1079): which, the review batches it kept
+   * (not dispatched), and what the summary says.
+   */
+  spendCap?: { kind: CapKind; batches: number[]; reason: string };
 }
+
+/** What a ticket a spend cap kept from being checked says instead of its checklist. */
+export const TICKET_SPEND_CAP_NOTE = "Not checked: a spend cap was reached.";
 
 /** A manifest written before incremental reviews: the review lacks the fields they added. */
 interface LegacyManifest {
@@ -366,6 +385,41 @@ export async function prepare(
     return { runId: run.runId, superseded: true, batches: [] };
   }
 
+  // Spend caps (NIC-1079). A person's review command lifts the PR's own caps, when GitHub says
+  // they have write access. Before the clone: a run the deployment's caps stop entirely, with
+  // nothing new to say, ends here.
+  const spendAt = new Date();
+  const permission = github.permission;
+  const liftPr =
+    deps.spend === undefined
+      ? false
+      : await liftsPrCaps(
+          job,
+          permission === undefined ? undefined : (login) => permission(target, login),
+          (message, fields) => deps.log(message, fields),
+        );
+  if (deps.spend !== undefined) {
+    const probe = planSpend({
+      caps: effectiveCaps(deps.spend.budgets),
+      snapshot: await deps.spend.store.snapshot(
+        { repo: job.repo, prNumber: job.prNumber },
+        spendAt,
+      ),
+      override: liftPr,
+      wanted: [{ index: 0, kind: "review", tier: "standard" }],
+      prices: tierPrices(deps.spend.budgets),
+      now: spendAt,
+    });
+    if (
+      probe.cap !== undefined &&
+      (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, probe.cap))
+    ) {
+      await deps.runs.supersedeRun(run.runId);
+      deps.log("spend capped, nothing new to post", { runId: run.runId, cap: probe.cap.kind });
+      return { runId: run.runId, superseded: true, batches: [] };
+    }
+  }
+
   const keys = runKeys(run.runId);
   const lastReviewed = run.lastReviewedSha;
   // A full review someone asked for leaves earlier reviews out: every file is reviewed again,
@@ -439,6 +493,74 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
+    // What the caps let run, reserved before anything is dispatched: people's replies and
+    // explains first, then tickets, then the review's batches in plan order (riskiest first).
+    const wanted: PlannedBatch[] = [
+      ...judges.map((judge) => ({
+        index: judge.index,
+        kind: "judge" as const,
+        tier: REPLY_JUDGE_TIER as Tier,
+      })),
+      ...explains.flatMap((explain) =>
+        explain.index === undefined || explain.prompt === undefined
+          ? []
+          : [{ index: explain.index, kind: "explain" as const, tier: EXPLAINER_TIER as Tier }],
+      ),
+      ...tickets.batches.map((ticket) => ({
+        index: ticket.index,
+        kind: "ticket" as const,
+        tier: TICKET_CHECKER_TIER as Tier,
+      })),
+      ...prepared.jobs.flatMap((batch) =>
+        batch.prompt === undefined
+          ? []
+          : [{ index: batch.index, kind: "review" as const, tier: "standard" as Tier }],
+      ),
+    ];
+    const spent =
+      deps.spend === undefined
+        ? RUN_ALL
+        : await reserveSpend(
+            deps.spend,
+            { runId: run.runId, repo: job.repo, prNumber: job.prNumber },
+            {
+              caps: effectiveCaps(deps.spend.budgets, prepared.config.budgets),
+              override: liftPr,
+              wanted,
+              now: spendAt,
+            },
+            (message, fields) => deps.log(message, fields),
+          );
+    const notRun = wanted.filter((batch) => !spent.runs(batch.index));
+    if (spent.cap !== undefined && deps.spend !== undefined) {
+      if (
+        notRun.length === wanted.length &&
+        (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, spent.cap))
+      ) {
+        await deps.runs.supersedeRun(run.runId);
+        deps.log("spend capped, nothing new to post", { runId: run.runId, cap: spent.cap.kind });
+        return { runId: run.runId, superseded: true, batches: [] };
+      }
+      await deps.spend.store.markCapped(run.runId, spent.cap.kind);
+    }
+    const keptJudges = judges.filter((judge) => spent.runs(judge.index));
+    const keptExplains = explains.filter(
+      (explain) => explain.index === undefined || spent.runs(explain.index),
+    );
+    const ticketsManifest =
+      tickets.manifest === undefined
+        ? undefined
+        : {
+            ...tickets.manifest,
+            tickets: tickets.manifest.tickets.map((ticket) => {
+              if (ticket.index === undefined || spent.runs(ticket.index)) return ticket;
+              const rest = { ...ticket, note: TICKET_SPEND_CAP_NOTE };
+              delete rest.index;
+              return rest;
+            }),
+          };
+    const cappedReview = notRun.filter((batch) => batch.kind === "review").map((b) => b.index);
+
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);
@@ -446,7 +568,7 @@ export async function prepare(
 
     const batches: { index: number }[] = [];
     for (const batch of prepared.jobs) {
-      if (batch.prompt === undefined) continue;
+      if (batch.prompt === undefined || !spent.runs(batch.index)) continue;
       const input: BatchInput = batchInputSchema.parse({
         version: 1,
         runId: run.runId,
@@ -459,7 +581,7 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(batch.index), JSON.stringify(input));
       batches.push({ index: batch.index });
     }
-    for (const judge of judges) {
+    for (const judge of keptJudges) {
       const input: BatchInput = batchInputSchema.parse({
         version: 1,
         runId: run.runId,
@@ -474,6 +596,7 @@ export async function prepare(
       batches.push({ index: judge.index });
     }
     for (const ticket of tickets.batches) {
+      if (!spent.runs(ticket.index)) continue;
       const input: BatchInput = batchInputSchema.parse({
         version: 1,
         runId: run.runId,
@@ -487,7 +610,7 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(ticket.index), JSON.stringify(input));
       batches.push({ index: ticket.index });
     }
-    for (const explain of explains) {
+    for (const explain of keptExplains) {
       if (explain.index === undefined || explain.prompt === undefined) continue;
       const input: BatchInput = batchInputSchema.parse({
         version: 1,
@@ -507,11 +630,22 @@ export async function prepare(
       installationId: job.installationId,
       review: prepared,
       ...(job.requested === undefined ? {} : { requested: job.requested }),
-      ...(judges.length === 0 ? {} : { judgements: judges.map(({ prompt: _, ...rest }) => rest) }),
-      ...(tickets.manifest === undefined ? {} : { tickets: tickets.manifest }),
-      ...(explains.length === 0
+      ...(keptJudges.length === 0
         ? {}
-        : { explanations: explains.map(({ prompt: _, ...rest }) => rest) }),
+        : { judgements: keptJudges.map(({ prompt: _, ...rest }) => rest) }),
+      ...(ticketsManifest === undefined ? {} : { tickets: ticketsManifest }),
+      ...(keptExplains.length === 0
+        ? {}
+        : { explanations: keptExplains.map(({ prompt: _, ...rest }) => rest) }),
+      ...(spent.cap === undefined
+        ? {}
+        : {
+            spendCap: {
+              kind: spent.cap.kind,
+              batches: cappedReview,
+              reason: capReason(spent.cap, notRun.length),
+            },
+          }),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {

@@ -7,7 +7,15 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
-import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
+import {
+  filesReviewed,
+  findingEvents,
+  findings,
+  postgresSpend,
+  pullRequests,
+  reviewRuns,
+} from "@lgtmoose/db";
+import { budgetsSchema, type Budgets } from "@lgtmoose/config";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
 import { graphQlThreadReader, resolveReviewThread } from "./threads.js";
@@ -716,6 +724,8 @@ export async function awsControlDeps(
     embeddings?: EmbeddingsSettings;
     tickets?: TicketSettings;
     maxPendingLearnings?: number;
+    /** The deploy config's `budgets` (`LGTMOOSE_BUDGETS`). Left out: no caps. */
+    budgets?: Budgets;
   },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
@@ -779,6 +789,7 @@ export async function awsControlDeps(
       ...(options.maxPendingLearnings === undefined
         ? {}
         : { maxPendingLearnings: options.maxPendingLearnings }),
+      ...(options.budgets === undefined ? {} : { budgets: options.budgets }),
     }),
     close: () => pool.end(),
   };
@@ -795,6 +806,8 @@ export interface ControlParts {
   tickets?: NonNullable<ControlDeps["tickets"]>;
   /** `learnings.maxPendingPerAuthor`; left out, the policy's default. */
   maxPendingLearnings?: number;
+  /** The deploy config's `budgets` (NIC-1079); left out, no caps, but spend is still recorded. */
+  budgets?: Budgets;
 }
 
 /**
@@ -943,5 +956,9 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
     },
     learnings: learningsRetriever(learningStore, embedder, log),
     ...(tickets === undefined ? {} : { tickets }),
+    spend: {
+      store: postgresSpend(db as unknown as Parameters<typeof postgresSpend>[0]),
+      budgets: parts.budgets ?? budgetsSchema.parse({}),
+    },
   };
 }

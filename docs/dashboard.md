@@ -14,14 +14,14 @@ The stack's outputs `DashboardUrl` and `OAuthCallbackUrl` hold the same URLs.
 
 ## What it shows
 
-| Page          | What's on it                                                                                                                                                                     |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review                                                                                |
-| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                                                                                                |
-| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used                                                                                |
-| Learnings     | [Learnings](learning.md) by status: pending ones with **Approve** and **Reject**, active ones with **Reject**, and retired ones. Each shows its scope, author, source PR and use |
-| Usage         | Each provider's batches, tokens, cost, limit hits and fallbacks in your repositories over the last 30 days, and the providers sitting out a cooldown now                         |
-| Acceptance    | The [feedback report](feedback.md)'s acceptance by rule category, and its declined findings in your repositories                                                                 |
+| Page          | What's on it                                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Repositories  | Each repository you can see that LGTMoose has reviewed: open findings, blocking ones, last review                                                                                                                                    |
+| Open findings | Open findings, most severe first, with the PR, file and line, and who raised them                                                                                                                                                    |
+| Review runs   | The latest runs: when, which PR, kind, status, files, how long, cost, and the providers they used                                                                                                                                    |
+| Learnings     | [Learnings](learning.md) by status: pending ones with **Approve** and **Reject**, active ones with **Reject**, and retired ones. Each shows its scope, author, source PR and use                                                     |
+| Usage         | Each provider's batches, tokens, cost, limit hits and fallbacks in your repositories over the last 30 days, this month's estimated spend against the [spend caps](costs.md#spend-caps), and the providers sitting out a cooldown now |
+| Acceptance    | The [feedback report](feedback.md)'s acceptance by rule category, and its declined findings in your repositories                                                                                                                     |
 
 Findings, runs and repositories can be filtered to one repository. Findings' and learnings' text is shown as plain text, never rendered as HTML or Markdown.
 
@@ -36,7 +36,7 @@ The dashboard learns your access when you sign in: the repositories listing GitH
 
 ### Usage and acceptance
 
-- Usage counts batches in your repositories only. Cooldowns apply to every review in the deployment, so everyone signed in sees them.
+- Usage counts batches in your repositories only. This month's spend is shown per repository, against `budgets.perRepoMonthlyUsd`; the deployment's total, against `budgets.monthlyUsd`, only to an owner of one of the deployment's orgs. A repository's own lower caps in `.lgtmoose.yaml` aren't shown. Cooldowns apply to every review in the deployment, so everyone signed in sees them.
 - The acceptance numbers per category cover every repository LGTMoose reviews, as the reconciler's report does; the dashboard can't split them by repository. Its list of declined findings shows only those in your repositories. Without a report yet (the reconciler writes one each day), the page says so.
 
 ## How sign-in works
