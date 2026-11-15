@@ -253,6 +253,33 @@ describe("runSandboxBatch", () => {
     expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
   });
 
+  it("runs a bootstrap batch on the fast model, and writes its candidates", async () => {
+    const candidates = [
+      { kind: "convention", text: "Use the query builder, not raw SQL.", sources: ["c1", "c4"] },
+    ];
+    const s = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 0,
+        prompt: "Distil these comments",
+        role: "bootstrap",
+        tier: "fast",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: { candidates },
+    });
+    s.deps.model = "sonnet";
+    s.deps.fastModel = "haiku";
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.runs[0]).toMatchObject({ model: "haiku", tier: "fast" });
+    expect(s.runs[0]?.system).toBeUndefined();
+    expect(output).toMatchObject({ index: 0, candidates });
+    expect(output.findings).toBeUndefined();
+    expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
+  });
+
   it("writes a judge's failure as the batch's error", async () => {
     const s = setup({
       run: "timeout",

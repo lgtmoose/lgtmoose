@@ -55,6 +55,8 @@ describe("migrations", () => {
       "findings",
 
       "job_queue",
+      "learning_bootstrap_items",
+      "learning_bootstraps",
       "learning_events",
       "learnings",
 

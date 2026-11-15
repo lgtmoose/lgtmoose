@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isBootstrapInput, postBootstrap, prepareBootstrap } from "./bootstrap.js";
 import type { ControlCommand, ReviewSettings } from "./env.js";
 import { fail } from "./fail.js";
 import { parseJob } from "./job.js";
@@ -178,10 +179,18 @@ export async function runCommand(
       let output;
       let failure: unknown;
       try {
-        const job = parseJob(command.job);
-        output = await withHeartbeat(deps, executionArn, command.taskToken, () =>
-          prepare(deps, job, executionArn, settings),
-        );
+        // A bootstrap (NIC-1080) runs on the review workflow with its own job.
+        const input: unknown = JSON.parse(command.job);
+        output = isBootstrapInput(input)
+          ? await withHeartbeat(deps, executionArn, command.taskToken, () =>
+              prepareBootstrap(deps, input, settings),
+            )
+          : await (async () => {
+              const job = parseJob(command.job);
+              return withHeartbeat(deps, executionArn, command.taskToken, () =>
+                prepare(deps, job, executionArn, settings),
+              );
+            })();
       } catch (error) {
         if (error instanceof StepAbandoned) return gaveUp(deps, executionArn);
         failure = error;
@@ -206,8 +215,9 @@ export async function runCommand(
       let failure: unknown;
       try {
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
+        const bootstrap = (await deps.bootstrap?.store.get(command.runId)) !== undefined;
         await withHeartbeat(deps, executionArn, command.taskToken, async () =>
-          post(deps, command.runId, {
+          bootstrap ? postBootstrap(deps, command.runId) : post(deps, command.runId, {
             running,
             attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
             taskStatus: (taskArn) => deps.taskStatus(taskArn),

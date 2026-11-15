@@ -28,6 +28,8 @@ import {
   type DashboardResponse,
 } from "./dashboard-http.js";
 import type { DashboardSession, DashboardStore } from "./dashboard-store.js";
+import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
+import type { Bootstrap, BootstrapStore } from "./bootstrap-store.js";
 
 /**
  * The dashboard API (NIC-840), behind the dashboard's CloudFront distribution at `/api/*`, so the
@@ -65,6 +67,15 @@ export interface DashboardDeps {
   allowedOrgs: readonly string[];
   /** GitHub's web URL, for sign-in; github.com by default. */
   webUrl?: string;
+  /**
+   * Learning from review history (NIC-1080): the bootstraps, and what a request asks for by
+   * default. Left out, the dashboard shows none and can't start one.
+   */
+  bootstraps?: {
+    store: BootstrapStore;
+    /** Merged PRs a request reads unless it says otherwise. */
+    maxPrs: number;
+  };
   now(): Date;
   log(message: string, fields?: Record<string, unknown>): void;
 }
@@ -323,6 +334,130 @@ async function changeLearning(
   });
 }
 
+const BOOTSTRAP_ACTION = /^\/api\/bootstraps\/([0-9a-f-]{36})\/(approve|reject)$/;
+/** Bootstraps listed, newest first, and their items read for pending learnings. */
+const BOOTSTRAPS_LIMIT = 20;
+const BOOTSTRAP_ITEMS_LIMIT = 500;
+
+/** A bootstrap as the dashboard shows it. */
+function bootstrapView(bootstrap: Bootstrap) {
+  return {
+    id: bootstrap.id,
+    repo: bootstrap.repo,
+    status: bootstrap.status,
+    requestedBy: bootstrap.requestedBy,
+    prsRead: bootstrap.prsRead,
+    commentsRead: bootstrap.commentsRead,
+    proposed: bootstrap.proposed,
+    costUsd: bootstrap.costUsd,
+    capped: bootstrap.capped,
+    error: bootstrap.error,
+    createdAt: bootstrap.createdAt.toISOString(),
+    finishedAt: bootstrap.finishedAt?.toISOString(),
+  };
+}
+
+/**
+ * Learning from review history (NIC-1080): the person's repositories' bootstraps, and the
+ * learnings they proposed that are still pending, each with the comments it rests on, for the
+ * Bootstrap queue. `writeRepos` says where they may start one.
+ */
+async function listBootstraps(
+  deps: DashboardDeps,
+  session: DashboardSession,
+): Promise<DashboardResponse> {
+  const bootstraps = deps.bootstraps;
+  if (bootstraps === undefined) return json(200, { enabled: false, bootstraps: [], items: [] });
+  const recent = await bootstraps.store.recent(session.repos, BOOTSTRAPS_LIMIT);
+  const items = (await bootstraps.store.items({ repos: session.repos })).slice(-BOOTSTRAP_ITEMS_LIMIT);
+  const pending = [];
+  for (const item of items) {
+    const learning = await deps.learnings.get(item.learningId);
+    if (learning === undefined || learning.status !== "pending" || !canSee(session, learning)) {
+      continue;
+    }
+    pending.push({ bootstrapId: item.bootstrapId, learning: learningView(learning), sources: item.sources });
+    if (pending.length >= LEARNINGS_LIMIT) break;
+  }
+  return json(200, {
+    enabled: true,
+    bootstraps: recent.map(bootstrapView),
+    items: pending,
+    writeRepos: session.writeRepos,
+    defaults: { maxPrs: bootstraps.maxPrs },
+  });
+}
+
+/**
+ * Asks for a bootstrap of `repo`: only someone GitHub said at sign-in has write access there,
+ * since it spends model time. The reconciler starts it on its next run.
+ */
+async function requestBootstrap(
+  deps: DashboardDeps,
+  session: DashboardSession,
+  query: DashboardRequest["query"],
+): Promise<DashboardResponse> {
+  const bootstraps = deps.bootstraps;
+  if (bootstraps === undefined) return json(404, { error: "not found" });
+  const repo = (query.repo ?? "").trim().toLowerCase();
+  if (!session.repos.includes(repo)) return json(404, { error: "no such repository" });
+  if (!session.writeRepos.includes(repo)) {
+    return json(403, { error: `needs write access on ${repo}` });
+  }
+  const prs = query.prs === undefined ? bootstraps.maxPrs : Number(query.prs);
+  if (!Number.isSafeInteger(prs) || prs < 1 || prs > BOOTSTRAP_DEFAULTS.maxPrsLimit) {
+    return json(400, { error: `prs is a whole number from 1 to ${BOOTSTRAP_DEFAULTS.maxPrsLimit}` });
+  }
+  const result = await bootstraps.store.request({
+    repo,
+    requestedBy: session.login,
+    maxPrs: prs,
+    // The deployment's cap (`learnings.bootstrapMaxCostUsd`) applies: the prepare step takes the
+    // lower of the two.
+    maxCostUsd: BOOTSTRAP_DEFAULTS.maxCostUsdLimit,
+    resume: query.resume === "1",
+  });
+  deps.log("dashboard bootstrap requested", { repo, login: session.login, created: result.created });
+  return result.created
+    ? json(202, { bootstrap: bootstrapView(result.bootstrap) })
+    : json(409, { error: "already-requested", bootstrap: bootstrapView(result.active) });
+}
+
+/**
+ * Approves or rejects every pending learning a bootstrap proposed, each through the learnings
+ * policy with the session's access, as one at a time would.
+ */
+async function changeBootstrap(
+  deps: DashboardDeps,
+  session: DashboardSession,
+  id: string,
+  action: "approve" | "reject",
+): Promise<DashboardResponse> {
+  const bootstraps = deps.bootstraps;
+  const bootstrap = await bootstraps?.store.get(id);
+  if (bootstraps === undefined || bootstrap === undefined || !session.repos.includes(bootstrap.repo)) {
+    return json(404, { error: "no such bootstrap" });
+  }
+  const policy: LearningDeps = { store: deps.learnings, ...sessionAccess(session) };
+  const actor = { login: session.login };
+  let done = 0;
+  let refused = 0;
+  for (const item of await bootstraps.store.items({ bootstrapId: id })) {
+    const learning = await deps.learnings.get(item.learningId);
+    if (learning === undefined || learning.status !== "pending" || !canSee(session, learning)) {
+      continue;
+    }
+    const result =
+      action === "approve"
+        ? await approveLearning(policy, learning.id, actor)
+        : await forgetLearning(policy, learning.id, actor);
+    if (result.outcome === "done") done += 1;
+    if (result.outcome === "refused") refused += 1;
+  }
+  deps.log("dashboard bootstrap changed", { id, action, done, refused, login: session.login });
+  return json(200, { done, refused });
+}
+
 /** The feedback report's categories, and its declined findings in the person's repositories. */
 async function acceptance(
   deps: DashboardDeps,
@@ -371,7 +506,15 @@ export async function handleDashboardRequest(
   if (action?.[1] !== undefined && (action[2] === "approve" || action[2] === "reject")) {
     return changeLearning(deps, session, action[1], action[2]);
   }
+  const bulk = request.method === "POST" ? BOOTSTRAP_ACTION.exec(request.path) : null;
+  if (bulk?.[1] !== undefined && (bulk[2] === "approve" || bulk[2] === "reject")) {
+    return changeBootstrap(deps, session, bulk[1], bulk[2]);
+  }
   switch (route) {
+    case "GET /api/bootstraps":
+      return listBootstraps(deps, session);
+    case "POST /api/bootstraps":
+      return requestBootstrap(deps, session, request.query);
     case "GET /api/me":
       return json(200, {
         login: session.login,

@@ -17,6 +17,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { z } from "zod";
 import { controlDepsFor } from "../aws.js";
+import { drizzleBootstrapStore } from "../bootstrap-store.js";
 import { drizzleConversationStore, githubConversation } from "../conversation-aws.js";
 import { conversationBatch } from "../conversation-lambda.js";
 import { checkCredentials } from "../credentials.js";
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
     embedder,
     ...(tickets === undefined ? {} : { tickets }),
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
+    bootstrapMaxCostUsd: config.learnings.bootstrapMaxCostUsd,
   });
 
   const docker = new Docker(
@@ -264,6 +266,16 @@ async function main(): Promise<void> {
     shadow: config.shadow,
     lookbackMs: config.reconcileLookbackHours * 3_600_000,
     log,
+    // Bootstraps from review history (NIC-1080), asked for on the dashboard, run as executions
+    // of the runner's workflow like reviews.
+    bootstraps: {
+      store: drizzleBootstrapStore(db),
+      async startExecution(name: string, input: unknown) {
+        await executions.start(name, input);
+        return executions.arnOf(name);
+      },
+      maxCostUsd: config.learnings.bootstrapMaxCostUsd,
+    },
   };
   const reconcileOnce = async () => {
     const counts = await reconcile(reconcileDeps);

@@ -57,6 +57,12 @@ export {
 } from "./reply-judge.js";
 export { EXPLAINER_TIER, buildExplainPrompt, type ExplainInput } from "./explainer.js";
 export {
+  BOOTSTRAPPER_TIER,
+  buildBootstrapPrompt,
+  type BootstrapComment,
+  type BootstrapPromptInput,
+} from "./bootstrapper.js";
+export {
   CROSS_FILE_LIMITS,
   CROSS_FILE_TIER,
   buildCrossFilePrompt,

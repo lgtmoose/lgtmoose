@@ -28,6 +28,9 @@ import pg from "pg";
 import { z } from "zod";
 import { drizzleLearningStore, proposeLearning } from "@lgtmoose/learnings";
 import { drizzleReplyStore } from "./replies-aws.js";
+import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
+import { githubBootstrap } from "./bootstrap-github.js";
+import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -716,6 +719,7 @@ export async function awsControlDeps(
     embeddings?: EmbeddingsSettings;
     tickets?: TicketSettings;
     maxPendingLearnings?: number;
+    bootstrapMaxCostUsd?: number;
   },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
@@ -779,6 +783,9 @@ export async function awsControlDeps(
       ...(options.maxPendingLearnings === undefined
         ? {}
         : { maxPendingLearnings: options.maxPendingLearnings }),
+      ...(options.bootstrapMaxCostUsd === undefined
+        ? {}
+        : { bootstrapMaxCostUsd: options.bootstrapMaxCostUsd }),
     }),
     close: () => pool.end(),
   };
@@ -795,6 +802,8 @@ export interface ControlParts {
   tickets?: NonNullable<ControlDeps["tickets"]>;
   /** `learnings.maxPendingPerAuthor`; left out, the policy's default. */
   maxPendingLearnings?: number;
+  /** `learnings.bootstrapMaxCostUsd`; left out, `BOOTSTRAP_DEFAULTS.maxCostUsd`. */
+  bootstrapMaxCostUsd?: number;
 }
 
 /**
@@ -944,5 +953,22 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
     },
     learnings: learningsRetriever(learningStore, embedder, log),
     ...(tickets === undefined ? {} : { tickets }),
+    bootstrap: {
+      store: drizzleBootstrapStore(db),
+      async github(installationId) {
+        const client = new GitHubClient({
+          token: installationTokenProvider({
+            appId: app.appId,
+            privateKey: app.privateKey,
+            installationId,
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        });
+        return githubBootstrap(client, log);
+      },
+      learnings: learningStore,
+      maxCostUsd: parts.bootstrapMaxCostUsd ?? BOOTSTRAP_DEFAULTS.maxCostUsd,
+    },
   };
 }

@@ -7,6 +7,8 @@ import { handleDashboardRequest, type DashboardDeps } from "../dashboard.js";
 import { githubDashboard } from "../dashboard-github.js";
 import { json } from "../dashboard-http.js";
 import { drizzleDashboardStore } from "../dashboard-store.js";
+import { BOOTSTRAP_DEFAULTS } from "../bootstrap.js";
+import { drizzleBootstrapStore } from "../bootstrap-store.js";
 import { log } from "../log.js";
 import { createDashboardServer, readSite } from "./dashboard-server.js";
 import { parseOrigin, signingKey, viewFeedbackReport } from "./dashboard-setup.js";
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
   const deps: DashboardDeps = {
     store: drizzleDashboardStore(db),
     learnings: drizzleLearningStore(db),
+    bootstraps: { store: drizzleBootstrapStore(db), maxPrs: BOOTSTRAP_DEFAULTS.maxPrs },
     feedbackReport: viewFeedbackReport(pool),
     github: githubDashboard({ timeoutMs: 8000 }),
     // Read on each sign-in until it's there, so storing it later needs no restart.

@@ -27,6 +27,7 @@ import { Queue, QueueEncryption, type IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   credentialConcurrency,
+  BOOTSTRAP_REQUEST_PREFIX,
   FEEDBACK_REPORT_KEY,
   modelFor,
   providerModelEnv,
@@ -149,6 +150,8 @@ export interface WorkflowStackProps extends StackProps {
   embeddings?: DeployConfig["learnings"]["embeddings"];
   /** `learnings.maxPendingPerAuthor`: the most pending learnings one author may have. */
   maxPendingLearnings?: number;
+  /** `learnings.bootstrapMaxCostUsd`: the cost cap of one bootstrap from review history. */
+  bootstrapMaxCostUsd?: number;
   /**
    * Ticket coverage (`tickets`): the control task reads linked tickets with the key in
    * `SECRET_NAMES.linearTickets`. Left out: off. Sandbox tasks never get the key.
@@ -238,6 +241,7 @@ export class WorkflowStack extends Stack {
         ...embeddingsEnvironment(embeddings),
         ...ticketsEnvironment(props.tickets),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
+        LGTMOOSE_BOOTSTRAP_MAX_COST_USD: String(props.bootstrapMaxCostUsd ?? 5),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
@@ -567,6 +571,9 @@ export class WorkflowStack extends Stack {
         RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
         // Feedback signals: the acceptance report goes to the artifact bucket.
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
+        // Bootstraps from review history (NIC-1080) run on the review workflow.
+        STATE_MACHINE_ARN: this.reviewWorkflow.stateMachine.stateMachineArn,
+        LGTMOOSE_BOOTSTRAP_MAX_COST_USD: String(props.bootstrapMaxCostUsd ?? 5),
         ...(props.feedback === undefined
           ? {}
           : {
@@ -588,6 +595,26 @@ export class WorkflowStack extends Stack {
     props.jobQueue.grantSendMessages(fn);
     // The feedback report only: nothing else in the bucket.
     props.artifactBucket.grantPut(fn, FEEDBACK_REPORT_KEY);
+    // The CLI's bootstrap requests (NIC-1080): listed, read and removed under their prefix only.
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:ListBucket"],
+        resources: [props.artifactBucket.bucketArn],
+        conditions: { StringLike: { "s3:prefix": [`${BOOTSTRAP_REQUEST_PREFIX}*`] } },
+      }),
+    );
+    fn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:GetObject", "s3:DeleteObject"],
+        resources: [props.artifactBucket.arnForObjects(`${BOOTSTRAP_REQUEST_PREFIX}*`)],
+      }),
+    );
+    if (props.artifactBucket.encryptionKey !== undefined) {
+      props.artifactBucket.encryptionKey.grantDecrypt(fn);
+    }
+    this.reviewWorkflow.stateMachine.grantStartExecution(fn);
     new Schedule(this, "ReconcileSchedule", {
       description: "Runs the reconciler.",
       schedule: ScheduleExpression.rate(Duration.minutes(props.reconcileIntervalMinutes)),

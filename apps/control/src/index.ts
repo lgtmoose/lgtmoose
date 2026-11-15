@@ -4,6 +4,7 @@ import { awsControlDeps } from "./aws.js";
 import { currentTaskArn, taskStatus } from "./ecs.js";
 import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
 import {
+  readBootstrapMaxCost,
   readCommand,
   readControlEnv,
   readEmbeddingsSettings,
@@ -14,9 +15,13 @@ import {
 import { runCommand } from "./run.js";
 
 /** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
-function maxPending(): { maxPendingLearnings?: number } {
+function maxPending(): { maxPendingLearnings?: number; bootstrapMaxCostUsd?: number } {
   const limit = readMaxPendingLearnings(process.env);
-  return limit === undefined ? {} : { maxPendingLearnings: limit };
+  const cap = readBootstrapMaxCost(process.env);
+  return {
+    ...(limit === undefined ? {} : { maxPendingLearnings: limit }),
+    ...(cap === undefined ? {} : { bootstrapMaxCostUsd: cap }),
+  };
 }
 
 /**

@@ -16,6 +16,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { handleDashboardRequest, type DashboardDeps } from "../dashboard.js";
 import { SESSION_COOKIE, sha256Hex, type DashboardRequest } from "../dashboard-http.js";
+import { drizzleBootstrapStore } from "../bootstrap-store.js";
 import { drizzleDashboardStore } from "../dashboard-store.js";
 import { viewFeedbackReport } from "./dashboard-setup.js";
 
@@ -163,6 +164,7 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     deps = {
       store: drizzleDashboardStore(dashboardDb),
       learnings: drizzleLearningStore(dashboardDb),
+      bootstraps: { store: drizzleBootstrapStore(dashboardDb), maxPrs: 200 },
       feedbackReport: viewFeedbackReport(dashboard),
       github: {} as DashboardDeps["github"],
       oauthClient: async () => undefined,
@@ -225,6 +227,16 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     expect(await get("/api/learnings")).toMatchObject({ learnings: [{ id: learningId }] });
     // The report, through its view.
     expect(await get("/api/acceptance")).toMatchObject({ report: { version: 1 } });
+    // Asking for a bootstrap from review history (NIC-1080), and seeing it.
+    const asked = await handleDashboardRequest(
+      deps,
+      request("POST", "/api/bootstraps", { repo: "acme/shop" }),
+    );
+    expect(asked.status).toBe(202);
+    expect(await get("/api/bootstraps")).toMatchObject({
+      bootstraps: [{ repo: "acme/shop", status: "requested", requestedBy: "dev" }],
+      items: [],
+    });
 
     // Approving goes through the policy, as the signed-in person.
     const approved = await handleDashboardRequest(
@@ -281,6 +293,11 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "update review_runs set status = 'failed'",
       "update dashboard_sessions set login = 'mallory'",
       "update dashboard_sessions set repos = '[\"other/repo\"]'",
+      // A bootstrap, once asked for, is the runner's.
+      "update learning_bootstraps set status = 'done'",
+      "delete from learning_bootstraps",
+      "insert into learning_bootstrap_items (learning_id, bootstrap_id, sources) values (gen_random_uuid(), gen_random_uuid(), '[]')",
+      "delete from learning_bootstrap_items",
       "create table mine (id int)",
       "create or replace view dashboard_feedback_report as select key as body from artifacts",
     ]) {

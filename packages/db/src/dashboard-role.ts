@@ -7,6 +7,8 @@ import pg from "pg";
  *
  * - reads of pull requests, findings, review runs, provider use and cooldowns, and learnings;
  * - its own sessions in `dashboard_sessions` (create, read, delete);
+ * - asking for a bootstrap from review history: INSERT and SELECT on `learning_bootstraps`, and
+ *   reading `learning_bootstrap_items` (NIC-1080);
  * - approving or retiring a learning: UPDATE of `status`, `updated_at` and `retired_at` on
  *   `learnings`, and INSERT on `learning_events`. Whether a person may is decided by
  *   `approveLearning` and `forgetLearning` from what GitHub said at sign-in, as on AWS;
@@ -28,6 +30,8 @@ const READS = [
   "provider_usage",
   "provider_cooldowns",
   "learnings",
+  // A bootstrap's proposed learnings and their sources (NIC-1080).
+  "learning_bootstrap_items",
 ] as const;
 
 export async function ensureDashboardRole(
@@ -59,5 +63,8 @@ export async function ensureDashboardRole(
   await client.query(`grant select, insert, delete on table dashboard_sessions to ${name}`);
   await client.query(`grant update (status, updated_at, retired_at) on table learnings to ${name}`);
   await client.query(`grant insert on table learning_events to ${name}`);
+  // Asking for a bootstrap from review history (NIC-1080): a new row, and reading them. The
+  // control task and the reconciler run it; the dashboard can't change one once asked.
+  await client.query(`grant select, insert on table learning_bootstraps to ${name}`);
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
 }

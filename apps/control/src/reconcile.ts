@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RepoConfig } from "@lgtmoose/config";
 import { SKIP_LABEL, reviewJobGroupId, type ReviewJob } from "@lgtmoose/core";
+import { startBootstraps, type BootstrapStarter } from "./bootstrap-start.js";
 
 /**
  * The reconciler: a scheduled check that compares each installation's open PRs with what the
@@ -141,6 +142,11 @@ export interface ReconcileDeps {
   lookbackMs: number;
   log(message: string, fields?: Record<string, unknown>): void;
   now?: () => Date;
+  /**
+   * Bootstraps from review history (NIC-1080): requested ones are started on the repository's
+   * installation, which the reconcile loop finds. Left out, none are started.
+   */
+  bootstraps?: BootstrapStarter;
 }
 
 /** What one reconcile found and did, reported as metrics. */
@@ -172,6 +178,8 @@ export interface ReconcileCounts {
   feedbackCommentsRead: number;
   /** Rule categories below the feedback acceptance threshold, for a person to look at. */
   categoriesFlagged: number;
+  /** Bootstraps from review history started (NIC-1080). */
+  bootstrapsStarted: number;
   /** Installations, repositories or PRs that couldn't be checked, and failed label syncs. */
   errors: number;
 }
@@ -190,6 +198,7 @@ function emptyCounts(): ReconcileCounts {
     learningsRetired: 0,
     feedbackCommentsRead: 0,
     categoriesFlagged: 0,
+    bootstrapsStarted: 0,
     errors: 0,
   };
 }
@@ -224,6 +233,9 @@ export async function reconcile(deps: ReconcileDeps): Promise<ReconcileCounts> {
   const counts = emptyCounts();
   const allowed = (owner: string) => deps.allowedOrgs.some((org) => sameLabel(org, owner));
   const installations = await deps.github.installations();
+  // Each checked repository's installation, for the bootstraps (NIC-1080).
+  const installed = new Map<string, number>();
+  const errorsBefore = counts.errors;
   for (const installation of installations) {
     if (!allowed(installation.account)) continue;
     try {
@@ -231,6 +243,7 @@ export async function reconcile(deps: ReconcileDeps): Promise<ReconcileCounts> {
       for (const repo of await github.repositories()) {
         const [owner = ""] = repo.split("/");
         if (!allowed(owner)) continue;
+        installed.set(repo.toLowerCase(), installation.id);
         try {
           await reconcileRepo(deps, github, installation.id, repo, counts);
         } catch (error) {
@@ -244,6 +257,20 @@ export async function reconcile(deps: ReconcileDeps): Promise<ReconcileCounts> {
         installationId: installation.id,
         error: reason(error),
       });
+    }
+  }
+  if (deps.bootstraps !== undefined) {
+    try {
+      counts.bootstrapsStarted = await startBootstraps(
+        deps.bootstraps,
+        installed,
+        counts.errors === errorsBefore,
+        deps.now?.() ?? new Date(),
+        deps.log,
+      );
+    } catch (error) {
+      counts.errors += 1;
+      deps.log("reconcile: bootstraps not started", { error: reason(error) });
     }
   }
   return counts;
@@ -499,6 +526,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     learningsRetired: "LearningsRetired",
     feedbackCommentsRead: "FeedbackCommentsRead",
     categoriesFlagged: "CategoriesFlagged",
+    bootstrapsStarted: "BootstrapsStarted",
     errors: "ReconcileErrors",
   };
   const entries = Object.entries(names) as [keyof ReconcileCounts, string][];
