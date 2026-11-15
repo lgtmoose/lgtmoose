@@ -12,5 +12,7 @@ const MAX_ERROR = 500;
 export async function fail(deps: ControlDeps, executionArn: string, error: string): Promise<void> {
   const text = error.length > MAX_ERROR ? `${error.slice(0, MAX_ERROR - 1)}…` : error;
   await deps.runs.failRun(executionArn, text);
+  // A bootstrap's execution (NIC-1080) has no review run: its bootstrap is failed instead.
+  await deps.bootstrap?.store.failByExecution(executionArn, text);
   deps.log("failed", { executionArn, error: text });
 }

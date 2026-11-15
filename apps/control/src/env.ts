@@ -128,6 +128,11 @@ export interface ReconcileEnv {
   artifactBucket?: string;
   /** Feedback signals (NIC-841): `FEEDBACK_*`. */
   feedback: { threshold: number; minSamples: number; maxComments: number };
+  /**
+   * `STATE_MACHINE_ARN`: the review workflow, which bootstraps from review history run on
+   * (NIC-1080). Without it, none are started.
+   */
+  stateMachineArn?: string;
 }
 
 export const DEFAULT_RECONCILE_LOOKBACK_HOURS = 24;
@@ -177,6 +182,7 @@ export function readReconcileEnv(env: Env): ReconcileEnv | { missing: string[] }
       minSamples: whole("FEEDBACK_MIN_SAMPLES", DEFAULT_MIN_SAMPLES, 1),
       maxComments: whole("FEEDBACK_MAX_COMMENTS", DEFAULT_MAX_FEEDBACK_COMMENTS, 0),
     },
+    ...(env.STATE_MACHINE_ARN?.trim() ? { stateMachineArn: env.STATE_MACHINE_ARN.trim() } : {}),
   };
 }
 
@@ -248,6 +254,20 @@ export function readMaxPendingLearnings(env: Env): number | undefined {
     throw new Error("LGTMOOSE_MAX_PENDING_LEARNINGS must be a whole number of at least 1.");
   }
   return limit;
+}
+
+/**
+ * The cost cap of one bootstrap from review history, in USD, from
+ * `LGTMOOSE_BOOTSTRAP_MAX_COST_USD` (`learnings.bootstrapMaxCostUsd`, NIC-1080). Unset: the default.
+ */
+export function readBootstrapMaxCost(env: Env): number | undefined {
+  const value = env.LGTMOOSE_BOOTSTRAP_MAX_COST_USD?.trim() ?? "";
+  if (value === "") return undefined;
+  const cap = Number(value);
+  if (!Number.isFinite(cap) || cap < 0) {
+    throw new Error("LGTMOOSE_BOOTSTRAP_MAX_COST_USD must be a number of dollars, 0 or more.");
+  }
+  return cap;
 }
 
 /**

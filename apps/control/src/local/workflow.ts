@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { isBootstrapInput, postBootstrap, prepareBootstrap } from "../bootstrap.js";
 import { workflowJobSchema } from "../job.js";
 import type { ControlDeps } from "../ports.js";
 import { fail } from "../fail.js";
@@ -116,6 +117,43 @@ export async function runExecution(
       }
     }
   };
+
+  // A bootstrap (NIC-1080): its own prepare and post steps, no debounce.
+  if (isBootstrapInput(execution.input)) {
+    let prepared;
+    try {
+      prepared = await retried("prepare", () =>
+        prepareBootstrap(control, execution.input, deps.settings),
+      );
+    } catch (error) {
+      await failRun(PREPARE_FAILED, message(error));
+      return;
+    }
+    if (prepared.superseded) {
+      await deps.executions.finish(arn, "SUCCEEDED");
+      return;
+    }
+    await eachLimited(prepared.batches, deps.maxConcurrency, async (batch) => {
+      if (!(await running())) return;
+      try {
+        await deps.runBatch({ runId: prepared.runId, index: batch.index, executionArn: arn });
+      } catch (error) {
+        control.log("batch failed", {
+          executionArn: arn,
+          index: batch.index,
+          error: message(error),
+        });
+      }
+    });
+    try {
+      await retried("post", () => postBootstrap(control, prepared.runId));
+    } catch (error) {
+      await failRun(POST_FAILED, message(error));
+      return;
+    }
+    await deps.executions.finish(arn, "SUCCEEDED");
+    return;
+  }
 
   const parsed = inputSchema.safeParse(execution.input);
   if (!parsed.success) {

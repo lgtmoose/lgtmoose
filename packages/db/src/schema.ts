@@ -623,11 +623,15 @@ export const dashboardSessions = pgTable(
 export const spendLedger = pgTable(
   "spend_ledger",
   {
-    runId: uuid("run_id")
-      .primaryKey()
-      .references(() => reviewRuns.id, { onDelete: "cascade" }),
+    /**
+     * The review run, or a bootstrap from review history (NIC-1080), which has no review run: so
+     * no foreign key. A row outlives its run, so a month's spend stays counted after the
+     * retention sweep removes old runs.
+     */
+    runId: uuid("run_id").primaryKey(),
     /** owner/name, lower case. */
     repo: text("repo").notNull(),
+    /** The PR; 0 for a bootstrap, which no PR's caps cover. */
     prNumber: integer("pr_number").notNull(),
     /** YYYY-MM. */
     month: text("month").notNull(),
@@ -652,4 +656,86 @@ export const spendLedger = pgTable(
     // The reconciler's look for reservations post never settled.
     index("spend_ledger_unsettled_idx").on(t.settled, t.createdAt),
   ],
+);
+
+export const learningBootstrapStatus = pgEnum("learning_bootstrap_status", [
+  "requested",
+  "running",
+  "done",
+  "failed",
+]);
+
+/**
+ * Learning from a repository's review history (NIC-1080): one row per bootstrap someone asked for
+ * (on the dashboard, or with `lgtmoose learnings bootstrap`). The reconciler starts a workflow
+ * execution for a requested one; its prepare step reads the merged PRs' review comments, the
+ * sandbox distils them, and its post step stores the candidates as pending learnings. One
+ * requested or running bootstrap per repository at a time.
+ */
+export const learningBootstraps = pgTable(
+  "learning_bootstraps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** owner/name, lower case. */
+    repo: text("repo").notNull(),
+    /** Who asked: a dashboard login, or `operator` for the CLI. */
+    requestedBy: text("requested_by").notNull(),
+    status: learningBootstrapStatus("status").notNull().default("requested"),
+    /** The most merged PRs read. */
+    maxPrs: integer("max_prs").notNull(),
+    /** The most estimated model cost, in USD. */
+    maxCostUsd: numeric("max_cost_usd", { precision: 10, scale: 4 }).notNull(),
+    /** Only PRs numbered below this are read: a resumed bootstrap picks up where one stopped. */
+    beforePr: integer("before_pr"),
+    /** The oldest PR whose comments were read; what a resume starts below. */
+    oldestPrRead: integer("oldest_pr_read"),
+    prsRead: integer("prs_read").notNull().default(0),
+    commentsRead: integer("comments_read").notNull().default(0),
+    /** Learnings stored as pending. */
+    proposed: integer("proposed").notNull().default(0),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 4 }).notNull().default("0"),
+    /** The cost cap stopped it before `maxPrs`. */
+    capped: boolean("capped").notNull().default(false),
+    executionArn: text("execution_arn"),
+    error: text("error"),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("learning_bootstraps_repo_idx").on(t.repo, t.createdAt),
+    uniqueIndex("learning_bootstraps_active_key")
+      .on(t.repo)
+      .where(sql`${t.status} in ('requested', 'running')`),
+  ],
+);
+
+/**
+ * Where a bootstrap's learning came from (NIC-1080): a review comment it rests on, or the file a
+ * hint was read from (CODEOWNERS, a lint config), with no model involved.
+ */
+export type BootstrapSource =
+  | {
+      pr: number;
+      commentId: number;
+      /** The comment on GitHub. */
+      url: string;
+      path?: string;
+    }
+  | { file: string };
+
+/** A learning a bootstrap proposed, and the comments it rests on (NIC-1080). */
+export const learningBootstrapItems = pgTable(
+  "learning_bootstrap_items",
+  {
+    learningId: uuid("learning_id")
+      .primaryKey()
+      .references(() => learnings.id, { onDelete: "restrict" }),
+    bootstrapId: uuid("bootstrap_id")
+      .notNull()
+      .references(() => learningBootstraps.id, { onDelete: "cascade" }),
+    sources: jsonb("sources").$type<BootstrapSource[]>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("learning_bootstrap_items_bootstrap_idx").on(t.bootstrapId)],
 );

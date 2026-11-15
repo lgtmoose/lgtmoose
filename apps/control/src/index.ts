@@ -4,6 +4,7 @@ import { awsControlDeps } from "./aws.js";
 import { currentTaskArn, taskStatus } from "./ecs.js";
 import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js";
 import {
+  readBootstrapMaxCost,
   readCommand,
   readControlEnv,
   readEmbeddingsSettings,
@@ -16,15 +17,21 @@ import { runCommand } from "./run.js";
 import { readBudgets } from "./spend.js";
 
 /**
- * `learnings.maxPendingPerAuthor` and `learnings.repeatThreshold`, as the Workflow stack sets
- * them; unset, the defaults.
+ * `learnings.maxPendingPerAuthor`, `learnings.repeatThreshold` and
+ * `learnings.bootstrapMaxCostUsd`, as the Workflow stack sets them; unset, the defaults.
  */
-function maxPending(): { maxPendingLearnings?: number; repeatThreshold?: number } {
+function maxPending(): {
+  maxPendingLearnings?: number;
+  repeatThreshold?: number;
+  bootstrapMaxCostUsd?: number;
+} {
   const limit = readMaxPendingLearnings(process.env);
   const threshold = readRepeatThreshold(process.env);
+  const cap = readBootstrapMaxCost(process.env);
   return {
     ...(limit === undefined ? {} : { maxPendingLearnings: limit }),
     ...(threshold === undefined ? {} : { repeatThreshold: threshold }),
+    ...(cap === undefined ? {} : { bootstrapMaxCostUsd: cap }),
   };
 }
 

@@ -21,6 +21,14 @@ export {
 } from "./policy.js";
 export { redactSensitive, type RedactionKind } from "./redact.js";
 export {
+  checkBootstrapProposal,
+  learningKey,
+  normalizedLearningText,
+  storeBootstrapLearning,
+  type BootstrapCheck,
+  type BootstrapProposal,
+} from "./bootstrap.js";
+export {
   appliesTo,
   byKeyword,
   keywords,

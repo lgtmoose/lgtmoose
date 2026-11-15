@@ -277,6 +277,9 @@ Next steps:
      aims at a placeholder and GitHub's deliveries are lost, so install after deploying:
      ${CLI} deploy
   3. ${install}
+  4. Optional: let it learn your team's conventions from past code reviews, so its first
+     reviews are less noisy. It proposes learnings for you to approve on the dashboard:
+     ${CLI} learnings bootstrap --repo <owner/name>
 `;
 }
 

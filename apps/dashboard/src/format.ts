@@ -7,6 +7,7 @@ export type Route =
   | { page: "learnings"; status: LearningStatus }
   | { page: "usage" }
   | { page: "acceptance" }
+  | { page: "bootstrap" }
   | { page: "signed-out"; error: string | undefined };
 
 export type LearningStatus = "pending" | "active" | "retired";
@@ -37,6 +38,8 @@ export function parseRoute(hash: string): Route {
       return { page: "usage" };
     case "/acceptance":
       return { page: "acceptance" };
+    case "/bootstrap":
+      return { page: "bootstrap" };
     case "/signed-out":
       return { page: "signed-out", error: params.get("error") ?? undefined };
     default:
@@ -47,7 +50,9 @@ export function parseRoute(hash: string): Route {
 export function routeHash(route: Route): string {
   if (route.page === "repos") return "#/";
   if (route.page === "signed-out") return "#/signed-out";
-  if (route.page === "usage" || route.page === "acceptance") return `#/${route.page}`;
+  if (route.page === "usage" || route.page === "acceptance" || route.page === "bootstrap") {
+    return `#/${route.page}`;
+  }
   if (route.page === "learnings") {
     return route.status === "pending" ? "#/learnings" : `#/learnings?status=${route.status}`;
   }
@@ -121,6 +126,21 @@ export function duration(startedAt: string | undefined, finishedAt: string | und
 }
 
 /** The PR's page on GitHub: built from parts already validated, never from free text. */
+/**
+ * A review comment's URL on github.com, built from its repository, PR and ID (never a URL from
+ * the API): an inline comment's discussion, or a submitted review.
+ */
+export function reviewCommentUrl(
+  repo: string,
+  number: number,
+  commentId: number,
+  inline: boolean,
+): string | undefined {
+  const pull = pullRequestUrl(repo, number);
+  if (pull === undefined || !Number.isSafeInteger(commentId) || commentId <= 0) return undefined;
+  return `${pull}#${inline ? "discussion_r" : "pullrequestreview-"}${commentId}`;
+}
+
 export function pullRequestUrl(repo: string, number: number): string | undefined {
   if (!REPO.test(repo) || !Number.isSafeInteger(number) || number <= 0) return undefined;
   return `https://github.com/${repo}/pull/${number}`;

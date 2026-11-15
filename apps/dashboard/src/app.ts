@@ -8,6 +8,7 @@ import {
   parseRoute,
   percent,
   pullRequestUrl,
+  reviewCommentUrl,
   routeHash,
   severityLabel,
   signInMessage,
@@ -202,6 +203,7 @@ function renderNav(me: Me | undefined): void {
     link({ page: "findings", repo: undefined }, "Open findings"),
     link({ page: "runs", repo: undefined }, "Review runs"),
     link({ page: "learnings", status: "pending" }, "Learnings"),
+    link({ page: "bootstrap" }, "Learn from history"),
     link({ page: "usage" }, "Usage"),
     link({ page: "acceptance" }, "Acceptance"),
   );
@@ -461,6 +463,217 @@ async function renderLearnings(status: LearningStatus): Promise<void> {
   );
 }
 
+interface Bootstrap {
+  id: string;
+  repo: string;
+  status: string;
+  requestedBy: string;
+  prsRead: number;
+  commentsRead: number;
+  proposed: number;
+  costUsd: number;
+  capped: boolean;
+  error: string | undefined;
+  createdAt: string;
+  finishedAt: string | undefined;
+}
+
+type BootstrapSource = { pr: number; commentId: number; path?: string } | { file: string };
+
+interface BootstrapItem {
+  bootstrapId: string;
+  learning: Learning;
+  sources: BootstrapSource[];
+}
+
+/** A button that POSTs `path`, then shows the page again or says why not. */
+function actionButton(label: string, path: string, status: HTMLElement): HTMLButtonElement {
+  const button = el("button", { type: "button" }, label);
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    void post(path)
+      .then(({ status: code, body }) => {
+        if (code >= 200 && code < 300) return render();
+        replace(
+          status,
+          code === 409
+            ? "One is already waiting or running for this repository."
+            : learningRefusal(code, typeof body.error === "string" ? body.error : undefined),
+        );
+        button.disabled = false;
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        if (error instanceof SignedOut) return render();
+        replace(status, error instanceof Error ? error.message : "Something went wrong.");
+        button.disabled = false;
+        return undefined;
+      });
+  });
+  return button;
+}
+
+/** Where a proposed learning came from: links to the review comments, or the file it read. */
+function sourcesOf(repo: string, sources: readonly BootstrapSource[]): HTMLElement {
+  return el(
+    "span",
+    {},
+    ...sources.flatMap((source, index) => {
+      const separator = index === 0 ? undefined : ", ";
+      if ("file" in source) return [separator, el("code", {}, source.file)];
+      const url = reviewCommentUrl(repo, source.pr, source.commentId, source.path !== undefined);
+      return [
+        separator,
+        url === undefined
+          ? `#${source.pr}`
+          : el("a", { href: url, rel: "noopener noreferrer" }, `#${source.pr}`),
+      ];
+    }),
+  );
+}
+
+/**
+ * Learning from review history (NIC-1080): start a bootstrap for a repository you can write to,
+ * follow the bootstraps, and approve or reject what they proposed, one by one or all at once.
+ */
+async function renderBootstrap(): Promise<void> {
+  const data = await api<{
+    enabled: boolean;
+    bootstraps: Bootstrap[];
+    items: BootstrapItem[];
+    writeRepos?: string[];
+    defaults?: { maxPrs: number };
+  }>("/api/bootstraps");
+  if (!data.enabled) {
+    replace(
+      main(),
+      el("h1", {}, "Learn from history"),
+      el("p", { class: "muted" }, "Not available in this deployment."),
+    );
+    return;
+  }
+  const status = el("p", { role: "status", class: "muted" });
+  const byBootstrap = new Map<string, BootstrapItem[]>();
+  for (const item of data.items) {
+    byBootstrap.set(item.bootstrapId, [...(byBootstrap.get(item.bootstrapId) ?? []), item]);
+  }
+  const repoOf = new Map(data.bootstraps.map((bootstrap) => [bootstrap.id, bootstrap.repo]));
+  replace(
+    main(),
+    el("h1", {}, "Learn from history"),
+    el(
+      "p",
+      { class: "muted" },
+      `Reads the review comments of a repository's last ${data.defaults?.maxPrs ?? 200} merged pull requests, by people with write access, and proposes the team's rules as learnings. Nothing is used until someone with write access approves it. It spends model time, up to the deployment's cap.`,
+    ),
+    status,
+    (data.writeRepos ?? []).length === 0
+      ? el("p", { class: "muted" }, "You need write access to a repository to start one.")
+      : table(
+          ["Repository", ""],
+          (data.writeRepos ?? []).map((repo) => [
+            repo,
+            el(
+              "span",
+              {},
+              actionButton(
+                "Learn from history",
+                `/api/bootstraps?repo=${encodeURIComponent(repo)}`,
+                status,
+              ),
+              " ",
+              actionButton(
+                "Read older PRs",
+                `/api/bootstraps?repo=${encodeURIComponent(repo)}&resume=1`,
+                status,
+              ),
+            ),
+          ]),
+        ),
+    el("h2", {}, "Bootstraps"),
+    data.bootstraps.length === 0
+      ? el("p", { class: "muted" }, "None yet. The reconciler starts one within its interval.")
+      : table(
+          ["Asked", "Repository", "By", "Status", "PRs", "Comments", "Proposed", "Cost"],
+          data.bootstraps.map((bootstrap) => [
+            when(bootstrap.createdAt),
+            bootstrap.repo,
+            bootstrap.requestedBy,
+            bootstrap.error === undefined
+              ? `${bootstrap.status}${bootstrap.capped ? " (cost cap reached)" : ""}`
+              : el(
+                  "span",
+                  {},
+                  `${bootstrap.status}: `,
+                  el("span", { class: "muted" }, bootstrap.error),
+                ),
+            count(bootstrap.prsRead),
+            count(bootstrap.commentsRead),
+            count(bootstrap.proposed),
+            money(bootstrap.costUsd),
+          ]),
+        ),
+    el("h2", {}, "Waiting for approval"),
+    byBootstrap.size === 0
+      ? el("p", { class: "muted" }, "Nothing waiting.")
+      : el(
+          "div",
+          {},
+          ...[...byBootstrap.entries()].map(([id, items]) => {
+            const repo = repoOf.get(id) ?? items[0]?.learning.repo ?? "";
+            const message = el("span", { role: "status", class: "muted" });
+            return el(
+              "section",
+              {},
+              el(
+                "p",
+                {},
+                el("strong", {}, `${repo}: ${items.length} proposed`),
+                " ",
+                actionButton(
+                  "Approve all",
+                  `/api/bootstraps/${encodeURIComponent(id)}/approve`,
+                  message,
+                ),
+                " ",
+                actionButton(
+                  "Reject all",
+                  `/api/bootstraps/${encodeURIComponent(id)}/reject`,
+                  message,
+                ),
+                " ",
+                message,
+              ),
+              table(
+                ["Learning", "Applies to", "Kind", "From", ""],
+                items.map((item) => {
+                  const one = el("span", { role: "status", class: "muted" });
+                  return [
+                    // Untrusted: always a text node, preformatted.
+                    el("pre", { class: "body" }, item.learning.text),
+                    `${item.learning.repo ?? item.learning.org} (${item.learning.scope})`,
+                    item.learning.category === undefined
+                      ? item.learning.kind
+                      : `${item.learning.kind}, ${item.learning.category}`,
+                    sourcesOf(repo, item.sources),
+                    el(
+                      "span",
+                      {},
+                      learningButton(item.learning, "approve", one),
+                      " ",
+                      learningButton(item.learning, "reject", one),
+                      " ",
+                      one,
+                    ),
+                  ];
+                }),
+              ),
+            );
+          }),
+        ),
+  );
+}
+
 async function renderUsage(): Promise<void> {
   const { days, providers, cooldowns, spend } = await api<{
     days: number;
@@ -606,6 +819,7 @@ async function render(): Promise<void> {
     else if (route.page === "learnings") await renderLearnings(route.status);
     else if (route.page === "usage") await renderUsage();
     else if (route.page === "acceptance") await renderAcceptance();
+    else if (route.page === "bootstrap") await renderBootstrap();
     else await renderRepos();
   } catch (error) {
     if (error instanceof SignedOut) {

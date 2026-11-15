@@ -5,7 +5,7 @@ A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your 
 > **Status: pre-release.** The review workflow, commands and learnings are built, but no release has been cut and the stack hasn't yet passed its end-to-end smoke test on a real AWS account. Reviews run in shadow mode by default: they're recorded, not posted.
 
 - **Reviews every PR** as a GitHub App: inline comments, a summary, a status label and a check run. Plain code, not the model, decides whether to approve.
-- **Learns from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database, and only people with write access can make them take effect.
+- **Learns from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database, and only people with write access can make them take effect. On a new install, it can start from your past code reviews: `lgtmoose learnings bootstrap` proposes your team's conventions for you to approve.
 - **Runs on the model access you already have**: Amazon Bedrock, Anthropic or OpenAI API keys, or Claude, ChatGPT and Cursor credentials where the vendor's terms allow it ([what each vendor's terms say](docs/providers.md)). When one provider's limit runs out, it falls back to the next.
 - **Stays in your account.** The model runs in a sandbox with no GitHub token and network access only to its model API.
 

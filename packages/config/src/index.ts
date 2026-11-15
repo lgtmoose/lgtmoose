@@ -71,6 +71,7 @@ export {
   providerNeedsSecret,
 } from "./secrets.js";
 export {
+  BOOTSTRAP_REQUEST_PREFIX,
   CDK_CONTEXT,
   DASHBOARD_CSP,
   FEEDBACK_REPORT_KEY,

@@ -7,6 +7,7 @@ import type { TicketProvider } from "@lgtmoose/tickets";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 import type { Permission } from "./thread-policy.js";
 import type { ReplyStore } from "./replies.js";
+import type { BootstrapDeps } from "./bootstrap.js";
 import type { SpendStore } from "./spend.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
@@ -358,6 +359,11 @@ export interface ControlDeps {
     maxPerPullRequest: number;
     detailsOnPublicRepos?: boolean;
   };
+  /**
+   * Learning from a repository's review history (NIC-1080): the bootstraps, GitHub as a bootstrap
+   * reads it, and the learnings it stores as pending. Left out, the deployment runs none.
+   */
+  bootstrap?: BootstrapDeps;
   /**
    * Spend caps (NIC-1079): the ledger and the deploy config's `budgets`. Left out (tests, the
    * CLI), nothing is capped or recorded.
