@@ -6,6 +6,7 @@
       "default": [
         "generic"
       ],
+      "description": "Rule packs to review with: built-in or private pack ids, and ./rules/<name>.md or ./rules/*.md from this repository. generic and security are always on.",
       "type": "array",
       "items": {
         "type": "string",
@@ -19,6 +20,7 @@
         ".github/copilot-instructions.md",
         ".cursor/rules/*.mdc"
       ],
+      "description": "Files of team conventions the reviewer reads, as globs.",
       "type": "array",
       "items": {
         "type": "string",
@@ -27,6 +29,7 @@
     },
     "tiers": {
       "default": {},
+      "description": "Risk tiers, most important first: keys 1 to 7, each a list of globs. Files are reviewed in tier order; tests go last.",
       "type": "object",
       "propertyNames": {
         "type": "string",
@@ -42,6 +45,7 @@
     },
     "skip": {
       "default": [],
+      "description": "Globs never to review, on top of the defaults (lockfiles, build output, vendored, generated and binary files). They win over include.",
       "type": "array",
       "items": {
         "type": "string",
@@ -50,6 +54,7 @@
     },
     "include": {
       "default": [],
+      "description": "Globs to review even though a default skip matches them. skip still wins, and binaries are always skipped.",
       "type": "array",
       "items": {
         "type": "string",
@@ -58,6 +63,7 @@
     },
     "registries": {
       "default": [],
+      "description": "Extra package hosts to trust in lockfiles, such as a private registry.",
       "type": "array",
       "items": {
         "type": "string",
@@ -65,11 +71,13 @@
       }
     },
     "gate": {
+      "description": "How a review's decision is posted.",
       "default": {},
       "type": "object",
       "properties": {
         "check_run": {
           "default": "required",
+          "description": "The LGTMoose check run. required: it fails on open blocking findings. optional: failing and held results are posted as neutral. off: no check run.",
           "type": "string",
           "enum": [
             "required",
@@ -79,10 +87,12 @@
         },
         "approve": {
           "default": true,
+          "description": "false: a clean review posts COMMENT instead of APPROVE.",
           "type": "boolean"
         },
         "nit_cap": {
           "default": 10,
+          "description": "Most nits posted in one review. The rest are counted in the summary.",
           "type": "integer",
           "minimum": 0,
           "maximum": 100
@@ -91,11 +101,13 @@
       "additionalProperties": false
     },
     "injection": {
+      "description": "The prompt-injection detector.",
       "default": {},
       "type": "object",
       "properties": {
         "allow": {
           "default": [],
+          "description": "Globs whose added lines the prompt-injection detector doesn't scan, such as its own tests. Keep them narrow.",
           "type": "array",
           "items": {
             "type": "string",
@@ -106,21 +118,25 @@
       "additionalProperties": false
     },
     "labels": {
+      "description": "The three status labels LGTMoose keeps on a PR: pending, changes and approved.",
       "default": {},
       "type": "object",
       "properties": {
         "pending": {
           "default": "Ready for Review",
+          "description": "Set when a review holds for a person: it was incomplete, or flagged a prompt-injection attempt.",
           "type": "string",
           "minLength": 1
         },
         "changes": {
           "default": "Requires Changes",
+          "description": "Set when blocking or should-fix findings are open.",
           "type": "string",
           "minLength": 1
         },
         "approved": {
           "default": "Approved",
+          "description": "Set when no blocking or should-fix finding is open, also with gate.approve: false.",
           "type": "string",
           "minLength": 1
         }

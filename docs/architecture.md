@@ -27,6 +27,18 @@ Resolving a thread isn't a way round the gate. A blocking finding, or one in a p
 
 Other reviewers' unresolved inline comments count too. Those from other bots (CodeRabbit, say), or from people who are owners, members or collaborators, that are marked Critical (blocking), Major or a bug (should fix), on files the review covers and still on the current diff, count towards the decision as open findings. The summary lists them with who raised them. They're never posted again, never stored as LGTMoose's own, and their text never reaches a model or the summary: only its opening words are read, for the severity. When one is on a file LGTMoose reviewed and none of its own findings is within a few lines, the run writes it to `misses.json` (path, line, severity and source, no text) for the evals.
 
+## How a review runs
+
+Each review job is one execution of the review state machine (`StateMachineArn` in the Workflow stack's outputs):
+
+1. **Prepare** (control task): records the run, clones and plans the PR, and uploads the checkout and each batch's input to `runs/<run id>/` in the artifact bucket. A run for a head that's no longer the PR's head stops here as superseded.
+2. **Batches** (sandbox tasks, `maxConcurrency` at once): each runs the reviewer on one batch. Sandbox tasks have no S3 access of their own; a small Lambda hands each one presigned URLs for its own batch.
+3. **Post** (control task): reads the batches' outputs and posts one review, the check run, the summary comment and the status label. A batch without a valid output makes the review incomplete, so it can't approve.
+
+A step that fails for good marks the run failed and posts nothing more: a failure before post leaves the PR untouched. With `shadow: true` in `lgtmoose.config.ts` (the default for now), post records what it would post to `shadow/` in the bucket and the log instead.
+
+People talk to LGTMoose through `@lgtmoose` commands and replies on its findings: see [Commands](commands.md). What it learns from them is in [Learning](learning.md).
+
 ## Harnesses
 
 Each vendor's official CLI runs headless behind a small adapter, restricted to read-only tools and validated with zod:
@@ -55,62 +67,13 @@ Before using a plan credential, read [Providers](providers.md): what each vendor
 
 One AWS account and region holds one install. `lgtmoose setup` writes fixed Secrets Manager names (`lgtmoose/github-app`, `lgtmoose/github-webhook-secret`), so a second install there would overwrite the first one's App credentials. Use another account or region for staging until deployment names land.
 
-## Commands
-
-People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command go to the reply judge, below.
-
-| Command               | Who                                                                                              | What it does                                                                                                                                      |
-| --------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `review`              | the PR's author, or write access                                                                 | Queues a review of the head unless it's reviewed already. Not debounced; runs on a paused PR.                                                     |
-| `full review`         | the PR's author, or write access                                                                 | Reviews the whole PR again, leaving earlier reviews out, unless a review of the head is running. Duplicates of posted comments are still dropped. |
-| `pause`, `resume`     | write access                                                                                     | Stops or restarts automatic reviews of the PR. Requested reviews still run.                                                                       |
-| `explain`             | anyone                                                                                           | In a finding's thread, or `explain path:line`: the stored finding's details.                                                                      |
-| `ignore`              | anyone; for blocking or protected findings, someone other than the PR's author with write access | In a finding's thread: declines it, as a person's decision.                                                                                       |
-| `learn: <text>`       | anyone; applied at once with write access (org owner for `[org]`), else pending                  | Proposes a learning (see `@lgtmoose/learnings`). Tags: `[path <glob>]`, `[org]`, `[kind <kind>]`, `[category <name>]`.                            |
-| `learnings`           | anyone                                                                                           | Lists the learnings that apply to the PR.                                                                                                         |
-| `forget <id>`         | write access (org owner for org-wide)                                                            | Retires one of this account's learnings.                                                                                                          |
-| `help`, anything else | anyone                                                                                           | The list of commands.                                                                                                                             |
-
-Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
-
-### Replies on findings: the reply judge
-
-A person's reply on one of LGTMoose's open findings' review threads (not a command, not thanks or an emoji) is recorded in `pending_replies`, redacted like learning text, and the conversation Lambda queues a run for it (`requested: "replies"`; none on a paused PR). The model doesn't run in the Lambda, which has no model credential: the run is an ordinary review run, so the judge runs in a sandbox task with only its provider's credential (leased through the credential broker) and no GitHub token, reading the checkout at head. Each run, the prepare step takes up to `maxReplyJudgements` (10) pending replies, each finding's latest only, and adds one judge batch per reply on the fast tier. The post step acts on the judgements before the decision, then writes replies and resolves threads once it holds its claim; a run someone asked for (a full review, or one for replies) is never covered by the head's earlier review, so the decision, check run, summary and label are recomputed. The reconciler asks for a run again for a reply no run took after 30 minutes, and `comments_through` now moves as comments are handled, so the reconciler's missed-comment path works.
-
-The judge only classifies (fixed, declined, disputed, question or other) and writes a few words; plain code decides (`decideReply`):
-
-| Reply    | What happens                                                                                                                                                                                                                                                                   |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| fixed    | Closed as fixed, and its thread resolved, only when the judge read the code at head and found the problem gone **and** git shows the finding's file changed since it was raised. A claim alone never clears it. Otherwise one reply naming the line where it still is.         |
-| declined | Declined and resolved, with a learning proposed (through the learnings policy) when the judge saw a general rule. A blocking or protected finding needs someone other than the PR's author with write access, as for resolving its thread; otherwise one reply saying who can. |
-| disputed | Re-checked by the judge. Still valid: one reply with the evidence, never a second on the same finding. Wrong: a should_fix or nit is closed as disputed; a blocking or protected one stays open with one reply.                                                                |
-| question | One short answer.                                                                                                                                                                                                                                                              |
-
-At most one reply per finding per run, never a thank-you, and each with a marker so it's never read as a command or judged. A person unresolving a thread LGTMoose resolved reopens the finding. Top-level PR comments aren't judged.
-
 ## Security controls
 
-The full threat model, with the test behind each control, is in [SECURITY.md](../SECURITY.md).
+The full threat model, with the test behind each control, is on the [Security](security.md) page.
 
 - The model can't approve. The decision is a pure function of verified findings.
 - A prompt-injection detector, in plain code, scans what the reviewer read. Text aimed at an AI reviewer, chat-format markup, attempts to break out of an untrusted block, bidirectional controls and hidden Unicode on a line the PR adds raise a blocking `prompt_injection` finding there. The same in the PR's title, description, or a comment by someone outside the repository holds approval for the run. `injection.allow` in `.lgtmoose.yaml` lists files whose added lines aren't scanned (tests and docs about prompt injection). Like protected categories, its findings are dropped as duplicates only on an exact match.
 - `extraEgressHosts` refuses GitHub's hosts, so no deploy config can let the sandbox reach GitHub.
-- Learnings are written only through a policy check (author permission and provenance). The model can only propose them. `@lgtmoose/learnings` enforces it:
-  - The author, the PR, the comment and the author's permission come from GitHub, never from the proposal.
-  - A repo or path learning is active at once for an author with write access or higher on the repo. An org-wide one needs an owner of the org (the org memberships API), since admin on one repo is open to anyone who creates a repo. Anything else waits as `pending` until someone with that access approves it; approving and forgetting need the same access.
-  - The text is scanned and redacted before it's stored, pending ones included: tokens, keys, credentials in URLs, emails, phone and card numbers.
-  - `forget` retires a learning; its row and `learning_events` history stay.
-- Protected categories (`authz`, `tenant_scoping`, `money`, `secrets`) can't be suppressed by learnings or dedupe. A learning that could quiet findings (`accepted_pattern`, `scoping`, `correction`) can't name one, and retrieval checks `mayLearningSuppress` for every finding a learning would quiet, learnings with no category included.
-- Learning text is proposal text from comments or the model. Retrieval puts it in an untrusted block in the prompt, never with the instructions.
+- Learnings are written only through a policy check (author permission and provenance from GitHub, redaction before storage), and the model can only propose them. Learning text reaches the reviewer only inside an untrusted block. See [Learning](learning.md).
+- Protected categories (`authz`, `tenant_scoping`, `money`, `secrets`) can't be suppressed by learnings or dedupe.
 - PR code is never executed.
-
-## Learnings retrieval
-
-The prepare step (the control task) picks each batch's learnings; the sandbox only sees their text in its prompt.
-
-1. **Scope.** Active learnings of the PR's org: org-wide ones, and the PR's repo's whose path glob (if any) matches one of the batch's files.
-2. **Rank.** With `learnings.embeddings` set to `bedrock` (Titan Text Embeddings v2 in the deployment's account) or `openai` (its embeddings API, with the key in `lgtmoose/embeddings/openai`), learnings and the batch's diff are embedded and ranked by pgvector cosine distance. A learning is embedded the first time it's ranked with a model, and the model is stored with the vector, so changing provider re-embeds rather than comparing unlike vectors. With `none` (the default), or when the provider fails, learnings are ranked by shared keywords, with no network call.
-3. **Prompt.** The top 15 go in the batch's prompt after the PR and before the diff, each in an untrusted block. The prompt says a learning can't relax the rules or their severities, and never quiets a protected-category finding. Learnings are context only: no code drops or downgrades a finding because of one.
-4. **Use.** Each learning put in a prompt has `hits` counted and `last_used_at` set. The reconciler retires active learnings unused for 90 days, with a `retired` event by `lgtmoose` (permission `system`), so their history stays.
-
-The embeddings provider receives learning text and batch diffs. Only the control task can reach it: its role gets `bedrock:InvokeModel` on the one Titan model, or read access to the OpenAI key's secret. Sandbox roles get neither. `learningsForPullRequest` lists the learnings that apply to a PR, for the `learnings` command (NIC-834).

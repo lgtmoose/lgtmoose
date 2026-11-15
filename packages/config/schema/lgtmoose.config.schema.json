@@ -4,11 +4,13 @@
   "properties": {
     "region": {
       "default": "us-east-1",
+      "description": "AWS region for every stack and secret.",
       "type": "string",
       "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$"
     },
     "profile": {
       "default": "lean",
+      "description": "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, one egress proxy task. standard: NAT gateways, Aurora Serverless v2 with a reader, two proxy tasks.",
       "type": "string",
       "enum": [
         "lean",
@@ -21,7 +23,8 @@
       "items": {
         "type": "string",
         "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
-      }
+      },
+      "description": "GitHub orgs or users whose repositories LGTMoose reviews. Others are ignored."
     },
     "providers": {
       "minItems": 1,
@@ -31,7 +34,8 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[a-z][a-z0-9-]{0,31}$"
+            "pattern": "^[a-z][a-z0-9-]{0,31}$",
+            "description": "Your name for the provider. Its credential is stored as lgtmoose/provider/<id>, and roles refer to it."
           },
           "harness": {
             "type": "string",
@@ -40,7 +44,8 @@
               "codex",
               "cursor-agent",
               "agent-sdk"
-            ]
+            ],
+            "description": "The agent that runs the review: claude-code, codex, cursor-agent or agent-sdk."
           },
           "auth": {
             "type": "string",
@@ -52,9 +57,11 @@
               "chatgpt-login",
               "access-token",
               "service-account"
-            ]
+            ],
+            "description": "How the harness signs in. Each harness accepts only some methods."
           },
           "models": {
+            "description": "Model per tier (fast, standard, deep). Tiers left out use the harness default: haiku, sonnet and opus for Claude Code and the Agent SDK, the CLI's own model for Codex and Cursor.",
             "type": "object",
             "propertyNames": {
               "type": "string",
@@ -70,14 +77,17 @@
             }
           },
           "vertex": {
+            "description": "Google Cloud settings, for auth: \"vertex\" only.",
             "type": "object",
             "properties": {
               "region": {
                 "default": "global",
+                "description": "CLOUD_ML_REGION: global, a multi-region (us, eu) or a region (us-east5).",
                 "type": "string",
                 "pattern": "^(global|us|eu|[a-z]+-[a-z]+\\d+)$"
               },
               "projectId": {
+                "description": "Google Cloud project. Defaults to the stored service-account key's project_id.",
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
               }
@@ -97,10 +107,12 @@
           "auth"
         ],
         "additionalProperties": false
-      }
+      },
+      "description": "Model providers in fallback order: a rate limit, a used-up plan or a rejected credential moves a run to the next one."
     },
     "roles": {
       "default": {},
+      "description": "The provider id each role starts on. A role left out starts on the first provider; the others follow as fallbacks.",
       "type": "object",
       "propertyNames": {
         "type": "string",
@@ -118,6 +130,7 @@
     },
     "maxConcurrency": {
       "default": 4,
+      "description": "Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower.",
       "type": "integer",
       "minimum": 1,
       "maximum": 64
@@ -163,6 +176,7 @@
           "provider": "none"
         }
       },
+      "description": "Learnings retrieval: how the learnings for each review batch are ranked.",
       "type": "object",
       "properties": {
         "embeddings": {
@@ -226,6 +240,7 @@
       "additionalProperties": false
     },
     "tickets": {
+      "description": "Reserved for ticket coverage. Not used yet: no ticket provider is built.",
       "type": "object",
       "properties": {
         "provider": {
@@ -244,6 +259,7 @@
     },
     "dashboard": {
       "default": true,
+      "description": "Reserved for the dashboard. Not used yet: no dashboard is deployed.",
       "type": "boolean"
     }
   },
