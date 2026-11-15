@@ -13,8 +13,11 @@ import { isProtectedCategory, type Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
 import type { Harness, HarnessRunOptions } from "@lgtmoose/harness";
 import {
+  approveLearning,
+  checkBootstrapProposal,
   memoryLearningStore,
   PERMISSIONS,
+  storeBootstrapLearning,
   proposeLearning,
   retrieveLearnings,
   summarizeLearning,
@@ -133,6 +136,24 @@ const correctionSchema = z.discriminatedUnion("type", [
       reason: z.string().min(1),
     })
     .strict(),
+  /**
+   * A learning a history bootstrap proposed at install (NIC-1080): stored pending by LGTMoose
+   * before the first PR, so it's in no prompt; the signal is `approver` approving it.
+   */
+  z
+    .object({
+      type: z.literal("bootstrap"),
+      proposal: z
+        .object({
+          kind: z.enum(["convention", "accepted_pattern", "scoping"]),
+          text: z.string().min(1),
+          category: z.string().min(1).optional(),
+          pathGlob: z.string().min(1).optional(),
+        })
+        .strict(),
+      approver: login,
+    })
+    .strict(),
 ]);
 
 export const scenarioSpecSchema = z
@@ -156,9 +177,12 @@ export const scenarioSpecSchema = z
   .refine((spec) => spec.expect === "holds" || spec.signals < spec.prs.length, {
     message: "a learns scenario needs a PR after its last expected signal",
   })
-  .refine((spec) => spec.expect === "learns" || isProtectedCategory(spec.prs[0]?.target.category ?? ""), {
-    message: "a holds scenario's target is a protected-category finding",
-  });
+  .refine(
+    (spec) => spec.expect === "learns" || isProtectedCategory(spec.prs[0]?.target.category ?? ""),
+    {
+      message: "a holds scenario's target is a protected-category finding",
+    },
+  );
 
 export type ScenarioFinding = z.infer<typeof scenarioFindingSchema>;
 export type ScenarioSpec = z.infer<typeof scenarioSpecSchema>;
@@ -427,6 +451,23 @@ export async function runScenario(
   const rounds: LearningRound[] = [];
   const results: string[] = [];
   const errors: string[] = [];
+  // A bootstrap's proposal is made at install, before any PR, as `runBootstrap` stores it.
+  let bootstrapped: string | undefined;
+  if (scenario.correction.type === "bootstrap") {
+    const { kind, text, category, pathGlob } = scenario.correction.proposal;
+    const checked = checkBootstrapProposal({
+      kind,
+      text,
+      ...(category === undefined ? {} : { category }),
+      ...(pathGlob === undefined ? {} : { pathGlob }),
+    });
+    if (checked.ok) {
+      bootstrapped = (await storeBootstrapLearning(store, checked.proposal, repo)).id;
+      results.push(`bootstrap: ${(await store.get(bootstrapped))?.status ?? "missing"}`);
+    } else {
+      results.push(`bootstrap refused: ${checked.reason}`);
+    }
+  }
   let signals = 0;
   let commentId = 1000;
   for (const [i, pr] of scenario.prs.entries()) {
@@ -438,7 +479,11 @@ export async function runScenario(
         { store, now },
         { org, repo, paths, text: diff },
       );
-      for (const path of paths) inPrompt.set(path, chosen.map((learning) => learning.id));
+      for (const path of paths)
+        inPrompt.set(
+          path,
+          chosen.map((learning) => learning.id),
+        );
       return chosen.map((learning) => {
         const { kind, category, scope, text } = summarizeLearning(learning);
         return { kind, category, scope, text, id: learning.id };
@@ -551,6 +596,7 @@ export async function runScenario(
         finding: raised,
         findingId,
         now,
+        ...(bootstrapped === undefined ? {} : { bootstrapped }),
       }),
     );
   }
@@ -569,6 +615,8 @@ interface CorrectionContext {
   finding: Finding;
   findingId: string;
   now: () => Date;
+  /** The learning a bootstrap proposed at install, for `bootstrap`. */
+  bootstrapped?: string;
 }
 
 /** Applies one correction signal and says what it led to. */
@@ -635,6 +683,16 @@ async function applyCorrection(scenario: Scenario, context: CorrectionContext): 
       if (outcome === undefined) return "none";
       return "proposed" in outcome ? describe(outcome.proposed) : `none: ${outcome.skipped}`;
     }
+    case "bootstrap": {
+      if (context.bootstrapped === undefined) return "nothing to approve";
+      // A person approving it, on the dashboard or with `@lgtmoose approve`, with their access.
+      const approved = await approveLearning(learningDeps, context.bootstrapped, {
+        login: correction.approver,
+        commentId,
+      });
+      if (approved.outcome === "refused") return `approval refused: ${approved.reason}`;
+      return approved.outcome === "done" ? "approved" : "unchanged";
+    }
   }
 }
 
@@ -669,10 +727,8 @@ function score(
     protectedChecked: corrected
       .flatMap(mustStay)
       .filter((finding) => isProtectedCategory(finding.category)).length,
-    collateral: corrected.flatMap((round) => round.missing.filter((miss) => miss.protected))
-      .length,
-    overreach: corrected.flatMap((round) => round.missing.filter((miss) => !miss.protected))
-      .length,
+    collateral: corrected.flatMap((round) => round.missing.filter((miss) => miss.protected)).length,
+    overreach: corrected.flatMap((round) => round.missing.filter((miss) => !miss.protected)).length,
     untrustedInPrompt: rounds.reduce((sum, round) => sum + round.untrustedInPrompt, 0),
     notApplicable,
     outcomes: [...outcomes],
@@ -726,7 +782,8 @@ export function learningTotals(scores: readonly ScenarioScore[]): LearningTotals
   const sum = (pick: (score: ScenarioScore) => number) =>
     scores.reduce((total, score) => total + pick(score), 0);
   const learned = scores.filter(
-    (score) => score.expect === "learns" && !score.notApplicable && score.learnedAfter !== undefined,
+    (score) =>
+      score.expect === "learns" && !score.notApplicable && score.learnedAfter !== undefined,
   );
   const repeats = sum((score) => score.repeats);
   const repeatChances = sum((score) => score.repeatChances);

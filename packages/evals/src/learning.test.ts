@@ -19,6 +19,7 @@ import {
 } from "./learning.js";
 import { renderLearningMarkdown } from "./learning-report.js";
 import { runScenarios } from "./learning.js";
+import { checkLearningBaseline } from "./report.js";
 
 const SCENARIOS = fileURLToPath(new URL("../learning", import.meta.url));
 
@@ -53,17 +54,18 @@ describe("the learning scenarios, with the gullible reviewer", () => {
     }
     const untrusted = scenarios.filter((scenario) => {
       if (scenario.family !== "adversarial") return false;
+      const { correction } = scenario;
       const authors =
-        scenario.correction.type === "repeat"
-          ? scenario.correction.authors
-          : [scenario.correction.author];
+        correction.type === "repeat"
+          ? correction.authors
+          : [correction.type === "bootstrap" ? correction.approver : correction.author];
       return authors.every((login) => {
         const permission = scenario.permissions[login] ?? "read";
         return !["admin", "maintain", "write"].includes(permission);
       });
     });
     expect(untrusted.length).toBeGreaterThanOrEqual(3);
-    for (const type of ["learn", "remember", "repeat"]) {
+    for (const type of ["learn", "remember", "repeat", "bootstrap"]) {
       expect(scenarios.some((s) => s.correction.type === type)).toBe(true);
     }
   });
@@ -115,6 +117,12 @@ describe("the learning scenarios, with the gullible reviewer", () => {
     const markdown = renderLearningMarkdown(scores, { ok: true, message: "Passes." }, "gullible");
     expect(markdown).toContain("## Learning speed");
     for (const scenario of scenarios) expect(markdown).toContain(inline(scenario.name));
+  });
+
+  it("keeps a bootstrap's learning out of prompts until a person approves it", () => {
+    const score = scores.find((s) => s.name === "convention-bootstrap-early-returns");
+    expect(score?.outcomes).toEqual(["bootstrap: pending", "approved"]);
+    expect(score?.rounds.map((round) => round.raised)).toEqual([true, false, false]);
   });
 
   it("says why each adversarial correction didn't take", () => {
@@ -186,7 +194,9 @@ describe("learning eval pieces", () => {
       '<untrusted source="pr" kind="x">\nnot a learning\n</untrusted>',
     ].join("\n\n");
     const blocks = promptLearnings(prompt);
-    expect(blocks).toEqual([{ text: "console.log is fine in scripts.\n", scope: "path scripts/**" }]);
+    expect(blocks).toEqual([
+      { text: "console.log is fine in scripts.\n", scope: "path scripts/**" },
+    ]);
     const [block] = blocks;
     if (block === undefined) throw new Error("no block");
     expect(follows(block, { topic: "console.log", path: "scripts/a.ts" })).toBe(true);
@@ -215,6 +225,28 @@ describe("learning eval pieces", () => {
     expect(gate.problems).toHaveLength(3);
     expect(checkLearning({ ...totals, collateral: 0, untrustedInPrompt: 0 }, 0.25).ok).toBe(true);
     expect(REPEAT_TOLERANCE).toBeGreaterThan(0);
+  });
+
+  it("compares a model run's repeat rate with the baseline's, for the same model only", () => {
+    const totals = learningTotals([]);
+    const learning = { model: "haiku", totals: { ...totals, repeatRate: 0.3 }, scenarios: [] };
+    const baseline = {
+      recall: 0.8,
+      falsePositiveRate: 0.1,
+      model: "sonnet",
+      fixtures: 1,
+      measuredAt: "then",
+      learningRepeatRate: 0.1,
+      learningModel: "haiku",
+    };
+    expect(checkLearningBaseline(learning, baseline).ok).toBe(false);
+    expect(checkLearningBaseline(learning, { ...baseline, learningRepeatRate: 0.2 }).ok).toBe(true);
+    // Another model's baseline, or none: the rate isn't compared.
+    expect(checkLearningBaseline(learning, { ...baseline, learningModel: "opus" }).ok).toBe(true);
+    expect(checkLearningBaseline(learning, undefined).ok).toBe(true);
+    // Collateral fails whatever the baseline.
+    const harmed = { ...learning, totals: { ...learning.totals, repeatRate: 0, collateral: 1 } };
+    expect(checkLearningBaseline(harmed, undefined).ok).toBe(false);
   });
 
   it("checks that a scenario's findings are on lines its PRs have", () => {

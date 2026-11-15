@@ -1,0 +1,63 @@
+{
+  "description": "A history bootstrap at install proposes a learning that the team prefers early returns over a nested else. It's pending, so the first PR still raises the finding; a maintainer approves it, and later PRs shouldn't.",
+  "family": "convention",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "bootstrap",
+    "proposal": {
+      "kind": "convention",
+      "text": "This team writes an early return and then the rest of the function; an else after a return is fine and shouldn't be flagged as an else after return."
+    },
+    "approver": "maya"
+  },
+  "base": {
+    "README.md": "# Rules\n",
+    "src/user.ts": "export interface User {\n  active: boolean;\n  admin: boolean;\n}\n"
+  },
+  "prs": [
+    {
+      "title": "Add the active check",
+      "files": {
+        "src/active.ts": "import type { User } from \"./user\";\nexport function label(user: User) {\n  if (!user.active) return \"inactive\";\n  else return \"active\";\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/active.ts",
+        "line": 4,
+        "title": "Unnecessary else after return",
+        "topic": "else after return"
+      }
+    },
+    {
+      "title": "Add the admin check",
+      "files": {
+        "src/admin.ts": "import type { User } from \"./user\";\nexport function role(user: User) {\n  if (user.admin) return \"admin\";\n  else return \"member\";\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/admin.ts",
+        "line": 4,
+        "title": "Unnecessary else after return",
+        "topic": "else after return"
+      }
+    },
+    {
+      "title": "Add the badge",
+      "files": {
+        "src/badge.ts": "import type { User } from \"./user\";\nexport function badge(user: User) {\n  if (user.admin && user.active) return \"gold\";\n  else return \"none\";\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/badge.ts",
+        "line": 4,
+        "title": "Unnecessary else after return",
+        "topic": "else after return"
+      }
+    }
+  ]
+}

@@ -17,7 +17,8 @@ function rounds(score: ScenarioScore): string {
 
 function learned(score: ScenarioScore): string {
   if (score.notApplicable) return "n/a (not raised first)";
-  if (score.expect === "holds") return score.learnedAfter === undefined ? "held" : "**taught away**";
+  if (score.expect === "holds")
+    return score.learnedAfter === undefined ? "held" : "**taught away**";
   if (score.learnedAfter === undefined) return "**never**";
   const late = score.learnedAfter > score.signals ? " (late)" : "";
   return `${score.learnedAfter} of ${score.signals}${late}`;

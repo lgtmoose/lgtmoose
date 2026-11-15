@@ -75,10 +75,10 @@ Provider matrix (instead of the single Claude Code run and its baseline gate):
                        (repeatable). Only roles the pipeline runs today can be set: reviewer
   --results <dir>      Also keep a timestamped copy of matrix.json here, to compare runs later
 
-A matrix run doesn't run the learning scenarios. It writes matrix.md (the side-by-side table) and matrix.json to --out, and each
-configuration's report.md, report.json and transcripts to a folder of its own. A provider
-without a credential is skipped, and limit hits are counted, not fatal. It exits 2 when no
-configuration could run, and 0 otherwise.
+A matrix run leaves out the learning scenarios. It writes matrix.md (the side-by-side table) and
+matrix.json to --out, and each configuration's report.md, report.json and transcripts to a
+folder of its own. A provider without a credential is skipped, and limit hits are counted, not
+fatal. It exits 2 when no configuration could run, and 0 otherwise.
 `;
 
 /**
@@ -231,15 +231,14 @@ async function main(argv: readonly string[]): Promise<number> {
     const baseline = await readBaseline(baselinePath);
     // Collateral and untrusted learnings fail any run; the repeat rate is compared with the
     // baseline's only on the whole set, as recall is.
-    const learningGate =
-      learning === undefined
-        ? undefined
-        : learning.totals.failedRuns === learning.scenarios.length
-          ? { ok: false, message: "Every learning scenario's reviews failed." }
-          : checkLearningBaseline(
-              learning,
-              values["update-baseline"] || values.only !== undefined ? undefined : baseline,
-            );
+    let learningGate: GateResult | undefined;
+    if (learning !== undefined && learning.totals.failedRuns === learning.scenarios.length) {
+      learningGate = { ok: false, message: "Every learning scenario's reviews failed." };
+    } else if (learning !== undefined) {
+      const compareWith =
+        values["update-baseline"] || values.only !== undefined ? undefined : baseline;
+      learningGate = checkLearningBaseline(learning, compareWith);
+    }
     // A failed run (a timeout, a rate limit, no credential) scores as misses, which would read
     // as a recall drop. Report it as "couldn't run" instead, and never make it the baseline.
     const failed = report.totals.failedRuns;

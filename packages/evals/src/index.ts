@@ -2,7 +2,8 @@
  * @lgtmoose/evals: runs the review pipeline on fixtures (a repo snapshot with seeded bugs, or a
  * clean change) and scores what it would post: recall on seeded bugs, false positives on clean
  * changes, severity accuracy, cost and time. CI gates prompt, rule pack and harness changes on
- * recall against a stored baseline.
+ * recall against a stored baseline. The learning-speed family (`learning/`) checks that a
+ * correction sticks on the next review, and that none quiets a protected-category finding.
  */
 export {
   buildFixtureRepo,
@@ -41,6 +42,30 @@ export {
   type GateResult,
 } from "./report.js";
 export { runFixture, runFixtures, type RunOptions } from "./run.js";
+export {
+  REPEAT_TOLERANCE,
+  checkLearning,
+  follows,
+  gullibleReviewer,
+  isFinding,
+  learningTotals,
+  loadScenarios,
+  promptLearnings,
+  runScenario,
+  runScenarios,
+  scenarioFindingSchema,
+  scenarioProblems,
+  scenarioSpecSchema,
+  type LearningRound,
+  type LearningRunOptions,
+  type LearningTotals,
+  type Scenario,
+  type ScenarioFinding,
+  type ScenarioScore,
+  type ScenarioSpec,
+} from "./learning.js";
+export { renderLearningMarkdown } from "./learning-report.js";
+export { checkLearningBaseline, type LearningReport } from "./report.js";
 export {
   EVALUATED_ROLES,
   assignmentFromRoles,
