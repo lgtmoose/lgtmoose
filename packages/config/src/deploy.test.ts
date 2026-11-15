@@ -55,7 +55,11 @@ describe("parseDeployConfig", () => {
       budgets: { perPullRequest: {}, prices: {} },
       shadow: true,
       extraEgressHosts: [],
-      learnings: { embeddings: { provider: "none" }, maxPendingPerAuthor: 5 },
+      learnings: {
+        embeddings: { provider: "none" },
+        maxPendingPerAuthor: 5,
+        bootstrapMaxCostUsd: 5,
+      },
       dashboard: true,
     });
   });
@@ -93,7 +97,11 @@ describe("parseDeployConfig", () => {
   it("takes a pending-learnings limit per author between 1 and 100", () => {
     expect(
       parseDeployConfig({ ...minimal, learnings: { maxPendingPerAuthor: 2 } }).learnings,
-    ).toEqual({ embeddings: { provider: "none" }, maxPendingPerAuthor: 2 });
+    ).toEqual({
+      embeddings: { provider: "none" },
+      maxPendingPerAuthor: 2,
+      bootstrapMaxCostUsd: 5,
+    });
     expect(issuesOf({ ...minimal, learnings: { maxPendingPerAuthor: 0 } })).toEqual([
       expect.objectContaining({ path: "learnings.maxPendingPerAuthor" }),
     ]);
@@ -106,6 +114,7 @@ describe("parseDeployConfig", () => {
     ).toEqual({
       embeddings: { provider: "bedrock", model: "amazon.titan-embed-text-v2:0" },
       maxPendingPerAuthor: 5,
+      bootstrapMaxCostUsd: 5,
     });
     expect(
       parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "openai" } } })
@@ -113,6 +122,7 @@ describe("parseDeployConfig", () => {
     ).toEqual({
       embeddings: { provider: "openai", model: "text-embedding-3-small" },
       maxPendingPerAuthor: 5,
+      bootstrapMaxCostUsd: 5,
     });
     expect(
       issuesOf({

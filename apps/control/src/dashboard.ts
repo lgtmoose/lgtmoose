@@ -400,14 +400,20 @@ async function listBootstraps(
   const bootstraps = deps.bootstraps;
   if (bootstraps === undefined) return json(200, { enabled: false, bootstraps: [], items: [] });
   const recent = await bootstraps.store.recent(session.repos, BOOTSTRAPS_LIMIT);
-  const items = (await bootstraps.store.items({ repos: session.repos })).slice(-BOOTSTRAP_ITEMS_LIMIT);
+  const items = (await bootstraps.store.items({ repos: session.repos })).slice(
+    -BOOTSTRAP_ITEMS_LIMIT,
+  );
   const pending = [];
   for (const item of items) {
     const learning = await deps.learnings.get(item.learningId);
     if (learning === undefined || learning.status !== "pending" || !canSee(session, learning)) {
       continue;
     }
-    pending.push({ bootstrapId: item.bootstrapId, learning: learningView(learning), sources: item.sources });
+    pending.push({
+      bootstrapId: item.bootstrapId,
+      learning: learningView(learning),
+      sources: item.sources,
+    });
     if (pending.length >= LEARNINGS_LIMIT) break;
   }
   return json(200, {
@@ -437,7 +443,9 @@ async function requestBootstrap(
   }
   const prs = query.prs === undefined ? bootstraps.maxPrs : Number(query.prs);
   if (!Number.isSafeInteger(prs) || prs < 1 || prs > BOOTSTRAP_DEFAULTS.maxPrsLimit) {
-    return json(400, { error: `prs is a whole number from 1 to ${BOOTSTRAP_DEFAULTS.maxPrsLimit}` });
+    return json(400, {
+      error: `prs is a whole number from 1 to ${BOOTSTRAP_DEFAULTS.maxPrsLimit}`,
+    });
   }
   const result = await bootstraps.store.request({
     repo,
@@ -448,7 +456,11 @@ async function requestBootstrap(
     maxCostUsd: BOOTSTRAP_DEFAULTS.maxCostUsdLimit,
     resume: query.resume === "1",
   });
-  deps.log("dashboard bootstrap requested", { repo, login: session.login, created: result.created });
+  deps.log("dashboard bootstrap requested", {
+    repo,
+    login: session.login,
+    created: result.created,
+  });
   return result.created
     ? json(202, { bootstrap: bootstrapView(result.bootstrap) })
     : json(409, { error: "already-requested", bootstrap: bootstrapView(result.active) });
@@ -466,7 +478,11 @@ async function changeBootstrap(
 ): Promise<DashboardResponse> {
   const bootstraps = deps.bootstraps;
   const bootstrap = await bootstraps?.store.get(id);
-  if (bootstraps === undefined || bootstrap === undefined || !session.repos.includes(bootstrap.repo)) {
+  if (
+    bootstraps === undefined ||
+    bootstrap === undefined ||
+    !session.repos.includes(bootstrap.repo)
+  ) {
     return json(404, { error: "no such bootstrap" });
   }
   const policy: LearningDeps = { store: deps.learnings, ...sessionAccess(session) };

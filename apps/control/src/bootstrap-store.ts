@@ -39,7 +39,8 @@ export interface BootstrapRequest {
   resume?: boolean;
 }
 
-export type RequestResult = { created: true; bootstrap: Bootstrap } | { created: false; active: Bootstrap };
+export type RequestResult =
+  { created: true; bootstrap: Bootstrap } | { created: false; active: Bootstrap };
 
 export interface BootstrapStore {
   get(id: string): Promise<Bootstrap | undefined>;
@@ -52,7 +53,12 @@ export interface BootstrapStore {
   /** What the prepare step read. */
   progress(
     id: string,
-    read: { prsRead: number; commentsRead: number; oldestPrRead: number | undefined; capped: boolean },
+    read: {
+      prsRead: number;
+      commentsRead: number;
+      oldestPrRead: number | undefined;
+      capped: boolean;
+    },
   ): Promise<void>;
   finish(id: string, result: { proposed: number; costUsd: number }): Promise<void>;
   /** Fails a requested or running bootstrap. */
@@ -62,13 +68,18 @@ export interface BootstrapStore {
   /** Fails bootstraps running since before `before`: their execution was lost. */
   failStale(before: Date): Promise<number>;
   /** Records a learning the bootstrap proposed, with its sources. */
-  addItem(bootstrapId: string, learningId: string, sources: readonly BootstrapSource[]): Promise<void>;
+  addItem(
+    bootstrapId: string,
+    learningId: string,
+    sources: readonly BootstrapSource[],
+  ): Promise<void>;
   /** The newest bootstraps of `repos`, at most `limit`. */
   recent(repos: readonly string[], limit: number): Promise<Bootstrap[]>;
   /** The items of a bootstrap, or of every bootstrap of `repos`: learning IDs and sources. */
-  items(filter: { bootstrapId?: string; repos?: readonly string[] }): Promise<
-    { bootstrapId: string; learningId: string; sources: BootstrapSource[] }[]
-  >;
+  items(filter: {
+    bootstrapId?: string;
+    repos?: readonly string[];
+  }): Promise<{ bootstrapId: string; learningId: string; sources: BootstrapSource[] }[]>;
 }
 
 type Row = typeof learningBootstraps.$inferSelect;
@@ -97,7 +108,8 @@ function toBootstrap(row: Row): Bootstrap {
 
 const ACTIVE = ["requested", "running"] as const;
 const MAX_ERROR = 500;
-const clip = (error: string) => (error.length > MAX_ERROR ? `${error.slice(0, MAX_ERROR - 1)}…` : error);
+const clip = (error: string) =>
+  error.length > MAX_ERROR ? `${error.slice(0, MAX_ERROR - 1)}…` : error;
 
 export function drizzleBootstrapStore(db: Db, now: () => Date = () => new Date()): BootstrapStore {
   async function get(id: string): Promise<Bootstrap | undefined> {
@@ -108,7 +120,9 @@ export function drizzleBootstrapStore(db: Db, now: () => Date = () => new Date()
     const [row] = await db
       .select()
       .from(learningBootstraps)
-      .where(and(eq(learningBootstraps.repo, repo), inArray(learningBootstraps.status, [...ACTIVE])));
+      .where(
+        and(eq(learningBootstraps.repo, repo), inArray(learningBootstraps.status, [...ACTIVE])),
+      );
     return row === undefined ? undefined : toBootstrap(row);
   }
   return {
@@ -212,7 +226,9 @@ export function drizzleBootstrapStore(db: Db, now: () => Date = () => new Date()
           finishedAt: now(),
           updatedAt: now(),
         })
-        .where(and(eq(learningBootstraps.status, "running"), lt(learningBootstraps.updatedAt, before)))
+        .where(
+          and(eq(learningBootstraps.status, "running"), lt(learningBootstraps.updatedAt, before)),
+        )
         .returning({ id: learningBootstraps.id });
       return rows.length;
     },

@@ -139,7 +139,9 @@ export function cleanComment(body: string): string {
     .join("\n")
     .trim();
   const { text: redacted } = redactSensitive(text);
-  return redacted.length > MAX_COMMENT_CHARS ? `${redacted.slice(0, MAX_COMMENT_CHARS - 1)}…` : redacted;
+  return redacted.length > MAX_COMMENT_CHARS
+    ? `${redacted.slice(0, MAX_COMMENT_CHARS - 1)}…`
+    : redacted;
 }
 
 /** A command to a bot (`@lgtmoose learn: …`, `/review`): not a review remark. */
@@ -216,7 +218,11 @@ export function planBatches(
     let simCount = count;
     let simChars = chars;
     for (const { text } of comments) {
-      if (total === 0 || simCount >= COMMENTS_PER_BATCH || simChars + text.length > CHARS_PER_BATCH) {
+      if (
+        total === 0 ||
+        simCount >= COMMENTS_PER_BATCH ||
+        simChars + text.length > CHARS_PER_BATCH
+      ) {
         total += 1;
         simCount = 0;
         simChars = 0;
@@ -270,40 +276,58 @@ export function keepBatches(
 }
 
 /** Lint and format tools whose config tells the reviewer what's already enforced. */
-const TOOLS: readonly { name: string; files: readonly string[]; what: string; category: string }[] = [
-  {
-    name: "ESLint",
-    files: [
-      "eslint.config.js",
-      "eslint.config.mjs",
-      "eslint.config.cjs",
-      "eslint.config.ts",
-      ".eslintrc",
-      ".eslintrc.json",
-      ".eslintrc.js",
-      ".eslintrc.cjs",
-      ".eslintrc.yml",
-      ".eslintrc.yaml",
-    ],
-    what: "lint rules",
-    category: "style",
-  },
-  { name: "Biome", files: ["biome.json", "biome.jsonc"], what: "lint and formatting rules", category: "style" },
-  {
-    name: "Prettier",
-    files: [".prettierrc", ".prettierrc.json", ".prettierrc.yaml", ".prettierrc.yml", "prettier.config.js", "prettier.config.mjs"],
-    what: "formatting",
-    category: "style",
-  },
-  { name: "Ruff", files: ["ruff.toml", ".ruff.toml"], what: "lint and formatting rules", category: "style" },
-  {
-    name: "golangci-lint",
-    files: [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"],
-    what: "lint rules",
-    category: "style",
-  },
-  { name: "RuboCop", files: [".rubocop.yml"], what: "lint and style rules", category: "style" },
-];
+const TOOLS: readonly { name: string; files: readonly string[]; what: string; category: string }[] =
+  [
+    {
+      name: "ESLint",
+      files: [
+        "eslint.config.js",
+        "eslint.config.mjs",
+        "eslint.config.cjs",
+        "eslint.config.ts",
+        ".eslintrc",
+        ".eslintrc.json",
+        ".eslintrc.js",
+        ".eslintrc.cjs",
+        ".eslintrc.yml",
+        ".eslintrc.yaml",
+      ],
+      what: "lint rules",
+      category: "style",
+    },
+    {
+      name: "Biome",
+      files: ["biome.json", "biome.jsonc"],
+      what: "lint and formatting rules",
+      category: "style",
+    },
+    {
+      name: "Prettier",
+      files: [
+        ".prettierrc",
+        ".prettierrc.json",
+        ".prettierrc.yaml",
+        ".prettierrc.yml",
+        "prettier.config.js",
+        "prettier.config.mjs",
+      ],
+      what: "formatting",
+      category: "style",
+    },
+    {
+      name: "Ruff",
+      files: ["ruff.toml", ".ruff.toml"],
+      what: "lint and formatting rules",
+      category: "style",
+    },
+    {
+      name: "golangci-lint",
+      files: [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"],
+      what: "lint rules",
+      category: "style",
+    },
+    { name: "RuboCop", files: [".rubocop.yml"], what: "lint and style rules", category: "style" },
+  ];
 
 /** Files a bootstrap reads for hints. */
 export const HINT_FILES: readonly string[] = [
@@ -343,7 +367,11 @@ export function fileHints(files: ReadonlyMap<string, string | undefined>): Hint[
     });
   }
   const pyproject = files.get("pyproject.toml");
-  if (pyproject !== undefined && /^\s*\[tool\.ruff/m.test(pyproject) && !hints.some((hint) => hint.proposal.text.startsWith("Ruff"))) {
+  if (
+    pyproject !== undefined &&
+    /^\s*\[tool\.ruff/m.test(pyproject) &&
+    !hints.some((hint) => hint.proposal.text.startsWith("Ruff"))
+  ) {
     hints.push({
       file: "pyproject.toml",
       proposal: {
@@ -364,7 +392,12 @@ export function fileHints(files: ReadonlyMap<string, string | undefined>): Hint[
           .map((line) => line.trim())
           .filter((line) => line !== "" && !line.startsWith("#"))
           .map((line) => line.split(/\s+/)[0] ?? "")
-          .filter((pattern) => pattern !== "*" && OWNED_PATTERN.test(pattern)),
+          .filter(
+            (pattern) =>
+              pattern !== "*" &&
+              OWNED_PATTERN.test(pattern) &&
+              !pattern.split("/").some((part) => part === ".." || part === "."),
+          ),
       ),
     ].slice(0, 8);
     if (patterns.length > 0) {
@@ -417,8 +450,12 @@ const manifestSchema = z.object({
 type Manifest = z.infer<typeof manifestSchema>;
 
 /** Runs `work` on each of `items`, at most `limit` at once, keeping their order. */
-async function mapLimited<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
+async function mapLimited<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = [];
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
@@ -479,7 +516,10 @@ export async function prepareBootstrap(
     deps.spend === undefined
       ? BOOTSTRAP_BATCH_ESTIMATE_USD
       : estimateCost(undefined, tierPrices(deps.spend.budgets).fast);
-  const planned = planBatches(prs, estimate > 0 ? Math.floor(maxCostUsd / estimate) : maxBatchesFree);
+  const planned = planBatches(
+    prs,
+    estimate > 0 ? Math.floor(maxCostUsd / estimate) : maxBatchesFree,
+  );
   // The deployment's spend caps (NIC-1079): the batches are reserved in the spend ledger like a
   // review's, under the repository's and the deployment's monthly caps. A bootstrap is no PR's,
   // so per-PR caps don't apply. Those that don't fit aren't run.
@@ -576,13 +616,16 @@ export async function prepareBootstrap(
     hints: hints.length,
     capped: plan.capped,
   });
-  return { runId: job.bootstrapId, superseded: false, batches: batches.map(({ index }) => ({ index })) };
+  return {
+    runId: job.bootstrapId,
+    superseded: false,
+    batches: batches.map(({ index }) => ({ index })),
+  };
 }
 
 /** Why a candidate wasn't stored, or the learning it became. */
 export type CandidateOutcome =
-  | { stored: true; learningId: string }
-  | { stored: false; reason: string };
+  { stored: true; learningId: string } | { stored: false; reason: string };
 
 /**
  * Checks one candidate of a batch: its sources must be at least two distinct comments of that
@@ -639,7 +682,9 @@ export async function postBootstrap(deps: ControlDeps, bootstrapId: string): Pro
   const [owner = ""] = manifest.repo.split("/");
   const existing = await bootstrap.learnings.list({ org: owner, repo: manifest.repo });
   const seen = new Set(
-    existing.filter((learning) => learning.status !== "retired").map((learning) => learningKey(learning)),
+    existing
+      .filter((learning) => learning.status !== "retired")
+      .map((learning) => learningKey(learning)),
   );
   let proposed = 0;
   let refused = 0;
@@ -654,12 +699,17 @@ export async function postBootstrap(deps: ControlDeps, bootstrapId: string): Pro
     }
     const key = learningKey({
       repo: manifest.repo,
-      pathGlob: checked.proposal.scope.level === "path" ? checked.proposal.scope.pathGlob : undefined,
+      pathGlob:
+        checked.proposal.scope.level === "path" ? checked.proposal.scope.pathGlob : undefined,
       text: checked.proposal.text,
     });
     if (seen.has(key)) return;
     seen.add(key);
-    const learning = await storeBootstrapLearning(bootstrap.learnings, checked.proposal, manifest.repo);
+    const learning = await storeBootstrapLearning(
+      bootstrap.learnings,
+      checked.proposal,
+      manifest.repo,
+    );
     await bootstrap.store.addItem(bootstrapId, learning.id, sources);
     proposed += 1;
   };

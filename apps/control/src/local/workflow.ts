@@ -138,7 +138,11 @@ export async function runExecution(
       try {
         await deps.runBatch({ runId: prepared.runId, index: batch.index, executionArn: arn });
       } catch (error) {
-        control.log("batch failed", { executionArn: arn, index: batch.index, error: message(error) });
+        control.log("batch failed", {
+          executionArn: arn,
+          index: batch.index,
+          error: message(error),
+        });
       }
     });
     try {

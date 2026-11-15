@@ -82,7 +82,11 @@ export function learningKey(learning: {
   pathGlob: string | undefined;
   text: string;
 }): string {
-  return JSON.stringify([learning.repo ?? "", learning.pathGlob ?? "", normalizedLearningText(learning.text)]);
+  return JSON.stringify([
+    learning.repo ?? "",
+    learning.pathGlob ?? "",
+    normalizedLearningText(learning.text),
+  ]);
 }
 
 /**
@@ -113,7 +117,14 @@ export async function storeBootstrapLearning(
       author: SYSTEM_ACTOR,
       authorPermission: "system",
     },
-    [{ type: "proposed", actor: SYSTEM_ACTOR, actorPermission: "system", githubCommentId: undefined }],
+    [
+      {
+        type: "proposed",
+        actor: SYSTEM_ACTOR,
+        actorPermission: "system",
+        githubCommentId: undefined,
+      },
+    ],
   );
   return learning;
 }

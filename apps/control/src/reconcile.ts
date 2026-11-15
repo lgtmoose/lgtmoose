@@ -266,7 +266,7 @@ export async function reconcile(deps: ReconcileDeps): Promise<ReconcileCounts> {
         installed,
         counts.errors === errorsBefore,
         deps.now?.() ?? new Date(),
-        deps.log,
+        (message, fields) => deps.log(message, fields),
       );
     } catch (error) {
       counts.errors += 1;

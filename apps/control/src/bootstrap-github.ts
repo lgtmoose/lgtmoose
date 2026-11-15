@@ -14,7 +14,10 @@ const MAX_PAGES = 30;
 const MAX_FILE_BYTES = 200_000;
 
 const user = z.object({ login: z.string(), type: z.string().optional() }).nullable();
-const pullSchema = z.object({ number: z.number().int().positive(), merged_at: z.string().nullable() });
+const pullSchema = z.object({
+  number: z.number().int().positive(),
+  merged_at: z.string().nullable(),
+});
 const reviewCommentSchema = z.object({
   id: z.number().int().positive(),
   user,
@@ -37,13 +40,20 @@ const contentSchema = z.object({
 
 function split(repo: string): { owner: string; repo: string; path: string } {
   const [owner = "", name = ""] = repo.split("/");
-  return { owner, repo: name, path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}` };
+  return {
+    owner,
+    repo: name,
+    path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+  };
 }
 
 const isBot = (account: z.infer<typeof user>) =>
   account === null || account.type === "Bot" || account.login.endsWith("[bot]");
 
-export function githubBootstrap(client: Pick<GitHubClient, "request" | "list">, log: Log): BootstrapGitHub {
+export function githubBootstrap(
+  client: Pick<GitHubClient, "request" | "list">,
+  log: Log,
+): BootstrapGitHub {
   return {
     async mergedPulls(repo, { before, limit }) {
       const { path } = split(repo);
@@ -69,11 +79,14 @@ export function githubBootstrap(client: Pick<GitHubClient, "request" | "list">, 
     },
     async comments(repo, pr) {
       const { path } = split(repo);
-      const inline = z.array(reviewCommentSchema).parse(await client.list(`${path}/pulls/${pr}/comments`));
+      const inline = z
+        .array(reviewCommentSchema)
+        .parse(await client.list(`${path}/pulls/${pr}/comments`));
       const reviews = z.array(reviewSchema).parse(await client.list(`${path}/pulls/${pr}/reviews`));
       const comments: HistoryComment[] = [];
       for (const comment of inline) {
-        if (comment.body === undefined || comment.body === null || comment.body.trim() === "") continue;
+        if (comment.body === undefined || comment.body === null || comment.body.trim() === "")
+          continue;
         comments.push({
           id: comment.id,
           pr,
@@ -85,7 +98,8 @@ export function githubBootstrap(client: Pick<GitHubClient, "request" | "list">, 
         });
       }
       for (const review of reviews) {
-        if (review.body === undefined || review.body === null || review.body.trim() === "") continue;
+        if (review.body === undefined || review.body === null || review.body.trim() === "")
+          continue;
         comments.push({
           id: review.id,
           pr,
@@ -105,7 +119,9 @@ export function githubBootstrap(client: Pick<GitHubClient, "request" | "list">, 
       const { path } = split(repo);
       const encoded = file.split("/").map(encodeURIComponent).join("/");
       try {
-        const reply = contentSchema.parse(await client.request("GET", `${path}/contents/${encoded}`));
+        const reply = contentSchema.parse(
+          await client.request("GET", `${path}/contents/${encoded}`),
+        );
         if (reply.type !== "file" || reply.encoding !== "base64" || reply.content === undefined) {
           return undefined;
         }

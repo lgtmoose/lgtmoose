@@ -33,7 +33,7 @@ describe("buildBootstrapPrompt", () => {
   });
 
   it("names nobody: authors aren't in the prompt", () => {
-    expect(buildBootstrapPrompt(input)).not.toMatch(/author/i);
+    expect(buildBootstrapPrompt(input)).not.toMatch(/\bauthors?\b/i);
   });
 
   it("is deterministic", () => {

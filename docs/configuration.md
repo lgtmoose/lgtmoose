@@ -68,12 +68,13 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
-| `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5}` | Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have. |
+| `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5,"bootstrapMaxCostUsd":5}` | Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have. |
 | `learnings.embeddings` | one of the forms below | `{"provider":"none"}` | How learnings are ranked against a batch's diff: bedrock or openai embeddings, or none for keywords. The provider receives learning text and diffs. |
 | `learnings.embeddings.provider` (required) | `"none"` or `"bedrock"` or `"openai"` |  | Which form this is. |
 | `learnings.embeddings.model` | string matching `^amazon\.titan-embed-text-v2(?::\d+)?$` | `"amazon.titan-embed-text-v2:0"` | With `provider: "bedrock"`. |
 | `learnings.embeddings.model` | string matching <code>^text-embedding-3-(?:small&#124;large)$</code> | `"text-embedding-3-small"` | With `provider: "openai"`. |
 | `learnings.maxPendingPerAuthor` | integer, 1 to 100 | `5` | The most pending learnings one author without write access may have in an org. A new learn: past it is refused and nothing is stored. |
+| `learnings.bootstrapMaxCostUsd` | number, 0 to 1000 | `5` | The most estimated model cost, in USD, of one bootstrap from a repository's review history (lgtmoose learnings bootstrap). A request can ask for less, never more. |
 | `tickets` | object |  | Ticket coverage: check each PR against the tickets it names. Left out: off. The provider receives no code; the model checks coverage in the sandbox. |
 | `tickets.provider` | `"linear"` or `"jira"` or `"github-issues"` |  | The ticket system: linear. jira and github-issues aren't built yet. |
 | `tickets.maxPerPullRequest` | integer, 1 to 10 | `3` | The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed. |

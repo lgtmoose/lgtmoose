@@ -1,5 +1,6 @@
 import { Match, Template } from "aws-cdk-lib/assertions";
 import {
+  BOOTSTRAP_REQUEST_PREFIX,
   FEEDBACK_REPORT_KEY,
   SECRET_NAMES,
   STACK_OUTPUTS,
@@ -54,7 +55,9 @@ function taskDefinition(provider: string) {
 }
 
 /** Every statement in the IAM policies attached to a role. */
-function statements(roleId: string): { Action: string | string[]; Resource: unknown }[] {
+function statements(
+  roleId: string,
+): { Action: string | string[]; Resource: unknown; Condition?: unknown }[] {
   return Object.values(resources)
     .filter((r) => r.Type === "AWS::IAM::Policy")
     .filter((r) => (r.Properties.Roles as { Ref: string }[]).some((role) => role.Ref === roleId))
@@ -62,7 +65,7 @@ function statements(roleId: string): { Action: string | string[]; Resource: unkn
       (r) =>
         (
           r.Properties.PolicyDocument as {
-            Statement: { Action: string | string[]; Resource: unknown }[];
+            Statement: { Action: string | string[]; Resource: unknown; Condition?: unknown }[];
           }
         ).Statement,
     );
@@ -686,7 +689,13 @@ describe("reconciler", () => {
     ]);
     const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
     expect(secrets).toHaveLength(2);
-    expect(actions(granted).some((a) => a.startsWith("states:"))).toBe(false);
+    // Starting bootstraps from review history (NIC-1080) on the review workflow, and nothing
+    // else in Step Functions.
+    const states = granted.filter((s) => actions([s]).some((a) => a.startsWith("states:")));
+    expect(actions(states)).toEqual(["states:StartExecution"]);
+    for (const statement of states) {
+      expect(JSON.stringify(statement.Resource)).toContain("ReviewStateMachine");
+    }
     expect(actions(granted)).not.toContain("sqs:ReceiveMessage");
     // In the artifact bucket, only writing the feedback report and reading batch outputs (to
     // settle spend for runs post never reached, NIC-1079): no other object, and no deletes.
@@ -702,19 +711,34 @@ describe("reconciler", () => {
     const reads = s3.filter((s) => !writes.includes(s));
     expect(reads.length).toBeGreaterThan(0);
     for (const statement of reads) {
+      const granted = actions([statement]);
       expect(
-        actions([statement]).every(
+        granted.every(
           (a) =>
-            a.startsWith("s3:GetObject") || a.startsWith("s3:GetBucket") || a.startsWith("s3:List"),
+            a.startsWith("s3:GetObject") ||
+            a.startsWith("s3:GetBucket") ||
+            a.startsWith("s3:List") ||
+            a === "s3:DeleteObject",
         ),
       ).toBe(true);
-      // Objects only under runs/<id>/batches/<n>/output.json (and the bucket, for listing).
+      // Objects only under runs/<id>/batches/<n>/output.json, or the CLI's bootstrap requests
+      // (NIC-1080), which it also removes once read (and the bucket, for listing).
       const objects = (JSON.stringify(statement.Resource).match(/\/[^"\\]*?(?=")/g) ?? []).filter(
         (part) => part.startsWith("/") && part.length > 1,
       );
-      for (const object of objects) expect(object).toBe("/runs/*/batches/*/output.json");
+      for (const object of objects) {
+        expect(["/runs/*/batches/*/output.json", `/${BOOTSTRAP_REQUEST_PREFIX}*`]).toContain(
+          object,
+        );
+      }
+      if (granted.includes("s3:DeleteObject")) {
+        expect(objects).toEqual([`/${BOOTSTRAP_REQUEST_PREFIX}*`]);
+      }
+      // Listing the bucket only under the requests' prefix.
+      if (granted.includes("s3:ListBucket") && objects.length === 0) {
+        expect(JSON.stringify(statement.Condition)).toContain(BOOTSTRAP_REQUEST_PREFIX);
+      }
     }
-    expect(actions(granted).some((a) => a.startsWith("s3:DeleteObject"))).toBe(false);
   });
 
   it("writes the feedback report to the artifact bucket, with the config's settings", () => {

@@ -8,6 +8,7 @@ Memory writes are the main way an attacker could steer a reviewer, so who may wr
 
 - **`@lgtmoose learn: <text>`** in a PR comment. Tags narrow or widen it: `[path <glob>]`, `[org]`, `[kind <kind>]`, `[category <name>]`. See [Commands](commands.md).
 - **A declined finding.** When a person declines a finding in a reply and the reply judge sees a general rule in their reason, it proposes a learning on their behalf.
+- **The repository's review history.** A bootstrap reads past code review comments and proposes the team's rules. They are always pending until a person approves them. See [Starting with your history](#starting-with-your-history).
 
 Kinds are `accepted_pattern`, `correction`, `convention` and `scoping`. A `learn:` comment is a repo-wide `convention` unless its tags say otherwise.
 
@@ -26,6 +27,56 @@ Kinds are `accepted_pattern`, `correction`, `convention` and `scoping`. A `learn
 Pending learnings are approved with `@lgtmoose approve <id>` on a PR, or approved (or rejected) on the [dashboard](dashboard.md#approving-and-rejecting-learnings), with the same access rules.
 
 Not built yet: the monthly sync PR that writes learnings into the repository.
+
+## Starting with your history
+
+A new install knows only your conventions files, so its first reviews are its noisiest. Most teams have already written their taste down in past code review comments. A bootstrap turns those comments into learnings, for you to approve before any review uses them.
+
+### Starting one
+
+- **On the dashboard:** open **Learn from history** and choose **Learn from history** next to a repository. You need write access to it. **Read older PRs** carries on below the oldest PR the last bootstrap read.
+- **From the CLI, on AWS:**
+
+  ```bash
+  lgtmoose learnings bootstrap --repo acme/shop
+  ```
+
+  Options are `--prs <n>` (merged PRs to read, 200 by default, 1,000 at most), `--max-cost <usd>` and `--resume`. The command leaves a request in the artifact bucket with your AWS credentials.
+
+`lgtmoose setup` suggests this as its last step. Either way, the reconciler starts the bootstrap on its next run, on the repository's installation. One bootstrap per repository can be waiting or running at a time.
+
+### What it reads
+
+The control task reads the merged PRs, newest first, with the App's installation token. For each one it reads the inline review comments and the bodies of submitted reviews, and keeps a comment only if all of these hold:
+
+- its author has write access to the repository now (GitHub doesn't keep who had it when the PR merged);
+- it isn't from a bot or from LGTMoose;
+- it isn't a command such as `@lgtmoose learn:`;
+- it's long enough to say something.
+
+Quoted lines are dropped, the text is redacted like any learning, and a comment the [prompt-injection detector](security.md) flags is held out and counted.
+
+The comments go in batches to the bootstrapper on the fast tier, in the sandbox. The sandbox has no GitHub token and no checkout. Each comment sits in its own untrusted block, and its author's name isn't in the prompt. The answer's schema is strict. Each candidate has a kind, a short text, an optional category and path glob, and the IDs of the comments it rests on. Nothing in it acts.
+
+### What it stores
+
+The post step checks every candidate:
+
+- It must cite at least two different comments of its batch. One remark is never a rule.
+- Its text must pass the prompt-injection detector.
+- It must pass the write policy. An `accepted_pattern` or `scoping` learning can't name a protected category, and the text is redacted.
+- It mustn't duplicate one of the repository's pending or active learnings: the same scope and text, ignoring case, spacing and punctuation.
+
+What's left is stored as **pending**, by `lgtmoose` (permission `system`), with links to the comments it rests on. At most 50 are stored per bootstrap. Nothing is used in a review until someone with write access approves it, one at a time or with **Approve all** on the dashboard, or with `@lgtmoose approve <id>`. The usual access rules apply. Running a bootstrap again, or retrying one, stores nothing twice.
+
+Some learnings are made without a model, from files on the default branch:
+
+- **A lint or format config** (ESLint, Biome, Prettier, Ruff, golangci-lint, RuboCop) becomes a `scoping` learning on style: don't raise what the tool already enforces.
+- **CODEOWNERS** becomes a `convention` that lists the paths with their own owners. No one's handle is copied.
+
+### What it costs
+
+Each batch is one fast-tier model call on up to 60 comments. A bootstrap runs as many batches as fit under `learnings.bootstrapMaxCostUsd` (5 USD by default), or the lower cap a request asks for, and stops at a PR boundary. Its batches are reserved and settled in the [spend ledger](costs.md#spend-caps) like a review's, under the repository's and the deployment's monthly caps. No PR's caps apply to it. The dashboard shows each bootstrap's PRs, comments, proposals, cost, and whether a cap stopped it.
 
 ## Retrieval: learnings in reviews
 

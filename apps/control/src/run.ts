@@ -217,12 +217,14 @@ export async function runCommand(
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
         const bootstrap = (await deps.bootstrap?.store.get(command.runId)) !== undefined;
         await withHeartbeat(deps, executionArn, command.taskToken, async () =>
-          bootstrap ? postBootstrap(deps, command.runId) : post(deps, command.runId, {
-            running,
-            attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
-            taskStatus: (taskArn) => deps.taskStatus(taskArn),
-            executionStatus: (arn) => deps.executionStatus(arn),
-          }),
+          bootstrap
+            ? postBootstrap(deps, command.runId)
+            : post(deps, command.runId, {
+                running,
+                attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
+                taskStatus: (taskArn) => deps.taskStatus(taskArn),
+                executionStatus: (arn) => deps.executionStatus(arn),
+              }),
         );
       } catch (error) {
         if (error instanceof StepAbandoned) return gaveUp(deps, executionArn);
