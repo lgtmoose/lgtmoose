@@ -1,0 +1,1 @@
+ALTER TABLE "findings" ADD COLUMN "feedback_checked_at" timestamp with time zone;

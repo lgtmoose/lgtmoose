@@ -13,6 +13,7 @@ A self-hosted, open-source AI pull request reviewer. You deploy it to your own A
 - [Rule packs](rule-packs.md): the review criteria, and adding your own
 - [Commands](commands.md): `@lgtmoose` commands and replies on findings
 - [Learning](learning.md): how learnings are written, approved and used
+- [Feedback signals](feedback.md): acceptance per rule category, and declined findings as eval fixtures
 - [Evals](evals.md): measuring reviews on fixtures, and comparing providers
 - [Costs](costs.md): what you pay AWS and your model vendors for
 - [Security](security.md): the threat model and how to report a vulnerability

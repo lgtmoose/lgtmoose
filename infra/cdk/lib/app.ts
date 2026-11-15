@@ -101,6 +101,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowedOrgs: config.allowedOrgs,
     reconcileIntervalMinutes: config.reconcileIntervalMinutes,
     reconcileLookbackHours: config.reconcileLookbackHours,
+    feedback: config.feedback,
     maxReplyJudgements: config.maxReplyJudgements,
     embeddings: config.learnings.embeddings,
     allowUnverifiedCursor:

@@ -86,6 +86,8 @@ pnpm --filter @lgtmoose/evals run eval --fixtures ../acme-eval-fixtures --out /t
 
 Add `--no-public` to run only your own. Fixture names must be unique across all directories.
 
+Findings people declined make good private fixtures: `pnpm lgtmoose feedback export-declined --out <dir>` writes a `clean` fixture skeleton for each, with a `mustNotFlag` entry on the declined lines. See [Feedback signals](feedback.md).
+
 The committed `baseline.json` is measured on the public fixtures, so a run with extra fixtures compares recall over a different set. Keep a baseline for your own set and pass it with `--baseline`, including with `--update-baseline`; updating without `--baseline` is refused when extra fixtures are loaded.
 
 In a fork's CI, check out the private fixtures repository with a deploy key or token that can read it, then pass its path in `LGTMOOSE_EVAL_FIXTURES` to the evals step. Keep the report and transcripts private: they contain your fixtures' code.

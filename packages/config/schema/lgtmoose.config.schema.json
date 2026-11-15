@@ -149,6 +149,39 @@
       "minimum": 1,
       "maximum": 720
     },
+    "feedback": {
+      "default": {
+        "acceptanceThreshold": 0.5,
+        "minSamples": 10,
+        "maxCommentsPerRun": 100
+      },
+      "description": "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
+      "type": "object",
+      "properties": {
+        "acceptanceThreshold": {
+          "default": 0.5,
+          "description": "Acceptance below which a rule category is flagged for a person to look at.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minSamples": {
+          "default": 10,
+          "description": "Accepted plus rejected findings a category needs before it's judged.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "maxCommentsPerRun": {
+          "default": 100,
+          "description": "Most inline comments whose reactions one reconciler run reads (one GitHub call each). 0 stops reading them.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        }
+      },
+      "additionalProperties": false
+    },
     "maxReplyJudgements": {
       "default": 10,
       "description": "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",

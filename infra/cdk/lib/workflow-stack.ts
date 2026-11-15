@@ -28,6 +28,7 @@ import { Queue, QueueEncryption, type IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   credentialConcurrency,
+  FEEDBACK_REPORT_KEY,
   modelFor,
   providerModelEnv,
   SECRET_NAMES,
@@ -133,6 +134,8 @@ export interface WorkflowStackProps extends StackProps {
   reconcileIntervalMinutes: number;
   /** Hours back the reconciler queues reviews for. */
   reconcileLookbackHours: number;
+  /** Feedback signals (NIC-841), read by the reconciler. Defaults when left out. */
+  feedback?: { acceptanceThreshold: number; minSamples: number; maxCommentsPerRun: number };
   /** The most replies the reply judge reads per run (`maxReplyJudgements`). Left out: 10. */
   maxReplyJudgements?: number;
   /**
@@ -512,6 +515,15 @@ export class WorkflowStack extends Stack {
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         LGTMOOSE_SHADOW: String(props.shadow),
         RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
+        // Feedback signals: the acceptance report goes to the artifact bucket.
+        ARTIFACT_BUCKET: props.artifactBucket.bucketName,
+        ...(props.feedback === undefined
+          ? {}
+          : {
+              FEEDBACK_ACCEPTANCE_THRESHOLD: String(props.feedback.acceptanceThreshold),
+              FEEDBACK_MIN_SAMPLES: String(props.feedback.minSamples),
+              FEEDBACK_MAX_COMMENTS: String(props.feedback.maxCommentsPerRun),
+            }),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
@@ -524,6 +536,8 @@ export class WorkflowStack extends Stack {
     props.databaseSecret.grantRead(fn);
     props.githubAppSecret.grantRead(fn);
     props.jobQueue.grantSendMessages(fn);
+    // The feedback report only: nothing else in the bucket.
+    props.artifactBucket.grantPut(fn, FEEDBACK_REPORT_KEY);
     new Schedule(this, "ReconcileSchedule", {
       description: "Runs the reconciler.",
       schedule: ScheduleExpression.rate(Duration.minutes(props.reconcileIntervalMinutes)),

@@ -56,6 +56,9 @@ importers:
       '@aws-sdk/client-rds':
         specifier: ^3.1167.0
         version: 3.1167.0
+      '@aws-sdk/client-s3':
+        specifier: ^3.1167.0
+        version: 3.1169.0
       '@aws-sdk/client-secrets-manager':
         specifier: ^3.1167.0
         version: 3.1167.0
@@ -87,6 +90,9 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
+      '@lgtmoose/evals':
+        specifier: workspace:*
+        version: link:../../packages/evals
       prettier:
         specifier: ^3.10.0
         version: 3.10.0

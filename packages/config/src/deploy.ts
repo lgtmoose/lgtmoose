@@ -266,6 +266,41 @@ export const deployConfigSchema = z
         "Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval.",
       ),
     /**
+     * Feedback signals (NIC-841): the reconciler reads 👍/👎 on LGTMoose's inline comments and
+     * works out, per rule category, how often findings are accepted. Signals only: nothing
+     * changes on its own. A category below the threshold is flagged for a person to look at.
+     */
+    feedback: z
+      .object({
+        acceptanceThreshold: z
+          .number()
+          .min(0)
+          .max(1)
+          .default(0.5)
+          .describe("Acceptance below which a rule category is flagged for a person to look at."),
+        minSamples: z
+          .number()
+          .int()
+          .min(1)
+          .max(10_000)
+          .default(10)
+          .describe("Accepted plus rejected findings a category needs before it's judged."),
+        maxCommentsPerRun: z
+          .number()
+          .int()
+          .min(0)
+          .max(1000)
+          .default(100)
+          .describe(
+            "Most inline comments whose reactions one reconciler run reads (one GitHub call each). 0 stops reading them.",
+          ),
+      })
+      .strict()
+      .default({ acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 })
+      .describe(
+        "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
+      ),
+    /**
      * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier
      * model call each). Replies past it wait for the next run.
      */

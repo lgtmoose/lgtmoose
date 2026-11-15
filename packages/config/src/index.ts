@@ -50,4 +50,4 @@ export {
   SECRET_NAMES,
   providerNeedsSecret,
 } from "./secrets.js";
-export { CDK_CONTEXT, STACK_NAMES, STACK_OUTPUTS } from "./stacks.js";
+export { CDK_CONTEXT, FEEDBACK_REPORT_KEY, STACK_NAMES, STACK_OUTPUTS } from "./stacks.js";

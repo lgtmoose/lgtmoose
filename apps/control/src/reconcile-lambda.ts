@@ -1,3 +1,4 @@
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import {
@@ -9,6 +10,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { readReconcileEnv } from "./env.js";
+import { collectFeedback, type FeedbackDeps } from "./feedback.js";
+import { drizzleFeedbackStore, githubFeedback } from "./feedback-aws.js";
 import { log } from "./log.js";
 import { metricsLine, reconcile, type ReconcileCounts, type ReconcileDeps } from "./reconcile.js";
 import { drizzleReconcileStore, githubReconcile, sqsReconcileQueue } from "./reconcile-aws.js";
@@ -27,10 +30,16 @@ const appSecretSchema = z.object({
   privateKey: z.string().min(1),
 });
 
-let deps: Promise<ReconcileDeps & { learnings: LearningStore }> | undefined;
+type LambdaDeps = ReconcileDeps & {
+  learnings: LearningStore;
+  /** Undefined without an artifact bucket to write the report to. */
+  feedback: FeedbackDeps | undefined;
+};
+
+let deps: Promise<LambdaDeps> | undefined;
 
 /** Built once per container: the pool outlives invocations. */
-function reconcileDeps(): Promise<ReconcileDeps & { learnings: LearningStore }> {
+function reconcileDeps(): Promise<LambdaDeps> {
   deps ??= (async () => {
     const env = readReconcileEnv(process.env);
     if ("missing" in env) {
@@ -46,7 +55,31 @@ function reconcileDeps(): Promise<ReconcileDeps & { learnings: LearningStore }> 
     // An idle connection can drop while the container is frozen; the next query reconnects.
     pool.on("error", (error) => log("database connection dropped", { error: error.message }));
     const db = drizzle({ client: pool });
+    const bucket = env.artifactBucket;
+    const s3 = new S3Client({});
+    const feedback: FeedbackDeps | undefined =
+      bucket === undefined
+        ? undefined
+        : {
+            store: drizzleFeedbackStore(db),
+            github: githubFeedback(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
+            async putReport(key, body) {
+              await s3.send(
+                new PutObjectCommand({
+                  Bucket: bucket,
+                  Key: key,
+                  Body: body,
+                  ContentType: "application/json",
+                }),
+              );
+            },
+            log,
+            maxComments: env.feedback.maxComments,
+            threshold: env.feedback.threshold,
+            minSamples: env.feedback.minSamples,
+          };
     return {
+      feedback,
       github: githubReconcile(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
       store: drizzleReconcileStore(db),
       learnings: drizzleLearningStore(db),
@@ -76,6 +109,14 @@ export async function handler(): Promise<ReconcileCounts> {
     log("reconcile: unused learnings not retired", {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+  // Feedback signals (NIC-841): reactions on our comments, and the acceptance report. Signals
+  // only; a failure is logged and counted, never thrown.
+  if (ready.feedback !== undefined) {
+    const feedback = await collectFeedback(ready.feedback);
+    counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
+    counts.categoriesFlagged = feedback.categoriesFlagged;
+    counts.errors += feedback.errors;
   }
   process.stdout.write(`${metricsLine(counts, new Date())}\n`);
   return counts;

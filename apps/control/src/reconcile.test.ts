@@ -376,6 +376,8 @@ describe("metricsLine", () => {
           unreviewed: 1,
           skippedStale: 4,
           learningsRetired: 5,
+          feedbackCommentsRead: 7,
+          categoriesFlagged: 2,
           errors: 0,
         },
         new Date(1000),
@@ -385,9 +387,11 @@ describe("metricsLine", () => {
     };
     expect(line._aws.Timestamp).toBe(1000);
     expect(line._aws.CloudWatchMetrics[0]?.Namespace).toBe("LGTMoose");
-    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(10);
+    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(12);
     expect(line).toMatchObject({
       LearningsRetired: 5,
+      FeedbackCommentsRead: 7,
+      CategoriesFlagged: 2,
       OpenPullRequests: 3,
       MissedHeads: 1,
       LabelsResynced: 2,
