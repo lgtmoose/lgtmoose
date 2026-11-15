@@ -39,6 +39,7 @@ import type { Profile } from "./network-stack.js";
 import { bedrockStatements } from "./bedrock.js";
 import {
   BATCH_TIMEOUT,
+  RUN_PREFIX,
   ReviewWorkflow,
   secretArnPattern,
   type ReviewProvider,
@@ -143,6 +144,11 @@ export interface WorkflowStackProps extends StackProps {
   /** How long a push's review waits for the next push (`reviewDebounceSeconds`). Left out: 60. */
   reviewDebounceSeconds?: number;
   /**
+   * Spend caps and prices (`budgets`, NIC-1079), passed to the control task as JSON. With a
+   * monthly cap, CloudWatch alarms at 50%, 80% and 100% of it. Left out: no caps.
+   */
+  budgets?: DeployConfig["budgets"];
+  /**
    * How the control task ranks learnings (`learnings.embeddings`): none (keywords), Bedrock in
    * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
    */
@@ -241,6 +247,7 @@ export class WorkflowStack extends Stack {
         ...ticketsEnvironment(props.tickets),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
         LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
+        LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
       },
     });
     const controlRole = this.controlTaskDefinition.taskRole;
@@ -381,6 +388,8 @@ export class WorkflowStack extends Stack {
         treatMissingData: TreatMissingData.NOT_BREACHING,
       });
     }
+
+    this.budgetAlarms(props.budgets);
 
     this.conversationQueue = this.conversationQueueOf();
     this.dispatchFunction = this.dispatcher(props, retention);
@@ -569,6 +578,8 @@ export class WorkflowStack extends Stack {
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         LGTMOOSE_SHADOW: String(props.shadow),
         RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
+        // Spend caps' prices, to settle runs post never reached (NIC-1079).
+        LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
         // Feedback signals: the acceptance report goes to the artifact bucket.
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         ...(props.feedback === undefined
@@ -595,6 +606,9 @@ export class WorkflowStack extends Stack {
     props.jobQueue.grantSendMessages(fn);
     // The feedback report only: nothing else in the bucket.
     props.artifactBucket.grantPut(fn, FEEDBACK_REPORT_KEY);
+    // Batch outputs only, read-only: their reported usage settles runs post never reached
+    // (NIC-1079). Not inputs, checkouts or transcripts.
+    props.artifactBucket.grantRead(fn, `${RUN_PREFIX}*/batches/*/output.json`);
     new Schedule(this, "ReconcileSchedule", {
       description: "Runs the reconciler.",
       schedule: ScheduleExpression.rate(Duration.minutes(props.reconcileIntervalMinutes)),
@@ -602,6 +616,32 @@ export class WorkflowStack extends Stack {
       target: new LambdaInvoke(fn, { retryAttempts: 0 }),
     });
     return fn;
+  }
+
+  /**
+   * Alarms as the deployment's estimated spend passes 50%, 80% and 100% of its monthly cap, from
+   * the `BudgetUsed` metric the post step writes (NIC-1079). Missing data keeps the alarm where
+   * it is: the metric is only written when a run settles, and spend doesn't go down mid-month.
+   * Without a monthly cap there's nothing to alarm on.
+   */
+  private budgetAlarms(budgets: DeployConfig["budgets"] | undefined): void {
+    const cap = budgets?.monthlyUsd;
+    if (cap === undefined) return;
+    for (const percent of [50, 80, 100]) {
+      new Alarm(this, `BudgetAlarm${percent}`, {
+        alarmDescription: `LGTMoose's estimated model spend this month passed ${percent}% of its $${cap} cap (budgets.monthlyUsd).`,
+        metric: new Metric({
+          namespace: "LGTMoose",
+          metricName: "BudgetUsed",
+          statistic: "Maximum",
+          period: Duration.hours(1),
+        }),
+        threshold: percent,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        treatMissingData: TreatMissingData.IGNORE,
+      });
+    }
   }
 
   /**

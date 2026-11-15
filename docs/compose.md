@@ -158,13 +158,15 @@ its API, on one origin, with the same sign-in, sessions and checks as on AWS. It
 What it can do:
 
 - **Its database login** (`lgtmoose_dashboard`) reads pull requests, findings, review runs,
-  provider use and cooldowns, and learnings; creates, reads and deletes its own sessions; and
+  provider use and cooldowns, learnings and the spend ledger; creates, reads and deletes its own
+  sessions; and
   approves or retires a learning (`status`, `updated_at` and `retired_at` on `learnings`, and a
   new `learning_events` row). It reads the feedback report through a view of that one artifact:
   not the `artifacts` table, which holds transcripts and run data. It can't read the job queue
   or executions, change findings or runs, or delete anything but sessions.
 - **No Docker socket and no App private key.** The OAuth client and its signing key are the
-  only secrets it holds. Who may approve or reject a learning is decided as on AWS, from what
+  only secrets it holds. It also mounts `lgtmoose.config.json` read-only, for the
+  [spend caps](costs.md#spend-caps) on the Usage page; the config holds no secrets. Who may approve or reject a learning is decided as on AWS, from what
   GitHub said about the person at sign-in.
 - **The same headers as CloudFront sends** on every response, the page and the API: the same
   Content-Security-Policy, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and

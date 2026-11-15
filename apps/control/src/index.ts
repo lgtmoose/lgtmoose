@@ -13,6 +13,7 @@ import {
   readTicketSettings,
 } from "./env.js";
 import { runCommand } from "./run.js";
+import { readBudgets } from "./spend.js";
 
 /**
  * `learnings.maxPendingPerAuthor` and `learnings.repeatThreshold`, as the Workflow stack sets
@@ -61,6 +62,7 @@ async function main(): Promise<void> {
     shadow: settings.shadow,
     embeddings: readEmbeddingsSettings(process.env),
     tickets: readTicketSettings(process.env),
+    budgets: readBudgets(process.env),
     ...maxPending(),
   });
   const ecs = new ECSClient({});

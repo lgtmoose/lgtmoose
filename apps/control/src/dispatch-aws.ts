@@ -189,6 +189,8 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
             eq(reviewRuns.headSha, headSha),
             // Covered: another run's review is on the head.
             inArray(reviewRuns.status, ["succeeded", "covered"]),
+            // A run a spend cap kept batches from didn't review all of its head (NIC-1079).
+            isNull(reviewRuns.spendCap),
           ),
         )
         .limit(1);

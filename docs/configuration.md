@@ -41,6 +41,28 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `images.digests.control` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-control image's digest. |
 | `images.digests.sandbox` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-sandbox image's digest. |
 | `images.digests.egressProxy` | string matching `^sha256:[0-9a-f]{64}$` |  | With `source: "release"`. The lgtmoose-egress-proxy image's digest. |
+| `budgets` | object | `{}` | Spend caps: the most estimated model cost per PR, per repository and per month. A repository's .lgtmoose.yaml can only lower its own. See docs/costs.md. |
+| `budgets.perPullRequest` | object | `{}` | Caps per PR per UTC day. `@lgtmoose review` from someone with write access runs once past them. |
+| `budgets.perPullRequest.runsPerDay` | integer, 1 to 1000 |  | Most review runs that call a model, per PR per UTC day. |
+| `budgets.perPullRequest.costPerDayUsd` | number, 0 to 1000000 |  | Most estimated model cost per PR per UTC day, in USD. |
+| `budgets.perRepoMonthlyUsd` | number, 0 to 1000000 |  | Most estimated model cost per repository per UTC calendar month, in USD. |
+| `budgets.monthlyUsd` | number, 0 to 1000000 |  | Most estimated model cost for the whole deployment per UTC calendar month, in USD. |
+| `budgets.prices` | object | `{}` | USD per million tokens by model tier, for the cost estimate. Unset fields keep the defaults (Claude list prices). |
+| `budgets.prices.fast` | object |  | This tier's prices, in USD per million tokens. |
+| `budgets.prices.fast.input` | number, 0 to 10000 |  | USD per million input tokens. |
+| `budgets.prices.fast.output` | number, 0 to 10000 |  | USD per million output tokens. |
+| `budgets.prices.fast.cacheRead` | number, 0 to 10000 |  | USD per million cache-read tokens. |
+| `budgets.prices.fast.cacheWrite` | number, 0 to 10000 |  | USD per million cache-write tokens. |
+| `budgets.prices.standard` | object |  | This tier's prices, in USD per million tokens. |
+| `budgets.prices.standard.input` | number, 0 to 10000 |  | USD per million input tokens. |
+| `budgets.prices.standard.output` | number, 0 to 10000 |  | USD per million output tokens. |
+| `budgets.prices.standard.cacheRead` | number, 0 to 10000 |  | USD per million cache-read tokens. |
+| `budgets.prices.standard.cacheWrite` | number, 0 to 10000 |  | USD per million cache-write tokens. |
+| `budgets.prices.deep` | object |  | This tier's prices, in USD per million tokens. |
+| `budgets.prices.deep.input` | number, 0 to 10000 |  | USD per million input tokens. |
+| `budgets.prices.deep.output` | number, 0 to 10000 |  | USD per million output tokens. |
+| `budgets.prices.deep.cacheRead` | number, 0 to 10000 |  | USD per million cache-read tokens. |
+| `budgets.prices.deep.cacheWrite` | number, 0 to 10000 |  | USD per million cache-write tokens. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `maxExplanations` | integer, 0 to 20 | `5` | Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply. |
 | `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
@@ -90,3 +112,8 @@ Optional, at the repository's root. It's read from the PR's base branch, never f
 | `labels.pending` | string | `"Ready for Review"` | Set when a review holds for a person: it was incomplete, or flagged a prompt-injection attempt. |
 | `labels.changes` | string | `"Requires Changes"` | Set when blocking or should-fix findings are open. |
 | `labels.approved` | string | `"Approved"` | Set when no blocking or should-fix finding is open, also with gate.approve: false. |
+| `budgets` | object | `{}` | Spend caps for this repository. They can only lower the deployment's caps, never raise them. |
+| `budgets.per_pull_request` | object | `{}` | Caps per PR per UTC day. |
+| `budgets.per_pull_request.runs_per_day` | integer, 1 to 1000 |  | Most review runs that call a model, per PR per UTC day. |
+| `budgets.per_pull_request.cost_per_day_usd` | number, 0 to 1000000 |  | Most estimated model cost per PR per UTC day, in USD. |
+| `budgets.monthly_usd` | number, 0 to 1000000 |  | Most estimated model cost for this repository per UTC calendar month, in USD. |

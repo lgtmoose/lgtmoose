@@ -1,3 +1,4 @@
+import type { Budgets } from "@lgtmoose/config";
 import { feedbackReportSchema } from "@lgtmoose/core";
 import {
   approveLearning,
@@ -63,10 +64,40 @@ export interface DashboardDeps {
   origin(): Promise<string>;
   /** The deploy config's `allowedOrgs`. */
   allowedOrgs: readonly string[];
+  /** The deploy config's `budgets` (NIC-1079), for spend against the caps. Left out: none. */
+  budgets?: Budgets;
   /** GitHub's web URL, for sign-in; github.com by default. */
   webUrl?: string;
   now(): Date;
   log(message: string, fields?: Record<string, unknown>): void;
+}
+
+/**
+ * This month's estimated spend against the deploy config's caps (NIC-1079): each of the
+ * person's repositories, and the whole deployment's only for an owner of one of its orgs, since
+ * it adds up repositories they may not see. A repository's own `.lgtmoose.yaml` can lower its
+ * caps further; those aren't shown here.
+ */
+async function spendView(deps: DashboardDeps, session: DashboardSession, now: Date) {
+  const totals = await deps.store.spendThisMonth(session.repos, now);
+  const budgets = deps.budgets;
+  return {
+    month: now.toISOString().slice(0, 7),
+    caps: {
+      ...(budgets?.monthlyUsd === undefined ? {} : { monthlyUsd: budgets.monthlyUsd }),
+      ...(budgets?.perRepoMonthlyUsd === undefined
+        ? {}
+        : { perRepoMonthlyUsd: budgets.perRepoMonthlyUsd }),
+      ...(budgets?.perPullRequest.costPerDayUsd === undefined
+        ? {}
+        : { prCostPerDayUsd: budgets.perPullRequest.costPerDayUsd }),
+      ...(budgets?.perPullRequest.runsPerDay === undefined
+        ? {}
+        : { prRunsPerDay: budgets.perPullRequest.runsPerDay }),
+    },
+    ...(session.ownerOrgs.length === 0 ? {} : { deploymentUsd: totals.monthUsd }),
+    repos: totals.repos,
+  };
 }
 
 /** How long a session lasts before signing in again. */
@@ -440,6 +471,7 @@ export async function handleDashboardRequest(
         days: USAGE_DAYS,
         providers: await deps.store.providerUse(session.repos, since),
         cooldowns: await deps.store.cooldowns(now),
+        spend: await spendView(deps, session, now),
       });
     }
     case "GET /api/acceptance":

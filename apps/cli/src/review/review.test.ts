@@ -51,13 +51,17 @@ describe("terminalSafe", () => {
 });
 
 describe("lgtmoose review", () => {
+  // The file's first test: it pays for the review command's first, lazy import of the review
+  // pipeline. That's under a second alone, but 5s and more while `pnpm run check` builds,
+  // synthesizes and runs the integration tests alongside, past vitest's default. Its own limit,
+  // as for the other cold-start tests (clone.test.ts, diff.test.ts).
   it("shows its help without building any I/O", async () => {
     const environment = vi.fn();
     const result = await run(["review", "--help"], { reviewEnvironment: environment });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: lgtmoose review");
     expect(environment).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it.each([
     [["acme/shop#7"], "Pass --dry-run"],

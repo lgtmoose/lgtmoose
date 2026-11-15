@@ -5,6 +5,7 @@
  * stages in separate tasks (prepare, one batch per sandbox, finish).
  */
 export {
+  SPEND_CAP_ERROR,
   finishReview,
   prepareReview,
   runBatch,

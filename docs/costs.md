@@ -68,6 +68,76 @@ Where model usage is billed depends on the provider:
 
 Every attempt is recorded in the `provider_usage` table (tokens, cost where the CLI reports it, limit hits and fallbacks), and each review's summary comment ends with its usage per provider.
 
+## Spend caps
+
+`budgets` in the deploy config sets hard limits on model spend. Every cap is optional: with none set, nothing is capped, but each run's estimated cost is still recorded.
+
+```ts
+// lgtmoose.config.ts
+budgets: {
+  perPullRequest: { runsPerDay: 20, costPerDayUsd: 5 },
+  perRepoMonthlyUsd: 150,
+  monthlyUsd: 1000,
+},
+```
+
+| Cap                            | Applies to                              | Resets                    | Lifted by                                                         |
+| ------------------------------ | --------------------------------------- | ------------------------- | ----------------------------------------------------------------- |
+| `perPullRequest.runsPerDay`    | runs that call a model, per PR          | 00:00 UTC                 | a review command from someone with write access, for that one run |
+| `perPullRequest.costPerDayUsd` | estimated cost per PR                   | 00:00 UTC                 | the same                                                          |
+| `perRepoMonthlyUsd`            | estimated cost per repository           | the 1st of the month, UTC | only a change to the deploy config                                |
+| `monthlyUsd`                   | estimated cost for the whole deployment | the 1st of the month, UTC | only a change to the deploy config                                |
+
+A repository can set lower caps for itself in `.lgtmoose.yaml`, never higher ones. The file is read at the PR's base, like the rest of it, so a PR can't change its own caps:
+
+```yaml
+# .lgtmoose.yaml
+budgets:
+  per_pull_request:
+    runs_per_day: 5
+    cost_per_day_usd: 2
+  monthly_usd: 40
+```
+
+### How the cost is estimated
+
+Each batch's cost is the tokens its harness reported (input, output, cache reads and cache writes) times its model tier's price, in USD per million tokens. The defaults are the list prices of the Claude models the tiers map to by default:
+
+| Tier       | Input | Output | Cache read | Cache write | Used by                                |
+| ---------- | ----- | ------ | ---------- | ----------- | -------------------------------------- |
+| `fast`     | 1     | 5      | 0.10       | 1.25        | reply judge, ticket checker, explainer |
+| `standard` | 3     | 15     | 0.30       | 3.75        | reviewer                               |
+| `deep`     | 5     | 25     | 0.50       | 6.25        | (not used yet)                         |
+
+Set `budgets.prices` for other models or a negotiated price, per tier and per field; unset fields keep the defaults. The same price applies to an API key, Bedrock and a plan sign-in, so a cap means the same whichever provider ran. For a plan, the estimate is what the same tokens would cost at API prices. A batch whose harness reported no tokens counts at its reported cost, or else at 60,000 input and 6,000 output tokens.
+
+### What happens at a cap
+
+The prepare step checks the caps before any batch is dispatched:
+
+1. It reads what's been spent from the spend ledger (`spend_ledger`): each run's reservation until the run settles, then its reported cost. A reservation counts until it's settled, however long that takes: it's made only just before batches are dispatched, so it stands for spend that happened. The post step settles a run. The reconciler settles one that post never reached (a newer push stopped it, or it failed after its batches ran) once it's 6 hours old, from its batches' outputs; a batch that left no output keeps its estimate.
+2. It estimates each batch: the deployment's average settled cost per batch over 30 days, once it has 10 batches of history, and the tier's default before that.
+3. It keeps the batches that fit under every cap, in this order: replies to judge, `explain`s, linked tickets, then the review's batches in plan order (riskiest files first). It reserves their estimate.
+
+Checking and reserving happen under one database lock, so two runs prepared at once can't both use the same headroom. A run can still end a little past a cap, by the difference between its estimate and what its batches used. A batch that's already running always finishes.
+
+Batches that don't fit aren't dispatched. The run posts an incomplete review:
+
+- the check run is titled **Spend cap reached**. Like any incomplete review it asks a person to look (`action_required`, or neutral with `gate.check_run: optional`), so a required check doesn't pass on a review that didn't run;
+- the summary says which cap was reached, how many batches didn't run, and when it resets;
+- the status label is the pending one, and nothing is approved;
+- the files that weren't reviewed are reviewed by the next run, and the head doesn't count as reviewed.
+
+A run that would run nothing at all, on a head whose last posted run was already stopped by the same cap, posts nothing: the PR already says why. A run for replies or an `explain` that a cap stops entirely also posts nothing, so the PR's review isn't replaced; the replies wait for the next run.
+
+`@lgtmoose review` or `@lgtmoose full review` from someone with write access, as GitHub says now, runs once past the PR's own caps. The monthly caps always apply, whoever asks.
+
+### Alerts
+
+After each run settles, the control task logs `spend cap alert` as the deployment's or a repository's monthly spend passes 50%, 80% and 100% of its cap. On AWS it also writes the `BudgetUsed` metric (percent of `monthlyUsd`, namespace `LGTMoose`), and with `monthlyUsd` set the Workflow stack alarms at 50, 80 and 100. Those alarms notify the topic in `alarms`, like the others.
+
+The dashboard's Usage page shows this month's spend in your repositories against the caps, and the deployment's total to org owners.
+
 ## What you can change
 
 - **`profile`**: `lean` or `standard`, above. Switching is a redeploy that keeps the database ([Upgrading](upgrading.md#switching-profile)).
@@ -76,7 +146,8 @@ Every attempt is recorded in the `provider_usage` table (tokens, cost where the 
 - **`maxReplyJudgements`**: replies judged per run, 10 by default. 0 turns the reply judge off.
 - **`learnings.embeddings`**: `none` (the default) ranks learnings by keywords with no calls; `bedrock` or `openai` add an embeddings call per batch, and when a learning is first ranked.
 - **`tickets`**: off unless set. With Linear, each linked ticket (up to `maxPerPullRequest`, 3 by default) costs one fast-tier run per commit reviewed, plus a Linear API call. See [Ticket coverage](tickets.md).
-- **`.lgtmoose.yaml`**: `skip` globs keep files out of the review, so they cost nothing.
+- **`budgets`**: hard caps on model spend per PR, per repository and per month (above).
+- **`.lgtmoose.yaml`**: `skip` globs keep files out of the review, so they cost nothing; `budgets` lowers the repository's caps.
 - **`review.trigger` and `review.on_push`** in `.lgtmoose.yaml`: review only when a PR is ready (a label, a command or a trusted agent), and only once unless asked again. A PR with ten work-in-progress pushes then costs one or two reviews instead of ten. A run that waits costs one short control task and no model time. See [When reviews run](commands.md#when-reviews-run).
 - **`reviewDebounceSeconds`**: how long a push waits for the next one before its review starts (60 by default, up to 1800). A longer wait folds more pushes into one review.
 - **Incremental reviews**: after the first review, a push reviews only the files whose change moved, and a superseded run's finished batches are reused.
