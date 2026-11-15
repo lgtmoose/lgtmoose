@@ -392,6 +392,8 @@ export interface BatchJob {
   files: string[];
   /** The reviewer prompt, for the batch's files that aren't done. Undefined otherwise. */
   prompt?: string;
+  /** The IDs of the learnings in its prompt, for their findings' outcomes (NIC-1081). */
+  learningIds?: string[];
   skipped?: true;
   done?: true;
 }
@@ -721,7 +723,15 @@ export async function prepareReview(
       batch: reviewBatch,
     });
     reviewerSystem = system;
-    jobs.push({ index: batch.index, files: paths, prompt });
+    const learningIds = learnings.flatMap((learning) =>
+      learning.id === undefined ? [] : [learning.id],
+    );
+    jobs.push({
+      index: batch.index,
+      files: paths,
+      prompt,
+      ...(learningIds.length === 0 ? {} : { learningIds }),
+    });
   }
   return {
     target,
@@ -1240,6 +1250,8 @@ export async function finishReview(
       findingsOverLimit: overLimit,
       noLongerChanged: prepared.noLongerChanged,
       ...(tickets.table === undefined ? {} : { tickets: tickets.table }),
+      // The team's learnings this run's prompts had (NIC-1081), so people see them at work.
+      learningsApplied: [...new Set(prepared.jobs.flatMap((job) => job.learningIds ?? []))],
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );

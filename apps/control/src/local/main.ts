@@ -138,6 +138,7 @@ async function main(): Promise<void> {
     embedder,
     ...(tickets === undefined ? {} : { tickets }),
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
+    repeatThreshold: config.learnings.repeatThreshold,
   });
 
   const docker = new Docker(
@@ -243,6 +244,8 @@ async function main(): Promise<void> {
     store: drizzleConversationStore(db),
     learnings: drizzleLearningStore(db),
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
+    // An `ignore` may complete a repeated rejection (NIC-1081).
+    ...(control.outcomes === undefined ? {} : { outcomes: control.outcomes }),
     replies: drizzleReplyStore(db),
     maxExplanations: config.maxExplanations,
     queue: sender,
@@ -276,6 +279,11 @@ async function main(): Promise<void> {
       maxComments: config.feedback.maxCommentsPerRun,
       threshold: config.feedback.acceptanceThreshold,
       minSamples: config.feedback.minSamples,
+      // A comment newly 👎'd may complete a repeated rejection (NIC-1081).
+      onRejected: (comment) =>
+        control.outcomes?.rejected(comment.installationId, comment.repo, [
+          { findingId: comment.findingId },
+        ]) ?? Promise.resolve(),
     });
     counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
     counts.categoriesFlagged = feedback.categoriesFlagged;

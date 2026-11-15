@@ -68,6 +68,11 @@ export interface FeedbackDeps {
   maxComments?: number;
   threshold?: number;
   minSamples?: number;
+  /**
+   * A comment whose reactions came out against it (more 👎 than 👍): outcome learning (NIC-1081)
+   * may make a learning of a repeated pattern. Its failure is counted, never thrown.
+   */
+  onRejected?(comment: FeedbackComment): Promise<void>;
 }
 
 export interface FeedbackCounts {
@@ -105,11 +110,23 @@ export async function collectFeedback(deps: FeedbackDeps): Promise<FeedbackCount
         comment.commentId,
       );
       // A deleted comment has no reactions left to count.
-      await deps.store.replaceReactions(
-        comment.findingId,
-        reactions === "gone" ? new Map() : currentReactions(reactions),
-      );
+      const current = reactions === "gone" ? new Map() : currentReactions(reactions);
+      await deps.store.replaceReactions(comment.findingId, current);
       counts.feedbackCommentsRead += 1;
+      const net = [...current.values()].reduce(
+        (sum, reaction) => sum + (reaction === "+1" ? 1 : -1),
+        0,
+      );
+      if (net < 0 && deps.onRejected !== undefined) {
+        try {
+          await deps.onRejected(comment);
+        } catch (error) {
+          fail("feedback: rejection not learned from", error, {
+            repo: comment.repo,
+            commentId: comment.commentId,
+          });
+        }
+      }
     } catch (error) {
       fail("feedback: reactions not read", error, {
         repo: comment.repo,

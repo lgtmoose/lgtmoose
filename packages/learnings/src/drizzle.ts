@@ -15,7 +15,13 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { toCheckedPermission } from "./policy.js";
-import type { Learning, LearningEvent, LearningStore, NewLearningEvent } from "./store.js";
+import {
+  SYSTEM_ACTOR,
+  type Learning,
+  type LearningEvent,
+  type LearningStore,
+  type NewLearningEvent,
+} from "./store.js";
 
 // Every column but the embedding, which only `nearest` needs: 1024 floats a row add up.
 const rowColumns = Object.fromEntries(
@@ -38,6 +44,7 @@ function toLearning(row: Row): Learning {
     sourceRepo: row.sourceRepo ?? row.repo ?? row.org,
     sourcePr: row.sourcePr ?? undefined,
     sourceCommentId: row.sourceCommentId ?? undefined,
+    ...(row.patternKey === null ? {} : { patternKey: row.patternKey }),
     author: row.author,
     authorPermission: toCheckedPermission(row.authorPermission),
     createdAt: row.createdAt,
@@ -54,6 +61,7 @@ function eventRows(learningId: string, events: readonly NewLearningEvent[]) {
     actor: event.actor,
     actorPermission: event.actorPermission,
     githubCommentId: event.githubCommentId ?? null,
+    findingId: event.findingId ?? null,
   }));
 }
 
@@ -78,6 +86,7 @@ export function drizzleLearningStore(
             sourceRepo: learning.sourceRepo,
             sourcePr: learning.sourcePr ?? null,
             sourceCommentId: learning.sourceCommentId ?? null,
+            patternKey: learning.patternKey ?? null,
             author: learning.author,
             authorPermission: learning.authorPermission,
           })
@@ -160,8 +169,74 @@ export function drizzleLearningStore(
         actor: row.actor,
         actorPermission: toCheckedPermission(row.actorPermission),
         githubCommentId: row.githubCommentId ?? undefined,
+        ...(row.findingId === null ? {} : { findingId: row.findingId }),
         createdAt: row.createdAt,
       }));
+    },
+    async recordOutcome(ids, outcome, at) {
+      const unique = [...new Set(ids)];
+      if (unique.length === 0) return;
+      await db.transaction(async (tx) => {
+        // Not retired, and without this outcome for this finding yet: a retried post adds none.
+        const fresh = await tx
+          .select({ id: learnings.id })
+          .from(learnings)
+          .where(
+            and(
+              inArray(learnings.id, unique),
+              ne(learnings.status, "retired"),
+              sql`not exists (select 1 from ${learningEvents} e where e.learning_id = ${learnings.id} and e.type = ${outcome.type} and e.finding_id = ${outcome.findingId})`,
+            ),
+          )
+          .for("update");
+        const targets = fresh.map((row) => row.id);
+        if (targets.length === 0) return;
+        if (outcome.type === "reinforced") {
+          await tx
+            .update(learnings)
+            .set({ hits: sql`${learnings.hits} + 1`, lastUsedAt: at })
+            .where(inArray(learnings.id, targets));
+        }
+        await tx.insert(learningEvents).values(
+          targets.map((learningId) => ({
+            learningId,
+            type: outcome.type,
+            actor: SYSTEM_ACTOR,
+            actorPermission: "system",
+            githubCommentId: outcome.githubCommentId ?? null,
+            findingId: outcome.findingId,
+          })),
+        );
+      });
+    },
+    async notFollowedSince(org, since) {
+      const rows = await db
+        .select({ id: learningEvents.learningId, count: sql<number>`count(*)::int` })
+        .from(learningEvents)
+        .innerJoin(learnings, eq(learnings.id, learningEvents.learningId))
+        .where(
+          and(
+            eq(learnings.org, org),
+            eq(learningEvents.type, "not_followed"),
+            sql`${learningEvents.createdAt} >= ${since.toISOString()}::timestamptz`,
+          ),
+        )
+        .groupBy(learningEvents.learningId);
+      return new Map(rows.map((row) => [row.id, row.count]));
+    },
+    async patterned(repo) {
+      const rows = await db
+        .select(rowColumns)
+        .from(learnings)
+        .where(
+          and(
+            eq(learnings.repo, repo),
+            isNotNull(learnings.patternKey),
+            ne(learnings.status, "retired"),
+          ),
+        )
+        .orderBy(desc(learnings.createdAt), desc(learnings.id));
+      return rows.map(toLearning);
     },
     async missingEmbeddings(ids, model) {
       if (ids.length === 0) return [];

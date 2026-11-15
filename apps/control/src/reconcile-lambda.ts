@@ -9,7 +9,9 @@ import {
 import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { databasePool, parseSecret, readSecret } from "./database.js";
-import { readReconcileEnv } from "./env.js";
+import { GitHubClient, installationTokenProvider } from "@lgtmoose/poster";
+import { readMaxPendingLearnings, readReconcileEnv, readRepeatThreshold } from "./env.js";
+import { outcomeLearner } from "./outcome-learning-aws.js";
 import { collectFeedback, type FeedbackDeps } from "./feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "./feedback-aws.js";
 import { log } from "./log.js";
@@ -57,6 +59,24 @@ function reconcileDeps(): Promise<LambdaDeps> {
     const db = drizzle({ client: pool });
     const bucket = env.artifactBucket;
     const s3 = new S3Client({});
+    const maxPending = readMaxPendingLearnings(process.env);
+    const repeatThreshold = readRepeatThreshold(process.env);
+    const outcomes = outcomeLearner({
+      db,
+      learnings: drizzleLearningStore(db),
+      client: (installationId) =>
+        new GitHubClient({
+          token: installationTokenProvider({
+            ...app,
+            installationId,
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        }),
+      ...(maxPending === undefined ? {} : { maxPendingPerAuthor: maxPending }),
+      ...(repeatThreshold === undefined ? {} : { repeatThreshold }),
+      log,
+    });
     const feedback: FeedbackDeps | undefined =
       bucket === undefined
         ? undefined
@@ -77,6 +97,11 @@ function reconcileDeps(): Promise<LambdaDeps> {
             maxComments: env.feedback.maxComments,
             threshold: env.feedback.threshold,
             minSamples: env.feedback.minSamples,
+            // A comment newly 👎'd may complete a repeated rejection (NIC-1081).
+            onRejected: (comment) =>
+              outcomes.rejected(comment.installationId, comment.repo, [
+                { findingId: comment.findingId },
+              ]),
           };
     return {
       feedback,

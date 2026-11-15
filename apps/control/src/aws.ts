@@ -33,6 +33,7 @@ import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
+import { outcomeLearner } from "./outcome-learning-aws.js";
 import { s3ArtifactStore } from "./s3-store.js";
 
 export { s3ArtifactStore };
@@ -469,7 +470,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             .values(
               posted
                 .slice(i, i + INSERT_CHUNK)
-                .map(({ finding, fingerprint, githubCommentId, basePath }) => ({
+                .map(({ finding, fingerprint, githubCommentId, basePath, learningIds }) => ({
                   pullRequestId,
                   runId,
                   fingerprint,
@@ -484,6 +485,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   raisedAtSha: headSha,
                   githubCommentId: githubCommentId ?? null,
                   basePath: basePath ?? null,
+                  learningIds:
+                    learningIds === undefined || learningIds.length === 0 ? null : [...learningIds],
                 })),
             )
             .onConflictDoUpdate({
@@ -499,6 +502,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
+                // The batch that raised it this time: its learnings are the ones that count.
+                learningIds: sql`excluded.learning_ids`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
                 side: sql`excluded.side`,
@@ -716,6 +721,7 @@ export async function awsControlDeps(
     embeddings?: EmbeddingsSettings;
     tickets?: TicketSettings;
     maxPendingLearnings?: number;
+    repeatThreshold?: number;
   },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
@@ -779,6 +785,9 @@ export async function awsControlDeps(
       ...(options.maxPendingLearnings === undefined
         ? {}
         : { maxPendingLearnings: options.maxPendingLearnings }),
+      ...(options.repeatThreshold === undefined
+        ? {}
+        : { repeatThreshold: options.repeatThreshold }),
     }),
     close: () => pool.end(),
   };
@@ -795,6 +804,8 @@ export interface ControlParts {
   tickets?: NonNullable<ControlDeps["tickets"]>;
   /** `learnings.maxPendingPerAuthor`; left out, the policy's default. */
   maxPendingLearnings?: number;
+  /** `learnings.repeatThreshold` (NIC-1081); left out, the default. */
+  repeatThreshold?: number;
 }
 
 /**
@@ -943,6 +954,23 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
       });
     },
     learnings: learningsRetriever(learningStore, embedder, log),
+    outcomes: outcomeLearner({
+      db,
+      learnings: learningStore,
+      client: (installationId) =>
+        new GitHubClient({
+          token: installationTokenProvider({
+            appId: app.appId,
+            privateKey: app.privateKey,
+            installationId,
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        }),
+      ...(maxPendingLearnings === undefined ? {} : { maxPendingPerAuthor: maxPendingLearnings }),
+      ...(parts.repeatThreshold === undefined ? {} : { repeatThreshold: parts.repeatThreshold }),
+      log,
+    }),
     ...(tickets === undefined ? {} : { tickets }),
   };
 }

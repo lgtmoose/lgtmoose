@@ -59,7 +59,8 @@ export function learningsRetriever(
     }
     return learnings.map((learning) => {
       const { kind, category, scope, text } = summarizeLearning(learning);
-      return { kind, category, scope, text };
+      // The ID stays with the batch (not the prompt), for its findings' outcomes (NIC-1081).
+      return { kind, category, scope, text, id: learning.id };
     });
   };
 }

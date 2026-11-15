@@ -92,6 +92,8 @@ export interface FindingToSave {
   githubCommentId?: number;
   /** Its file's base-side name in the PR's diff (see `FindingRecord.basePath`). */
   basePath?: string;
+  /** The learnings in its batch's prompt (NIC-1081). */
+  learningIds?: readonly string[];
 }
 
 /** `findings` and `finding_events`, for our own findings. */
@@ -321,6 +323,21 @@ export interface ControlDeps {
     installationId: number,
     proposal: { text: string; repo: string; prNumber: number; commentId: number; author: string },
   ) => Promise<void>;
+  /**
+   * Learning from outcomes (NIC-1081), after the post step settled judged replies: findings
+   * people rejected (declined or disputed, with the reply that did it) may make a learning of a
+   * repeated pattern, and record the learnings in their prompts as not followed; fixed ones
+   * reinforce theirs. Left out, outcomes teach nothing. Failures are logged, never thrown.
+   */
+  outcomes?: {
+    rejected(
+      installationId: number,
+      /** owner/name */
+      repo: string,
+      rejected: readonly { findingId: string; commentId?: number }[],
+    ): Promise<void>;
+    fixed(fixes: readonly { findingId: string; commentId?: number }[]): Promise<void>;
+  };
   /**
    * The team's learnings for one batch of a PR in `org`'s `repo` (owner/name): retrieved here,
    * in the control task, never in the sandbox. Left out, prompts have none.

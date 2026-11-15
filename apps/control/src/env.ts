@@ -251,6 +251,21 @@ export function readMaxPendingLearnings(env: Env): number | undefined {
 }
 
 /**
+ * On how many PRs a pattern must be rejected before a learning is proposed, from
+ * `LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD` (`learnings.repeatThreshold`, NIC-1081). Unset: the
+ * default, 2.
+ */
+export function readRepeatThreshold(env: Env): number | undefined {
+  const value = env.LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD?.trim() ?? "";
+  if (value === "") return undefined;
+  const threshold = Number(value);
+  if (!Number.isSafeInteger(threshold) || threshold < 2) {
+    throw new Error("LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD must be a whole number of at least 2.");
+  }
+  return threshold;
+}
+
+/**
  * How learnings are ranked, from `LGTMOOSE_EMBEDDINGS` (`bedrock:<model>`, `openai:<model>`, or
  * `none` / unset for keywords) and, for OpenAI, `LGTMOOSE_EMBEDDINGS_SECRET_ID`, the key's
  * secret. The Workflow stack sets both from `learnings.embeddings`.

@@ -90,6 +90,19 @@ export interface SummaryInput {
    * added then and no longer does (from the PR, so untrusted; escaped as text).
    */
   noLongerChanged?: readonly { path: string; lines: readonly string[] }[];
+  /** The IDs of the team's learnings in this run's prompts (NIC-1081). */
+  learningsApplied?: readonly string[];
+}
+
+/** The most learning IDs listed in the summary; the rest are counted. */
+const LEARNINGS_LISTED = 10;
+
+/** "Applied N learnings" with their IDs, for `@lgtmoose learnings` and `forget <id>`. */
+function renderLearningsApplied(ids: readonly string[]): string | undefined {
+  if (ids.length === 0) return undefined;
+  const listed = ids.slice(0, LEARNINGS_LISTED).map((id) => inline(clip(id, 64)));
+  const more = ids.length > LEARNINGS_LISTED ? ` and ${ids.length - LEARNINGS_LISTED} more` : "";
+  return `_Applied ${count(ids.length, "learning")}: ${listed.join(", ")}${more}._`;
 }
 
 /** One provider's usage over a run, for the footer. */
@@ -508,6 +521,8 @@ function renderAt(
   const findings = renderFindings(input.findings, detail.findingRows);
   if (findings !== undefined) sections.push(findings);
   if (input.tickets !== undefined) sections.push(renderTickets(input.tickets));
+  const learnings = renderLearningsApplied(input.learningsApplied ?? []);
+  if (learnings !== undefined) sections.push(learnings);
   const usage = renderUsage(input.usage ?? []);
   if (usage !== undefined) sections.push(usage);
   if (cut.length > 0) {

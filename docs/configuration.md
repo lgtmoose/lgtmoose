@@ -26,9 +26,9 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `maxConcurrency` | integer, 1 to 64 | `4` | Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower. |
 | `reconcileIntervalMinutes` | integer, 5 to 1440 | `30` | Minutes between reconciler runs, which catch missed webhooks and drifted status labels. |
 | `reconcileLookbackHours` | integer, 1 to 720 | `24` | Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval. |
-| `feedback` | object | `{"acceptanceThreshold":0.5,"minSamples":10,"maxCommentsPerRun":100}` | Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md. |
+| `feedback` | object | `{"acceptanceThreshold":0.5,"minSamples":3,"maxCommentsPerRun":100}` | Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md. |
 | `feedback.acceptanceThreshold` | number, 0 to 1 | `0.5` | Acceptance below which a rule category is flagged for a person to look at. |
-| `feedback.minSamples` | integer, 1 to 10000 | `10` | Accepted plus rejected findings a category needs before it's judged. |
+| `feedback.minSamples` | integer, 1 to 10000 | `3` | Accepted plus rejected findings a category needs before it's judged. Acceptance is smoothed with a prior, so a small number doesn't flap. |
 | `feedback.maxCommentsPerRun` | integer, 0 to 1000 | `100` | Most inline comments whose reactions one reconciler run reads (one GitHub call each). 0 stops reading them. |
 | `alarms` | object | `{}` | Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch. |
 | `alarms.email` | string matching `^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$` |  | An address subscribed to a new SNS topic for LGTMoose's alarms. AWS emails it a confirmation link first. |
@@ -46,12 +46,13 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
-| `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5}` | Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have. |
+| `learnings` | object | `{"embeddings":{"provider":"none"},"maxPendingPerAuthor":5,"repeatThreshold":2}` | Learnings: how the learnings for each review batch are ranked, how many pending learnings one author may have, and when repeated rejections make one. |
 | `learnings.embeddings` | one of the forms below | `{"provider":"none"}` | How learnings are ranked against a batch's diff: bedrock or openai embeddings, or none for keywords. The provider receives learning text and diffs. |
 | `learnings.embeddings.provider` (required) | `"none"` or `"bedrock"` or `"openai"` |  | Which form this is. |
 | `learnings.embeddings.model` | string matching `^amazon\.titan-embed-text-v2(?::\d+)?$` | `"amazon.titan-embed-text-v2:0"` | With `provider: "bedrock"`. |
 | `learnings.embeddings.model` | string matching <code>^text-embedding-3-(?:small&#124;large)$</code> | `"text-embedding-3-small"` | With `provider: "openai"`. |
 | `learnings.maxPendingPerAuthor` | integer, 1 to 100 | `5` | The most pending learnings one author without write access may have in an org. A new learn: past it is refused and nothing is stored. |
+| `learnings.repeatThreshold` | integer, 2 to 20 | `2` | On how many PRs of a repository findings about the same thing must be declined, disputed or 👎'd before LGTMoose proposes a learning not to raise it. Never for protected categories. |
 | `tickets` | object |  | Ticket coverage: check each PR against the tickets it names. Left out: off. The provider receives no code; the model checks coverage in the sandbox. |
 | `tickets.provider` | `"linear"` or `"jira"` or `"github-issues"` |  | The ticket system: linear. jira and github-issues aren't built yet. |
 | `tickets.maxPerPullRequest` | integer, 1 to 10 | `3` | The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed. |

@@ -13,6 +13,7 @@ import {
 import { inline } from "@lgtmoose/summary";
 import { helpText, learningProposal, parseCommands, type Command } from "./commands.js";
 import { describeFinding } from "./explain.js";
+import { patternKey, rememberText } from "./outcome-learning.js";
 import { JUDGE_REPLY_MARKER, isTrivialReply, type ReplyStore } from "./replies.js";
 import { resolutionHeld } from "./thread-policy.js";
 
@@ -132,6 +133,11 @@ export interface ConversationStore {
    */
   decline(findingId: string, login: string, commentId: number): Promise<boolean>;
   /**
+   * The reply that last declined or disputed the finding, as the reply judge stored it
+   * (redacted; untrusted), for `remember` (NIC-1081). Undefined when there's none on record.
+   */
+  declineReason?(findingId: string): Promise<{ author: string; body: string } | undefined>;
+  /**
    * Moves the PR's `comments_through` up to `at` (never back): comments up to then are
    * handled, so the reconciler only queues ones written later.
    */
@@ -154,6 +160,17 @@ export interface ConversationDeps {
    * 0, or without `replies`, `explain` replies with the finding as it's stored.
    */
   maxExplanations?: number;
+  /**
+   * Outcome learning (NIC-1081): a finding `ignore` declined may complete a repeated rejection.
+   * Left out, an `ignore` teaches nothing. Failures are logged, never thrown.
+   */
+  outcomes?: {
+    rejected(
+      installationId: number,
+      repo: string,
+      rejected: readonly { findingId: string; commentId?: number }[],
+    ): Promise<void>;
+  };
   /** The job queue, for reviews a command asks for. */
   queue: { send(job: ReviewJob): Promise<void> };
   /** In shadow mode nothing is written to GitHub: reactions and replies are logged. */
@@ -415,7 +432,75 @@ async function ignoreCommand(context: Context): Promise<Outcome> {
     };
   }
   const declined = await context.deps.store.decline(finding.id, context.comment.author, commentId);
-  return declined ? { ok: true } : { ok: true, reply: "This finding was already closed." };
+  if (!declined) return { ok: true, reply: "This finding was already closed." };
+  const { outcomes } = context.deps;
+  if (outcomes !== undefined) {
+    try {
+      await outcomes.rejected(context.job.installationId, context.job.repo, [
+        { findingId: finding.id, commentId },
+      ]);
+    } catch (error) {
+      context.deps.log("outcomes not learned from", {
+        findingId: finding.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * `remember` in a declined finding's thread (NIC-1081): a learning not to raise findings like it
+ * in this repo, from the finding and the reason it was declined with. It goes through the
+ * learnings policy as the commenter's: active with write access, pending otherwise, refused for
+ * a protected category. A trusted bot never gets here (`handleBotComment`).
+ */
+async function rememberCommand(context: Context): Promise<Outcome> {
+  const root = context.comment.threadRootId;
+  const commentId = context.commentId;
+  if (context.kind !== "review_comment" || root === undefined || commentId === undefined) {
+    return {
+      ok: false,
+      reply: "`remember` works as a reply in one of my declined findings' threads.",
+    };
+  }
+  const { store } = context.deps;
+  const finding = await store.findingByComment(context.job.repo, context.job.prNumber, root);
+  if (finding === undefined) return { ok: false, reply: "This thread isn't one of my findings." };
+  if (finding.status !== "declined" && finding.status !== "disputed") {
+    return {
+      ok: false,
+      reply: `There's nothing to remember yet: this finding is ${finding.status.replaceAll("_", " ")}. Decline it first, with a reason.`,
+    };
+  }
+  const reason = await store.declineReason?.(finding.id);
+  const result = await proposeLearning(
+    learningDeps(context),
+    {
+      kind: "scoping",
+      category: finding.ruleCategory,
+      text: rememberText(finding, reason?.body),
+      scope: { level: "repo" },
+    },
+    {
+      repo: context.job.repo,
+      pr: context.job.prNumber,
+      commentId,
+      author: context.comment.author,
+    },
+    { patternKey: patternKey(finding.ruleCategory, finding.title) },
+  );
+  if (result.outcome === "refused") {
+    return { ok: false, reply: `Not remembered: ${inline(result.reason)}.` };
+  }
+  const state =
+    result.outcome === "active"
+      ? "is active"
+      : "is pending: it applies once someone with write access approves it";
+  return {
+    ok: true,
+    reply: `Learning \`${result.learning.id}\` (not raising findings like this one here) ${state}.`,
+  };
 }
 
 function learningDeps(context: Context): LearningDeps {
@@ -543,6 +628,8 @@ async function run(context: Context, command: Command): Promise<Outcome> {
       return explainCommand(context, command.at);
     case "ignore":
       return ignoreCommand(context);
+    case "remember":
+      return rememberCommand(context);
     case "learn":
       return learnCommand(context, command.text);
     case "forget":
