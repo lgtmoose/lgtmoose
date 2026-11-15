@@ -10,6 +10,7 @@ export {
   type PostgresExecutions,
   type QueuedMessage,
 } from "./local.js";
+export { GATEWAY_ROLE, ensureGatewayRole } from "./gateway-role.js";
 export {
   DbCooldownStore,
   insertProviderUsage,

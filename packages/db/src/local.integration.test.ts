@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ensureGatewayRole } from "./gateway-role.js";
 import { PostgresQueue, postgresArtifactStore, postgresExecutions } from "./local.js";
 import { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 
@@ -87,5 +88,52 @@ describe.skipIf(adminUrl === undefined)("local stand-ins on Postgres", () => {
     const arns = claims.flat().map((execution) => execution.arn);
     expect(new Set(arns).size).toBe(arns.length);
     expect(arns).toHaveLength(10);
+  });
+
+  it("lets the gateway's login add jobs and nothing else", async () => {
+    // Roles are cluster-wide: one of this run's own.
+    const role = `lgtmoose_gateway_test_${randomBytes(4).toString("hex")}`;
+    const password = randomBytes(18).toString("hex");
+    const owner = await pool.connect();
+    try {
+      await ensureGatewayRole(owner, password, role);
+      // Again, as every runner start does: the password is set again, the grants stay.
+      await ensureGatewayRole(owner, password, role);
+    } finally {
+      owner.release();
+    }
+    await postgresArtifactStore(drizzle({ client: pool })).putText("runs/secret.json", "{}");
+
+    const url = new URL(adminUrl ?? "");
+    url.pathname = `/${database}`;
+    url.username = role;
+    url.password = password;
+    const gateway = new pg.Pool({ connectionString: url.toString(), max: 2 });
+    try {
+      const queue = new PostgresQueue(drizzle({ client: gateway }), "jobs");
+      expect(await queue.send({ groupId: "acme/shop#1", dedupeId: "d-1", body: "{}" })).toBe(true);
+      // A redelivery is dropped, not an error.
+      expect(await queue.send({ groupId: "acme/shop#1", dedupeId: "d-1", body: "{}" })).toBe(false);
+      for (const sql of [
+        "select body from job_queue",
+        "update job_queue set body = 'x'",
+        "delete from job_queue",
+        "select * from artifacts",
+        "select * from findings",
+        "select * from local_executions",
+        "insert into artifacts (key, body, etag) values ('k', 'x', 'e')",
+      ]) {
+        await expect(gateway.query(sql), sql).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await gateway.end();
+      const admin = await pool.connect();
+      try {
+        await admin.query(`drop owned by ${role}`);
+        await admin.query(`drop role ${role}`);
+      } finally {
+        admin.release();
+      }
+    }
   });
 });

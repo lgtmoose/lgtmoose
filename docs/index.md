@@ -23,6 +23,7 @@ A self-hosted, open-source AI pull request reviewer. You deploy it to your own A
 - [Upgrading](upgrading.md), and removing it
 - [Releasing](releasing.md): changesets, how a release is published, and deploying a release's images
 - [AWS smoke test](smoke-test.md): the end-to-end check on a throwaway account
+- [docker compose](compose.md): running it on one host without AWS, and what holding the Docker socket means
 
 ## Quickstart
 

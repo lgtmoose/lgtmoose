@@ -344,6 +344,19 @@ export function postgresExecutions(db: Database) {
       const all = await Promise.all(found.map((row) => read(row.arn)));
       return all.filter((execution): execution is LocalExecution => execution !== undefined);
     },
+    /** Deletes executions that ended before `before` (the retention sweep). */
+    async pruneEnded(before: Date): Promise<number> {
+      const deleted = await db
+        .delete(localExecutions)
+        .where(
+          and(
+            sql`${localExecutions.status} <> 'RUNNING'`,
+            sql`${localExecutions.updatedAt} < ${before}`,
+          ),
+        )
+        .returning({ arn: localExecutions.arn });
+      return deleted.length;
+    },
     /** Ends a running execution: SUCCEEDED or FAILED. One stopped meanwhile stays ABORTED. */
     async finish(arn: string, status: "SUCCEEDED" | "FAILED", cause?: string): Promise<void> {
       await db

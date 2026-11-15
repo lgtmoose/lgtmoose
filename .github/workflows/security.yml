@@ -81,6 +81,7 @@ jobs:
           - { name: control, file: apps/control/Dockerfile, context: . }
           - { name: egress-proxy, file: apps/egress-proxy/Dockerfile, context: apps/egress-proxy }
           - { name: sandbox, file: infra/sandbox/Dockerfile, context: . }
+          - { name: gateway, file: apps/gateway/Dockerfile, context: . }
     steps:
       - uses: actions/checkout@v7
       - name: Build the image
@@ -115,6 +116,16 @@ jobs:
             sandbox)
               docker run --rm --read-only --tmpfs /tmp -e HOME=/tmp --entrypoint sh "$TAG" -c \
                 'node --version && claude --version && codex --version && ! command -v npm && test -f /app/dist/index.js'
+              ;;
+            gateway)
+              docker run --detach --name gateway --read-only -p 3000:3000 \
+                -e GITHUB_WEBHOOK_SECRET=scan-only -e ALLOWED_ORGS=acme "$TAG"
+              for attempt in $(seq 1 20); do
+                if curl -fsS http://127.0.0.1:3000/health; then echo; exit 0; fi
+                sleep 1
+              done
+              docker logs gateway
+              exit 1
               ;;
           esac
       # Pinned by commit: it runs with the job's token. Its own actions are pinned by commit too.

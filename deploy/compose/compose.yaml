@@ -1,0 +1,139 @@
+# LGTMoose on one host with docker compose (NIC-843). See docs/compose.md before running it.
+#
+#   cp .env.example .env            # then fill it in
+#   docker compose build            # the runner, gateway, egress proxy and sandbox images
+#   docker compose up -d
+#
+# What each service can reach:
+# - gateway:      the internet (webhooks come in on GATEWAY_PORT) and Postgres, as a login that
+#                 can only add jobs. No Docker socket, no App key.
+# - runner:       Postgres, GitHub (through the egress network), the secrets directory, and the
+#                 Docker socket, to start sandboxes. The only service with the socket.
+# - egress-proxy: the internet, for LGTMOOSE_EGRESS_HOSTS only, and the sandbox network.
+# - sandboxes:    started by the runner, one per batch, on the internal sandbox network only:
+#                 their one way out is the egress proxy. No socket, no GitHub token, no host path.
+# - postgres:     the internal database network only.
+name: lgtmoose
+
+x-hardened: &hardened
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+
+services:
+  postgres:
+    # Pinned by digest, as in tools/test-postgres/Dockerfile.
+    image: pgvector/pgvector:pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lgtmoose
+      POSTGRES_DB: lgtmoose
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql
+    networks: [db]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lgtmoose -d lgtmoose"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  runner:
+    <<: *hardened
+    build:
+      context: ../..
+      dockerfile: apps/control/Dockerfile
+    image: lgtmoose-control:local
+    entrypoint: ["node", "/app/dist/local/main.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://lgtmoose:${POSTGRES_PASSWORD}@postgres:5432/lgtmoose
+      # The root filesystem is read-only: git and the clone use tmpfs.
+      HOME: /tmp
+      TMPDIR: /work
+      LGTMOOSE_GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env}
+      LGTMOOSE_CONFIG: /config/lgtmoose.config.json
+      LGTMOOSE_SECRETS_DIR: /run/lgtmoose/secrets
+      LGTMOOSE_SANDBOX_IMAGE: lgtmoose-sandbox:local
+      LGTMOOSE_SANDBOX_NETWORK: lgtmoose-sandbox
+      LGTMOOSE_PROXY_URL: http://egress-proxy:3128
+      LGTMOOSE_EGRESS_HOSTS: ${LGTMOOSE_EGRESS_HOSTS:?set LGTMOOSE_EGRESS_HOSTS in .env}
+      LGTMOOSE_MAX_EXECUTIONS: ${LGTMOOSE_MAX_EXECUTIONS:-2}
+      LGTMOOSE_SANDBOX_MEMORY_MB: ${LGTMOOSE_SANDBOX_MEMORY_MB:-4096}
+      LGTMOOSE_SANDBOX_CPUS: ${LGTMOOSE_SANDBOX_CPUS:-2}
+    # Its image's user, plus the group that owns the Docker socket on this host.
+    group_add:
+      - ${DOCKER_GID:?set DOCKER_GID in .env (stat -c %g /var/run/docker.sock)}
+    volumes:
+      # The Docker socket: see "The Docker socket" in docs/compose.md.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./lgtmoose.config.json:/config/lgtmoose.config.json:ro
+      # Writable: a ChatGPT sign-in's refreshed auth.json is stored back here.
+      - ./secrets:/run/lgtmoose/secrets
+    tmpfs:
+      - /tmp:size=2g
+      - /work:size=16g
+    networks: [db, egress]
+
+  gateway:
+    <<: *hardened
+    build:
+      context: ../..
+      dockerfile: apps/gateway/Dockerfile
+    image: lgtmoose-gateway:local
+    depends_on:
+      runner:
+        condition: service_started
+    environment:
+      # The login the runner creates: it may only add jobs to job_queue.
+      DATABASE_URL: postgres://lgtmoose_gateway:${GATEWAY_DB_PASSWORD}@postgres:5432/lgtmoose
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set GITHUB_WEBHOOK_SECRET in .env}
+      ALLOWED_ORGS: ${ALLOWED_ORGS:?set ALLOWED_ORGS in .env}
+      # 1 behind one reverse proxy or tunnel, 0 when GATEWAY_PORT is reached directly.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+    ports:
+      - ${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-3000}:3000
+    networks: [db, web]
+
+  egress-proxy:
+    <<: *hardened
+    build:
+      context: ../../apps/egress-proxy
+    image: lgtmoose-egress-proxy:local
+    environment:
+      ALLOWED_HOSTS: ${LGTMOOSE_EGRESS_HOSTS:?set LGTMOOSE_EGRESS_HOSTS in .env}
+    networks:
+      sandbox:
+        aliases: [egress-proxy]
+      egress: {}
+
+  # Built only, never run by compose: the runner starts one per batch.
+  sandbox:
+    build:
+      context: ../..
+      dockerfile: infra/sandbox/Dockerfile
+    image: lgtmoose-sandbox:local
+    profiles: [build]
+
+networks:
+  # Sandboxes and the egress proxy. Internal: no route out but the proxy.
+  sandbox:
+    name: lgtmoose-sandbox
+    internal: true
+  # Postgres and the services that use it. Internal: Postgres has no route out.
+  db:
+    internal: true
+  # Outbound for the runner (GitHub) and the proxy (model APIs).
+  egress: {}
+  # Inbound webhooks to the gateway.
+  web: {}
+
+volumes:
+  postgres: {}

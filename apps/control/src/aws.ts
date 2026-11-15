@@ -735,7 +735,6 @@ export async function awsControlDeps(
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
   const db = drizzle({ client: pool });
-  const learningStore = drizzleLearningStore(db);
   const bedrock = new BedrockRuntimeClient({});
   const embedder = await embedderFor(options.embeddings ?? { provider: "none" }, {
     bedrock: () => async (modelId, body) => {
@@ -763,6 +762,41 @@ export async function awsControlDeps(
     return SecretString;
   });
   // The App's slug, read once with the App's own JWT.
+  return {
+    ...controlDepsFor({
+      app,
+      db,
+      store,
+      tokens: sfnTaskTokens(new SFNClient({})),
+      shadow: options.shadow,
+      embedder,
+      ...(tickets === undefined ? {} : { tickets }),
+    }),
+    close: () => pool.end(),
+  };
+}
+
+/** What `controlDepsFor` builds the control task's dependencies from. */
+export interface ControlParts {
+  app: { appId: number; privateKey: string };
+  db: PgDatabase<PgQueryResultHKT>;
+  store: ControlDeps["store"];
+  tokens: TaskTokens;
+  shadow: boolean;
+  embedder: Parameters<typeof learningsRetriever>[1];
+  tickets?: NonNullable<ControlDeps["tickets"]>;
+}
+
+/**
+ * The control task's dependencies from its parts: GitHub as the App, the database's stores and
+ * the artifact store. AWS (`awsControlDeps`) and the docker compose runner build the parts
+ * their own way and share the rest.
+ */
+export function controlDepsFor(parts: ControlParts): ControlDeps {
+  const { app, db, store, embedder, tickets } = parts;
+  const options = { shadow: parts.shadow };
+  const learningStore = drizzleLearningStore(db);
+
   let slugOnce: Promise<string> | undefined;
   const slug = () => {
     slugOnce ??= new GitHubClient({
@@ -784,7 +818,7 @@ export async function awsControlDeps(
     store,
     runs: drizzleRunStore(db),
     findings: drizzleFindingStore(db),
-    tokens: sfnTaskTokens(new SFNClient({})),
+    tokens: parts.tokens,
     async github(installationId) {
       const token = installationTokenProvider({
         appId: app.appId,
@@ -886,6 +920,5 @@ export async function awsControlDeps(
     },
     learnings: learningsRetriever(learningStore, embedder, log),
     ...(tickets === undefined ? {} : { tickets }),
-    close: () => pool.end(),
   };
 }

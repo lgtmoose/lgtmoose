@@ -1,0 +1,316 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { SECRET_NAMES } from "@lgtmoose/config";
+import {
+  ensureGatewayRole,
+  PostgresQueue,
+  postgresArtifactStore,
+  postgresExecutions,
+} from "@lgtmoose/db";
+import { MIGRATIONS_FOLDER, runMigrations } from "@lgtmoose/db/migrate";
+import { drizzleLearningStore, retireUnusedLearnings } from "@lgtmoose/learnings";
+import { appJwt, GitHubClient, installationTokenProvider } from "@lgtmoose/poster";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+import { z } from "zod";
+import { controlDepsFor } from "../aws.js";
+import { drizzleConversationStore, githubConversation } from "../conversation-aws.js";
+import { conversationBatch } from "../conversation-lambda.js";
+import { checkCredentials } from "../credentials.js";
+import { reportProblem } from "../credentials-aws.js";
+import { drizzleDispatchStore } from "../dispatch-aws.js";
+import { collectFeedback } from "../feedback.js";
+import { drizzleFeedbackStore, githubFeedback } from "../feedback-aws.js";
+import { embedderFor } from "../learnings.js";
+import { log } from "../log.js";
+import { metricsLine, reconcile } from "../reconcile.js";
+import { drizzleReconcileStore, githubReconcile } from "../reconcile-aws.js";
+import { drizzleReplyStore } from "../replies-aws.js";
+import { ticketSourceFor } from "../tickets.js";
+import { Docker, socketTransport } from "./docker.js";
+import { DEAD_QUEUE, JOBS_QUEUE, createRunner } from "./runner.js";
+import { dockerBatchRunner } from "./sandbox.js";
+import { fileCredentialSecrets, readSecretFile } from "./secrets.js";
+import { consumeConversations, every, queueSender, sweep } from "./services.js";
+import { checkEgressHosts, readLocalSettings } from "./settings.js";
+
+/**
+ * The docker compose runner (NIC-843): one long-running process that does what the dispatcher
+ * Lambda, the review state machine, the control and sandbox tasks, the conversation Lambda and
+ * the scheduled Lambdas do on AWS, on one host, over Postgres and the Docker socket.
+ */
+
+const CONVERSATION_QUEUE = "conversation";
+const GITHUB_TIMEOUT_MS = 30_000;
+const TICK_MS = 1_000;
+
+const appSecretSchema = z.object({
+  appId: z.coerce.number().int().positive(),
+  privateKey: z.string().min(1),
+});
+
+function required(name: string): string {
+  const value = process.env[name]?.trim();
+  if (value === undefined || value === "") throw new Error(`${name} must be set.`);
+  return value;
+}
+
+function whole(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  const value = raw === undefined || raw === "" ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be a number from ${min} to ${max}.`);
+  }
+  return value;
+}
+
+async function main(): Promise<void> {
+  const databaseUrl = required("DATABASE_URL");
+  const secretsDir = process.env.LGTMOOSE_SECRETS_DIR?.trim() || "/run/lgtmoose/secrets";
+  const settings = await readLocalSettings(
+    process.env.LGTMOOSE_CONFIG?.trim() || "/config/lgtmoose.config.json",
+  );
+  const { config } = settings;
+  checkEgressHosts(config, process.env.LGTMOOSE_EGRESS_HOSTS);
+
+  // The schema first, then the gateway's login, which can only add jobs.
+  await runMigrations({ connectionString: databaseUrl, migrationsFolder: MIGRATIONS_FOLDER });
+  const gatewayPassword = process.env.LGTMOOSE_GATEWAY_DB_PASSWORD?.trim();
+  if (gatewayPassword !== undefined && gatewayPassword !== "") {
+    const client = new pg.Client({ connectionString: databaseUrl });
+    await client.connect();
+    try {
+      await ensureGatewayRole(client, gatewayPassword);
+    } finally {
+      await client.end();
+    }
+  }
+
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 10 });
+  pool.on("error", (error) => log("database connection dropped", { error: error.message }));
+  const db = drizzle({ client: pool });
+  const store = postgresArtifactStore(db);
+  const executions = postgresExecutions(db);
+  const jobs = new PostgresQueue(db, JOBS_QUEUE);
+  const dead = new PostgresQueue(db, DEAD_QUEUE);
+  const conversations = new PostgresQueue(db, CONVERSATION_QUEUE);
+
+  const secret = async (name: string) => {
+    const value = await readSecretFile(secretsDir, name);
+    if (value === undefined) throw new Error(`No ${name} in the secrets directory.`);
+    return value;
+  };
+  const app = appSecretSchema.parse(JSON.parse(await secret(SECRET_NAMES.githubApp)));
+  const embedder = await embedderFor(settings.embeddings, {
+    bedrock: () => {
+      throw new Error("Bedrock embeddings need AWS.");
+    },
+    secret,
+  });
+  const tickets = ticketSourceFor(settings.tickets, secret);
+  const control = controlDepsFor({
+    app,
+    db,
+    store,
+    // Prepare and post report back to Step Functions only on AWS.
+    tokens: { succeed: async () => undefined, fail: async () => undefined },
+    shadow: config.shadow,
+    embedder,
+    ...(tickets === undefined ? {} : { tickets }),
+  });
+
+  const docker = new Docker(
+    socketTransport(process.env.DOCKER_SOCKET?.trim() || "/var/run/docker.sock"),
+  );
+  const network = process.env.LGTMOOSE_SANDBOX_NETWORK?.trim() || "lgtmoose-sandbox";
+  if (!(await docker.networkExists(network))) {
+    throw new Error(
+      `The sandbox network ${network} doesn't exist: start the runner with docker compose.`,
+    );
+  }
+  // Sandboxes a previous runner process left behind.
+  for (const id of await docker.listByLabel("lgtmoose.sandbox=1")) await docker.remove(id);
+
+  const secrets = fileCredentialSecrets(secretsDir);
+  const owner = `runner-${randomUUID()}`;
+  const runBatch = dockerBatchRunner({
+    docker,
+    store,
+    secrets,
+    providers: settings.providers,
+    image: required("LGTMOOSE_SANDBOX_IMAGE"),
+    network,
+    proxyUrl: process.env.LGTMOOSE_PROXY_URL?.trim() || "http://egress-proxy:3128",
+    timeoutMs: 30 * 60_000,
+    memoryBytes: whole("LGTMOOSE_SANDBOX_MEMORY_MB", 4096, 512, 65_536) * 1024 * 1024,
+    cpus: whole("LGTMOOSE_SANDBOX_CPUS", 2, 0.5, 64),
+    leaseWaitMs: 3 * 60 * 60_000,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    log,
+    broker: {
+      store,
+      executionRunning: async (arn) => (await executions.status(arn)) === "RUNNING",
+      leaseTtlMs: 40 * 60_000,
+      now: Date.now,
+      newToken: () => randomBytes(16).toString("hex"),
+      random: Math.random,
+      audit: (event, fields) => log(event, { audit: true, ...fields }),
+      problem: reportProblem,
+    },
+  });
+  const sender = queueSender(jobs);
+  const runner = createRunner({
+    jobs,
+    dead,
+    executions,
+    dispatchStore: drizzleDispatchStore(db),
+    conversation: queueSender(conversations),
+    workflow: {
+      control,
+      runBatch,
+      settings: {
+        model: settings.reviewerModel,
+        batchTimeoutMs: 20 * 60_000,
+        maxReplyJudgements: config.maxReplyJudgements,
+      },
+      maxConcurrency: config.maxConcurrency,
+      attempts: 3,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    },
+    owner,
+    maxExecutions: whole("LGTMOOSE_MAX_EXECUTIONS", 2, 1, 32),
+    log,
+  });
+
+  // What the conversation Lambda does on AWS.
+  let slugOnce: Promise<string> | undefined;
+  const slug = () => {
+    slugOnce ??= new GitHubClient({
+      token: async () => appJwt(app.appId, app.privateKey),
+      timeoutMs: GITHUB_TIMEOUT_MS,
+    })
+      .request<{ slug?: unknown }>("GET", "/app")
+      .then((reply) => {
+        if (typeof reply.slug !== "string") throw new Error("GET /app returned no slug.");
+        return reply.slug;
+      });
+    slugOnce.catch(() => {
+      slugOnce = undefined;
+    });
+    return slugOnce;
+  };
+  const conversationDeps = {
+    async github(installationId: number) {
+      const token = installationTokenProvider({
+        ...app,
+        installationId,
+        timeoutMs: GITHUB_TIMEOUT_MS,
+      });
+      return githubConversation(
+        new GitHubClient({ token, timeoutMs: GITHUB_TIMEOUT_MS }),
+        slug,
+        log,
+      );
+    },
+    store: drizzleConversationStore(db),
+    learnings: drizzleLearningStore(db),
+    replies: drizzleReplyStore(db),
+    queue: sender,
+    shadow: config.shadow,
+    log,
+  };
+
+  // The scheduled Lambdas.
+  const reconcileDeps = {
+    github: githubReconcile(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
+    store: drizzleReconcileStore(db),
+    queue: {
+      send: (
+        job: Parameters<typeof sender.sendWith>[0],
+        options: { groupId: string; dedupeId: string },
+      ) => sender.sendWith(job, options),
+    },
+    allowedOrgs: config.allowedOrgs,
+    shadow: config.shadow,
+    lookbackMs: config.reconcileLookbackHours * 3_600_000,
+    log,
+  };
+  const reconcileOnce = async () => {
+    const counts = await reconcile(reconcileDeps);
+    counts.learningsRetired = await retireUnusedLearnings(drizzleLearningStore(db));
+    const feedback = await collectFeedback({
+      store: drizzleFeedbackStore(db),
+      github: githubFeedback(app, { timeoutMs: GITHUB_TIMEOUT_MS }),
+      putReport: (key, body) => store.putText(key, body),
+      log,
+      maxComments: config.feedback.maxCommentsPerRun,
+      threshold: config.feedback.acceptanceThreshold,
+      minSamples: config.feedback.minSamples,
+    });
+    counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
+    counts.categoriesFlagged = feedback.categoriesFlagged;
+    counts.errors += feedback.errors;
+    process.stdout.write(`${metricsLine(counts, new Date())}\n`);
+  };
+  const health = () =>
+    checkCredentials({
+      secrets,
+      credentials: Object.fromEntries(
+        settings.providers.flatMap((provider) =>
+          provider.credential === undefined
+            ? []
+            : [[provider.id, { ...provider.credential, auth: provider.auth }]],
+        ),
+      ),
+      now: Date.now,
+      problem: reportProblem,
+    });
+
+  await runner.recover();
+  log("runner started", { owner, providers: settings.providers.map((provider) => provider.id) });
+
+  const stops = [
+    every("reconcile", config.reconcileIntervalMinutes * 60_000, reconcileOnce, log, 60_000),
+    every("credential health", 6 * 3_600_000, health, log, 30_000),
+    every(
+      "retention sweep",
+      24 * 3_600_000,
+      async () =>
+        log(
+          "swept",
+          await sweep({ artifacts: store, executions, queues: [jobs, dead, conversations] }),
+        ),
+      log,
+      5 * 60_000,
+    ),
+  ];
+
+  let stopping = false;
+  const stop = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    log("stopping", { signal });
+  };
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
+
+  while (!stopping) {
+    try {
+      await runner.tick();
+      await consumeConversations(conversations, (records) =>
+        conversationBatch(conversationDeps, records),
+      );
+    } catch (error) {
+      log("tick failed", { error: error instanceof Error ? error.message : String(error) });
+    }
+    await new Promise((resolve) => setTimeout(resolve, TICK_MS));
+  }
+  await Promise.all(stops.map((stopTask) => stopTask()));
+  // Running reviews finish; a later start fails what doesn't (`recover`).
+  await runner.idle();
+  await pool.end();
+}
+
+main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

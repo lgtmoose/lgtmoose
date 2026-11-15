@@ -16,6 +16,7 @@ import { runSandboxBatch } from "./batch.js";
 import { dropSymlinks } from "./checkout.js";
 import { credentialEnv, harnessEnv } from "./credential.js";
 import { readSandboxEnv } from "./env.js";
+import { localBatchFetch } from "./local-io.js";
 
 /** Writable volumes on the task; the root filesystem is read-only. */
 const WORK = "/work";
@@ -68,9 +69,11 @@ async function main(): Promise<void> {
     process.env,
     credentialEnv(env.harness, env.auth, process.env.LGTMOOSE_PROVIDER_CREDENTIAL),
   );
+  // docker compose: the batch's objects are files in the container, not presigned URLs.
+  const localDir = process.env.LGTMOOSE_BATCH_DIR?.trim();
   await runSandboxBatch(
     {
-      fetch,
+      fetch: localDir === undefined || localDir === "" ? fetch : localBatchFetch(localDir),
       writeFile: (path, body) =>
         pipeline(Readable.fromWeb(body as WebReadableStream<Uint8Array>), createWriteStream(path)),
       extract,
