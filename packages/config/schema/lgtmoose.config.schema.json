@@ -152,7 +152,7 @@
     "feedback": {
       "default": {
         "acceptanceThreshold": 0.5,
-        "minSamples": 10,
+        "minSamples": 3,
         "maxCommentsPerRun": 100
       },
       "description": "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
@@ -166,8 +166,8 @@
           "maximum": 1
         },
         "minSamples": {
-          "default": 10,
-          "description": "Accepted plus rejected findings a category needs before it's judged.",
+          "default": 3,
+          "description": "Accepted plus rejected findings a category needs before it's judged. Acceptance is smoothed with a prior, so a small number doesn't flap.",
           "type": "integer",
           "minimum": 1,
           "maximum": 10000
@@ -458,9 +458,10 @@
         "embeddings": {
           "provider": "none"
         },
-        "maxPendingPerAuthor": 5
+        "maxPendingPerAuthor": 5,
+        "repeatThreshold": 2
       },
-      "description": "Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have.",
+      "description": "Learnings: how the learnings for each review batch are ranked, how many pending learnings one author may have, and when repeated rejections make one.",
       "type": "object",
       "properties": {
         "embeddings": {
@@ -526,6 +527,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        },
+        "repeatThreshold": {
+          "default": 2,
+          "description": "On how many PRs of a repository findings about the same thing must be declined, disputed or 👎'd before LGTMoose proposes a learning not to raise it. Never for protected categories.",
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 20
         }
       },
       "additionalProperties": false

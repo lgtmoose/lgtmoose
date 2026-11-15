@@ -58,6 +58,16 @@ export const replyWritesSchema = z.object({
     }),
   ),
   closed: z.number().int().min(0),
+  /**
+   * Findings this run closed as declined or disputed, and as fixed, with the reply that did it:
+   * what outcome learning (NIC-1081) reads. Left out by runs before it.
+   */
+  rejected: z
+    .array(z.object({ findingId: z.string(), commentId: z.number().int().positive() }))
+    .optional(),
+  fixed: z
+    .array(z.object({ findingId: z.string(), commentId: z.number().int().positive() }))
+    .optional(),
 });
 
 export type ReplyWrites = z.infer<typeof replyWritesSchema>;
@@ -75,6 +85,8 @@ export interface SettleDeps {
   threadId(firstCommentId: number): string | undefined;
   prAuthor: string;
   permission: (login: string) => Promise<Permission>;
+  /** The App's slug, for the `remember` offer on a decline (NIC-1081). */
+  slug?: string;
   close(
     findingId: string,
     status: "fixed" | "declined" | "disputed",
@@ -139,6 +151,7 @@ export async function settleReplies(
       fileChanged: reply.fileChanged,
       disputeAnswered: answered.has(finding.id),
       permission: deps.permission,
+      ...(deps.slug === undefined ? {} : { slug: deps.slug }),
     });
     deps.log("reply judged", {
       findingId: finding.id,
@@ -167,7 +180,12 @@ export async function settleReplies(
         login: reply.author,
         commentId: reply.commentId,
       });
-      if (changed) result.closed += 1;
+      if (changed) {
+        result.closed += 1;
+        if (action.status === "declined" || action.status === "disputed") {
+          (result.rejected ??= []).push({ findingId: finding.id, commentId: reply.commentId });
+        }
+      }
     }
     const resolve = changed && action.resolveThread && threadId !== undefined;
     const reply_ = root === undefined ? undefined : action.reply;
@@ -232,6 +250,7 @@ export async function confirmFixes(
     if (await close(fix.findingId, "fixed", { login: fix.author, commentId: fix.commentId })) {
       closed.push(fix.findingId);
       writes.closed += 1;
+      (writes.fixed ??= []).push({ findingId: fix.findingId, commentId: fix.commentId });
       if (fix.threadId !== undefined) writes.writes.push({ ...base, threadId: fix.threadId });
     }
   }

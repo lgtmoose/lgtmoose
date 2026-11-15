@@ -1,8 +1,14 @@
 import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { reviewJobGroupId } from "@lgtmoose/core";
-import { findingEvents, findings, pullRequestDispatches, pullRequests } from "@lgtmoose/db";
+import {
+  findingEvents,
+  findings,
+  pendingReplies,
+  pullRequestDispatches,
+  pullRequests,
+} from "@lgtmoose/db";
 import { GitHubError, repoPath, type GitHubClient } from "@lgtmoose/poster";
-import { and, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "./database.js";
 import { drizzleDispatchStore } from "./dispatch-aws.js";
@@ -237,6 +243,27 @@ export function drizzleConversationStore(
         });
         return true;
       });
+    },
+    async declineReason(findingId) {
+      const [row] = await db
+        .select({ author: findingEvents.actorLogin, body: pendingReplies.body })
+        .from(findingEvents)
+        .innerJoin(
+          pendingReplies,
+          eq(pendingReplies.githubCommentId, findingEvents.githubCommentId),
+        )
+        .where(
+          and(
+            eq(findingEvents.findingId, findingId),
+            inArray(findingEvents.type, ["declined", "dispute_answered"]),
+            isNotNull(findingEvents.actorLogin),
+          ),
+        )
+        .orderBy(desc(findingEvents.createdAt))
+        .limit(1);
+      return row === undefined || row.author === null
+        ? undefined
+        : { author: row.author, body: row.body };
     },
     async commentsThrough(repo, number, at) {
       await db

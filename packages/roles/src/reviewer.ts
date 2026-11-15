@@ -47,6 +47,11 @@ export interface PromptLearning {
   /** `org`, `repo` or `path <glob>`. */
   scope: string;
   text: string;
+  /**
+   * The learning's ID, kept with the batch so its findings' outcomes can be traced back to it
+   * (NIC-1081). Never put in the prompt.
+   */
+  id?: string;
 }
 
 const OUTPUT_SCHEMA = JSON.stringify(z.toJSONSchema(reviewerOutputSchema), null, 2);

@@ -157,6 +157,17 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).not.toContain("Model usage");
   });
 
+  it("says which learnings the run applied, with their IDs (NIC-1081)", () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `id-${i}`);
+    const text = renderSummary(input({ learningsApplied: ids }));
+    expect(text).toContain("_Applied 12 learnings: `id-0`, `id-1`");
+    expect(text).toContain("`id-9` and 2 more._");
+    expect(renderSummary(input({ learningsApplied: ["one"] }))).toContain(
+      "_Applied 1 learning: `one`._",
+    );
+    expect(renderSummary(input())).not.toContain("Applied");
+  });
+
   it("lists files the PR no longer changes, with what they no longer add, escaped", () => {
     const summary = renderSummary(
       input({

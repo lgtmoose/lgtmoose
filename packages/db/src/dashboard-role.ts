@@ -11,6 +11,8 @@ import pg from "pg";
  * - approving or retiring a learning: UPDATE of `status`, `updated_at` and `retired_at` on
  *   `learnings`, and INSERT on `learning_events`. Whether a person may is decided by
  *   `approveLearning` and `forgetLearning` from what GitHub said at sign-in, as on AWS;
+ * - which learnings weren't followed (NIC-1081): SELECT of `learning_id`, `type` and
+ *   `created_at` on `learning_events`, not who did what;
  * - the feedback report, through the `dashboard_feedback_report` view of that one artifact, not
  *   the `artifacts` table, which holds transcripts and run data.
  *
@@ -61,5 +63,9 @@ export async function ensureDashboardRole(
   await client.query(`grant select, insert, delete on table dashboard_sessions to ${name}`);
   await client.query(`grant update (status, updated_at, retired_at) on table learnings to ${name}`);
   await client.query(`grant insert on table learning_events to ${name}`);
+  // What the learnings page counts (NIC-1081): which learning, what happened, and when. Not who.
+  await client.query(
+    `grant select (learning_id, type, created_at) on table learning_events to ${name}`,
+  );
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
 }

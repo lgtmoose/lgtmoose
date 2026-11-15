@@ -723,8 +723,11 @@ describe("reconciler", () => {
     expect(env.ARTIFACT_BUCKET).toBeDefined();
     expect(env).toMatchObject({
       FEEDBACK_ACCEPTANCE_THRESHOLD: "0.5",
-      FEEDBACK_MIN_SAMPLES: "10",
+      FEEDBACK_MIN_SAMPLES: "3",
       FEEDBACK_MAX_COMMENTS: "100",
+      // A newly 👎'd finding may complete a repeated rejection (NIC-1081).
+      LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: "2",
+      LGTMOOSE_MAX_PENDING_LEARNINGS: "5",
     });
   });
 

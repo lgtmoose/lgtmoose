@@ -5,7 +5,12 @@ export type LearningKind = (typeof LEARNING_KINDS)[number];
 
 export type LearningStatus = "pending" | "active" | "retired";
 
-export type LearningEventType = "proposed" | "applied" | "approved" | "retired";
+/**
+ * What happened to a learning. `reinforced` and `not_followed` come from outcomes (NIC-1081): a
+ * finding whose prompt had the learning was fixed, or one it should have covered was declined.
+ */
+export type LearningEventType =
+  "proposed" | "applied" | "approved" | "retired" | "reinforced" | "not_followed";
 
 /**
  * A GitHub repository permission, as the collaborators API's `role_name` gives it, from most to
@@ -47,6 +52,11 @@ export interface Learning {
   sourcePr: number | undefined;
   sourceCommentId: number | undefined;
   /**
+   * For a learning made from findings people rejected (NIC-1081): the pattern it's about (see
+   * `patternKey` in the control app), so it isn't proposed twice.
+   */
+  patternKey?: string;
+  /**
    * Who proposed it, and the access checked for them then, both from GitHub: their permission
    * on `sourceRepo`, or their org role for an org-wide learning.
    */
@@ -68,10 +78,20 @@ export interface LearningEvent {
   /** The access checked for the actor (see `Learning.authorPermission`). */
   actorPermission: CheckedPermission;
   githubCommentId: number | undefined;
+  /** For `reinforced` and `not_followed`: the finding it's about. */
+  findingId?: string;
   createdAt: Date;
 }
 
 export type NewLearningEvent = Omit<LearningEvent, "learningId" | "createdAt">;
+
+/** What became of a finding whose batch had learnings in its prompt (NIC-1081). */
+export interface LearningOutcome {
+  type: "reinforced" | "not_followed";
+  findingId: string;
+  /** The reply that fixed or declined it, when there was one. */
+  githubCommentId?: number;
+}
 
 export interface LearningFilter {
   org: string;
@@ -131,6 +151,16 @@ export interface LearningStore {
   ): Promise<string[]>;
   /** Counts a use of each learning: `hits` goes up by one and `lastUsedAt` becomes `at`. */
   recordUse(ids: readonly string[], at: Date): Promise<void>;
+  /**
+   * Records an outcome on each of `ids` that isn't retired, with an event by LGTMoose
+   * (`SYSTEM_ACTOR`): `reinforced` also counts a hit, `not_followed` only records the event.
+   * Each learning gets one event per finding and type, so a retried post doesn't add another.
+   */
+  recordOutcome(ids: readonly string[], outcome: LearningOutcome, at: Date): Promise<void>;
+  /** The repo's pending and active learnings with a `patternKey`, newest first. */
+  patterned(repo: string): Promise<Learning[]>;
+  /** How many `not_followed` events each of `org`'s learnings got since `since`, by ID. */
+  notFollowedSince(org: string, since: Date): Promise<Map<string, number>>;
   /**
    * Active learnings last used (or, never used, created) before `before`, oldest first, at
    * most `limit`.
@@ -251,6 +281,49 @@ export function memoryLearningStore(now: () => Date = () => new Date()): Learnin
         row.hits += 1;
         row.lastUsedAt = at;
       }
+    },
+    async recordOutcome(ids, outcome, at) {
+      for (const id of new Set(ids)) {
+        const row = rows.get(id);
+        if (row === undefined || row.status === "retired") continue;
+        const seen = history.some(
+          (event) =>
+            event.learningId === id &&
+            event.type === outcome.type &&
+            event.findingId === outcome.findingId,
+        );
+        if (seen) continue;
+        if (outcome.type === "reinforced") {
+          row.hits += 1;
+          row.lastUsedAt = at;
+        }
+        history.push({
+          learningId: id,
+          type: outcome.type,
+          actor: SYSTEM_ACTOR,
+          actorPermission: "system",
+          githubCommentId: outcome.githubCommentId,
+          findingId: outcome.findingId,
+          createdAt: at,
+        });
+      }
+    },
+    async patterned(repo) {
+      return [...rows.values()]
+        .filter(
+          (row) => row.repo === repo && row.patternKey !== undefined && row.status !== "retired",
+        )
+        .reverse()
+        .map((row) => ({ ...row }));
+    },
+    async notFollowedSince(org, since) {
+      const counts = new Map<string, number>();
+      for (const event of history) {
+        if (event.type !== "not_followed" || event.createdAt.getTime() < since.getTime()) continue;
+        if (rows.get(event.learningId)?.org !== org) continue;
+        counts.set(event.learningId, (counts.get(event.learningId) ?? 0) + 1);
+      }
+      return counts;
     },
     async unusedSince(before, limit) {
       const since = (row: Learning) => (row.lastUsedAt ?? row.createdAt).getTime();

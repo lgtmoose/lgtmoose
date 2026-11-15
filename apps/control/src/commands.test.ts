@@ -67,6 +67,7 @@ describe("parseCommand", () => {
     expect(parseCommand("resume")).toEqual({ name: "resume" });
     expect(parseCommand("learnings")).toEqual({ name: "learnings" });
     expect(parseCommand("ignore, this is fine")).toEqual({ name: "ignore" });
+    expect(parseCommand("remember!")).toEqual({ name: "remember" });
     expect(parseCommand("explain")).toEqual({ name: "explain" });
     expect(parseCommand("explain ./src/a.ts:12")).toEqual({
       name: "explain",

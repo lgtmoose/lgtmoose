@@ -49,13 +49,13 @@ describe("parseDeployConfig", () => {
       maxReplyJudgements: 10,
       maxExplanations: 5,
       reviewDebounceSeconds: 60,
-      feedback: { acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 },
+      feedback: { acceptanceThreshold: 0.5, minSamples: 3, maxCommentsPerRun: 100 },
       alarms: {},
       images: { source: "build" },
       budgets: { perPullRequest: {}, prices: {} },
       shadow: true,
       extraEgressHosts: [],
-      learnings: { embeddings: { provider: "none" }, maxPendingPerAuthor: 5 },
+      learnings: { embeddings: { provider: "none" }, maxPendingPerAuthor: 5, repeatThreshold: 2 },
       dashboard: true,
     });
   });
@@ -93,9 +93,19 @@ describe("parseDeployConfig", () => {
   it("takes a pending-learnings limit per author between 1 and 100", () => {
     expect(
       parseDeployConfig({ ...minimal, learnings: { maxPendingPerAuthor: 2 } }).learnings,
-    ).toEqual({ embeddings: { provider: "none" }, maxPendingPerAuthor: 2 });
+    ).toEqual({ embeddings: { provider: "none" }, maxPendingPerAuthor: 2, repeatThreshold: 2 });
     expect(issuesOf({ ...minimal, learnings: { maxPendingPerAuthor: 0 } })).toEqual([
       expect.objectContaining({ path: "learnings.maxPendingPerAuthor" }),
+    ]);
+  });
+
+  it("takes a repeat threshold of at least 2 PRs for learnings from rejections", () => {
+    expect(
+      parseDeployConfig({ ...minimal, learnings: { repeatThreshold: 3 } }).learnings
+        .repeatThreshold,
+    ).toBe(3);
+    expect(issuesOf({ ...minimal, learnings: { repeatThreshold: 1 } })).toEqual([
+      expect.objectContaining({ path: "learnings.repeatThreshold" }),
     ]);
   });
 
@@ -106,6 +116,7 @@ describe("parseDeployConfig", () => {
     ).toEqual({
       embeddings: { provider: "bedrock", model: "amazon.titan-embed-text-v2:0" },
       maxPendingPerAuthor: 5,
+      repeatThreshold: 2,
     });
     expect(
       parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "openai" } } })
@@ -113,6 +124,7 @@ describe("parseDeployConfig", () => {
     ).toEqual({
       embeddings: { provider: "openai", model: "text-embedding-3-small" },
       maxPendingPerAuthor: 5,
+      repeatThreshold: 2,
     });
     expect(
       issuesOf({

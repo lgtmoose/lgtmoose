@@ -6,6 +6,7 @@ import {
   settleReplies,
   writeReplies,
   type JudgedReply,
+  type ReplyWrites,
   type SettleDeps,
 } from "./judged-replies.js";
 import { JUDGE_REPLY_MARKER } from "./replies.js";
@@ -99,6 +100,17 @@ describe("settleReplies", () => {
     expect(replyWritesSchema.parse(JSON.parse(JSON.stringify(writes)))).toEqual(writes);
   });
 
+  it("lists the findings it rejected, and offers `remember` on a plain decline (NIC-1081)", async () => {
+    const { deps } = settleDeps({ 3: { kind: "declined" } });
+    const { writes } = await settleReplies([reply()], { ...deps, slug: "lgtmoose" });
+    expect(writes.rejected).toEqual([{ findingId: "f1", commentId: 501 }]);
+    expect(writes.writes).toMatchObject([
+      { findingId: "f1", threadRootId: 100, threadId: "thread-100", replyEvent: "replied" },
+    ]);
+    expect(writes.writes[0]?.reply).toContain("`@lgtmoose remember`");
+    expect(replyWritesSchema.parse(JSON.parse(JSON.stringify(writes)))).toEqual(writes);
+  });
+
   it("counts a failed judge as an attempt and writes nothing for it", async () => {
     const { deps, closed } = settleDeps({});
     const { writes } = await settleReplies([reply()], deps);
@@ -141,6 +153,8 @@ describe("confirmFixes", () => {
     expect(ids).toEqual(["ok"]);
     expect(closed).toEqual(["ok"]);
     expect(writes.closed).toBe(1);
+    // What outcome learning reinforces (NIC-1081): only the fix that held up.
+    expect((writes as ReplyWrites).fixed).toEqual([{ findingId: "ok", commentId: 501 }]);
     expect(writes.writes).toMatchObject([
       { findingId: "ok", threadId: "thread-ok" },
       { findingId: "again", reply: expect.stringContaining("found this again") },

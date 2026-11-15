@@ -127,6 +127,13 @@
       "when": 1794753975031,
       "tag": "0018_spend-caps",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794755273927,
+      "tag": "0019_outcome-learning",
+      "breakpoints": true
     }
   ]
 }

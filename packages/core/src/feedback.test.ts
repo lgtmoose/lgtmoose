@@ -88,6 +88,29 @@ describe("acceptanceByCategory", () => {
     expect(report?.note).toMatch(/never demoted/);
   });
 
+  it("smooths a small sample towards the org's acceptance, so 3 answers can flag (NIC-1081)", () => {
+    // The org accepts most findings: 18 of 20 outside `style`.
+    const org = [row("correctness", "fixed", 18), row("correctness", "declined", 2)];
+    // Three declines of style: raw 0, smoothed (0 + 4·c) / (3 + 4), c = (18+2)/(23+4).
+    const [style] = acceptanceByCategory([...org, row("style", "declined", 3)], {
+      threshold: 0.5,
+      minSamples: 3,
+    });
+    const centre = (18 + 2) / (18 + 5 + 4);
+    expect(style).toMatchObject({ category: "style", acceptance: 0 });
+    expect(style?.smoothed).toBeCloseTo((4 * centre) / 7, 10);
+    expect(style?.flagged).toBe(true);
+    // One decline after two fixes doesn't flap: raw 2/3, smoothed well above the threshold.
+    const steady = acceptanceByCategory(
+      [...org, row("naming", "fixed", 2), row("naming", "declined", 1)],
+      { threshold: 0.5, minSamples: 3 },
+    ).find((report) => report.category === "naming");
+    expect(steady?.flagged).toBe(false);
+    // Below `minSamples`, nothing is judged.
+    const [few] = acceptanceByCategory([row("style", "declined", 2)], { minSamples: 3 });
+    expect(few).toMatchObject({ acceptance: null, smoothed: null, flagged: false });
+  });
+
   it("produces a report the schema takes", () => {
     const categories = acceptanceByCategory([row("security", "fixed", 1)]);
     expect(

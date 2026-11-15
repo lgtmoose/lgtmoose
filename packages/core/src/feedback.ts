@@ -14,6 +14,11 @@ import { SEVERITIES } from "./severity.js";
  * - neither otherwise (still open, outdated, resolved without a word, or as many 👍 as 👎).
  *
  * Acceptance is accepted / (accepted + rejected), once a category has `minSamples` of those.
+ *
+ * Whether a category is flagged goes by its smoothed acceptance (NIC-1081), so a new install
+ * can flag after a few answers without flapping on one: a Beta prior worth `PRIOR_WEIGHT`
+ * answers, centred on the org's overall acceptance (itself under a Beta(2,2) prior, so it's 0.5
+ * with no answers at all), mixed with the category's own counts.
  */
 
 /** A finding status, as `findings.status` stores it. */
@@ -41,7 +46,9 @@ export interface CategoryStatusCount {
 }
 
 export const DEFAULT_ACCEPTANCE_THRESHOLD = 0.5;
-export const DEFAULT_MIN_SAMPLES = 10;
+export const DEFAULT_MIN_SAMPLES = 3;
+/** How many answers the prior counts as, against a category's own (NIC-1081). */
+export const PRIOR_WEIGHT = 4;
 /** How far back the report looks, by when a finding was raised. */
 export const FEEDBACK_WINDOW_DAYS = 90;
 /** The most declined findings the report lists for `lgtmoose evals export-declined`. */
@@ -62,7 +69,12 @@ const categoryReportSchema = z
     rejected: z.number().int().min(0),
     /** accepted / (accepted + rejected); null below `minSamples`. */
     acceptance: z.number().min(0).max(1).nullable(),
-    /** Below the threshold, with enough samples: for a person to consider demoting. */
+    /**
+     * Acceptance mixed with the prior (see above): what `flagged` goes by. Null below
+     * `minSamples`; left out by reports from before NIC-1081.
+     */
+    smoothed: z.number().min(0).max(1).nullable().optional(),
+    /** Smoothed acceptance below the threshold, with enough samples: for a person to look at. */
     flagged: z.boolean(),
     note: z.string().optional(),
   })
@@ -129,6 +141,16 @@ export function acceptanceByCategory(
     list.push(count);
     byCategory.set(count.category, list);
   }
+  // The prior's centre: the org's acceptance over every category, under Beta(2,2).
+  const allAccepted = counts.reduce(
+    (total, row) => total + (isAccepted(row.status, row.net) ? row.findings : 0),
+    0,
+  );
+  const allRejected = counts.reduce(
+    (total, row) => total + (isRejected(row.status, row.net) ? row.findings : 0),
+    0,
+  );
+  const centre = (allAccepted + 2) / (allAccepted + allRejected + 4);
   const reports = [...byCategory].map(([category, rows]): CategoryReport => {
     const sum = (pick: (row: CategoryStatusCount) => number) =>
       rows.reduce((total, row) => total + pick(row), 0);
@@ -138,7 +160,9 @@ export function acceptanceByCategory(
     const rejected = sum((row) => (isRejected(row.status, row.net) ? row.findings : 0));
     const samples = accepted + rejected;
     const acceptance = samples >= minSamples ? accepted / samples : null;
-    const low = acceptance !== null && acceptance < threshold;
+    const smoothed =
+      samples >= minSamples ? (accepted + PRIOR_WEIGHT * centre) / (samples + PRIOR_WEIGHT) : null;
+    const low = smoothed !== null && smoothed < threshold;
     const protectedCategory = isProtectedCategory(category);
     return {
       category,
@@ -152,6 +176,7 @@ export function acceptanceByCategory(
       accepted,
       rejected,
       acceptance,
+      smoothed,
       flagged: low,
       ...(low && protectedCategory
         ? {

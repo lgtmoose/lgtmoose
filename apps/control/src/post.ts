@@ -46,11 +46,47 @@ import {
   type ReplyWrites,
   type SettleDeps,
 } from "./judged-replies.js";
+import { learningIdsFor } from "./outcome-learning.js";
 import { readJudgement, readOutcome } from "./outcomes.js";
 import { ticketReview } from "./tickets.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
+
+/** The App's slug, for the `remember` offer; none when it can't be read (no offer then). */
+async function slugOf(github: { slug?: () => Promise<string> }): Promise<{ slug?: string }> {
+  try {
+    const slug = await github.slug?.();
+    return slug === undefined ? {} : { slug };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * What the run's judged replies teach (NIC-1081), once they're written: rejected findings may
+ * make a learning of a repeated pattern, and fixed ones reinforce the learnings in their
+ * prompts. Logged on failure, never thrown: the post is done either way.
+ */
+async function learnFromOutcomes(
+  deps: ControlDeps,
+  installationId: number,
+  repo: string,
+  writes: ReplyWrites,
+): Promise<void> {
+  const { outcomes } = deps;
+  if (outcomes === undefined) return;
+  try {
+    if ((writes.fixed ?? []).length > 0) await outcomes.fixed(writes.fixed ?? []);
+    if ((writes.rejected ?? []).length > 0) {
+      await outcomes.rejected(installationId, repo, writes.rejected ?? []);
+    }
+  } catch (error) {
+    deps.log("outcomes not learned from", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 /**
  * The post step of a conversation-only run (`RunManifest.conversationOnly`, NIC-1077): a run for
@@ -90,6 +126,7 @@ async function postConversation(
     threadId: (firstCommentId) =>
       threads.find((thread) => thread.firstCommentId === firstCommentId)?.id,
     pullRequestId: run.pullRequestId,
+    ...(await slugOf(github)),
   });
   let replyWrites: ReplyWrites | undefined;
   if (replied !== undefined) {
@@ -149,6 +186,12 @@ async function postConversation(
         log: (message, fields) => deps.log(message, fields),
       });
       deps.log("replies written", { runId, closed: replyWrites.closed, replied: written });
+      await learnFromOutcomes(
+        deps,
+        manifest.installationId,
+        `${target.owner}/${target.repo}`,
+        replyWrites,
+      );
     }
     progress.replies = true;
     await save();
@@ -360,6 +403,8 @@ async function settleRunReplies(
     permission: (login: string) => Promise<Permission>;
     threadId: (firstCommentId: number) => string | undefined;
     pullRequestId: string;
+    /** The App's slug, for the `remember` offer (NIC-1081). */
+    slug?: string;
   },
 ): Promise<
   | {
@@ -395,6 +440,7 @@ async function settleRunReplies(
     threadId: context.threadId,
     prAuthor: context.prAuthor,
     permission: context.permission,
+    ...(context.slug === undefined ? {} : { slug: context.slug }),
     close,
     disputesAnswered: answered,
     log: (message, fields) => deps.log(message, fields),
@@ -1136,6 +1182,7 @@ export async function post(
     threadId: (firstCommentId) =>
       threads?.find((thread) => thread.firstCommentId === firstCommentId)?.id,
     pullRequestId: run.pullRequestId,
+    ...(await slugOf(github)),
   });
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
@@ -1454,10 +1501,12 @@ export async function post(
         const id = commentIds.get(entry.finding);
         const file = prepared.files.find((candidate) => candidate.path === entry.finding.path);
         const basePath = file === undefined ? undefined : (file.oldPath ?? file.path);
+        const learningIds = learningIdsFor(prepared.jobs, entry.finding.path);
         return {
           ...entry,
           ...(id === undefined ? {} : { githubCommentId: id }),
           ...(basePath === undefined ? {} : { basePath }),
+          ...(learningIds.length === 0 ? {} : { learningIds }),
         };
       }),
     );
@@ -1691,6 +1740,12 @@ export async function post(
           log: (message, fields) => deps.log(message, fields),
         });
         deps.log("replies written", { runId, closed: replyWrites.closed, replied });
+        await learnFromOutcomes(
+          deps,
+          manifest.installationId,
+          `${target.owner}/${target.repo}`,
+          replyWrites,
+        );
       }
       progress.replies = true;
       await save();

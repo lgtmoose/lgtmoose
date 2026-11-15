@@ -83,6 +83,8 @@ describe("learningsRetriever", () => {
         category: "money",
         scope: "path src/**",
         text: "Amounts are in cents.",
+        // Kept with the batch, never put in the prompt (NIC-1081).
+        id: "learning-1",
       },
     ]);
     expect(

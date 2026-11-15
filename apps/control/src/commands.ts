@@ -25,6 +25,8 @@ export type Command =
   | { name: "approve"; id: string }
   | { name: "learnings" }
   | { name: "ignore" }
+  /** In a declined finding's thread: learn not to raise findings like it here (NIC-1081). */
+  | { name: "remember" }
   /** Anything else: answered with the help text. */
   | { name: "unknown"; word: string };
 
@@ -115,6 +117,8 @@ export function parseCommand(text: string): Command {
       return { name: "learnings" };
     case "ignore":
       return { name: "ignore" };
+    case "remember":
+      return { name: "remember" };
     case "forget":
     case "approve": {
       const id = words[1] ?? "";
@@ -192,6 +196,7 @@ export function helpText(slug: string): string {
     `| \`${at} resume\` | Starts automatic reviews again (needs write access). |`,
     `| \`${at} explain\` | In a finding's thread, or \`explain path:line\`: explains that finding. For the PR's author or someone with write access, a model answers in a later run. |`,
     `| \`${at} ignore\` | In a finding's thread: declines it. Blocking findings need someone with write access other than the PR's author. |`,
+    `| \`${at} remember\` | In a declined finding's thread: learns not to raise findings like it in this repo. Applied at once with write access, otherwise pending. Never for protected categories. |`,
     `| \`${at} learn: <text>\` | Proposes a learning for this repo. Tags: \`[path <glob>]\`, \`[org]\`, \`[kind <kind>]\`, \`[category <name>]\`. Applied at once with write access, otherwise pending. |`,
     `| \`${at} learnings\` | Lists the learnings that apply to this PR. |`,
     `| \`${at} approve <id>\` | Makes a pending learning active (needs write access, or an org owner for org-wide ones). |`,

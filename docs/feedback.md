@@ -24,13 +24,21 @@ Over findings raised in the last 90 days, each finding counts as:
 - **neither** otherwise: still open, outdated, resolved without a word, or as many 👍 as 👎.
 
 A category's acceptance is accepted ÷ (accepted + rejected), once it has `feedback.minSamples` of
-those (10 by default). A category below `feedback.acceptanceThreshold` (0.5 by default) is
-**flagged** for a person to look at. Protected categories (`authz`, `tenant_scoping`, `money`,
-`secrets`) are never demoted, only flagged with a note.
+those (3 by default). Whether it's **flagged** for a person to look at goes by its _smoothed_
+acceptance, below `feedback.acceptanceThreshold` (0.5 by default), so a new install can flag a
+noisy category after a few answers without flapping on one:
+
+- the org's overall acceptance, over every category, under a Beta(2,2) prior (0.5 with no
+  answers at all), is the prior's centre;
+- the category's smoothed acceptance is (accepted + 4 × centre) ÷ (accepted + rejected + 4): the
+  prior counts as 4 answers.
+
+The report has both `acceptance` (raw) and `smoothed`. Protected categories (`authz`,
+`tenant_scoping`, `money`, `secrets`) are never demoted, only flagged with a note.
 
 ```ts
 // lgtmoose.config.ts
-feedback: { acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 },
+feedback: { acceptanceThreshold: 0.5, minSamples: 3, maxCommentsPerRun: 100 },
 ```
 
 ## The report

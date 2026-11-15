@@ -225,6 +225,13 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       spend: { repos: [] },
     });
     expect(await get("/api/learnings")).toMatchObject({ learnings: [{ id: learningId }] });
+    // What was learned lately, and what wasn't followed (NIC-1081): `learning_events` read
+    // through its column grant.
+    expect(await get("/api/learnings/activity")).toMatchObject({
+      days: 7,
+      learned: [{ id: learningId }],
+      notFollowed: [],
+    });
     // The report, through its view.
     expect(await get("/api/acceptance")).toMatchObject({ report: { version: 1 } });
 
@@ -276,6 +283,8 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "update learnings set status = 'active', author = 'mallory'",
       `insert into learnings (org, kind, text, status, author, author_permission) values ('acme', 'convention', 'x', 'active', 'm', 'write')`,
       "delete from learnings",
+      // Only which learning, what happened and when: not who.
+      "select actor from learning_events",
       "update learning_events set actor = 'mallory'",
       "delete from learning_events",
       "update findings set status = 'outdated'",

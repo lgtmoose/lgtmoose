@@ -1,5 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
+import { findings, pullRequests } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { drizzleLearningStore, type NewLearning } from "@lgtmoose/learnings";
 import { drizzle } from "drizzle-orm/pglite";
@@ -317,5 +318,54 @@ describe("dashboard usage", () => {
     const response = await handleDashboardRequest(d, request("GET", "/api/usage", { cookies }));
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toMatchObject({ days: 30, providers: [], cooldowns: [] });
+  });
+
+  it("shows what was learned this week and which learnings weren't followed (NIC-1081)", async () => {
+    const fresh = await learning({ repo: "acme/api", status: "active" });
+    const hidden = await learning({ repo: "acme/secret", sourceRepo: "acme/secret" });
+    const [pull] = await db
+      .insert(pullRequests)
+      .values({
+        installationId: 1,
+        repo: "acme/api",
+        number: 77,
+        author: "bob",
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+      })
+      .returning({ id: pullRequests.id });
+    const [declined] = await db
+      .insert(findings)
+      .values({
+        pullRequestId: pull?.id ?? "",
+        fingerprint: "fp1:activity",
+        ruleCategory: "style",
+        severity: "nit",
+        title: "Prefer named exports",
+        body: "x",
+        raisedAtSha: "a".repeat(40),
+      })
+      .returning({ id: findings.id });
+    await learnings.recordOutcome(
+      [fresh, hidden],
+      { type: "not_followed", findingId: declined?.id ?? "" },
+      new Date(),
+    );
+    const d = deps("member");
+    const cookies = await signIn(d);
+    const response = await handleDashboardRequest(
+      d,
+      request("GET", "/api/learnings/activity", { cookies }),
+    );
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as {
+      days: number;
+      learned: { id: string }[];
+      notFollowed: { id: string; notFollowed: number }[];
+    };
+    expect(body.days).toBe(7);
+    expect(body.learned.map((entry) => entry.id)).toContain(fresh);
+    expect(body.learned.map((entry) => entry.id)).not.toContain(hidden);
+    expect(body.notFollowed).toEqual([expect.objectContaining({ id: fresh, notFollowed: 1 })]);
   });
 });

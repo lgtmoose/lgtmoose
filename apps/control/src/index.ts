@@ -8,16 +8,24 @@ import {
   readControlEnv,
   readEmbeddingsSettings,
   readMaxPendingLearnings,
+  readRepeatThreshold,
   readReviewSettings,
   readTicketSettings,
 } from "./env.js";
 import { runCommand } from "./run.js";
 import { readBudgets } from "./spend.js";
 
-/** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
-function maxPending(): { maxPendingLearnings?: number } {
+/**
+ * `learnings.maxPendingPerAuthor` and `learnings.repeatThreshold`, as the Workflow stack sets
+ * them; unset, the defaults.
+ */
+function maxPending(): { maxPendingLearnings?: number; repeatThreshold?: number } {
   const limit = readMaxPendingLearnings(process.env);
-  return limit === undefined ? {} : { maxPendingLearnings: limit };
+  const threshold = readRepeatThreshold(process.env);
+  return {
+    ...(limit === undefined ? {} : { maxPendingLearnings: limit }),
+    ...(threshold === undefined ? {} : { repeatThreshold: threshold }),
+  };
 }
 
 /**
