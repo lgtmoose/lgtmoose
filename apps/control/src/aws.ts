@@ -711,7 +711,12 @@ function log(message: string, fields: Record<string, unknown> = {}): void {
  */
 export async function awsControlDeps(
   env: ControlEnv,
-  options: { shadow: boolean; embeddings?: EmbeddingsSettings; tickets?: TicketSettings },
+  options: {
+    shadow: boolean;
+    embeddings?: EmbeddingsSettings;
+    tickets?: TicketSettings;
+    maxPendingLearnings?: number;
+  },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
   const app = parseSecret(
@@ -771,6 +776,9 @@ export async function awsControlDeps(
       shadow: options.shadow,
       embedder,
       ...(tickets === undefined ? {} : { tickets }),
+      ...(options.maxPendingLearnings === undefined
+        ? {}
+        : { maxPendingLearnings: options.maxPendingLearnings }),
     }),
     close: () => pool.end(),
   };
@@ -785,6 +793,8 @@ export interface ControlParts {
   shadow: boolean;
   embedder: Parameters<typeof learningsRetriever>[1];
   tickets?: NonNullable<ControlDeps["tickets"]>;
+  /** `learnings.maxPendingPerAuthor`; left out, the policy's default. */
+  maxPendingLearnings?: number;
 }
 
 /**
@@ -793,7 +803,7 @@ export interface ControlParts {
  * their own way and share the rest.
  */
 export function controlDepsFor(parts: ControlParts): ControlDeps {
-  const { app, db, store, embedder, tickets } = parts;
+  const { app, db, store, embedder, tickets, maxPendingLearnings } = parts;
   const options = { shadow: parts.shadow };
   const learningStore = drizzleLearningStore(db);
 
@@ -902,6 +912,9 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
           permissions: (_repo, login) =>
             collaboratorPermission(client, { owner, repo: name }, login, log),
           orgRoles: (org, login) => orgRole(client, org, login, log),
+          ...(maxPendingLearnings === undefined
+            ? {}
+            : { maxPendingPerAuthor: maxPendingLearnings }),
         },
         // A repo-wide convention from the person's reason, as `learn:` makes by default.
         { kind: "convention", text: proposal.text, scope: { level: "repo" } },

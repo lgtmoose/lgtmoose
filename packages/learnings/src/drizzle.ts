@@ -131,6 +131,23 @@ export function drizzleLearningStore(
         .orderBy(desc(learnings.createdAt), desc(learnings.id));
       return rows.map(toLearning);
     },
+    async countPending(org, author, except) {
+      const where: SQL[] = [
+        eq(learnings.org, org),
+        eq(learnings.status, "pending"),
+        sql`lower(${learnings.author}) = lower(${author})`,
+      ];
+      if (except !== undefined) {
+        where.push(
+          sql`not (${learnings.sourceRepo} = ${except.sourceRepo} and ${learnings.sourceCommentId} is not distinct from ${except.sourceCommentId})`,
+        );
+      }
+      const [row] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(learnings)
+        .where(and(...where));
+      return row?.count ?? 0;
+    },
     async events(learningId) {
       const rows = await db
         .select()

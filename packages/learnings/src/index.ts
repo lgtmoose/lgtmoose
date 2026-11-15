@@ -1,6 +1,7 @@
 export { drizzleLearningStore } from "./drizzle.js";
 export {
   approveLearning,
+  DEFAULT_MAX_PENDING_PER_AUTHOR,
   forgetLearning,
   learningProposalSchema,
   MAX_LEARNING_TEXT,

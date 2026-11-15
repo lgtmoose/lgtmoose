@@ -101,6 +101,21 @@ describe("drizzleLearningStore", () => {
     expect((await store.list({ org: "acme" })).some((row) => row.repo === "acme/other")).toBe(true);
   });
 
+  it("counts an author's pending learnings in an org, case-insensitively", async () => {
+    const pending = (overrides: Partial<NewLearning>) =>
+      store.insert(learning({ org: "count", status: "pending", author: "eve", ...overrides }), []);
+    await pending({ sourceCommentId: 900 });
+    await pending({ sourceCommentId: 901, author: "Eve" });
+    await pending({ sourceCommentId: 902, author: "mallory" });
+    await pending({ sourceCommentId: 903, status: "active" });
+    await pending({ sourceCommentId: 904, org: "elsewhere" });
+    expect(await store.countPending("count", "EVE")).toBe(2);
+    expect(
+      await store.countPending("count", "eve", { sourceRepo: "acme/shop", sourceCommentId: 900 }),
+    ).toBe(1);
+    expect(await store.countPending("count", "nobody")).toBe(0);
+  });
+
   it("keeps a forgotten learning's row and history", async () => {
     const deps: LearningDeps = {
       store,

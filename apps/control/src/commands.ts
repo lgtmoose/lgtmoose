@@ -21,6 +21,8 @@ export type Command =
   | { name: "explain"; at?: { path: string; line: number } }
   | { name: "learn"; text: string }
   | { name: "forget"; id: string }
+  /** `approve <id>`: makes a pending learning active. */
+  | { name: "approve"; id: string }
   | { name: "learnings" }
   | { name: "ignore" }
   /** Anything else: answered with the help text. */
@@ -113,11 +115,12 @@ export function parseCommand(text: string): Command {
       return { name: "learnings" };
     case "ignore":
       return { name: "ignore" };
-    case "forget": {
+    case "forget":
+    case "approve": {
       const id = words[1] ?? "";
       return LEARNING_ID.test(id) && third === undefined
-        ? { name: "forget", id: id.toLowerCase() }
-        : { name: "unknown", word: "forget" };
+        ? { name: first, id: id.toLowerCase() }
+        : { name: "unknown", word: first };
     }
     case "explain": {
       const where = words[1];
@@ -191,6 +194,7 @@ export function helpText(slug: string): string {
     `| \`${at} ignore\` | In a finding's thread: declines it. Blocking findings need someone with write access other than the PR's author. |`,
     `| \`${at} learn: <text>\` | Proposes a learning for this repo. Tags: \`[path <glob>]\`, \`[org]\`, \`[kind <kind>]\`, \`[category <name>]\`. Applied at once with write access, otherwise pending. |`,
     `| \`${at} learnings\` | Lists the learnings that apply to this PR. |`,
+    `| \`${at} approve <id>\` | Makes a pending learning active (needs write access, or an org owner for org-wide ones). |`,
     `| \`${at} forget <id>\` | Retires a learning (needs write access, or an org owner for org-wide ones). |`,
     `| \`${at} help\` | Shows this list. |`,
   ].join("\n");

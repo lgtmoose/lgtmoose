@@ -16,15 +16,29 @@ if (adminUrl === undefined && process.env.CI === "true") {
   throw new Error("LGTMOOSE_TEST_DATABASE_URL must be set in CI");
 }
 
+/**
+ * A pool or client's `error` listener. The teardown drops the database `with (force)`, which
+ * terminates any connection still open (57P01, admin_shutdown); that's expected there and
+ * ignored. Anything else is thrown, so the test fails on it rather than the process.
+ */
+function onError(error: Error & { code?: string }): void {
+  if (error.code === "57P01") return;
+  throw error;
+}
+
 describe.skipIf(adminUrl === undefined)("local stand-ins on Postgres", () => {
   const database = `lgtmoose_local_${randomBytes(4).toString("hex")}`;
   let pool: pg.Pool;
 
   beforeAll(async () => {
     const admin = new pg.Client({ connectionString: adminUrl });
+    admin.on("error", onError);
     await admin.connect();
-    await admin.query(`create database ${database}`);
-    await admin.end();
+    try {
+      await admin.query(`create database ${database}`);
+    } finally {
+      await admin.end();
+    }
     const parsed = new URL(adminUrl ?? "");
     parsed.pathname = `/${database}`;
     await runMigrations({
@@ -32,14 +46,21 @@ describe.skipIf(adminUrl === undefined)("local stand-ins on Postgres", () => {
       migrationsFolder: MIGRATIONS_FOLDER,
     });
     pool = new pg.Pool({ connectionString: parsed.toString(), max: 16 });
+    // Idle clients the server terminates at teardown emit here, not as an unhandled error.
+    pool.on("error", onError);
   }, 60_000);
 
   afterAll(async () => {
+    // Every client is released by then; end waits for them all to close.
     await pool.end();
     const admin = new pg.Client({ connectionString: adminUrl });
+    admin.on("error", onError);
     await admin.connect();
-    await admin.query(`drop database if exists ${database} with (force)`);
-    await admin.end();
+    try {
+      await admin.query(`drop database if exists ${database} with (force)`);
+    } finally {
+      await admin.end();
+    }
   });
 
   it("never hands one message, or two of one group, to concurrent receivers", async () => {
@@ -109,6 +130,7 @@ describe.skipIf(adminUrl === undefined)("local stand-ins on Postgres", () => {
     url.username = role;
     url.password = password;
     const gateway = new pg.Pool({ connectionString: url.toString(), max: 2 });
+    gateway.on("error", onError);
     try {
       const queue = new PostgresQueue(drizzle({ client: gateway }), "jobs");
       expect(await queue.send({ groupId: "acme/shop#1", dedupeId: "d-1", body: "{}" })).toBe(true);

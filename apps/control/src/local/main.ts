@@ -116,6 +116,7 @@ async function main(): Promise<void> {
     shadow: config.shadow,
     embedder,
     ...(tickets === undefined ? {} : { tickets }),
+    maxPendingLearnings: config.learnings.maxPendingPerAuthor,
   });
 
   const docker = new Docker(
@@ -213,6 +214,7 @@ async function main(): Promise<void> {
     },
     store: drizzleConversationStore(db),
     learnings: drizzleLearningStore(db),
+    maxPendingLearnings: config.learnings.maxPendingPerAuthor,
     replies: drizzleReplyStore(db),
     queue: sender,
     shadow: config.shadow,

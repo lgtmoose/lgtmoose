@@ -52,7 +52,7 @@ describe("parseDeployConfig", () => {
       images: { source: "build" },
       shadow: true,
       extraEgressHosts: [],
-      learnings: { embeddings: { provider: "none" } },
+      learnings: { embeddings: { provider: "none" }, maxPendingPerAuthor: 5 },
       dashboard: true,
     });
   });
@@ -87,15 +87,30 @@ describe("parseDeployConfig", () => {
     ).toContainEqual(expect.objectContaining({ path: "providers[0].harness" }));
   });
 
+  it("takes a pending-learnings limit per author between 1 and 100", () => {
+    expect(
+      parseDeployConfig({ ...minimal, learnings: { maxPendingPerAuthor: 2 } }).learnings,
+    ).toEqual({ embeddings: { provider: "none" }, maxPendingPerAuthor: 2 });
+    expect(issuesOf({ ...minimal, learnings: { maxPendingPerAuthor: 0 } })).toEqual([
+      expect.objectContaining({ path: "learnings.maxPendingPerAuthor" }),
+    ]);
+  });
+
   it("takes an embeddings provider for learnings, with each one's default model", () => {
     expect(
       parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "bedrock" } } })
         .learnings,
-    ).toEqual({ embeddings: { provider: "bedrock", model: "amazon.titan-embed-text-v2:0" } });
+    ).toEqual({
+      embeddings: { provider: "bedrock", model: "amazon.titan-embed-text-v2:0" },
+      maxPendingPerAuthor: 5,
+    });
     expect(
       parseDeployConfig({ ...minimal, learnings: { embeddings: { provider: "openai" } } })
         .learnings,
-    ).toEqual({ embeddings: { provider: "openai", model: "text-embedding-3-small" } });
+    ).toEqual({
+      embeddings: { provider: "openai", model: "text-embedding-3-small" },
+      maxPendingPerAuthor: 5,
+    });
     expect(
       issuesOf({
         ...minimal,

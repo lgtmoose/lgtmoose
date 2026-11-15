@@ -1,5 +1,6 @@
 import type { ReviewJob, Severity } from "@lgtmoose/core";
 import {
+  approveLearning,
   forgetLearning,
   learningsForPullRequest,
   proposeLearning,
@@ -121,6 +122,8 @@ export interface ConversationDeps {
   github(installationId: number): Promise<ConversationGitHub>;
   store: ConversationStore;
   learnings: LearningStore;
+  /** The most pending learnings one author may have (`LearningDeps.maxPendingPerAuthor`). */
+  maxPendingLearnings?: number;
   /**
    * Replies on our findings' threads, waiting for the reply judge. Left out, replies are
    * deferred as before.
@@ -168,7 +171,14 @@ interface Context {
   slug: string;
   owner: string;
   pull: () => Promise<PullInfo>;
+  /** A login's permission on the PR's repository. */
   permission: (login: string) => Promise<Permission>;
+  /**
+   * A login's permission on any repository (`owner/name`), read once per repository and login
+   * per job: a learning's own repository may not be the PR's. `none` when the installation
+   * can't see it.
+   */
+  permissionOn: (repo: string, login: string) => Promise<Permission>;
 }
 
 function memo<T>(read: (key: string) => Promise<T>): (key: string) => Promise<T> {
@@ -321,8 +331,13 @@ async function ignoreCommand(context: Context): Promise<Outcome> {
 function learningDeps(context: Context): LearningDeps {
   return {
     store: context.deps.learnings,
-    permissions: (_repo, login) => context.permission(login),
+    // The permission on the repository asked about (a learning's source repository), never
+    // just the PR's: write on one repository mustn't approve or forget another's learnings.
+    permissions: (repo, login) => context.permissionOn(repo, login),
     orgRoles: (org, login) => context.github.orgRole(org, login),
+    ...(context.deps.maxPendingLearnings === undefined
+      ? {}
+      : { maxPendingPerAuthor: context.deps.maxPendingLearnings }),
   };
 }
 
@@ -364,6 +379,31 @@ async function forgetCommand(context: Context, id: string): Promise<Outcome> {
   if (result.outcome === "unchanged")
     return { ok: true, reply: "That learning is already retired." };
   return { ok: true };
+}
+
+async function approveCommand(context: Context, id: string): Promise<Outcome> {
+  // Only this account's learnings: an ID from elsewhere is as good as unknown.
+  const learning = await context.deps.learnings.get(id);
+  if (learning === undefined || !sameLogin(learning.org, context.owner)) {
+    return { ok: false, reply: "There's no such learning here." };
+  }
+  const result = await approveLearning(learningDeps(context), id, {
+    login: context.comment.author,
+    commentId: context.job.commentId,
+  });
+  if (result.outcome === "refused") {
+    return { ok: false, reply: `Not approved: ${inline(result.reason)}.` };
+  }
+  if (result.outcome === "unchanged") {
+    return {
+      ok: true,
+      reply:
+        result.learning?.status === "active"
+          ? "That learning is already active."
+          : "Only a pending learning can be approved.",
+    };
+  }
+  return { ok: true, reply: `Learning \`${result.learning.id}\` is active.` };
 }
 
 async function learningsCommand(context: Context): Promise<Outcome> {
@@ -416,6 +456,8 @@ async function run(context: Context, command: Command): Promise<Outcome> {
       return learnCommand(context, command.text);
     case "forget":
       return forgetCommand(context, command.id);
+    case "approve":
+      return approveCommand(context, command.id);
     case "learnings":
       return learningsCommand(context);
   }
@@ -466,6 +508,11 @@ export async function handleConversation(
 
   const [owner = ""] = job.repo.split("/");
   let pull: Promise<PullInfo> | undefined;
+  const permission = memo((login) => github.permission(job.repo, login));
+  const otherPermission = memo((key) => {
+    const [repo = "", login = ""] = key.split("\n");
+    return github.permission(repo, login);
+  });
   const context: Context = {
     deps,
     github,
@@ -475,7 +522,11 @@ export async function handleConversation(
     slug,
     owner,
     pull: () => (pull ??= github.pull(job.repo, job.prNumber)),
-    permission: memo((login) => github.permission(job.repo, login)),
+    permission,
+    permissionOn: (repo, login) =>
+      repo.toLowerCase() === job.repo.toLowerCase()
+        ? permission(login)
+        : otherPermission(`${repo}\n${login}`),
   };
   const outcomes: Outcome[] = [];
   for (const command of commands) outcomes.push(await run(context, command));

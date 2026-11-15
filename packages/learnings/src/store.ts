@@ -103,6 +103,16 @@ export interface LearningStore {
   ): Promise<Learning | undefined>;
   /** Newest first. */
   list(filter: LearningFilter): Promise<Learning[]>;
+  /**
+   * How many of `author`'s learnings in `org` are pending, leaving out the one proposed in
+   * `except` (a source repo and comment), so a retried proposal isn't counted against itself.
+   * Logins are compared case-insensitively.
+   */
+  countPending(
+    org: string,
+    author: string,
+    except?: { sourceRepo: string; sourceCommentId: number },
+  ): Promise<number>;
   /** Oldest first. */
   events(learningId: string): Promise<LearningEvent[]>;
   /** Of `ids`, the learnings without an embedding from `model` (none, or another model's). */
@@ -199,6 +209,19 @@ export function memoryLearningStore(now: () => Date = () => new Date()): Learnin
         )
         .reverse()
         .map((row) => ({ ...row }));
+    },
+    async countPending(org, author, except) {
+      return [...rows.values()].filter(
+        (row) =>
+          row.org === org &&
+          row.status === "pending" &&
+          row.author.toLowerCase() === author.toLowerCase() &&
+          !(
+            except !== undefined &&
+            row.sourceRepo === except.sourceRepo &&
+            row.sourceCommentId === except.sourceCommentId
+          ),
+      ).length;
     },
     async events(learningId) {
       return history.filter((event) => event.learningId === learningId).map((e) => ({ ...e }));

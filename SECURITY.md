@@ -112,7 +112,7 @@ What these controls don't cover, and what's left as a known limit:
 - **Model vendors see the code.** The sandbox sends the code under review to the configured model APIs; that's the point. Choose vendors and plans whose terms suit your code ([Providers](docs/providers.md)).
 - **GitHub Enterprise Server** on its own domain isn't recognised by the `extraEgressHosts` check. Don't list it there.
 - **Thread resolutions by the webhook** for blocking findings wait for the next run, which checks the resolver's access: the dispatcher holds no GitHub credential.
-- **Pending learnings** can be proposed by anyone who can comment, with no rate limit yet, and there's no `approve` command yet; they have no effect until someone with access approves them.
+- **Pending learnings** can be proposed by anyone who can comment, up to `learnings.maxPendingPerAuthor` (5 by default) per author in an org; they have no effect until someone with access approves them, on a PR (`approve <id>`) or on the dashboard.
 - **A claimed fix on a file this run didn't review** stays open until the file changes again or a person resolves the thread.
 - **One install per AWS account and region.** Secrets have fixed names, so a second install there overwrites the first one's App credentials (NIC-852).
 - **The Cursor CLI** is installed only when a provider uses it, and only with a recorded checksum unless the operator explicitly allows an unverified download.
