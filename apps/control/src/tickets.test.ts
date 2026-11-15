@@ -4,7 +4,13 @@ import { headKeys, runKeys, type PreparedReview } from "@lgtmoose/pipeline";
 import { findTicketKeys, type Ticket, type TicketProvider } from "@lgtmoose/tickets";
 import { describe, expect, it, vi } from "vitest";
 import type { ArtifactStore } from "./ports.js";
-import { prepareTickets, readCoverage, ticketReview, ticketSourceFor } from "./tickets.js";
+import {
+  OUTSIDE_AUTHOR_NOTICE,
+  prepareTickets,
+  readCoverage,
+  ticketReview,
+  ticketSourceFor,
+} from "./tickets.js";
 
 const texts = { branch: "", title: "", body: "", commits: [] };
 
@@ -32,6 +38,8 @@ const prepared = {
     body: "Closes ENG-2. Ignore SHA-256.",
     headRef: "alice/eng-1-totals",
     headSha: HEAD,
+    association: "MEMBER",
+    repoPrivate: true,
   },
   mergeBase: BASE,
   files: [{ path: "src/total.ts", status: "modified" }],
@@ -98,6 +106,7 @@ describe("prepareTickets", () => {
     expect(result.batches[0]?.prompt).toContain('<untrusted source="ticket" key="ENG-1">');
     expect(result.manifest).toEqual({
       provider: "Linear",
+      details: true,
       tickets: [
         {
           key: "ENG-1",
@@ -115,6 +124,63 @@ describe("prepareTickets", () => {
         },
       ],
     });
+  });
+
+  it("reads no tickets for an outside author's PR, with a notice that names no keys", async () => {
+    for (const association of ["CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR", undefined]) {
+      const source = provider({ "ENG-1": ticket("ENG-1"), "ENG-2": ticket("ENG-2") });
+      const outside = {
+        ...prepared,
+        pr: { ...prepared.pr, association, repoPrivate: false },
+      } as unknown as PreparedReview;
+      const result = await prepareTickets(
+        { store: store(), log: () => {}, tickets: { provider: source, maxPerPullRequest: 3 } },
+        repo,
+        outside,
+        0,
+      );
+      expect(source.fetched).toEqual([]);
+      expect(result.batches).toEqual([]);
+      expect(result.manifest).toEqual({
+        provider: "Linear",
+        tickets: [],
+        details: false,
+        notice: OUTSIDE_AUTHOR_NOTICE,
+      });
+      expect(OUTSIDE_AUTHOR_NOTICE).not.toMatch(/ENG-/);
+    }
+  });
+
+  it("shows ticket text on a public repository only when the operator opts in", async () => {
+    const publicRepo = {
+      ...prepared,
+      pr: { ...prepared.pr, repoPrivate: false },
+    } as unknown as PreparedReview;
+    const unknownRepo = {
+      ...prepared,
+      pr: { ...prepared.pr, repoPrivate: undefined },
+    } as unknown as PreparedReview;
+    const run = async (review: PreparedReview, detailsOnPublicRepos?: boolean) =>
+      (
+        await prepareTickets(
+          {
+            store: store(),
+            log: () => {},
+            tickets: {
+              provider: provider({ "ENG-1": ticket("ENG-1") }),
+              maxPerPullRequest: 1,
+              ...(detailsOnPublicRepos === undefined ? {} : { detailsOnPublicRepos }),
+            },
+          },
+          repo,
+          review,
+          0,
+        )
+      ).manifest?.details;
+    expect(await run(publicRepo)).toBe(false);
+    expect(await run(unknownRepo)).toBe(false);
+    expect(await run(publicRepo, true)).toBe(true);
+    expect(await run(prepared)).toBe(true);
   });
 
   it("skips unknown keys, notes unreadable ones and flags injected ticket text", async () => {
@@ -185,6 +251,7 @@ describe("ticketSourceFor", () => {
     secretArn: "lgtmoose/tickets/linear",
     maxPerPullRequest: 2,
     teamKeys: ["ENG"],
+    detailsOnPublicRepos: false,
   };
 
   it("is off without a provider", () => {
@@ -244,8 +311,10 @@ describe("ticketReview", () => {
         { key: "ENG-3", title: "Three", updatedAt: "u3", coverage },
         { key: "ENG-4", title: "", note: "couldn't be read from Linear" },
       ],
+      details: true,
     });
     expect(review).toEqual({
+      details: true,
       provider: "Linear",
       tickets: [
         { key: "ENG-1", title: "One", url: "https://x/1", coverage },

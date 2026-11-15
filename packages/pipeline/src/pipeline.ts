@@ -249,6 +249,19 @@ export interface TicketReview {
    * like a flagged PR description.
    */
   injected: { key: string; kinds: InjectionKind[] }[];
+  /**
+   * Whether the summary may show ticket text: titles, links, the checker's notes and the missing
+   * requirements (which paraphrase the ticket). False on a public repository unless the operator
+   * opts in (`tickets.detailsOnPublicRepos`): then only each key, its coverage level and how
+   * many core requirements look missing are shown, since the comment is public and the tickets
+   * may not be.
+   */
+  details: boolean;
+  /**
+   * Why no tickets were read, in plain code text, such as "ticket coverage runs only for pull
+   * requests by the repository's owners, members and collaborators". It names no keys.
+   */
+  notice?: string;
 }
 
 /** A ticket key as providers give them; anything else isn't shown in the decision's reasons. */
@@ -267,30 +280,44 @@ function ticketParts(tickets: TicketReview | undefined): {
     ticket.coverage === undefined ? [] : missingCore(ticket.coverage),
   );
   const gaps = Math.min(missing.length, MAX_TICKET_GAPS);
-  // The note is ours when there's no checklist; otherwise the checker's summary, if any.
+  const { details } = tickets;
+  // Ours when there's no checklist; otherwise the checker's summary, if any, and only with
+  // details: it paraphrases the ticket. Without details, just how many look missing.
   const noteOf = (ticket: TicketReview["tickets"][number]): { note?: string } => {
-    const note = ticket.note ?? ticket.coverage?.summary;
-    return note === undefined ? {} : { note };
+    if (ticket.note !== undefined) return { note: ticket.note };
+    if (details)
+      return ticket.coverage?.summary === undefined ? {} : { note: ticket.coverage.summary };
+    const count = ticket.coverage === undefined ? 0 : missingCore(ticket.coverage).length;
+    return count === 0
+      ? {}
+      : {
+          note: `${count} core requirement${count === 1 ? "" : "s"} look${count === 1 ? "s" : ""} missing`,
+        };
   };
   return {
     gaps,
     table: {
       provider: tickets.provider,
+      ...(tickets.notice === undefined ? {} : { notice: tickets.notice }),
       tickets: tickets.tickets.map((ticket) => ({
         key: ticket.key,
-        title: ticket.title,
-        ...(ticket.url === undefined ? {} : { url: ticket.url }),
+        // A public repository's summary names the key only: no title, link or requirement text.
+        title: details ? ticket.title : "",
+        ...(details && ticket.url !== undefined ? { url: ticket.url } : {}),
         coverage: ticket.coverage === undefined ? "not_checked" : coverageLevel(ticket.coverage),
         ...noteOf(ticket),
-        ...(ticket.coverage === undefined
-          ? {}
-          : { missing: missingCore(ticket.coverage).map((req) => req.text) }),
+        ...(details && ticket.coverage !== undefined
+          ? { missing: missingCore(ticket.coverage).map((req) => req.text) }
+          : {}),
       })),
       footnote:
         `Coverage is a model's reading of the diff against each ticket, so check it. ` +
         `Each missing core requirement counts as a should-fix finding, up to ${MAX_TICKET_GAPS} per review` +
         (missing.length > MAX_TICKET_GAPS ? ` (${missing.length} found)` : "") +
-        "; it never blocks the merge on its own.",
+        "; it never blocks the merge on its own." +
+        (details
+          ? ""
+          : " This repository is public, so tickets' titles and requirements aren't shown."),
     },
   };
 }

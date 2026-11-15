@@ -54,6 +54,8 @@ export interface TicketCoverage {
   }[];
   /** A line under the table, such as how missing requirements count. Plain code text. */
   footnote?: string;
+  /** Why no tickets were read, shown instead of "No linked tickets." Plain code text. */
+  notice?: string;
 }
 
 export interface SummaryInput {
@@ -421,7 +423,7 @@ function renderChanges(input: SummaryInput, ctx: Context, detail: Detail): strin
 function renderTickets(tickets: TicketCoverage): string {
   const lines = [`### Ticket coverage (${inline(clip(tickets.provider, 50))})`, ""];
   if (tickets.tickets.length === 0) {
-    lines.push("No linked tickets.");
+    lines.push(tickets.notice === undefined ? "No linked tickets." : `_${tickets.notice}_`);
     return lines.join("\n");
   }
   lines.push("| Ticket | Coverage | Notes |", "| --- | --- | --- |");

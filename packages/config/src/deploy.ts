@@ -417,6 +417,8 @@ export const deployConfigSchema = z
      * Ticket coverage (NIC-839): the review reads the tickets a PR names (in its branch, title,
      * description and commits) and checks the PR against their requirements. Only Linear is
      * built; its API key is stored by `lgtmoose auth linear` and read by the control task only.
+     * Only PRs by the repository's owners, members and collaborators get tickets read, and a
+     * public repository's summary shows no ticket text unless `detailsOnPublicRepos` is on.
      */
     tickets: z
       .object({
@@ -438,6 +440,12 @@ export const deployConfigSchema = z
           .default([])
           .describe(
             "Only these teams' ticket keys count, such as ENG for ENG-123. Empty: any key the provider knows.",
+          ),
+        detailsOnPublicRepos: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Show tickets' titles, links and requirements in the summary on public repositories too. Off: a public repository's summary shows only each key, its coverage level and how many core requirements look missing.",
           ),
       })
       .strict()

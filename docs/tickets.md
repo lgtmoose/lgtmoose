@@ -21,6 +21,7 @@ With a ticket provider set up, each review checks the pull request against the t
 
    - `maxPerPullRequest` (1 to 10, default 3): the most tickets checked per PR.
    - `teamKeys` (default none): only these teams' keys count, such as `ENG` for `ENG-123`. Without it, any key Linear knows counts.
+   - `detailsOnPublicRepos` (default `false`): show tickets' titles, links and requirements on public repositories too (see [Who sees ticket text](#who-sees-ticket-text)).
 
    See the [configuration reference](configuration.md) for every key.
 
@@ -34,6 +35,14 @@ LGTMoose looks for ticket keys such as `ENG-123`, in this order:
 
 Outside the branch, keys must be upper case. Prefixes that name standards rather than teams (`UTF-8`, `SHA-256`, `ISO-8601`, `CVE-…` and a few more) are left out, and so is any key Linear doesn't know. The first `maxPerPullRequest` keys found are checked.
 
+## Who sees ticket text
+
+Whoever opens a PR chooses which ticket keys it names, and the summary comment is as public as the repository. So:
+
+- **Only members' PRs get ticket coverage.** Tickets are read only for PRs whose author is an owner, member or collaborator of the repository (GitHub's `author_association`). On anyone else's PR, nothing is fetched, and the summary says ticket coverage runs only for those authors, without naming any key. An outside contributor can't make LGTMoose read a ticket by naming it.
+- **Public repositories get keys and counts only.** On a public repository, or one whose visibility GitHub didn't report, the table shows each ticket's key, its coverage level and how many core requirements look missing. It shows no titles, links, notes or requirement text, since those paraphrase the ticket. Set `detailsOnPublicRepos: true` to show them anyway, for example when your Linear workspace is public too.
+- **Private repositories get the full table.**
+
 ## How a ticket is checked
 
 1. **The control task reads the ticket** from Linear: its title, description, state, up to 30 comments, its parent and up to 25 sub-issues, with each text capped. The Linear key is read here, in the control task, the first time a ticket is fetched. No sandbox task gets it, and the sandbox's egress proxy can't reach Linear.
@@ -45,7 +54,7 @@ A checklist is kept for the commit it was made at. Later runs at the same commit
 
 ## What it changes
 
-- **The summary** gets a table: each ticket, how much of its core the PR covers (covered, partly covered, not covered, unclear, or not checked), and the core requirements found missing.
+- **The summary** gets a table: each ticket, how much of its core the PR covers (covered, partly covered, not covered, unclear, or not checked), and the core requirements found missing (on a public repository, only how many).
 - **The decision:** each missing core requirement counts as one should-fix finding, up to 5 per review. Should-fix findings keep the review from approving, but they never request changes or fail the merge. Missing requirements aren't posted as inline comments or stored as findings: they're worked out again each run.
 - Partly met, unclear and non-core requirements don't count.
 

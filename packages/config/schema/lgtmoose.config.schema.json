@@ -319,6 +319,11 @@
             "type": "string",
             "pattern": "^[A-Za-z][A-Za-z0-9]{0,9}$"
           }
+        },
+        "detailsOnPublicRepos": {
+          "default": false,
+          "description": "Show tickets' titles, links and requirements in the summary on public repositories too. Off: a public repository's summary shows only each key, its coverage level and how many core requirements look missing.",
+          "type": "boolean"
         }
       },
       "required": [

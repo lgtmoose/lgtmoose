@@ -45,6 +45,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `tickets.provider` | `"linear"` or `"jira"` or `"github-issues"` |  | The ticket system: linear. jira and github-issues aren't built yet. |
 | `tickets.maxPerPullRequest` | integer, 1 to 10 | `3` | The most tickets checked per pull request, in the order they're named. Each costs one fast-tier model run per commit reviewed. |
 | `tickets.teamKeys` | list of string matching `^[A-Za-z][A-Za-z0-9]{0,9}$` | `[]` | Only these teams' ticket keys count, such as ENG for ENG-123. Empty: any key the provider knows. |
+| `tickets.detailsOnPublicRepos` | boolean | `false` | Show tickets' titles, links and requirements in the summary on public repositories too. Off: a public repository's summary shows only each key, its coverage level and how many core requirements look missing. |
 | `dashboard` | boolean | `true` | Reserved for the dashboard. Not used yet: no dashboard is deployed. |
 
 Each harness accepts only some `auth` methods: `claude-code` takes `oauth-token`, `api-key`, `bedrock` and `vertex`; `codex` takes `chatgpt-login`, `access-token` and `api-key`; `cursor-agent` takes `api-key` and `service-account`; `agent-sdk` takes `api-key`, `bedrock` and `vertex`. See [Providers and auth](credentials.md).

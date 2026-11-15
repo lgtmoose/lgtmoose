@@ -45,6 +45,7 @@ export function ticketSourceFor(
     ));
   return {
     maxPerPullRequest: settings.maxPerPullRequest,
+    detailsOnPublicRepos: settings.detailsOnPublicRepos,
     provider: {
       name: "Linear",
       find: (texts) => findTicketKeys(texts, { teamKeys: settings.teamKeys }),
@@ -94,7 +95,26 @@ export interface TicketJob {
 export interface TicketsManifest {
   provider: string;
   tickets: TicketJob[];
+  /**
+   * Whether the summary may show ticket text (`TicketReview.details`): on a private repository,
+   * or with `tickets.detailsOnPublicRepos`. Decided at prepare, from GitHub's facts.
+   */
+  details: boolean;
+  /** Why no tickets were read (`TicketReview.notice`). */
+  notice?: string;
 }
+
+/**
+ * Authors whose PRs get ticket coverage (`author_association`). Anyone who can open a PR picks
+ * which ticket keys it names, so on a public repository an outside contributor could make
+ * LGTMoose read private tickets and describe them in a public comment. Their PRs aren't
+ * checked against tickets at all.
+ */
+const TICKET_AUTHORS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/** Said instead of the table on another author's PR. Names no keys. */
+export const OUTSIDE_AUTHOR_NOTICE =
+  "Ticket coverage runs only for pull requests by the repository's owners, members and collaborators.";
 
 const cachedSchema = z.object({
   version: z.literal(1),
@@ -165,7 +185,11 @@ function errorMessage(error: unknown): string {
  */
 export async function prepareTickets(
   deps: {
-    tickets?: { provider: TicketProvider; maxPerPullRequest: number };
+    tickets?: {
+      provider: TicketProvider;
+      maxPerPullRequest: number;
+      detailsOnPublicRepos?: boolean;
+    };
     store: ArtifactStore;
     log(message: string, fields?: Record<string, unknown>): void;
   },
@@ -185,6 +209,24 @@ export async function prepareTickets(
     })
     .slice(0, settings.maxPerPullRequest);
   if (refs.length === 0) return { batches: [] };
+  // Text the summary may show: all of it on a private repository, only keys and counts on a
+  // public one (or one whose visibility GitHub didn't give) unless the operator opts in.
+  const details = pr.repoPrivate === true || settings.detailsOnPublicRepos === true;
+  // Whoever opens a PR picks the keys it names: only members' PRs get tickets read at all.
+  if (!TICKET_AUTHORS.has(pr.association ?? "")) {
+    deps.log("tickets skipped: the PR's author isn't a member", {
+      association: pr.association ?? "unknown",
+    });
+    return {
+      manifest: {
+        provider: settings.provider.name,
+        tickets: [],
+        details,
+        notice: OUTSIDE_AUTHOR_NOTICE,
+      },
+      batches: [],
+    };
+  }
   const keys = headKeys(`${target.owner}/${target.repo}`, target.number, pr.headSha);
   const files = prepared.files.map((file) => ({ path: file.path, status: file.status }));
   const jobs: TicketJob[] = [];
@@ -246,7 +288,7 @@ export async function prepareTickets(
     reused: jobs.filter((job) => job.coverage !== undefined).length,
     flagged: jobs.filter((job) => job.injected !== undefined).length,
   });
-  return { manifest: { provider: settings.provider.name, tickets: jobs }, batches };
+  return { manifest: { provider: settings.provider.name, tickets: jobs, details }, batches };
 }
 
 /**
@@ -315,5 +357,8 @@ export async function ticketReview(
     injected: manifest.tickets.flatMap((job) =>
       job.injected === undefined ? [] : [{ key: job.key, kinds: job.injected }],
     ),
+    // A manifest written without it can't say the repository is private: keys and counts only.
+    details: manifest.details === true,
+    ...(manifest.notice === undefined ? {} : { notice: manifest.notice }),
   };
 }

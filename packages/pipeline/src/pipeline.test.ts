@@ -455,6 +455,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
           { key: "ENG-3", title: "Logs", note: "the check didn't finish" },
         ],
         injected: [],
+        details: true,
       },
     });
     // Seven missing core requirements, capped at five: should fix, never blocking.
@@ -467,7 +468,77 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(report.summary).toContain("Missing: Requirement 0");
     expect(report.summary).toContain("(7 found)");
     expect(report.summary).toContain("never blocks the merge on its own");
+    expect(report.summary).toContain("Totals");
+    expect(report.summary).toContain("linear.app");
     expect(report.posted).toEqual([]);
+  });
+
+  it("shows only keys, levels and counts of a public repository's tickets", async () => {
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
+    const reviewed = ALL.map((path) => ({
+      path,
+      blobSha: blobs.get(path) ?? "",
+      baseBlobSha: baseBlobs.get(path),
+      depth: FULL,
+      reviewedAt: baseSha,
+    }));
+    const prepared = await prepare({ reviewed });
+    const report = await finishReview(repo, prepared, [], headSha, {
+      tickets: {
+        provider: "Linear",
+        tickets: [
+          {
+            key: "ENG-1",
+            title: "Secret project codename",
+            url: "https://linear.app/acme/issue/ENG-1/secret-project-codename",
+            coverage: {
+              requirements: [
+                { text: "Charge the Gold tier 30% more", core: true, status: "missing" },
+                { text: "Log it", core: true, status: "missing" },
+                { text: "Done bit", core: true, status: "met" },
+              ],
+              summary: "Mostly about the Gold tier pricing change.",
+            },
+          },
+        ],
+        injected: [],
+        details: false,
+      },
+    });
+    expect(report.ticketGaps).toBe(2);
+    expect(report.decision.counts.should_fix).toBe(2);
+    expect(report.summary).toContain("ENG\\-1");
+    expect(report.summary).toContain("Partly covered");
+    expect(report.summary).toContain("2 core requirements look missing");
+    expect(report.summary).toContain("This repository is public");
+    for (const secret of ["Secret project", "linear.app", "Gold tier", "Log it"]) {
+      expect(report.summary).not.toContain(secret);
+    }
+  });
+
+  it("says why no tickets were read, naming none", async () => {
+    const { repo, blobs, baseBlobs, prepare } = await setUp();
+    const reviewed = ALL.map((path) => ({
+      path,
+      blobSha: blobs.get(path) ?? "",
+      baseBlobSha: baseBlobs.get(path),
+      depth: FULL,
+      reviewedAt: baseSha,
+    }));
+    const prepared = await prepare({ reviewed });
+    const report = await finishReview(repo, prepared, [], headSha, {
+      tickets: {
+        provider: "Linear",
+        tickets: [],
+        injected: [],
+        details: false,
+        notice: "Ticket coverage runs only for members' pull requests.",
+      },
+    });
+    expect(report.ticketGaps).toBe(0);
+    expect(report.decision.event).toBe("APPROVE");
+    expect(report.summary).toContain("_Ticket coverage runs only for members' pull requests._");
+    expect(report.summary).not.toContain("No linked tickets");
   });
 
   it("holds approval when a linked ticket's text was flagged as an injection", async () => {
@@ -494,6 +565,7 @@ describe("prepareReview and finishReview with earlier runs", () => {
           { key: "ENG-1", kinds: ["instructions"] },
           { key: "not a key", kinds: ["bidi"] },
         ],
+        details: true,
       },
     });
     expect(report.decision.event).toBe("COMMENT");

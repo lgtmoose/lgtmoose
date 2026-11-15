@@ -733,6 +733,7 @@ export function ticketsEnvironment(tickets: DeployConfig["tickets"]): Record<str
     LGTMOOSE_TICKETS_SECRET_ID: SECRET_NAMES.linearTickets,
     LGTMOOSE_TICKETS_MAX: String(tickets.maxPerPullRequest),
     LGTMOOSE_TICKETS_TEAMS: tickets.teamKeys.map((team) => team.toUpperCase()).join(","),
+    LGTMOOSE_TICKETS_PUBLIC_DETAILS: String(tickets.detailsOnPublicRepos),
   };
 }
 

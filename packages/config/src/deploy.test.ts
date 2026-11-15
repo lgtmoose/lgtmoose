@@ -92,7 +92,12 @@ describe("parseDeployConfig", () => {
       }),
     );
     expect(config.providers).toHaveLength(3);
-    expect(config.tickets).toEqual({ provider: "linear", maxPerPullRequest: 3, teamKeys: [] });
+    expect(config.tickets).toEqual({
+      provider: "linear",
+      maxPerPullRequest: 3,
+      teamKeys: [],
+      detailsOnPublicRepos: false,
+    });
   });
 
   it("refuses ticket providers that aren't built and bad ticket settings", () => {

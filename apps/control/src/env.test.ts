@@ -22,19 +22,21 @@ describe("readTicketSettings", () => {
         LGTMOOSE_TICKETS_SECRET_ID: "lgtmoose/tickets/linear",
         LGTMOOSE_TICKETS_MAX: "5",
         LGTMOOSE_TICKETS_TEAMS: "eng, web,",
+        LGTMOOSE_TICKETS_PUBLIC_DETAILS: "true",
       }),
     ).toEqual({
       provider: "linear",
       secretArn: "lgtmoose/tickets/linear",
       maxPerPullRequest: 5,
       teamKeys: ["ENG", "WEB"],
+      detailsOnPublicRepos: true,
     });
     expect(
       readTicketSettings({
         LGTMOOSE_TICKETS: "linear",
         LGTMOOSE_TICKETS_SECRET_ID: "s",
       }),
-    ).toMatchObject({ maxPerPullRequest: 3, teamKeys: [] });
+    ).toMatchObject({ maxPerPullRequest: 3, teamKeys: [], detailsOnPublicRepos: false });
   });
 
   it("refuses an unknown provider, a missing secret and a bad limit", () => {

@@ -231,7 +231,14 @@ export function readEmbeddingsSettings(env: Env): EmbeddingsSettings {
  */
 export type TicketSettings =
   | { provider: "none" }
-  | { provider: "linear"; secretArn: string; maxPerPullRequest: number; teamKeys: string[] };
+  | {
+      provider: "linear";
+      secretArn: string;
+      maxPerPullRequest: number;
+      teamKeys: string[];
+      /** `LGTMOOSE_TICKETS_PUBLIC_DETAILS=true`: show ticket text on public repositories too. */
+      detailsOnPublicRepos: boolean;
+    };
 
 export function readTicketSettings(env: Env): TicketSettings {
   const provider = env.LGTMOOSE_TICKETS?.trim() ?? "";
@@ -249,7 +256,13 @@ export function readTicketSettings(env: Env): TicketSettings {
     .split(",")
     .map((team) => team.trim().toUpperCase())
     .filter((team) => team !== "");
-  return { provider, secretArn, maxPerPullRequest: max, teamKeys };
+  return {
+    provider,
+    secretArn,
+    maxPerPullRequest: max,
+    teamKeys,
+    detailsOnPublicRepos: env.LGTMOOSE_TICKETS_PUBLIC_DETAILS?.trim() === "true",
+  };
 }
 
 /**

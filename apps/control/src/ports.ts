@@ -326,8 +326,13 @@ export interface ControlDeps {
   ) => ReturnType<LearningsForBatch>;
   /**
    * Ticket coverage (NIC-839): the ticket provider, which reads tickets here in the control task
-   * with its own credential (the sandbox never gets it), and the most tickets checked per PR.
+   * with its own credential (the sandbox never gets it), the most tickets checked per PR, and
+   * whether a public repository's summary may show ticket text (`tickets.detailsOnPublicRepos`).
    * Left out, tickets aren't read.
    */
-  tickets?: { provider: TicketProvider; maxPerPullRequest: number };
+  tickets?: {
+    provider: TicketProvider;
+    maxPerPullRequest: number;
+    detailsOnPublicRepos?: boolean;
+  };
 }

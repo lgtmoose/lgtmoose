@@ -794,6 +794,7 @@ describe("learnings embeddings", () => {
       LGTMOOSE_TICKETS_SECRET_ID: SECRET_NAMES.linearTickets,
       LGTMOOSE_TICKETS_MAX: "2",
       LGTMOOSE_TICKETS_TEAMS: "ENG",
+      LGTMOOSE_TICKETS_PUBLIC_DETAILS: "false",
     });
     const reads = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
     expect(JSON.stringify(reads)).toContain(SECRET_NAMES.linearTickets);
