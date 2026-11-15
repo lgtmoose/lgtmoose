@@ -22,12 +22,9 @@ import {
   type Vpc,
 } from "aws-cdk-lib/aws-ec2";
 import { RetentionDays } from "aws-cdk-lib/aws-logs";
+import { Alarm, ComparisonOperator, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import {
-  AuroraPostgresEngineVersion,
-  ClusterInstance,
   Credentials,
-  DatabaseCluster,
-  DatabaseClusterEngine,
   DatabaseInstance,
   DatabaseInstanceEngine,
   ParameterGroup,
@@ -55,6 +52,23 @@ export const DATABASE_NAME = "lgtmoose";
 /** Batches, findings and transcripts are working files; nothing in the bucket is kept long. */
 export const ARTIFACT_RETENTION_DAYS = 30;
 
+/**
+ * The database per profile. Only properties RDS changes in place differ between them: the
+ * instance class, Multi-AZ and backup retention. Engine, version, storage type, encryption,
+ * database name and subnets are the same, so CloudFormation never replaces the database when the
+ * profile changes (data-stack.test.ts checks this).
+ */
+export const DATABASE_SIZES = {
+  lean: { instanceSize: InstanceSize.MICRO, multiAz: false, backupDays: 7 },
+  standard: { instanceSize: InstanceSize.SMALL, multiAz: true, backupDays: 14 },
+} as const satisfies Record<
+  Profile,
+  { instanceSize: InstanceSize; multiAz: boolean; backupDays: number }
+>;
+
+/** Free storage below which the standard profile alarms (storage autoscales up to 100 GiB). */
+export const FREE_STORAGE_ALARM_BYTES = 2 * 1024 ** 3;
+
 export interface DataStackProps extends StackProps {
   profile: Profile;
   providers: DeployConfig["providers"];
@@ -80,14 +94,19 @@ export interface DataStackProps extends StackProps {
  * State for LGTMoose: Postgres with pgvector, the artifact bucket, and references to the
  * secrets that `lgtmoose setup` and `lgtmoose auth` create.
  *
- * - lean: RDS PostgreSQL 18 on db.t4g.micro, single AZ
- * - standard: Aurora PostgreSQL Serverless v2 with a writer and a reader in different AZs
+ * - lean: RDS PostgreSQL 18 on db.t4g.micro, single AZ, 7 days of backups
+ * - standard: RDS PostgreSQL 18 on db.t4g.small with a Multi-AZ standby, 14 days of backups,
+ *   and alarms on CPU and free storage
+ *
+ * Both profiles use the same RDS instance, so switching profile is an in-place modification:
+ * the database keeps its data. Aurora would mean a different resource type, which CloudFormation
+ * can only replace.
  *
  * Migrations run as a custom resource whenever a migration file changes, before any stack that
  * depends on this one is updated.
  */
 export class DataStack extends Stack {
-  readonly database: DatabaseInstance | DatabaseCluster;
+  readonly database: DatabaseInstance;
   /** Writer endpoint hostname. Changes when CloudFormation replaces the database. */
   readonly databaseEndpoint: string;
   /** RDS instance or cluster identifier; final snapshots and the retained secret refer to it. */
@@ -132,49 +151,30 @@ export class DataStack extends Stack {
       cloudwatchLogsRetention: lean ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
     };
 
-    if (lean) {
-      const engine = DatabaseInstanceEngine.postgres({ version: PostgresEngineVersion.VER_18 });
-      const instance = new DatabaseInstance(this, "Database", {
-        ...common,
+    // One resource for both profiles, so switching profile modifies the database in place
+    // (class, Multi-AZ, backups) and never replaces it. See `DATABASE_SIZES`.
+    const size = DATABASE_SIZES[props.profile];
+    const engine = DatabaseInstanceEngine.postgres({ version: PostgresEngineVersion.VER_18 });
+    const instance = new DatabaseInstance(this, "Database", {
+      ...common,
+      engine,
+      databaseName: DATABASE_NAME,
+      instanceType: InstanceType.of(InstanceClass.T4G, size.instanceSize),
+      allocatedStorage: 20,
+      maxAllocatedStorage: 100,
+      storageType: StorageType.GP3,
+      multiAz: size.multiAz,
+      publiclyAccessible: false,
+      backupRetention: Duration.days(size.backupDays),
+      parameterGroup: new ParameterGroup(this, "DatabaseParams", {
         engine,
-        databaseName: DATABASE_NAME,
-        instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.MICRO),
-        allocatedStorage: 20,
-        maxAllocatedStorage: 100,
-        storageType: StorageType.GP3,
-        multiAz: false,
-        publiclyAccessible: false,
-        backupRetention: Duration.days(7),
-        parameterGroup: new ParameterGroup(this, "DatabaseParams", {
-          engine,
-          parameters: { "rds.force_ssl": "1" },
-        }),
-      });
-      this.database = instance;
-      this.databaseEndpoint = instance.instanceEndpoint.hostname;
-      this.databaseIdentifier = instance.instanceIdentifier;
-    } else {
-      const engine = DatabaseClusterEngine.auroraPostgres({
-        version: AuroraPostgresEngineVersion.VER_18_6,
-      });
-      const cluster = new DatabaseCluster(this, "Database", {
-        ...common,
-        engine,
-        defaultDatabaseName: DATABASE_NAME,
-        serverlessV2MinCapacity: 0.5,
-        serverlessV2MaxCapacity: 4,
-        writer: ClusterInstance.serverlessV2("writer"),
-        readers: [ClusterInstance.serverlessV2("reader", { scaleWithWriter: true })],
-        backup: { retention: Duration.days(14) },
-        parameterGroup: new ParameterGroup(this, "DatabaseParams", {
-          engine,
-          parameters: { "rds.force_ssl": "1" },
-        }),
-      });
-      this.database = cluster;
-      this.databaseEndpoint = cluster.clusterEndpoint.hostname;
-      this.databaseIdentifier = cluster.clusterIdentifier;
-    }
+        parameters: { "rds.force_ssl": "1" },
+      }),
+    });
+    this.database = instance;
+    this.databaseEndpoint = instance.instanceEndpoint.hostname;
+    this.databaseIdentifier = instance.instanceIdentifier;
+    if (!lean) this.addDatabaseAlarms(instance);
     const secret = this.database.secret;
     if (!secret) throw new Error("database has no generated secret");
     this.databaseSecret = secret;
@@ -232,6 +232,27 @@ export class DataStack extends Stack {
       value: this.databaseSecret.secretArn,
     });
     new CfnOutput(this, STACK_OUTPUTS.data.databaseIdentifier, { value: this.databaseIdentifier });
+  }
+
+  /** Standard only: the database is busy or running out of room. */
+  private addDatabaseAlarms(instance: DatabaseInstance): void {
+    new Alarm(this, "DatabaseCpuAlarm", {
+      alarmDescription: "LGTMoose's database has been above 80% CPU for 15 minutes.",
+      metric: instance.metricCPUUtilization({ period: Duration.minutes(5) }),
+      threshold: 80,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    new Alarm(this, "DatabaseStorageAlarm", {
+      alarmDescription:
+        "LGTMoose's database has under 2 GiB of free storage. Storage grows on its own up to 100 GiB; past that, raise maxAllocatedStorage.",
+      metric: instance.metricFreeStorageSpace({ period: Duration.minutes(5) }),
+      threshold: FREE_STORAGE_ALARM_BYTES,
+      comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
   }
 
   private addMigrations(

@@ -204,7 +204,10 @@ export async function resolveSetupInputs(
           message: "Deployment profile",
           choices: [
             { name: "lean: lowest cost, single-AZ RDS and a NAT instance", value: "lean" },
-            { name: "standard: Aurora across two AZs and NAT gateways", value: "standard" },
+            {
+              name: "standard: Multi-AZ RDS, NAT gateways in two AZs and extra alarms",
+              value: "standard",
+            },
           ],
           default: DEFAULT_PROFILE,
         }));

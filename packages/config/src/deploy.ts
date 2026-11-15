@@ -203,7 +203,7 @@ export const deployConfigSchema = z
       .enum(["lean", "standard"])
       .default("lean")
       .describe(
-        "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, one egress proxy task. standard: NAT gateways, Aurora Serverless v2 with a reader, two proxy tasks.",
+        "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, sandbox subnet and VPC endpoints in one AZ, one egress proxy task, short log retention. standard: a NAT gateway per AZ, RDS PostgreSQL on db.t4g.small with a Multi-AZ standby, two proxy tasks, longer retention and extra alarms. Switching is a redeploy that keeps the database; see docs/upgrading.md.",
       ),
     allowedOrgs: z
       .array(z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, "use a GitHub org or user"))
@@ -299,6 +299,35 @@ export const deployConfigSchema = z
       .default({ acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 })
       .describe(
         "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
+      ),
+    /**
+     * Where CloudWatch alarms notify. Without either, alarms still change state in CloudWatch but
+     * nobody is told. Never hardcoded: set it here.
+     */
+    alarms: z
+      .object({
+        email: z
+          .email()
+          .optional()
+          .describe(
+            "An address subscribed to a new SNS topic for LGTMoose's alarms. AWS emails it a confirmation link first.",
+          ),
+        topicArn: z
+          .string()
+          .regex(
+            /^arn:aws[a-z-]*:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$/,
+            "use an SNS topic ARN",
+          )
+          .optional()
+          .describe("An existing SNS topic for alarms, such as one that already pages your team."),
+      })
+      .strict()
+      .refine((alarms) => alarms.email === undefined || alarms.topicArn === undefined, {
+        message: "set email or topicArn, not both",
+      })
+      .default({})
+      .describe(
+        "Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch.",
       ),
     /**
      * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier

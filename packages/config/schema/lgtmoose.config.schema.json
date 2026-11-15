@@ -10,7 +10,7 @@
     },
     "profile": {
       "default": "lean",
-      "description": "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, one egress proxy task. standard: NAT gateways, Aurora Serverless v2 with a reader, two proxy tasks.",
+      "description": "lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, sandbox subnet and VPC endpoints in one AZ, one egress proxy task, short log retention. standard: a NAT gateway per AZ, RDS PostgreSQL on db.t4g.small with a Multi-AZ standby, two proxy tasks, longer retention and extra alarms. Switching is a redeploy that keeps the database; see docs/upgrading.md.",
       "type": "string",
       "enum": [
         "lean",
@@ -178,6 +178,25 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 1000
+        }
+      },
+      "additionalProperties": false
+    },
+    "alarms": {
+      "default": {},
+      "description": "Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "An address subscribed to a new SNS topic for LGTMoose's alarms. AWS emails it a confirmation link first.",
+          "type": "string",
+          "format": "email",
+          "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+        },
+        "topicArn": {
+          "description": "An existing SNS topic for alarms, such as one that already pages your team.",
+          "type": "string",
+          "pattern": "^arn:aws[a-z-]*:sns:[a-z0-9-]+:\\d{12}:[A-Za-z0-9_-]{1,256}$"
         }
       },
       "additionalProperties": false

@@ -1,21 +1,49 @@
 # Costs
 
-LGTMoose runs in your AWS account, so you pay AWS for what it deploys, and your model vendors for what the reviews use. There's no LGTMoose service to pay for. This page lists what costs money and what you can change; it gives no prices, since they change by region and over time. Use the [AWS Pricing Calculator](https://calculator.aws/) with the figures below.
+LGTMoose runs in your AWS account, so you pay AWS for what it deploys, and your model vendors for what the reviews use. There's no LGTMoose service to pay for. This page lists what costs money, an estimate for each profile, and what you can change.
 
 ## Always on
 
 These run whether or not anyone opens a PR. `profile` in `lgtmoose.config.ts` picks the size:
 
-| Part                                                 | `lean` (default)                         | `standard`                                         |
-| ---------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
-| Database                                             | RDS PostgreSQL on `db.t4g.micro`, one AZ | Aurora PostgreSQL Serverless v2, writer and reader |
-| NAT for the app subnets                              | one `t4g.nano` NAT instance              | two NAT gateways                                   |
-| Egress proxy (Fargate, ARM64, 0.25 vCPU, 512 MiB)    | one task                                 | two tasks                                          |
-| Interface VPC endpoints (ECR, Secrets Manager, Logs) | in one AZ                                | in each AZ                                         |
+| Part                                                                 | `lean` (default)                                     | `standard`                                                           |
+| -------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
+| Database                                                             | RDS PostgreSQL on `db.t4g.micro`, one AZ, 20 GiB gp3 | RDS PostgreSQL on `db.t4g.small` with a Multi-AZ standby, 20 GiB gp3 |
+| NAT for the app subnets                                              | one `t4g.nano` NAT instance                          | a NAT gateway in each of two AZs                                     |
+| Egress proxy (Fargate, ARM64, 0.25 vCPU, 512 MiB)                    | one task                                             | two tasks                                                            |
+| Interface VPC endpoints (ECR API, ECR Docker, Secrets Manager, Logs) | 4, in one AZ                                         | 4 in each of two AZs: 8                                              |
+| Log retention                                                        | a week (the credential audit log: 3 months)          | a month (the credential audit log: a year)                           |
+| Alarms                                                               | dead-letter queues and credentials                   | those, plus database CPU, free storage and failed reviews            |
 
-Also always there, but small: Secrets Manager secrets (one for the GitHub App, one for the webhook secret, the database's, and one per stored provider credential), the S3 artifact bucket, and CloudWatch logs (most kept a month).
+Also always there, but small: Secrets Manager secrets (one for the GitHub App, one for the webhook secret, the database's, and one per stored provider credential), the S3 artifact bucket, and CloudWatch logs.
 
-The database and NAT are usually most of the fixed cost. `lean` is meant for one team; `standard` for when the database and proxy shouldn't depend on one AZ.
+Both profiles span two AZs, because an RDS subnet group needs two; `lean` puts its NAT, sandbox subnet and endpoints in one of them. `lean` is meant for one team. `standard` is for when the database, NAT and proxy shouldn't depend on one AZ.
+
+## Monthly estimate
+
+**An estimate, not a quote.** It uses AWS's on-demand list prices for **us-east-1**, read from the AWS Price List API in November 2026 (offers published 4 to 13 November 2026), for 730 hours a month, with no free tier and no savings plans. Prices differ by region and change over time: put the figures into the [AWS Pricing Calculator](https://calculator.aws/) for your region before relying on them.
+
+| Line                                                       | `lean`                                     | `standard`                                |
+| ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------- |
+| NAT                                                        | t4g.nano at $0.0042/h: $3.07               | 2 NAT gateways at $0.045/h: $65.70        |
+| NAT public IPv4 ($0.005/h each)                            | 1: $3.65                                   | 2: $7.30                                  |
+| NAT instance disk (8 GiB gp3 at $0.08/GB-mo)               | $0.64                                      | none                                      |
+| Interface endpoints ($0.01/h each per AZ)                  | 4: $29.20                                  | 8: $58.40                                 |
+| Database instance                                          | db.t4g.micro single-AZ at $0.016/h: $11.68 | db.t4g.small Multi-AZ at $0.065/h: $47.45 |
+| Database storage (20 GiB gp3)                              | $0.115/GB-mo: $2.30                        | Multi-AZ, $0.23/GB-mo: $4.60              |
+| Egress proxy (Fargate ARM: $0.03238/vCPU-h, $0.00356/GB-h) | 1 task: $7.21                              | 2 tasks: $14.42                           |
+| Secrets Manager ($0.40 each; 4 with one stored provider)   | $1.60                                      | $1.60                                     |
+| CloudWatch alarms ($0.10 each, one stored provider)        | 3: $0.30                                   | 6: $0.60                                  |
+| **Fixed total**                                            | **about $60 a month**                      | **about $200 a month**                    |
+
+On top of the fixed total, and growing with use:
+
+- **Data through NAT and endpoints**: $0.045/GB through a NAT gateway (not a NAT instance), $0.01/GB through an interface endpoint. Pulling the sandbox image (several hundred MB) through the ECR endpoints is most of it.
+- **CloudWatch logs**: $0.50/GB ingested, $0.03/GB-month stored. A few GB a month is a few dollars.
+- **API Gateway, Lambda, SQS, Step Functions and S3**: cents a month at a team's PR volume, and mostly inside the free tier where it applies.
+- **Each review** (below).
+
+The interface endpoints are the largest line in `lean`. They are what keeps sandbox tasks off the internet, so they aren't optional.
 
 ## Per review
 
@@ -25,6 +53,8 @@ Each review is one Step Functions execution:
 - **Sandbox tasks** (Fargate, ARM64, 2 vCPU, 4 GiB, 30 GiB disk): one per batch, plus one per judged reply. `maxConcurrency` (4 by default) caps how many run at once for one PR.
 - **Lambdas**: the gateway, the dispatcher, the presigner and the credential broker, each a short call per step.
 - **Model usage**: the reviewer's tokens for each batch, and a fast-tier call for each judged reply. This is usually the largest part of a review's cost.
+
+At the list prices above, a control task costs about $0.04 an hour and a sandbox task about $0.08 an hour. For example, a review of four batches that each take 8 minutes, with 5 minutes of control tasks, is about $0.05 of AWS compute. That's an illustration, not a measurement: batch times depend on the PR and the model. The model usage is billed separately (below).
 
 Scheduled work runs on its own: the reconciler (every `reconcileIntervalMinutes`, 30 by default, no model calls) and the credential health check (every 6 hours, no model calls).
 
@@ -40,7 +70,7 @@ Every attempt is recorded in the `provider_usage` table (tokens, cost where the 
 
 ## What you can change
 
-- **`profile`**: `lean` or `standard`, above.
+- **`profile`**: `lean` or `standard`, above. Switching is a redeploy that keeps the database ([Upgrading](upgrading.md#switching-profile)).
 - **`providers[].models`**: the model for each tier. The reviewer runs on `standard`, the reply judge on `fast`.
 - **`maxConcurrency`**: fewer batches at once makes a big PR slower but doesn't change its total model usage.
 - **`maxReplyJudgements`**: replies judged per run, 10 by default. 0 turns the reply judge off.
