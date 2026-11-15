@@ -1,5 +1,5 @@
 {
-  "id": "c4167038-4520-4d59-9b27-5b205dccafca",
+  "id": "381a2089-faf3-4fcf-a222-a66b60ad9c6f",
   "prevId": "fe7a2f1d-a53b-42e9-9854-f84afe8bc355",
   "version": "7",
   "dialect": "postgresql",
@@ -615,6 +615,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "learning_ids": {
+          "name": "learning_ids",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -814,248 +820,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.learning_bootstrap_items": {
-      "name": "learning_bootstrap_items",
-      "schema": "",
-      "columns": {
-        "learning_id": {
-          "name": "learning_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "bootstrap_id": {
-          "name": "bootstrap_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sources": {
-          "name": "sources",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "learning_bootstrap_items_bootstrap_idx": {
-          "name": "learning_bootstrap_items_bootstrap_idx",
-          "columns": [
-            {
-              "expression": "bootstrap_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "learning_bootstrap_items_learning_id_learnings_id_fk": {
-          "name": "learning_bootstrap_items_learning_id_learnings_id_fk",
-          "tableFrom": "learning_bootstrap_items",
-          "tableTo": "learnings",
-          "columnsFrom": ["learning_id"],
-          "columnsTo": ["id"],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "learning_bootstrap_items_bootstrap_id_learning_bootstraps_id_fk": {
-          "name": "learning_bootstrap_items_bootstrap_id_learning_bootstraps_id_fk",
-          "tableFrom": "learning_bootstrap_items",
-          "tableTo": "learning_bootstraps",
-          "columnsFrom": ["bootstrap_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.learning_bootstraps": {
-      "name": "learning_bootstraps",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requested_by": {
-          "name": "requested_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "learning_bootstrap_status",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'requested'"
-        },
-        "max_prs": {
-          "name": "max_prs",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "max_cost_usd": {
-          "name": "max_cost_usd",
-          "type": "numeric(10, 4)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "before_pr": {
-          "name": "before_pr",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "oldest_pr_read": {
-          "name": "oldest_pr_read",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "prs_read": {
-          "name": "prs_read",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "comments_read": {
-          "name": "comments_read",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "proposed": {
-          "name": "proposed",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cost_usd": {
-          "name": "cost_usd",
-          "type": "numeric(10, 4)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "capped": {
-          "name": "capped",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "execution_arn": {
-          "name": "execution_arn",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "learning_bootstraps_repo_idx": {
-          "name": "learning_bootstraps_repo_idx",
-          "columns": [
-            {
-              "expression": "repo",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "learning_bootstraps_active_key": {
-          "name": "learning_bootstraps_active_key",
-          "columns": [
-            {
-              "expression": "repo",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"learning_bootstraps\".\"status\" in ('requested', 'running')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.learning_events": {
       "name": "learning_events",
       "schema": "",
@@ -1095,6 +859,12 @@
         "github_comment_id": {
           "name": "github_comment_id",
           "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finding_id": {
+          "name": "finding_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -1154,6 +924,15 @@
           "columnsFrom": ["learning_id"],
           "columnsTo": ["id"],
           "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "learning_events_finding_id_findings_id_fk": {
+          "name": "learning_events_finding_id_findings_id_fk",
+          "tableFrom": "learning_events",
+          "tableTo": "findings",
+          "columnsFrom": ["finding_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -1246,6 +1025,12 @@
         "source_comment_id": {
           "name": "source_comment_id",
           "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pattern_key": {
+          "name": "pattern_key",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -2357,7 +2142,17 @@
           "with": {}
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "spend_ledger_run_id_review_runs_id_fk": {
+          "name": "spend_ledger_run_id_review_runs_id_fk",
+          "tableFrom": "spend_ledger",
+          "tableTo": "review_runs",
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -2396,15 +2191,10 @@
       "schema": "public",
       "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
     },
-    "public.learning_bootstrap_status": {
-      "name": "learning_bootstrap_status",
-      "schema": "public",
-      "values": ["requested", "running", "done", "failed"]
-    },
     "public.learning_event_type": {
       "name": "learning_event_type",
       "schema": "public",
-      "values": ["proposed", "applied", "approved", "retired"]
+      "values": ["proposed", "applied", "approved", "retired", "reinforced", "not_followed"]
     },
     "public.learning_kind": {
       "name": "learning_kind",

@@ -363,3 +363,79 @@ describe("mayLearningSuppress and toPermission", () => {
     expect(toCheckedPermission("write")).toBe("write");
   });
 });
+
+describe("proposeLearning options (NIC-1081)", () => {
+  it("keeps a learning pending for approval even when its author has write access", async () => {
+    const d = deps({ dana: "write" });
+    const result = await proposeLearning(d, repoScoped, source, {
+      requireApproval: true,
+      patternKey: "style:naming",
+    });
+    expect(result).toMatchObject({
+      outcome: "pending",
+      learning: { status: "pending", patternKey: "style:naming", authorPermission: "write" },
+    });
+    if (result.outcome === "refused") throw new Error("refused");
+    expect((await d.store.events(result.learning.id)).map((event) => event.type)).toEqual([
+      "proposed",
+    ]);
+  });
+
+  it("doesn't count a write author's held learning against the pending limit", async () => {
+    const d = { ...deps({ dana: "write" }), maxPendingPerAuthor: 1 };
+    await proposeLearning(d, repoScoped, { ...source, commentId: 1 }, { requireApproval: true });
+    const second = await proposeLearning(
+      d,
+      repoScoped,
+      { ...source, commentId: 2 },
+      { requireApproval: true },
+    );
+    expect(second.outcome).toBe("pending");
+  });
+});
+
+describe("memoryLearningStore outcomes (NIC-1081)", () => {
+  it("counts a reinforcement once per finding, and records not followed without a hit", async () => {
+    const d = deps({ dana: "write" });
+    const result = await proposeLearning(d, repoScoped, source);
+    if (result.outcome === "refused") throw new Error("refused");
+    const { id } = result.learning;
+    const at = new Date("2026-11-15T12:00:00Z");
+    await d.store.recordOutcome([id], { type: "reinforced", findingId: "f1" }, at);
+    await d.store.recordOutcome([id], { type: "reinforced", findingId: "f1" }, at);
+    await d.store.recordOutcome([id], { type: "not_followed", findingId: "f2" }, at);
+    expect((await d.store.get(id))?.hits).toBe(1);
+    const events = await d.store.events(id);
+    expect(events.map((event) => [event.type, event.findingId, event.actor])).toEqual([
+      ["proposed", undefined, "dana"],
+      ["applied", undefined, "dana"],
+      ["reinforced", "f1", "lgtmoose"],
+      ["not_followed", "f2", "lgtmoose"],
+    ]);
+    expect(await d.store.notFollowedSince("acme", new Date(0))).toEqual(new Map([[id, 1]]));
+    expect(await d.store.notFollowedSince("other", new Date(0))).toEqual(new Map());
+  });
+
+  it("leaves a retired learning alone, and lists only live patterned ones", async () => {
+    const d = deps({ dana: "write" });
+    const plain = await proposeLearning(d, repoScoped, { ...source, commentId: 1 });
+    const patterned = await proposeLearning(
+      d,
+      repoScoped,
+      { ...source, commentId: 2 },
+      { patternKey: "style:naming" },
+    );
+    if (plain.outcome === "refused" || patterned.outcome === "refused") throw new Error("refused");
+    expect((await d.store.patterned("acme/shop")).map((learning) => learning.id)).toEqual([
+      patterned.learning.id,
+    ]);
+    await forgetLearning(d, patterned.learning.id, { login: "dana" });
+    expect(await d.store.patterned("acme/shop")).toEqual([]);
+    await d.store.recordOutcome(
+      [patterned.learning.id],
+      { type: "reinforced", findingId: "f1" },
+      new Date(),
+    );
+    expect((await d.store.get(patterned.learning.id))?.hits).toBe(0);
+  });
+});

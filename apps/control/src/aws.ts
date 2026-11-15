@@ -44,6 +44,7 @@ import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
+import { outcomeLearner } from "./outcome-learning-aws.js";
 import { s3ArtifactStore } from "./s3-store.js";
 
 export { s3ArtifactStore };
@@ -480,7 +481,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             .values(
               posted
                 .slice(i, i + INSERT_CHUNK)
-                .map(({ finding, fingerprint, githubCommentId, basePath }) => ({
+                .map(({ finding, fingerprint, githubCommentId, basePath, learningIds }) => ({
                   pullRequestId,
                   runId,
                   fingerprint,
@@ -495,6 +496,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   raisedAtSha: headSha,
                   githubCommentId: githubCommentId ?? null,
                   basePath: basePath ?? null,
+                  learningIds:
+                    learningIds === undefined || learningIds.length === 0 ? null : [...learningIds],
                 })),
             )
             .onConflictDoUpdate({
@@ -510,6 +513,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
+                // The batch that raised it this time: its learnings are the ones that count.
+                learningIds: sql`excluded.learning_ids`,
                 line: sql`excluded.line`,
                 startLine: sql`excluded.start_line`,
                 side: sql`excluded.side`,
@@ -728,6 +733,7 @@ export async function awsControlDeps(
     tickets?: TicketSettings;
     maxPendingLearnings?: number;
     bootstrapMaxCostUsd?: number;
+    repeatThreshold?: number;
     /** The deploy config's `budgets` (`LGTMOOSE_BUDGETS`). Left out: no caps. */
     budgets?: Budgets;
   },
@@ -796,6 +802,9 @@ export async function awsControlDeps(
       ...(options.bootstrapMaxCostUsd === undefined
         ? {}
         : { bootstrapMaxCostUsd: options.bootstrapMaxCostUsd }),
+      ...(options.repeatThreshold === undefined
+        ? {}
+        : { repeatThreshold: options.repeatThreshold }),
       ...(options.budgets === undefined ? {} : { budgets: options.budgets }),
     }),
     close: () => pool.end(),
@@ -815,6 +824,8 @@ export interface ControlParts {
   maxPendingLearnings?: number;
   /** `learnings.bootstrapMaxCostUsd`; left out, `BOOTSTRAP_DEFAULTS.maxCostUsd`. */
   bootstrapMaxCostUsd?: number;
+  /** `learnings.repeatThreshold` (NIC-1081); left out, the default. */
+  repeatThreshold?: number;
   /** The deploy config's `budgets` (NIC-1079); left out, no caps, but spend is still recorded. */
   budgets?: Budgets;
 }
@@ -965,6 +976,23 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
       });
     },
     learnings: learningsRetriever(learningStore, embedder, log),
+    outcomes: outcomeLearner({
+      db,
+      learnings: learningStore,
+      client: (installationId) =>
+        new GitHubClient({
+          token: installationTokenProvider({
+            appId: app.appId,
+            privateKey: app.privateKey,
+            installationId,
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        }),
+      ...(maxPendingLearnings === undefined ? {} : { maxPendingPerAuthor: maxPendingLearnings }),
+      ...(parts.repeatThreshold === undefined ? {} : { repeatThreshold: parts.repeatThreshold }),
+      log,
+    }),
     ...(tickets === undefined ? {} : { tickets }),
     bootstrap: {
       store: drizzleBootstrapStore(db),

@@ -9,12 +9,30 @@ import { handleConversation, type ConversationDeps } from "./conversation.js";
 import { drizzleReplyStore } from "./replies-aws.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { parseQueuedJob, type DispatchJob, type QueueRecord } from "./dispatch.js";
-import { readConversationEnv, readMaxExplanations, readMaxPendingLearnings } from "./env.js";
+import {
+  readConversationEnv,
+  readMaxExplanations,
+  readMaxPendingLearnings,
+  readRepeatThreshold,
+} from "./env.js";
+import { outcomeLearner } from "./outcome-learning-aws.js";
 
 /** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
 function maxPendingLearnings(): { maxPendingLearnings?: number } {
   const limit = readMaxPendingLearnings(process.env);
   return limit === undefined ? {} : { maxPendingLearnings: limit };
+}
+
+/** The same, as outcome learning takes it. */
+function maxPendingPerAuthor(): { maxPendingPerAuthor?: number } {
+  const limit = readMaxPendingLearnings(process.env);
+  return limit === undefined ? {} : { maxPendingPerAuthor: limit };
+}
+
+/** `learnings.repeatThreshold` (NIC-1081); unset, the default. */
+function repeatThreshold(): { repeatThreshold?: number } {
+  const threshold = readRepeatThreshold(process.env);
+  return threshold === undefined ? {} : { repeatThreshold: threshold };
 }
 import { log } from "./log.js";
 
@@ -83,6 +101,24 @@ function conversationDeps(): Promise<ConversationDeps> {
       store: drizzleConversationStore(db),
       learnings: drizzleLearningStore(db),
       ...maxPendingLearnings(),
+      // An `ignore` may complete a repeated rejection (NIC-1081).
+      outcomes: outcomeLearner({
+        db,
+        learnings: drizzleLearningStore(db),
+        client: (installationId) =>
+          new GitHubClient({
+            token: installationTokenProvider({
+              appId: app.appId,
+              privateKey: app.privateKey,
+              installationId,
+              timeoutMs: GITHUB_TIMEOUT_MS,
+            }),
+            timeoutMs: GITHUB_TIMEOUT_MS,
+          }),
+        ...maxPendingPerAuthor(),
+        ...repeatThreshold(),
+        log,
+      }),
       replies: drizzleReplyStore(db),
       maxExplanations: readMaxExplanations(process.env),
       queue: sqsJobQueue(new SQSClient({}), env.jobQueueUrl),

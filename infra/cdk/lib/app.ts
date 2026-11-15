@@ -121,6 +121,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     embeddings: config.learnings.embeddings,
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
     bootstrapMaxCostUsd: config.learnings.bootstrapMaxCostUsd,
+    repeatThreshold: config.learnings.repeatThreshold,
     ...(config.tickets === undefined ? {} : { tickets: config.tickets }),
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||

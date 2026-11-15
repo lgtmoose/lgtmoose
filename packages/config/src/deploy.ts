@@ -343,8 +343,10 @@ export const deployConfigSchema = z
           .int()
           .min(1)
           .max(10_000)
-          .default(10)
-          .describe("Accepted plus rejected findings a category needs before it's judged."),
+          .default(3)
+          .describe(
+            "Accepted plus rejected findings a category needs before it's judged. Acceptance is smoothed with a prior, so a small number doesn't flap.",
+          ),
         maxCommentsPerRun: z
           .number()
           .int()
@@ -356,7 +358,7 @@ export const deployConfigSchema = z
           ),
       })
       .strict()
-      .default({ acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 })
+      .default({ acceptanceThreshold: 0.5, minSamples: 3, maxCommentsPerRun: 100 })
       .describe(
         "Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md.",
       ),
@@ -525,11 +527,29 @@ export const deployConfigSchema = z
           .describe(
             "The most estimated model cost, in USD, of one bootstrap from a repository's review history (lgtmoose learnings bootstrap). A request can ask for less, never more.",
           ),
+        /**
+         * On how many PRs of a repo findings about the same thing must be declined, disputed or
+         * 👎'd before LGTMoose proposes a learning not to raise it (NIC-1081).
+         */
+        repeatThreshold: z
+          .number()
+          .int()
+          .min(2)
+          .max(20)
+          .default(2)
+          .describe(
+            "On how many PRs of a repository findings about the same thing must be declined, disputed or 👎'd before LGTMoose proposes a learning not to raise it. Never for protected categories.",
+          ),
       })
       .strict()
-      .default({ embeddings: { provider: "none" }, maxPendingPerAuthor: 5, bootstrapMaxCostUsd: 5 })
+      .default({
+        embeddings: { provider: "none" },
+        maxPendingPerAuthor: 5,
+        repeatThreshold: 2,
+        bootstrapMaxCostUsd: 5,
+      })
       .describe(
-        "Learnings: how the learnings for each review batch are ranked, and how many pending learnings one author may have.",
+        "Learnings: how the learnings for each review batch are ranked, how many pending learnings one author may have, and when repeated rejections make one.",
       ),
     /**
      * Ticket coverage (NIC-839): the review reads the tickets a PR names (in its branch, title,

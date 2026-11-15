@@ -16,6 +16,7 @@ export {
   type LearningSource,
   type OrgRoleReader,
   type PermissionReader,
+  type ProposeOptions,
   type ProposeResult,
 } from "./policy.js";
 export { redactSensitive, type RedactionKind } from "./redact.js";
@@ -63,6 +64,7 @@ export {
   type LearningEventType,
   type LearningFilter,
   type LearningKind,
+  type LearningOutcome,
   type LearningStatus,
   type LearningStore,
   type NewLearning,

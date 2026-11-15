@@ -353,10 +353,59 @@ function learningButton(
   return button;
 }
 
+/** What LGTMoose learned lately (NIC-1081): new learnings, and ones a decline wasn't covered by. */
+function learningActivity(activity: {
+  days: number;
+  learned: Learning[];
+  notFollowed: (Learning & { notFollowed: number })[];
+}): HTMLElement[] {
+  // Untrusted text: always a text node, preformatted so nothing is reflowed into markup.
+  const text = (learning: Learning) => el("pre", { class: "body" }, learning.text);
+  const where = (learning: Learning) => `${learning.repo ?? learning.org} (${learning.scope})`;
+  return [
+    el("h2", {}, `Learned in the last ${activity.days} days`),
+    activity.learned.length === 0
+      ? el("p", { class: "muted" }, "Nothing new.")
+      : table(
+          ["Learning", "Applies to", "Status", "From"],
+          activity.learned.map((learning) => [
+            text(learning),
+            where(learning),
+            learning.status,
+            el(
+              "span",
+              {},
+              `${learning.author} in `,
+              prLink(learning.sourceRepo, learning.sourcePr),
+            ),
+          ]),
+        ),
+    el("h2", {}, "Learnings not followed"),
+    el(
+      "p",
+      { class: "muted" },
+      `Active learnings that were in a review's prompt, yet a finding of their category was declined anyway, in the last ${activity.days} days. Sharpen the text with a new learning, or reject one that no longer holds.`,
+    ),
+    activity.notFollowed.length === 0
+      ? el("p", { class: "muted" }, "None.")
+      : table(
+          ["Learning", "Applies to", "Not followed"],
+          activity.notFollowed.map((learning) => [
+            text(learning),
+            where(learning),
+            count(learning.notFollowed),
+          ]),
+        ),
+  ];
+}
+
 async function renderLearnings(status: LearningStatus): Promise<void> {
-  const { learnings } = await api<{ learnings: Learning[] }>(
-    `/api/learnings?status=${encodeURIComponent(status)}`,
-  );
+  const [{ learnings }, activity] = await Promise.all([
+    api<{ learnings: Learning[] }>(`/api/learnings?status=${encodeURIComponent(status)}`),
+    api<{ days: number; learned: Learning[]; notFollowed: (Learning & { notFollowed: number })[] }>(
+      "/api/learnings/activity",
+    ),
+  ]);
   const tabs = el(
     "p",
     {},
@@ -410,6 +459,7 @@ async function renderLearnings(status: LearningStatus): Promise<void> {
             ];
           }),
         ),
+    ...learningActivity(activity),
   );
 }
 

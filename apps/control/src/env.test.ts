@@ -217,7 +217,7 @@ describe("readReconcileEnv", () => {
       allowedOrgs: ["acme", "beta"],
       shadow: true,
       lookbackHours: 24,
-      feedback: { threshold: 0.5, minSamples: 10, maxComments: 100 },
+      feedback: { threshold: 0.5, minSamples: 3, maxComments: 100 },
     });
     expect(
       readReconcileEnv({ ...env, LGTMOOSE_SHADOW: "false", RECONCILE_LOOKBACK_HOURS: "6" }),

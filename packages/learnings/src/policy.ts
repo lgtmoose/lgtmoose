@@ -206,15 +206,28 @@ export type ProposeResult =
     }
   | { outcome: "refused"; reason: string };
 
+/** How a proposal is stored, set by the caller's code (never by the proposal). */
+export interface ProposeOptions {
+  /**
+   * Stored pending even when its author has the access, for a person to approve: a learning
+   * made from several people's rejections, not all of whom had write access (NIC-1081).
+   */
+  requireApproval?: boolean;
+  /** The pattern of rejected findings it's made from (`Learning.patternKey`). */
+  patternKey?: string;
+}
+
 /**
  * Stores a proposed learning: refused when it doesn't validate or would let a protected category
- * be suppressed; otherwise redacted and stored, active when its author has the access and
- * pending when not. A second proposal from the same comment returns the first.
+ * be suppressed; otherwise redacted and stored, active when its author has the access (and
+ * `options.requireApproval` isn't set) and pending when not. A second proposal from the same
+ * comment returns the first.
  */
 export async function proposeLearning(
   deps: LearningDeps,
   proposal: unknown,
   source: LearningSource,
+  options: ProposeOptions = {},
 ): Promise<ProposeResult> {
   const parsed = learningProposalSchema.safeParse(proposal);
   if (!parsed.success) {
@@ -235,12 +248,14 @@ export async function proposeLearning(
   const pathGlob = scope.level === "path" ? scope.pathGlob : undefined;
   const redacted = redactSensitive(text);
   // From GitHub, at the time it's proposed.
-  const { checked: authorPermission, ok: active } = await access(
+  const { checked: authorPermission, ok: hasAccess } = await access(
     deps,
     { org: owner, repo, sourceRepo: full },
     source.author,
   );
-  if (!active) {
+  const active = hasAccess && options.requireApproval !== true;
+  // Authors with the access aren't limited, also when this one waits for approval.
+  if (!hasAccess) {
     const limit = deps.maxPendingPerAuthor ?? DEFAULT_MAX_PENDING_PER_AUTHOR;
     // A retried proposal of a stored one isn't counted against itself.
     const pending = await deps.store.countPending(
@@ -269,6 +284,7 @@ export async function proposeLearning(
       sourceRepo: full,
       sourcePr: source.pr,
       sourceCommentId: source.commentId,
+      ...(options.patternKey === undefined ? {} : { patternKey: options.patternKey }),
       author: source.author,
       authorPermission,
     },

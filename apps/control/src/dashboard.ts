@@ -335,6 +335,42 @@ async function listLearnings(
   return json(200, { learnings });
 }
 
+/** How far back "learned this week" and "not followed" look. */
+const ACTIVITY_DAYS = 7;
+
+/**
+ * What LGTMoose learned lately (NIC-1081): learnings proposed in the last week, pending or
+ * active, and active learnings a declined finding showed weren't followed, for a person to
+ * sharpen or retire. Only the person's repositories' and orgs' learnings.
+ */
+async function learningActivity(
+  deps: DashboardDeps,
+  session: DashboardSession,
+): Promise<DashboardResponse> {
+  const since = new Date(deps.now().getTime() - ACTIVITY_DAYS * 24 * 3600 * 1000);
+  const perOrg = await Promise.all(
+    session.orgs.map(async (org) => ({
+      learnings: (await deps.learnings.list({ org })).filter((learning) =>
+        canSee(session, learning),
+      ),
+      notFollowed: await deps.learnings.notFollowedSince(org, since),
+    })),
+  );
+  const all = perOrg.flatMap((entry) => entry.learnings);
+  const learned = all
+    .filter((learning) => learning.status !== "retired" && learning.createdAt >= since)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, LEARNINGS_LIMIT)
+    .map(learningView);
+  const counts = new Map(perOrg.flatMap((entry) => [...entry.notFollowed]));
+  const notFollowed = all
+    .filter((learning) => learning.status === "active" && (counts.get(learning.id) ?? 0) > 0)
+    .map((learning) => ({ ...learningView(learning), notFollowed: counts.get(learning.id) ?? 0 }))
+    .sort((a, b) => b.notFollowed - a.notFollowed)
+    .slice(0, LEARNINGS_LIMIT);
+  return json(200, { days: ACTIVITY_DAYS, learned, notFollowed });
+}
+
 async function changeLearning(
   deps: DashboardDeps,
   session: DashboardSession,
@@ -585,6 +621,8 @@ export async function handleDashboardRequest(
     }
     case "GET /api/learnings":
       return listLearnings(deps, session, request.query.status);
+    case "GET /api/learnings/activity":
+      return learningActivity(deps, session);
     case "GET /api/usage": {
       const now = deps.now();
       const since = new Date(now.getTime() - USAGE_DAYS * 24 * 3600 * 1000);

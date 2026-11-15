@@ -58,6 +58,35 @@ const comment = (findingId: string, commentId: number): FeedbackComment => ({
   commentId,
 });
 
+describe("collectFeedback: outcome learning (NIC-1081)", () => {
+  it("hands a comment whose reactions came out against it to outcome learning", async () => {
+    const at = "2026-05-01T00:00:00Z";
+    const { deps } = fakes({
+      comments: [comment("f1", 1), comment("f2", 2)],
+      reactions: {
+        1: [
+          { content: "-1", user: "ada", userIsBot: false, createdAt: at },
+          { content: "-1", user: "bob", userIsBot: false, createdAt: at },
+          { content: "+1", user: "cy", userIsBot: false, createdAt: at },
+        ],
+        2: [{ content: "+1", user: "ada", userIsBot: false, createdAt: at }],
+      },
+    });
+    const rejected: string[] = [];
+    const counts = await collectFeedback({
+      ...deps,
+      onRejected: async (entry) => {
+        rejected.push(entry.findingId);
+        if (entry.findingId === "f1") throw new Error("GitHub is down");
+      },
+    });
+    expect(rejected).toEqual(["f1"]);
+    // A failure is counted, never thrown.
+    expect(counts.errors).toBe(1);
+    expect(counts.feedbackCommentsRead).toBe(2);
+  });
+});
+
 describe("collectFeedback", () => {
   it("records each person's latest reaction, bots left out, up to the cap", async () => {
     const at = (day: number) => `2026-05-0${day}T00:00:00Z`;

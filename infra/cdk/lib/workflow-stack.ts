@@ -158,6 +158,8 @@ export interface WorkflowStackProps extends StackProps {
   maxPendingLearnings?: number;
   /** `learnings.bootstrapMaxCostUsd`: the cost cap of one bootstrap from review history. */
   bootstrapMaxCostUsd?: number;
+  /** `learnings.repeatThreshold` (NIC-1081): rejections on how many PRs make a learning. */
+  repeatThreshold?: number;
   /**
    * Ticket coverage (`tickets`): the control task reads linked tickets with the key in
    * `SECRET_NAMES.linearTickets`. Left out: off. Sandbox tasks never get the key.
@@ -248,6 +250,7 @@ export class WorkflowStack extends Stack {
         ...ticketsEnvironment(props.tickets),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
         LGTMOOSE_BOOTSTRAP_MAX_COST_USD: String(props.bootstrapMaxCostUsd ?? 5),
+        LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
         LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
       },
     });
@@ -529,6 +532,7 @@ export class WorkflowStack extends Stack {
         GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
+        LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
         // Whether `explain` asks the explainer (in a run) or replies with the stored finding.
         LGTMOOSE_MAX_EXPLANATIONS: String(props.maxExplanations ?? 5),
         // Lets Node verify the RDS server certificate.
@@ -592,6 +596,9 @@ export class WorkflowStack extends Stack {
               FEEDBACK_MIN_SAMPLES: String(props.feedback.minSamples),
               FEEDBACK_MAX_COMMENTS: String(props.feedback.maxCommentsPerRun),
             }),
+        // A newly 👎'd finding may complete a repeated rejection, which proposes a learning.
+        LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
+        LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

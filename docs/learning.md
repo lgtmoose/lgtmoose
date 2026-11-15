@@ -7,8 +7,9 @@ Memory writes are the main way an attacker could steer a reviewer, so who may wr
 ## Where learnings come from
 
 - **`@lgtmoose learn: <text>`** in a PR comment. Tags narrow or widen it: `[path <glob>]`, `[org]`, `[kind <kind>]`, `[category <name>]`. See [Commands](commands.md).
-- **A declined finding.** When a person declines a finding in a reply and the reply judge sees a general rule in their reason, it proposes a learning on their behalf.
 - **The repository's review history.** A bootstrap reads past code review comments and proposes the team's rules. They are always pending until a person approves them. See [Starting with your history](#starting-with-your-history).
+- **A declined finding.** When a person declines a finding in a reply and the reply judge sees a general rule in their reason, it proposes a learning on their behalf. When it sees no rule, it offers one line instead: reply `@lgtmoose remember` in the thread to stop raising findings like it in this repository.
+- **Repeated rejections.** See [Learning from outcomes](#learning-from-outcomes).
 
 Kinds are `accepted_pattern`, `correction`, `convention` and `scoping`. A `learn:` comment is a repo-wide `convention` unless its tags say otherwise.
 
@@ -77,6 +78,23 @@ Some learnings are made without a model, from files on the default branch:
 ### What it costs
 
 Each batch is one fast-tier model call on up to 60 comments. A bootstrap runs as many batches as fit under `learnings.bootstrapMaxCostUsd` (5 USD by default), or the lower cap a request asks for, and stops at a PR boundary. Its batches are reserved and settled in the [spend ledger](costs.md#spend-caps) like a review's, under the repository's and the deployment's monthly caps. No PR's caps apply to it. The dashboard shows each bootstrap's PRs, comments, proposals, cost, and whether a cap stopped it.
+
+## Learning from outcomes
+
+LGTMoose doesn't wait for someone to write `learn:` (NIC-1081). What people do with its findings teaches it too, within the same write policy:
+
+- **Repeated rejections.** When findings of one rule category about the same thing (their titles' key nouns overlap, as the fingerprint's fuzzy match measures it) are declined, disputed or 👎'd on `learnings.repeatThreshold` pull requests of a repository (2 by default), LGTMoose proposes a repo-wide `scoping` learning not to raise them. Its text is written in plain code from the findings and quotes the people's reasons; no model writes it. It's active at once only when every person who rejected one has write access on the repository, and pending otherwise. A protected category (`authz`, `tenant_scoping`, `money`, `secrets`) never gets one, and a pattern that already has a pending or active learning isn't proposed again. Declines and disputes count as the post step settles them, an `ignore` as it happens, and 👎 as the reconciler reads reactions.
+- **`@lgtmoose remember`.** In a declined finding's thread, it makes the same kind of learning from that finding and the reason it was declined with, as the commenter's: active with write access, pending otherwise, refused for a protected category. Bots can't use it, trusted ones included.
+- **Reinforcement.** The learnings in a batch's prompt are recorded with the findings it raised. When one of those findings is fixed, each of its learnings gets a hit and a `reinforced` event.
+- **Not followed.** When a finding is rejected though a learning of its category was in its prompt, that learning gets a `not_followed` event. The dashboard lists active learnings that weren't followed, for a person to sharpen or retire.
+- **Visible.** A review's summary says which learnings its prompts had ("Applied 3 learnings: …", with their IDs). The dashboard's Learnings page shows what was learned in the last 7 days.
+
+```ts
+// lgtmoose.config.ts
+learnings: { repeatThreshold: 2 },
+```
+
+None of this changes a finding by itself: learnings stay prompt context only.
 
 ## Retrieval: learnings in reviews
 

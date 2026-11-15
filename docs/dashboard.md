@@ -26,6 +26,10 @@ The stack's outputs `DashboardUrl` and `OAuthCallbackUrl` hold the same URLs.
 
 Findings, runs and repositories can be filtered to one repository. Findings' and learnings' text is shown as plain text, never rendered as HTML or Markdown.
 
+### What was learned lately
+
+Below the list, the Learnings page shows the learnings proposed in the last 7 days (pending or active) and the active learnings that weren't followed: a finding of their category was declined anyway though they were in its review's prompt. Sharpen one with a new learning, or reject it. See [Learning from outcomes](learning.md#learning-from-outcomes).
+
 ### Approving and rejecting learnings
 
 **Approve** makes a pending learning active. **Reject** retires a pending or active one, like `@lgtmoose forget <id>`: its row and its history stay. Both go through the same policy as the PR commands, with you as the actor, so the `learning_events` history records your login:

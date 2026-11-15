@@ -1,4 +1,4 @@
-import type { Judgement } from "@lgtmoose/core";
+import { isProtectedCategory, type Judgement } from "@lgtmoose/core";
 import { inline, paragraphs } from "@lgtmoose/summary";
 import { needsTrustedResolver, resolutionHeld, type Permission } from "./thread-policy.js";
 
@@ -100,6 +100,16 @@ export interface ReplyContext {
   /** We already answered a dispute on this finding. */
   disputeAnswered: boolean;
   permission: (login: string) => Promise<Permission>;
+  /**
+   * The App's slug: a decline the judge saw no rule in offers `@<slug> remember` (NIC-1081).
+   * Left out, no offer.
+   */
+  slug?: string;
+}
+
+/** The offer on a decline with no rule in it: one line, never for a protected category. */
+export function rememberOffer(slug: string): string {
+  return `Declined. Reply \`@${slug} remember\` in this thread to stop raising findings like this in this repository.`;
 }
 
 /** What to do about one reply. */
@@ -165,12 +175,20 @@ export async function decideReply(
         context.permission,
       );
       if (held === undefined) {
+        const learning = judgement.learning?.trim() ?? "";
+        // No rule in the reason: offer to remember the finding itself (NIC-1081). A protected
+        // category can't be quieted by a learning, so there's nothing to offer.
+        const offer =
+          learning === "" &&
+          context.slug !== undefined &&
+          !isProtectedCategory(finding.ruleCategory);
         return {
           status: "declined",
           resolveThread: true,
-          ...(judgement.learning === undefined || judgement.learning.trim() === ""
-            ? {}
-            : { learning: judgement.learning.trim() }),
+          ...(learning === "" ? {} : { learning }),
+          ...(offer && context.slug !== undefined
+            ? { reply: rememberOffer(context.slug), replyEvent: "replied" as const }
+            : {}),
           reason: "declined",
         };
       }

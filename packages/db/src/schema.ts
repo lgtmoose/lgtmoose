@@ -81,13 +81,17 @@ export const learningStatus = pgEnum("learning_status", ["pending", "active", "r
 /**
  * What happened to a learning: proposed (stored, pending or active), applied (active as
  * proposed: its author had the access), approved (a pending one made active by someone with
- * the access), retired (`forget`).
+ * the access), retired (`forget`). From outcomes (NIC-1081): reinforced (a finding whose prompt
+ * had it was fixed), not_followed (a finding it should have covered was declined anyway, for a
+ * person to sharpen or retire it).
  */
 export const learningEventType = pgEnum("learning_event_type", [
   "proposed",
   "applied",
   "approved",
   "retired",
+  "reinforced",
+  "not_followed",
 ]);
 export const reaction = pgEnum("reaction", ["+1", "-1"]);
 
@@ -219,6 +223,11 @@ export const findings = pgTable(
      * (NIC-841). The reconciler reads the least recently checked first, a few per run.
      */
     feedbackCheckedAt: timestamp("feedback_checked_at", { withTimezone: true }),
+    /**
+     * The learnings in the prompt of the batch that raised it (NIC-1081): reinforced when it's
+     * fixed, and recorded as not followed when it's declined against one of them.
+     */
+    learningIds: text("learning_ids").array(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -334,6 +343,11 @@ export const learnings = pgTable(
     sourceRepo: text("source_repo"),
     sourcePr: integer("source_pr"),
     sourceCommentId: bigint("source_comment_id", { mode: "number" }),
+    /**
+     * For a learning made from findings people rejected (NIC-1081): their rule category and
+     * title nouns, so the same pattern isn't proposed twice. Null otherwise.
+     */
+    patternKey: text("pattern_key"),
     author: text("author").notNull(),
     /** The author's repo permission when they proposed it: admin, maintain, write, triage, read. */
     authorPermission: text("author_permission").notNull(),
@@ -366,6 +380,8 @@ export const learningEvents = pgTable(
     actorPermission: text("actor_permission").notNull(),
     /** The comment it came from, when there was one. */
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
+    /** For `reinforced` and `not_followed`: the finding it's about. */
+    findingId: uuid("finding_id").references(() => findings.id, { onDelete: "set null" }),
     /** Increases with every event: their order, also for events written together. */
     seq: bigint("seq", { mode: "number" }).notNull().generatedAlwaysAsIdentity(),
     createdAt: createdAt(),
