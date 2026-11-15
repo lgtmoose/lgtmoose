@@ -53,6 +53,7 @@ describe("migrations", () => {
       "findings",
       "learning_events",
       "learnings",
+      "pending_replies",
       "provider_cooldowns",
       "provider_usage",
       "pull_request_dispatches",

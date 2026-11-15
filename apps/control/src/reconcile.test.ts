@@ -326,6 +326,27 @@ describe("reconcile", () => {
     expect(sent).toEqual([]);
   });
 
+  it("asks again for a run for a reply no run judged, once per attempt", async () => {
+    const { deps, sent } = setup({ records: new Map([[7, recorded()]]) });
+    let waiting: { id: string; attempts: number } | undefined = { id: "r-1", attempts: 1 };
+    deps.store.pendingReply = async () => waiting;
+    expect(await reconcile(deps)).toMatchObject({ pendingReplies: 1 });
+    const replies = sent.filter((entry) => entry.job.requested === "replies");
+    expect(replies).toMatchObject([
+      {
+        job: {
+          kind: "pr_updated",
+          requested: "replies",
+          deliveryId: reconcileDeliveryId("acme/shop#7:replies:r-1:1"),
+          prNumber: 7,
+        },
+        groupId: "acme/shop#7",
+      },
+    ]);
+    waiting = undefined;
+    expect(await reconcile(deps)).toMatchObject({ pendingReplies: 0 });
+  });
+
   it("counts a repository it can't read as an error and goes on", async () => {
     const { deps } = setup({ failPulls: true, repos: ["acme/a", "acme/b"] });
     expect(await reconcile(deps)).toMatchObject({ errors: 2 });
@@ -349,6 +370,7 @@ describe("metricsLine", () => {
           openPullRequests: 3,
           missedHeads: 1,
           missedComments: 0,
+          pendingReplies: 0,
           labelsResynced: 2,
           statesResynced: 0,
           unreviewed: 1,
@@ -363,7 +385,7 @@ describe("metricsLine", () => {
     };
     expect(line._aws.Timestamp).toBe(1000);
     expect(line._aws.CloudWatchMetrics[0]?.Namespace).toBe("LGTMoose");
-    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(9);
+    expect(line._aws.CloudWatchMetrics[0]?.Metrics).toHaveLength(10);
     expect(line).toMatchObject({
       LearningsRetired: 5,
       OpenPullRequests: 3,

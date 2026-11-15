@@ -6,6 +6,7 @@ import {
   batchRunId,
   batchUrlsSchema,
   runBatch,
+  runJudge,
   type BatchOutput,
   type BatchUrls,
 } from "@lgtmoose/pipeline";
@@ -37,6 +38,12 @@ export interface SandboxDeps {
    * Undefined: the input's, the reviewer provider's.
    */
   model?: string;
+  /**
+   * This task's provider's model for the fast tier (`LGTMOOSE_FAST_MODEL`; empty for the
+   * harness's own choice), for a batch that asks for it (the reply judge). Undefined: the tier
+   * alone picks it, where the harness maps tiers.
+   */
+  fastModel?: string;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -114,8 +121,36 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     await put(deps, urls.credential, credential);
     deps.log("handed the refreshed credential back");
   };
+  const harness = deps.harness(presignedTranscripts(deps, urls), onAuthRefreshed);
+  if (input.role === "judge") {
+    const judged = await runJudge(
+      harness,
+      { index: input.index, prompt: input.prompt },
+      {
+        cwd: checkout,
+        model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
+        timeoutMs: input.timeoutMs,
+        runId: batchRunId(input.runId, input.index),
+      },
+    );
+    const output: BatchOutput = batchOutputSchema.parse({
+      version: 1,
+      index: input.index,
+      ...(judged.judgement === undefined ? {} : { judgement: judged.judgement }),
+      ...(judged.error === undefined ? {} : { error: judged.error.slice(0, 4000) }),
+      transcriptKeys: judged.transcriptKeys.slice(0, 3),
+      ...(judged.usage === undefined ? {} : { usage: judged.usage }),
+    });
+    await put(deps, urls.output, JSON.stringify(output));
+    deps.log("reply judged", {
+      index: input.index,
+      kind: output.judgement?.kind,
+      error: output.error,
+    });
+    return output;
+  }
   const outcome = await runBatch(
-    deps.harness(presignedTranscripts(deps, urls), onAuthRefreshed),
+    harness,
     { index: input.index, files: [], prompt: input.prompt },
     {
       cwd: checkout,

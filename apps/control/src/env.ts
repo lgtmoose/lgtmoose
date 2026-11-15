@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_REPLY_JUDGEMENTS } from "./replies.js";
+
 /** What the control task reads from its environment, set by the Workflow stack. */
 export interface ControlEnv {
   /** The artifact bucket: batch inputs, findings and transcripts. */
@@ -138,6 +140,11 @@ export interface ReviewSettings {
   batchTimeoutMs: number;
   /** `LGTMOOSE_SHADOW`: record reviews instead of posting them. Anything but "false" is on. */
   shadow: boolean;
+  /**
+   * `LGTMOOSE_MAX_REPLY_JUDGEMENTS`: the most replies the reply judge reads per run. Left out
+   * (tests), none are judged.
+   */
+  maxReplyJudgements?: number;
 }
 
 export const DEFAULT_BATCH_TIMEOUT_MS = 20 * 60_000;
@@ -148,9 +155,15 @@ export function readReviewSettings(env: Env): ReviewSettings {
   if (!Number.isSafeInteger(batchTimeoutMs) || batchTimeoutMs <= 0) {
     throw new Error("LGTMOOSE_BATCH_TIMEOUT_MS must be a whole number of milliseconds.");
   }
+  const judgements = env.LGTMOOSE_MAX_REPLY_JUDGEMENTS?.trim();
+  const maxReplyJudgements = judgements ? Number(judgements) : DEFAULT_MAX_REPLY_JUDGEMENTS;
+  if (!Number.isSafeInteger(maxReplyJudgements) || maxReplyJudgements < 0) {
+    throw new Error("LGTMOOSE_MAX_REPLY_JUDGEMENTS must be a whole number.");
+  }
   return {
     model: env.LGTMOOSE_REVIEWER_MODEL?.trim() ?? "",
     batchTimeoutMs,
+    maxReplyJudgements,
     // Shadow mode is the safe side: only an explicit "false" posts to GitHub.
     shadow: env.LGTMOOSE_SHADOW?.trim() !== "false",
   };

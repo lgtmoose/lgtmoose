@@ -1,6 +1,6 @@
 import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { parseRepoConfigYaml, statusLabels } from "@lgtmoose/config";
-import { pullRequests, reviewRuns } from "@lgtmoose/db";
+import { pendingReplies, pullRequests, reviewRuns } from "@lgtmoose/db";
 import {
   GitHubClient,
   GitHubError,
@@ -10,9 +10,12 @@ import {
   repoPath,
 } from "@lgtmoose/poster";
 import { syncStatusLabel } from "@lgtmoose/summary";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "./database.js";
+
+/** How long a recorded reply is left to the run its comment asked for before the reconciler asks again. */
+export const PENDING_REPLY_GRACE_MS = 30 * 60_000;
 import type {
   HumanComment,
   InstallationGitHub,
@@ -98,6 +101,22 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
         .where(and(eq(pullRequests.id, pullRequestId), eq(pullRequests.headSha, recordedHead)))
         .returning({ id: pullRequests.id });
       return updated.length > 0;
+    },
+    async pendingReply(pullRequestId) {
+      const [row] = await db
+        .select({ id: pendingReplies.id, attempts: pendingReplies.attempts })
+        .from(pendingReplies)
+        .where(
+          and(
+            eq(pendingReplies.pullRequestId, pullRequestId),
+            eq(pendingReplies.status, "pending"),
+            // Not one just recorded: its own run was asked for and is likely under way.
+            lt(pendingReplies.createdAt, new Date(now().getTime() - PENDING_REPLY_GRACE_MS)),
+          ),
+        )
+        .orderBy(asc(pendingReplies.createdAt))
+        .limit(1);
+      return row;
     },
   };
 }

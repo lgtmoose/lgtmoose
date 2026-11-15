@@ -4,6 +4,7 @@ import type { LearningsForBatch, PullReader, PullTarget } from "@lgtmoose/pipeli
 import type { Poster, PullRef } from "@lgtmoose/poster";
 import type { ReviewThread, ReviewThreadReader } from "./threads.js";
 import type { Permission } from "./thread-policy.js";
+import type { ReplyStore } from "./replies.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
@@ -135,6 +136,32 @@ export interface FindingStore {
     changes: readonly { id: string; severity: FindingRecord["severity"] }[],
     sha: string,
   ): Promise<void>;
+  /**
+   * Closes an open or outdated finding after the reply judge (`decideReply`): `fixed` and
+   * `disputed` by us, `declined` by the reply's author. With an event naming the reply. False
+   * when the finding wasn't open or outdated any more. Optional: without it, no reply is acted on.
+   */
+  closeForReply?(
+    findingId: string,
+    status: "fixed" | "declined" | "disputed",
+    reply: { login: string; commentId: number },
+    sha: string,
+  ): Promise<boolean>;
+  /** Records that we replied on a finding's thread (`replied` or `dispute_answered`). */
+  recordReply?(
+    findingId: string,
+    type: "replied" | "dispute_answered",
+    commentId: number,
+    sha: string,
+  ): Promise<void>;
+  /** The findings among `ids` with a `dispute_answered` event: never answered twice. */
+  disputesAnswered?(ids: readonly string[]): Promise<Set<string>>;
+  /**
+   * Our inline comments on the PR's findings closed as fixed after a reply. They aren't a
+   * reason to drop the reviewer raising the problem again, so they're left out of its context
+   * and of the duplicate check against the PR's comments: a re-raise reopens the finding.
+   */
+  fixedCommentIds?(pullRequestId: string): Promise<number[]>;
 }
 
 /** `review_runs` and `pull_requests` in the database. */
@@ -260,6 +287,15 @@ export interface ControlDeps {
     permission?: (target: PullTarget, login: string) => Promise<Permission>;
     /** The PR's review threads, through GraphQL, to follow resolved ones. */
     threads: ReviewThreadReader;
+    /**
+     * Writes for the reply judge: a reply in a finding's review thread, and resolving that
+     * thread. In shadow mode, logged instead. Without them, judgements aren't acted on.
+     */
+    conversation?: {
+      reply(target: PullTarget, commentId: number, body: string): Promise<void>;
+      /** Resolves a review thread by its GraphQL node ID. */
+      resolveThread(threadId: string): Promise<void>;
+    };
     token: () => Promise<string>;
     poster: (runId: string, pull: PullRef) => Poster;
   }>;
@@ -270,6 +306,16 @@ export interface ControlDeps {
   /** Writes a gzip tarball of `dir` (hidden files included) to `archive`. */
   archive(dir: string, archive: string): Promise<void>;
   log(message: string, fields?: Record<string, unknown>): void;
+  /** Replies waiting for the reply judge (`pending_replies`). Left out, none are judged. */
+  replies?: ReplyStore;
+  /**
+   * Proposes a learning from a declined finding's reply, as its author's (through the learnings
+   * policy, which reads their access from GitHub). Left out, none are proposed.
+   */
+  proposeLearning?: (
+    installationId: number,
+    proposal: { text: string; repo: string; prNumber: number; commentId: number; author: string },
+  ) => Promise<void>;
   /**
    * The team's learnings for one batch of a PR in `org`'s `repo` (owner/name): retrieved here,
    * in the control task, never in the sandbox. Left out, prompts have none.

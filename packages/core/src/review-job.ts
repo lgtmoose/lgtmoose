@@ -20,8 +20,13 @@ export const REVIEW_JOB_KINDS = [
 
 export type ReviewJobKind = (typeof REVIEW_JOB_KINDS)[number];
 
-/** How a person asked for a review: the latest commit, or the whole PR again. */
-export const REVIEW_REQUESTS = ["review", "full_review"] as const;
+/**
+ * Why a run was asked for rather than started by a push: a person's `review` or `full review`
+ * command (the latest commit, or the whole PR again), or `replies`, which the conversation
+ * handler queues when a person replies on one of our findings' threads, so the reply judge
+ * runs without waiting for a push.
+ */
+export const REVIEW_REQUESTS = ["review", "full_review", "replies"] as const;
 
 export type ReviewRequest = (typeof REVIEW_REQUESTS)[number];
 
@@ -53,7 +58,8 @@ export interface ReviewJob {
   /**
    * Set when a person asked for this review with an `@lgtmoose review` or `full review`
    * command, never by the gateway. A requested review isn't debounced and runs on a paused PR;
-   * a full one also leaves earlier reviews out, so the whole PR is reviewed again.
+   * a full one also leaves earlier reviews out, so the whole PR is reviewed again. `replies`
+   * is queued for replies waiting for the reply judge, and doesn't run on a paused PR.
    */
   requested?: ReviewRequest;
   /** ISO 8601 time the gateway received the delivery. */

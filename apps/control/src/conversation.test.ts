@@ -120,13 +120,93 @@ const from = (author: string, body: string, extra: Partial<CommentInfo> = {}): C
 });
 
 describe("handleConversation", () => {
-  it("leaves a comment without a command to the reply judge", async () => {
+  it("leaves a top-level comment without a command alone", async () => {
     const f = fakeDeps(from("dev", "Looks good, thanks @lgtmoose-fan"));
     expect(await handleConversation(f.deps, job())).toEqual({
       action: "deferred",
-      reason: "not a command",
+      reason: "not a reply on a review thread",
     });
     expect(f.reactions).toEqual([]);
+  });
+
+  describe("replies for the reply judge", () => {
+    function withReplies(body: string, status: StoredFinding["status"] = "open") {
+      const f = fakeDeps(
+        from("dev", body, { threadRootId: 100, createdAt: "2026-11-15T00:00:03.000Z" }),
+        { findings: new Map([[100, finding({ status })]]) },
+      );
+      const added: { findingId: string; commentId: number; body: string }[] = [];
+      const through: Date[] = [];
+      f.deps.replies = {
+        add: async (input) => {
+          if (added.some((entry) => entry.commentId === input.commentId)) return false;
+          added.push(input);
+          return true;
+        },
+        take: async () => [],
+        finish: async () => {},
+        failed: async () => {},
+      };
+      f.deps.store.commentsThrough = async (_repo, _number, at) => {
+        through.push(at);
+      };
+      return { ...f, added, through };
+    }
+    const reviewReply = job({ kind: "review_comment", commentId: 501 });
+
+    it("records a reply on one of our findings' threads and asks for a run", async () => {
+      const f = withReplies("This is intended: we retry later.");
+      expect(await handleConversation(f.deps, reviewReply)).toEqual({
+        action: "reply",
+        queued: true,
+      });
+      expect(f.added).toMatchObject([{ findingId: "f-1", commentId: 501 }]);
+      expect(f.queued).toMatchObject([
+        {
+          kind: "pr_updated",
+          requested: "replies",
+          deliveryId: "replies-501",
+          headSha: HEAD,
+          commentId: 501,
+        },
+      ]);
+      expect(f.through.map((at) => at.toISOString())).toEqual(["2026-11-15T00:00:03.000Z"]);
+      // A redelivery is recorded once and asks once.
+      expect(await handleConversation(f.deps, reviewReply)).toEqual({
+        action: "reply",
+        queued: false,
+      });
+      expect(f.queued).toHaveLength(1);
+    });
+
+    it("leaves thanks, closed findings and other threads alone", async () => {
+      const thanks = withReplies("Thanks! 👍");
+      expect(await handleConversation(thanks.deps, reviewReply)).toMatchObject({
+        action: "ignored",
+        reason: "nothing to judge",
+      });
+      const closed = withReplies("Why?", "declined");
+      expect(await handleConversation(closed.deps, reviewReply)).toMatchObject({
+        action: "ignored",
+      });
+      const other = withReplies("Why?");
+      expect(
+        await handleConversation(other.deps, job({ kind: "review_comment", commentId: 100 })),
+      ).toMatchObject({ action: "deferred" });
+      for (const f of [thanks, closed, other]) {
+        expect(f.added).toEqual([]);
+        expect(f.queued).toEqual([]);
+      }
+      // Handled all the same: the reconciler needn't send them again.
+      expect(thanks.through).toHaveLength(1);
+    });
+
+    it("moves comments_through after a command too", async () => {
+      const f = withReplies("@lgtmoose help");
+      await handleConversation(f.deps, reviewReply);
+      expect(f.through).toHaveLength(1);
+      expect(f.added).toEqual([]);
+    });
   });
 
   it("ignores bots, our own replies and submitted reviews", async () => {

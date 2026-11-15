@@ -7,10 +7,12 @@ import {
   dedupeFindings,
   fingerprint,
   fingerprintParts,
+  judgementSchema,
   reviewerOutputSchema,
   severityRank,
   type Finding,
   type HoldReason,
+  type Judgement,
   type FingerprintParts,
   type KnownFinding,
   type ReviewDecision,
@@ -28,6 +30,7 @@ import {
   type ReadingDepth,
 } from "@lgtmoose/planner";
 import {
+  REPLY_JUDGE_TIER,
   buildReviewerParts,
   clipBatchNotes,
   renderBatch,
@@ -119,6 +122,14 @@ export interface ReviewReport {
    * the finding itself): counted at that severity, and to store with it.
    */
   escalated: { fingerprint: string; severity: Severity }[];
+  /**
+   * Earlier open findings (by stored fingerprint) one of this run's findings was matched to:
+   * the reviewer raised them again at this head. A finding someone says is fixed stays open
+   * when it's here.
+   */
+  reraised: string[];
+  /** Files a batch of this run reviewed (not done by blob, not failed). */
+  reviewedNow: string[];
   /** File versions this run reviewed, to record so a later run can skip them. */
   reviewedFiles: ReviewedFile[];
   /** Other reviewers' open findings counted in the decision (`FinishOptions.others`). */
@@ -301,6 +312,13 @@ export interface PrepareOptions {
   reviewed?: readonly ReviewedBlob[];
   /** Unposted runs' finished batches: their files are done and their findings carried over. */
   resumed?: readonly ResumedWork[];
+  /**
+   * Review threads (by their first comment's ID) left out of the reviewer's context: our
+   * findings someone says are fixed. Without our comment, the reviewer isn't told not to raise
+   * them again, so it checks the code at head on its own (see `ReviewReport.reraised`). They
+   * still count for duplicate checks.
+   */
+  hiddenThreads?: ReadonlySet<number>;
 }
 
 /** What one batch's reviewer run returned. Findings are placed and checked in `finishReview`. */
@@ -526,7 +544,14 @@ export async function prepareReview(
       baseRef: pr.baseRef,
       headRef: pr.headRef,
     },
-    comments: contextComments(comments),
+    comments: contextComments(
+      comments.filter((comment) => {
+        const hidden = options.hiddenThreads;
+        if (hidden === undefined) return true;
+        const root = comment.inReplyTo ?? comment.id;
+        return root === undefined || !hidden.has(root);
+      }),
+    ),
     conventions: conventions.files,
     rulePacks,
   };
@@ -737,6 +762,46 @@ export async function runBatch(
   }
 }
 
+/** What the reply judge's run on one batch came to: a judgement, or why it failed. */
+export interface JudgeOutcome {
+  index: number;
+  judgement?: Judgement;
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the reply judge on one reply (its prompt from `buildReplyJudgePrompt`), on the fast tier.
+ * A failed run is an outcome with `error`, never a throw.
+ */
+export async function runJudge(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<JudgeOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: judgementSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      tier: REPLY_JUDGE_TIER,
+    });
+    return {
+      index: job.index,
+      judgement: result.output,
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
 /**
  * Places, deduplicates and decides on the batches' findings, and renders the summary: what would
  * be posted. `repo` is read for the cited code (blobs only, so a partial clone without a checkout
@@ -839,16 +904,20 @@ export async function finishReview(
   // alone) counts at the higher severity.
   const ourPrints = new Set(ours.map((entry) => entry.fingerprint));
   const raisedTo = new Map<string, Severity>();
+  // Every earlier finding matched at all, at any severity.
+  const reraisedPrints = new Set<string>();
   for (const dropped of deduped.dropped) {
     const { finding } = dropped;
     const matched = storedOf.get(dropped.matched) ?? dropped.matched;
     if (!ourPrints.has(matched)) continue;
+    reraisedPrints.add(matched);
     const known =
       raisedTo.get(matched) ?? ours.find((e) => e.fingerprint === matched)?.finding.severity;
     if (known === undefined || severityRank(finding.severity) < severityRank(known)) {
       raisedTo.set(matched, finding.severity);
     }
   }
+  const reraised = [...reraisedPrints];
   const escalated = ours.flatMap((entry) => {
     const severity = raisedTo.get(entry.fingerprint);
     return severity === undefined || severity === entry.finding.severity
@@ -956,6 +1025,11 @@ export async function finishReview(
     kind: prepared.kind,
     posted,
     escalated,
+    reraised,
+    // Not a file with findings cut past the limit: one of those could have been the re-raise.
+    reviewedNow: statuses.flatMap(({ file, status }) =>
+      status === "reviewed" && !unsettled.has(file.path) ? [file.path] : [],
+    ),
     reviewedFiles: reviewedFiles(prepared, statuses, unsettled),
     others: others.length,
     misses: reviewerMisses(

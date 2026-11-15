@@ -15,7 +15,7 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 | Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                   |
 | Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch  |
 | Credential broker | Lambdas + Secrets Manager             | No                       | Lease each sandbox task one model credential; write back refreshed tokens |
-| Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands in PR comments. No model calls.                      |
+| Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands; replies queued for the judge. No model calls.       |
 | Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels. No model calls.     |
 | State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                             |
 
@@ -57,7 +57,7 @@ One AWS account and region holds one install. `lgtmoose setup` writes fixed Secr
 
 ## Commands
 
-People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command are left for the reply judge (NIC-833).
+People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command go to the reply judge, below.
 
 | Command               | Who                                                                                              | What it does                                                                                                                                      |
 | --------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -72,6 +72,21 @@ People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or
 | `help`, anything else | anyone                                                                                           | The list of commands.                                                                                                                             |
 
 Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
+
+### Replies on findings: the reply judge
+
+A person's reply on one of LGTMoose's open findings' review threads (not a command, not thanks or an emoji) is recorded in `pending_replies`, redacted like learning text, and the conversation Lambda queues a run for it (`requested: "replies"`; none on a paused PR). The model doesn't run in the Lambda, which has no model credential: the run is an ordinary review run, so the judge runs in a sandbox task with only its provider's credential (leased through the credential broker) and no GitHub token, reading the checkout at head. Each run, the prepare step takes up to `maxReplyJudgements` (10) pending replies, each finding's latest only, and adds one judge batch per reply on the fast tier. The post step acts on the judgements before the decision, then writes replies and resolves threads once it holds its claim; a run someone asked for (a full review, or one for replies) is never covered by the head's earlier review, so the decision, check run, summary and label are recomputed. The reconciler asks for a run again for a reply no run took after 30 minutes, and `comments_through` now moves as comments are handled, so the reconciler's missed-comment path works.
+
+The judge only classifies (fixed, declined, disputed, question or other) and writes a few words; plain code decides (`decideReply`):
+
+| Reply    | What happens                                                                                                                                                                                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| fixed    | Closed as fixed, and its thread resolved, only when the judge read the code at head and found the problem gone **and** git shows the finding's file changed since it was raised. A claim alone never clears it. Otherwise one reply naming the line where it still is.         |
+| declined | Declined and resolved, with a learning proposed (through the learnings policy) when the judge saw a general rule. A blocking or protected finding needs someone other than the PR's author with write access, as for resolving its thread; otherwise one reply saying who can. |
+| disputed | Re-checked by the judge. Still valid: one reply with the evidence, never a second on the same finding. Wrong: a should_fix or nit is closed as disputed; a blocking or protected one stays open with one reply.                                                                |
+| question | One short answer.                                                                                                                                                                                                                                                              |
+
+At most one reply per finding per run, never a thank-you, and each with a marker so it's never read as a command or judged. A person unresolving a thread LGTMoose resolved reopens the finding. Top-level PR comments aren't judged.
 
 ## Security controls
 

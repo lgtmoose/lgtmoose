@@ -133,6 +133,8 @@ export interface WorkflowStackProps extends StackProps {
   reconcileIntervalMinutes: number;
   /** Hours back the reconciler queues reviews for. */
   reconcileLookbackHours: number;
+  /** The most replies the reply judge reads per run (`maxReplyJudgements`). Left out: 10. */
+  maxReplyJudgements?: number;
   /**
    * How the control task ranks learnings (`learnings.embeddings`): none (keywords), Bedrock in
    * this account, or OpenAI with the key in `SECRET_NAMES.openAiEmbeddings`. Left out: none.
@@ -207,6 +209,7 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),
         LGTMOOSE_SHADOW: String(props.shadow),
+        LGTMOOSE_MAX_REPLY_JUDGEMENTS: String(props.maxReplyJudgements ?? 10),
         ...embeddingsEnvironment(embeddings),
       },
     });
@@ -263,6 +266,8 @@ export class WorkflowStack extends Stack {
           // The model this provider reviews with, so a batch that falls back to it runs its
           // own model (`default`: the harness's).
           LGTMOOSE_MODEL: modelFor(provider, "standard") ?? "default",
+          // Its fast-tier model, for the reply judge.
+          LGTMOOSE_FAST_MODEL: modelFor(provider, "fast") ?? "default",
           ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't

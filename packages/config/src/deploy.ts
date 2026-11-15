@@ -203,6 +203,19 @@ export const deployConfigSchema = z
         "Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval.",
       ),
     /**
+     * The most replies on LGTMoose's findings the reply judge reads in one run (a fast-tier
+     * model call each). Replies past it wait for the next run.
+     */
+    maxReplyJudgements: z
+      .number()
+      .int()
+      .min(0)
+      .max(50)
+      .default(10)
+      .describe(
+        "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",
+      ),
+    /**
      * Shadow mode: the review workflow records what it would post (the review, check run,
      * summary comment and labels) to the artifact bucket and the log instead of posting it to
      * GitHub. On by default until reviews have been checked on real PRs (M1).

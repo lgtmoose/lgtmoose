@@ -195,7 +195,11 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
       return row !== undefined;
     },
     async followThread(repo, number, firstCommentId, resolved, actor) {
-      const from = resolved ? (["open", "outdated"] as const) : (["resolved_by_human"] as const);
+      // Unresolving also reopens a finding we closed after a reply and resolved the thread of
+      // (fixed, disputed, declined): the person disagrees, and their latest action wins.
+      const from = resolved
+        ? (["open", "outdated"] as const)
+        : (["resolved_by_human", "fixed", "disputed", "declined"] as const);
       return db.transaction(async (tx) => {
         const rows = await tx
           .select({

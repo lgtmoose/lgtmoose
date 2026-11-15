@@ -52,6 +52,25 @@ describe("batchOutputSchema", () => {
     expect(batchOutputSchema.safeParse({ ...base, findings: [], error: "x" }).success).toBe(false);
   });
 
+  it("takes a reply judge's judgement instead, and only a valid one", () => {
+    const base = { version: 1, index: 3, transcriptKeys: [] };
+    expect(
+      batchOutputSchema.safeParse({ ...base, judgement: { kind: "question", text: "Because." } })
+        .success,
+    ).toBe(true);
+    expect(
+      batchOutputSchema.safeParse({ ...base, judgement: { kind: "question" }, findings: [] })
+        .success,
+    ).toBe(false);
+    // The judge can't pick an action of its own.
+    expect(batchOutputSchema.safeParse({ ...base, judgement: { kind: "approve" } }).success).toBe(
+      false,
+    );
+    expect(
+      batchOutputSchema.safeParse({ ...base, judgement: { kind: "other", resolve: true } }).success,
+    ).toBe(false);
+  });
+
   it("refuses unknown fields", () => {
     expect(
       batchOutputSchema.safeParse({ version: 1, index: 0, transcriptKeys: [], findings: [], x: 1 })

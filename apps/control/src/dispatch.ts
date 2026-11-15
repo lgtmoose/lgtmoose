@@ -23,9 +23,10 @@ import { workflowJobSchema } from "./job.js";
  * - Closing a PR stops the executions of jobs up to the close. A reopen with the same time as
  *   the close is taken as older: the PR stays closed.
  * - A paused PR (`@lgtmoose pause`) starts no review for a push, open or ready job; its event
- *   time still advances. A review a person asked for (`requested`) runs anyway.
+ *   time still advances. A review a person asked for (`review`, `full_review`) runs anyway.
  * - A requested `full_review` starts a new execution for the head even when it was reviewed,
- *   unless one for the head is running.
+ *   unless one for the head is running. So does a run for `replies` waiting for the reply
+ *   judge, except on a paused PR.
  * - Comment and review-comment jobs are forwarded to the conversation queue, whose handler
  *   reads them on GitHub (the dispatcher can't): `@lgtmoose` commands, and later replies.
  *   Review jobs wait for M5. Thread jobs update the finding behind the thread here.
@@ -248,10 +249,16 @@ async function review(
   eventAt: Date,
 ): Promise<DispatchResult> {
   await deps.store.advance(job.repo, job.prNumber, eventAt, false);
-  if (job.requested === undefined && (await deps.store.paused(job.repo, job.prNumber))) {
+  // A person's review command runs on a paused PR; a push, and a run for replies, don't.
+  const command = job.requested === "review" || job.requested === "full_review";
+  if (!command && (await deps.store.paused(job.repo, job.prNumber))) {
     return { action: "paused" };
   }
-  if (job.requested === "full_review") return fullReview(deps, job, eventAt);
+  // A run for replies is a run of its own even when the head was reviewed, like a full review:
+  // it judges the replies waiting, then posts the decision they lead to.
+  if (job.requested === "full_review" || job.requested === "replies") {
+    return fullReview(deps, job, eventAt);
+  }
   let name = executionName(job.repo, job.prNumber, job.headSha);
   let { started, executionArn } = await startExecution(deps, job, name, eventAt);
   let action: "started" | "retried" = "started";

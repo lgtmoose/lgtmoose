@@ -141,6 +141,9 @@ importers:
       '@lgtmoose/poster':
         specifier: workspace:*
         version: link:../../packages/poster
+      '@lgtmoose/roles':
+        specifier: workspace:*
+        version: link:../../packages/roles
       '@lgtmoose/summary':
         specifier: workspace:*
         version: link:../../packages/summary

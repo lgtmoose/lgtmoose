@@ -9,16 +9,36 @@ import {
   type PreparedReview,
   type ResumedWork,
 } from "@lgtmoose/pipeline";
+import { REPLY_JUDGE_TIER, buildReplyJudgePrompt } from "@lgtmoose/roles";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { z } from "zod";
 import { readOutcome } from "./outcomes.js";
-import type { ControlDeps } from "./ports.js";
+import type { ControlDeps, FindingRecord } from "./ports.js";
+import type { PendingReply } from "./replies.js";
 
 /** How the batches are run, from the control task's environment. */
 export interface PrepareSettings {
   /** The reviewer's model; empty for the harness's default. */
   model: string;
   batchTimeoutMs: number;
+  /** The most replies the reply judge reads in this run. Left out: none. */
+  maxReplyJudgements?: number;
+}
+
+/**
+ * One reply the reply judge reads in this run: its batch, and what the post step needs to act
+ * on the judgement. Written by the prepare step (trusted), not by the model.
+ */
+export interface JudgeJob {
+  index: number;
+  replyId: string;
+  findingId: string;
+  /** The reply's review comment ID: the thread the answer goes in. */
+  commentId: number;
+  /** The reply's author, from GitHub. */
+  author: string;
+  /** The finding's file changed between the commit it was raised at and this head. */
+  fileChanged: boolean;
 }
 
 export const MANIFEST_VERSION = 2;
@@ -28,6 +48,10 @@ export interface RunManifest {
   version: typeof MANIFEST_VERSION;
   installationId: number;
   review: PreparedReview;
+  /** Why the run was asked for, when it was (`WorkflowJob.requested`). */
+  requested?: WorkflowJob["requested"];
+  /** The replies the reply judge reads in this run (their batches follow the review's). */
+  judgements?: JudgeJob[];
 }
 
 /** A manifest written before incremental reviews: the review lacks the fields they added. */
@@ -198,6 +222,107 @@ async function resumableBatches(deps: ControlDeps, earlierId: string): Promise<R
   });
 }
 
+/** The longest a reply judge run may take: it reads one finding's file, on the fast tier. */
+export const JUDGE_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Whether `path` differs between `from` and `to`. False when `from` can't be fetched (it was
+ * force-pushed away): then nothing shows the file changed since the finding was raised.
+ */
+async function fileChangedSince(
+  repo: Repo,
+  from: string,
+  to: string,
+  path: string,
+): Promise<boolean> {
+  try {
+    await repo.fetchCommits([from]);
+    const names = await repo.git(["diff", "--name-only", from, to, "--", path]);
+    return names.trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The replies the reply judge reads in this run: the PR's pending ones (each finding's latest,
+ * oldest first, up to the limit), on findings still open or outdated, each with its prompt and
+ * a batch index after the review's. A reply on a finding closed since is skipped.
+ */
+async function takeReplies(
+  deps: ControlDeps,
+  pullRequestId: string,
+  settings: PrepareSettings,
+): Promise<{ pending: PendingReply[]; open: Map<string, FindingRecord> }> {
+  const limit = settings.maxReplyJudgements ?? 0;
+  if (deps.replies === undefined || limit <= 0) return { pending: [], open: new Map() };
+  const pending = await deps.replies.take(pullRequestId, limit);
+  if (pending.length === 0) return { pending, open: new Map() };
+  const open = new Map(
+    (await deps.findings.trackedFindings(pullRequestId)).map((record) => [record.id, record]),
+  );
+  return { pending, open };
+}
+
+/**
+ * The review threads of findings someone replied on, left out of the reviewer's context: so the
+ * reviewer, not told about our comment, checks a claimed fix on its own (`hiddenThreads`).
+ */
+function repliedThreads(taken: Awaited<ReturnType<typeof takeReplies>>): Set<number> {
+  return new Set(
+    taken.pending.flatMap((reply) => {
+      const id = taken.open.get(reply.findingId)?.githubCommentId;
+      return id === undefined ? [] : [id];
+    }),
+  );
+}
+
+async function judgeJobs(
+  deps: ControlDeps,
+  { pending, open }: Awaited<ReturnType<typeof takeReplies>>,
+  repo: Repo,
+  headSha: string,
+  prepared: PreparedReview,
+): Promise<(JudgeJob & { prompt: string })[]> {
+  if (pending.length === 0 || deps.replies === undefined) return [];
+  const first = Math.max(-1, ...prepared.jobs.map((job) => job.index)) + 1;
+  const judges: (JudgeJob & { prompt: string })[] = [];
+  const gone: string[] = [];
+  for (const reply of pending) {
+    const record = open.get(reply.findingId);
+    if (record === undefined) {
+      gone.push(reply.id);
+      continue;
+    }
+    const file = record.side === "LEFT" ? (record.basePath ?? record.path) : record.path;
+    judges.push({
+      index: first + judges.length,
+      replyId: reply.id,
+      findingId: record.id,
+      commentId: reply.commentId,
+      author: reply.author,
+      fileChanged: await fileChangedSince(repo, record.raisedAtSha, headSha, file),
+      prompt: buildReplyJudgePrompt({
+        finding: {
+          severity: record.severity,
+          ruleCategory: record.ruleCategory,
+          title: record.title,
+          body: record.body,
+          path: record.path,
+          line: record.line,
+          side: record.side,
+          raisedAtSha: record.raisedAtSha,
+        },
+        reply: reply.body,
+        headSha,
+      }),
+    });
+  }
+  if (gone.length > 0) await deps.replies.finish(gone, "skipped");
+  if (judges.length > 0) deps.log("replies to judge", { count: judges.length });
+  return judges;
+}
+
 /**
  * The prepare step: records the run, clones the PR, plans it and writes each batch's input, the
  * checkout archive and the prepared review to the artifact bucket. It runs once per execution.
@@ -251,6 +376,7 @@ export async function prepare(
       token: await github.token(),
     });
     const { learnings } = deps;
+    const taken = await takeReplies(deps, run.pullRequestId, settings);
     const prepared = await prepareReview(
       {
         github: github.reader,
@@ -265,8 +391,17 @@ export async function prepare(
       target,
       repo,
       pr,
-      { reviewed, resumed },
+      {
+        reviewed,
+        resumed,
+        hiddenThreads: new Set([
+          ...repliedThreads(taken),
+          ...((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []),
+        ]),
+      },
     );
+    // Before the checkout is sealed: whether a finding's file changed needs its commit.
+    const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     await sealCheckout(repo, prepared);
     const archive = join(work.dir, "checkout.tar.gz");
     await deps.archive(checkout, archive);
@@ -287,10 +422,26 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(batch.index), JSON.stringify(input));
       batches.push({ index: batch.index });
     }
+    for (const judge of judges) {
+      const input: BatchInput = batchInputSchema.parse({
+        version: 1,
+        runId: run.runId,
+        index: judge.index,
+        prompt: judge.prompt,
+        role: "judge",
+        tier: REPLY_JUDGE_TIER,
+        model: settings.model,
+        timeoutMs: Math.min(settings.batchTimeoutMs, JUDGE_TIMEOUT_MS),
+      });
+      await deps.store.putText(keys.batchInput(judge.index), JSON.stringify(input));
+      batches.push({ index: judge.index });
+    }
     const manifest: RunManifest = {
       version: MANIFEST_VERSION,
       installationId: job.installationId,
       review: prepared,
+      ...(job.requested === undefined ? {} : { requested: job.requested }),
+      ...(judges.length === 0 ? {} : { judgements: judges.map(({ prompt: _, ...rest }) => rest) }),
     };
     await deps.store.putText(keys.prepared, JSON.stringify(manifest));
     await deps.runs.setPlan(run.runId, {

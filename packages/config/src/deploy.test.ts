@@ -46,6 +46,7 @@ describe("parseDeployConfig", () => {
       maxConcurrency: 4,
       reconcileIntervalMinutes: 30,
       reconcileLookbackHours: 24,
+      maxReplyJudgements: 10,
       shadow: true,
       extraEgressHosts: [],
       learnings: { embeddings: { provider: "none" } },

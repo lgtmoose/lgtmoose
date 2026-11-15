@@ -11,6 +11,8 @@ export interface ReviewThread {
   firstCommentId: number | undefined;
   /** Who resolved it, for a resolved thread; undefined when GitHub doesn't say (a ghost). */
   resolvedBy?: string;
+  /** The thread's GraphQL node ID, to resolve it. */
+  id?: string;
 }
 
 /** Reads a PR's review threads. GraphQL only: REST doesn't say whether a thread is resolved. */
@@ -26,7 +28,7 @@ const QUERY = `query ($owner: String!, $repo: String!, $number: Int!, $after: St
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { isResolved resolvedBy { login } comments(first: 1) { nodes { fullDatabaseId } } }
+        nodes { id isResolved resolvedBy { login } comments(first: 1) { nodes { fullDatabaseId } } }
       }
     }
   }
@@ -44,6 +46,7 @@ const replySchema = z.object({
                 nodes: z.array(
                   z
                     .object({
+                      id: z.string().optional(),
                       isResolved: z.boolean(),
                       resolvedBy: z.object({ login: z.string() }).nullable().optional(),
                       comments: z.object({
@@ -123,6 +126,7 @@ export function graphQlThreadReader(
             resolved: node.isResolved,
             firstCommentId: commentId(node.comments.nodes[0]?.fullDatabaseId),
             ...(node.isResolved && resolvedBy !== undefined ? { resolvedBy } : {}),
+            ...(node.id === undefined ? {} : { id: node.id }),
           });
         }
         if (!list.pageInfo.hasNextPage || list.pageInfo.endCursor === null) break;
@@ -131,4 +135,19 @@ export function graphQlThreadReader(
       return threads;
     },
   };
+}
+
+const RESOLVE = `mutation ($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+}`;
+
+const resolveReply = z.object({
+  errors: z.array(z.object({ message: z.string() })).optional(),
+});
+
+/** Resolves one review thread through GitHub GraphQL. Throws on a GraphQL error. */
+export async function resolveReviewThread(graphql: GraphQl, threadId: string): Promise<void> {
+  const reply = resolveReply.parse(await graphql(RESOLVE, { threadId }));
+  const errors = (reply.errors ?? []).map((error) => error.message);
+  if (errors.length > 0) throw new Error(`GitHub GraphQL: ${errors.join("; ")}`);
 }
