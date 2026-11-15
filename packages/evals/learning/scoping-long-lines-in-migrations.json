@@ -1,0 +1,60 @@
+{
+  "description": "A maintainer declines a long-line finding in a SQL migration and replies remember. Later migrations shouldn't raise it.",
+  "family": "scoping",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "remember",
+    "author": "maya",
+    "reason": "Migrations are generated from the schema and never edited by hand; a long line there doesn't matter."
+  },
+  "base": {
+    "README.md": "# Db\n",
+    "migrations/0000_init.sql": "CREATE TABLE users (id uuid PRIMARY KEY);\n"
+  },
+  "prs": [
+    {
+      "title": "Add the orders table",
+      "files": {
+        "migrations/0001_orders.sql": "CREATE TABLE orders (id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id), total_cents integer NOT NULL, created_at timestamptz NOT NULL DEFAULT now());\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "migrations/0001_orders.sql",
+        "line": 1,
+        "title": "Very long line in the migration",
+        "topic": "long line"
+      }
+    },
+    {
+      "title": "Add the refunds table",
+      "files": {
+        "migrations/0002_refunds.sql": "CREATE TABLE refunds (id uuid PRIMARY KEY, order_id uuid NOT NULL REFERENCES orders(id), amount_cents integer NOT NULL, created_at timestamptz NOT NULL DEFAULT now());\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "migrations/0002_refunds.sql",
+        "line": 1,
+        "title": "Very long line in the migration",
+        "topic": "long line"
+      }
+    },
+    {
+      "title": "Add the coupons table",
+      "files": {
+        "migrations/0003_coupons.sql": "CREATE TABLE coupons (id uuid PRIMARY KEY, code text NOT NULL UNIQUE, percent_off integer NOT NULL CHECK (percent_off BETWEEN 1 AND 100), expires_at timestamptz);\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "migrations/0003_coupons.sql",
+        "line": 1,
+        "title": "Very long line in the migration",
+        "topic": "long line"
+      }
+    }
+  ]
+}

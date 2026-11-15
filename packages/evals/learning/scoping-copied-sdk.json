@@ -1,0 +1,79 @@
+{
+  "description": "A maintainer teaches with learn: [kind scoping] that lib/sdk/ is a copied third-party SDK, so error handling findings don't apply there. Later SDK files shouldn't raise it; the same finding in src/ must still be raised.",
+  "family": "scoping",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "learn",
+    "author": "maya",
+    "comment": "@lgtmoose learn: [path lib/sdk/**] [kind scoping] lib/sdk is a copy of the vendor's SDK that we never edit; missing error handling there isn't ours to fix."
+  },
+  "base": {
+    "README.md": "# Payments\n",
+    "src/http.ts": "export const base = \"https://api.example.com\";\n"
+  },
+  "prs": [
+    {
+      "title": "Copy the SDK client",
+      "files": {
+        "lib/sdk/client.ts": "export async function get(url: string) {\n  const res = await fetch(url);\n  return res.json();\n}\n"
+      },
+      "target": {
+        "category": "error_handling",
+        "also": ["correctness"],
+        "severity": "should_fix",
+        "path": "lib/sdk/client.ts",
+        "line": 2,
+        "lines": [2, 3],
+        "title": "Missing error handling around fetch",
+        "topic": "error handling"
+      }
+    },
+    {
+      "title": "Copy the SDK uploads and call the API",
+      "files": {
+        "lib/sdk/uploads.ts": "export async function put(url: string, body: string) {\n  const res = await fetch(url, { method: \"PUT\", body });\n  return res.status;\n}\n",
+        "src/charge.ts": "import { base } from \"./http\";\nexport async function charge(id: string) {\n  const res = await fetch(`${base}/charges/${id}`);\n  return res.json();\n}\n"
+      },
+      "target": {
+        "category": "error_handling",
+        "also": ["correctness"],
+        "severity": "should_fix",
+        "path": "lib/sdk/uploads.ts",
+        "line": 2,
+        "lines": [2, 3],
+        "title": "Missing error handling around fetch",
+        "topic": "error handling"
+      },
+      "keep": [
+        {
+          "category": "error_handling",
+          "also": ["correctness"],
+          "severity": "should_fix",
+          "path": "src/charge.ts",
+          "line": 3,
+          "lines": [3, 4],
+          "title": "Missing error handling around the charge request",
+          "topic": "error handling"
+        }
+      ]
+    },
+    {
+      "title": "Copy the SDK auth helper",
+      "files": {
+        "lib/sdk/token.ts": "export async function token(url: string) {\n  const res = await fetch(url, { method: \"POST\" });\n  return (await res.json()).token;\n}\n"
+      },
+      "target": {
+        "category": "error_handling",
+        "also": ["correctness"],
+        "severity": "should_fix",
+        "path": "lib/sdk/token.ts",
+        "line": 2,
+        "lines": [2, 3],
+        "title": "Missing error handling around fetch",
+        "topic": "error handling"
+      }
+    }
+  ]
+}

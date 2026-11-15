@@ -2,8 +2,10 @@ name: Evals
 
 # Runs the review pipeline with a real model on packages/evals' fixtures when a PR changes what
 # the model sees or how it runs: prompts and rule packs (packages/roles), harnesses
-# (packages/harness), the pipeline itself, or the evals. It posts the report on the PR (one
-# comment, edited on each run) and fails when recall drops below packages/evals/baseline.json.
+# (packages/harness), the pipeline itself, learning, or the evals. It posts the report on the PR
+# (one comment, edited on each run) and fails when recall drops below packages/evals/baseline.json,
+# or the learning-speed scenarios (on the fast tier) show collateral, an untrusted learning in a
+# prompt, or a repeat rate above the baseline's.
 #
 # Model runs cost money and need a credential: set the ANTHROPIC_API_KEY or
 # CLAUDE_CODE_OAUTH_TOKEN repository secret to turn the job on. Without one (and on PRs from
@@ -17,6 +19,11 @@ on:
       - packages/core/src/finding.ts
       - packages/harness/**
       - packages/pipeline/**
+      # What the learning-speed scenarios exercise: the learnings store, policy and retrieval,
+      # the command parser and outcome learning.
+      - packages/learnings/**
+      - apps/control/src/commands.ts
+      - apps/control/src/outcome-learning.ts
       - packages/evals/**
       - .github/workflows/evals.yml
 
@@ -111,5 +118,5 @@ jobs:
       - name: Fail when recall dropped or the evals couldn't run
         if: env.HAS_CREDENTIAL == 'true' && steps.run.outputs.code != '0'
         run: |
-          echo "The evals exited with ${{ steps.run.outputs.code }}: 1 means recall fell below the baseline, 2 that some fixture runs failed (see the report) so recall wasn't compared."
+          echo "The evals exited with ${{ steps.run.outputs.code }}: 1 means recall fell below the baseline or the learning gate failed, 2 that some fixture runs (or every learning scenario) failed (see the report) so nothing was compared."
           exit 1

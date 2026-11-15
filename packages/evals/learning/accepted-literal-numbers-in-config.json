@@ -1,0 +1,75 @@
+{
+  "description": "A maintainer teaches with learn: that literal numbers in config/ are accepted, scoped to that path. Later config files shouldn't raise it, and a magic number in the pricing code must still be raised.",
+  "family": "accepted_pattern",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "learn",
+    "author": "maya",
+    "comment": "@lgtmoose learn: [path config/**] [kind accepted_pattern] Config files are where our tuning values live; a magic number in config/ is accepted."
+  },
+  "base": {
+    "README.md": "# Store\n",
+    "src/pricing.ts": "export const price = (cents: number) => cents;\n"
+  },
+  "prs": [
+    {
+      "title": "Add the cache config",
+      "files": {
+        "config/cache.ts": "export const cache = {\n  ttlSeconds: 86400,\n};\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness"],
+        "severity": "nit",
+        "path": "config/cache.ts",
+        "line": 2,
+        "title": "Magic number in the cache config",
+        "topic": "magic number"
+      }
+    },
+    {
+      "title": "Add the retry config and a bulk discount",
+      "files": {
+        "config/retry.ts": "export const retry = {\n  attempts: 7,\n};\n",
+        "src/pricing.ts": "export const price = (cents: number) => cents;\nexport const bulk = (cents: number) => Math.round(cents * 0.87);\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness"],
+        "severity": "nit",
+        "path": "config/retry.ts",
+        "line": 2,
+        "title": "Magic number in the retry config",
+        "topic": "magic number"
+      },
+      "keep": [
+        {
+          "category": "convention",
+          "also": ["correctness"],
+          "severity": "nit",
+          "path": "src/pricing.ts",
+          "line": 2,
+          "title": "Magic number in the bulk discount",
+          "topic": "magic number"
+        }
+      ]
+    },
+    {
+      "title": "Add the upload config",
+      "files": {
+        "config/upload.ts": "export const upload = {\n  maxBytes: 5242880,\n};\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness"],
+        "severity": "nit",
+        "path": "config/upload.ts",
+        "line": 2,
+        "title": "Magic number in the upload config",
+        "topic": "magic number"
+      }
+    }
+  ]
+}

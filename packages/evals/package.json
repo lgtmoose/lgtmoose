@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "fixtures",
-    "baseline.json"
+    "baseline.json",
+    "learning"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -28,14 +29,18 @@
   },
   "dependencies": {
     "@lgtmoose/config": "workspace:*",
+    "@lgtmoose/control": "workspace:*",
     "@lgtmoose/core": "workspace:*",
     "@lgtmoose/git": "workspace:*",
     "@lgtmoose/harness": "workspace:*",
+    "@lgtmoose/learnings": "workspace:*",
     "@lgtmoose/pipeline": "workspace:*",
     "@lgtmoose/summary": "workspace:*",
+    "picomatch": "^4.0.3",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/picomatch": "^4.0.3",
     "typescript": "catalog:"
   }
 }

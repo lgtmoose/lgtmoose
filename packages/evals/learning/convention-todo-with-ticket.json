@@ -1,0 +1,60 @@
+{
+  "description": "Two maintainers decline the same TODO-comment finding on two PRs. Outcome learning proposes a learning after the second, and the third PR shouldn't raise it.",
+  "family": "convention",
+  "expect": "learns",
+  "signals": 2,
+  "permissions": { "maya": "write", "li": "maintain" },
+  "correction": {
+    "type": "repeat",
+    "authors": ["maya", "li"],
+    "reason": "We keep TODOs that name a ticket, like TODO(NIC-12); that's how we track follow-ups."
+  },
+  "base": {
+    "README.md": "# Billing\n",
+    "src/format.ts": "export const money = (cents: number) => (cents / 100).toFixed(2);\n"
+  },
+  "prs": [
+    {
+      "title": "Add invoice totals",
+      "files": {
+        "src/invoice.ts": "import { money } from \"./format\";\n// TODO(NIC-12): add tax lines\nexport const total = (cents: number) => money(cents);\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/invoice.ts",
+        "line": 2,
+        "title": "TODO comment left in the code",
+        "topic": "TODO comment"
+      }
+    },
+    {
+      "title": "Add receipt totals",
+      "files": {
+        "src/receipt.ts": "import { money } from \"./format\";\n// TODO(NIC-31): show the payment method\nexport const receipt = (cents: number) => `Paid ${money(cents)}`;\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/receipt.ts",
+        "line": 2,
+        "title": "TODO comment left in the code",
+        "topic": "TODO comment"
+      }
+    },
+    {
+      "title": "Add credit notes",
+      "files": {
+        "src/credit.ts": "import { money } from \"./format\";\n// TODO(NIC-40): link the original invoice\nexport const credit = (cents: number) => `-${money(cents)}`;\n"
+      },
+      "target": {
+        "category": "convention",
+        "severity": "nit",
+        "path": "src/credit.ts",
+        "line": 2,
+        "title": "TODO comment left in the code",
+        "topic": "TODO comment"
+      }
+    }
+  ]
+}

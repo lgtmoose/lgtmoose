@@ -222,7 +222,10 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
  * `base/`, then a commit with `head/` laid over it and `deleted` removed, both pushed to a bare
  * remote that the pipeline clones over file://, as it would from GitHub.
  */
-export async function buildFixtureRepo(fixture: Fixture, root: string): Promise<FixtureRepo> {
+export async function buildFixtureRepo(
+  fixture: Pick<Fixture, "name" | "dir" | "title" | "deleted">,
+  root: string,
+): Promise<FixtureRepo> {
   const work = join(root, "work");
   const remote = join(root, "remote.git");
   await mkdir(root, { recursive: true });

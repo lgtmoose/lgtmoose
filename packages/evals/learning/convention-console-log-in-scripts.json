@@ -1,0 +1,76 @@
+{
+  "description": "A maintainer teaches with learn: that console.log is fine in scripts/, scoped to that path. It should stop the finding in later scripts, and leave the same finding in src/ alone.",
+  "family": "convention",
+  "expect": "learns",
+  "signals": 1,
+  "permissions": { "maya": "write" },
+  "correction": {
+    "type": "learn",
+    "author": "maya",
+    "comment": "These are one-off scripts.\n@lgtmoose learn: [path scripts/**] Our scripts report progress with console.log on purpose; don't flag console.log in scripts."
+  },
+  "base": {
+    "README.md": "# Shop\n",
+    "src/db.ts": "export const db = { insert: async (rows: unknown[]) => rows.length };\n",
+    "src/server.ts": "export const port = 3000;\n"
+  },
+  "prs": [
+    {
+      "title": "Add a seed script",
+      "files": {
+        "scripts/seed.ts": "import { db } from \"../src/db\";\nexport async function seed() {\n  console.log(\"seeding users\");\n  await db.insert([{ name: \"a\" }]);\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness", "error_handling"],
+        "severity": "nit",
+        "path": "scripts/seed.ts",
+        "line": 3,
+        "title": "console.log left in the seed script",
+        "topic": "console.log"
+      }
+    },
+    {
+      "title": "Add a backfill script and log the port",
+      "files": {
+        "scripts/backfill.ts": "export async function backfill() {\n  console.log(\"backfilling orders\");\n}\n",
+        "src/server.ts": "export const port = 3000;\nconsole.log(\"listening on\", port);\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness", "error_handling"],
+        "severity": "nit",
+        "path": "scripts/backfill.ts",
+        "line": 2,
+        "title": "console.log left in the backfill script",
+        "topic": "console.log"
+      },
+      "keep": [
+        {
+          "category": "convention",
+          "also": ["correctness", "error_handling"],
+          "severity": "nit",
+          "path": "src/server.ts",
+          "line": 2,
+          "title": "console.log left in server code",
+          "topic": "console.log"
+        }
+      ]
+    },
+    {
+      "title": "Add an export script",
+      "files": {
+        "scripts/export.ts": "import { db } from \"../src/db\";\nexport async function exportAll() {\n  console.log(\"exporting\", await db.insert([]));\n}\n"
+      },
+      "target": {
+        "category": "convention",
+        "also": ["correctness", "error_handling"],
+        "severity": "nit",
+        "path": "scripts/export.ts",
+        "line": 3,
+        "title": "console.log left in the export script",
+        "topic": "console.log"
+      }
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "description": "Two maintainers decline a synchronous-read finding in CLI commands on two PRs. Outcome learning proposes the learning after the second, and the third PR shouldn't raise it.",
+  "family": "accepted_pattern",
+  "expect": "learns",
+  "signals": 2,
+  "permissions": { "maya": "write", "li": "write" },
+  "correction": {
+    "type": "repeat",
+    "authors": ["maya", "li"],
+    "reason": "The CLI runs one command and exits, so a synchronous file read is fine there."
+  },
+  "base": {
+    "README.md": "# CLI\n",
+    "bin/args.ts": "export const arg = (n: number) => process.argv[n + 2] ?? \"\";\n"
+  },
+  "prs": [
+    {
+      "title": "Add the init command",
+      "files": {
+        "bin/init.ts": "import { readFileSync } from \"node:fs\";\nimport { arg } from \"./args\";\nexport const init = () => readFileSync(arg(0), \"utf8\").length;\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["error_handling", "convention"],
+        "severity": "nit",
+        "path": "bin/init.ts",
+        "line": 3,
+        "title": "Synchronous file read blocks the event loop",
+        "topic": "synchronous file read"
+      }
+    },
+    {
+      "title": "Add the lint command",
+      "files": {
+        "bin/lint.ts": "import { readFileSync } from \"node:fs\";\nimport { arg } from \"./args\";\nexport const lint = () => readFileSync(arg(0), \"utf8\").includes(\"\\t\");\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["error_handling", "convention"],
+        "severity": "nit",
+        "path": "bin/lint.ts",
+        "line": 3,
+        "title": "Synchronous file read blocks the event loop",
+        "topic": "synchronous file read"
+      }
+    },
+    {
+      "title": "Add the count command",
+      "files": {
+        "bin/count.ts": "import { readFileSync } from \"node:fs\";\nimport { arg } from \"./args\";\nexport const count = () => readFileSync(arg(0), \"utf8\").split(\"\\n\").length;\n"
+      },
+      "target": {
+        "category": "correctness",
+        "also": ["error_handling", "convention"],
+        "severity": "nit",
+        "path": "bin/count.ts",
+        "line": 3,
+        "title": "Synchronous file read blocks the event loop",
+        "topic": "synchronous file read"
+      }
+    }
+  ]
+}
