@@ -11,7 +11,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `region` | string matching `^[a-z]{2}(-gov)?-[a-z]+-\d$` | `"us-east-1"` | AWS region for every stack and secret. |
-| `profile` | `"lean"` or `"standard"` | `"lean"` | lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, one egress proxy task. standard: NAT gateways, Aurora Serverless v2 with a reader, two proxy tasks. |
+| `profile` | `"lean"` or `"standard"` | `"lean"` | lean: one NAT instance, RDS PostgreSQL on db.t4g.micro in one AZ, sandbox subnet and VPC endpoints in one AZ, one egress proxy task, short log retention. standard: a NAT gateway per AZ, RDS PostgreSQL on db.t4g.small with a Multi-AZ standby, two proxy tasks, longer retention and extra alarms. Switching is a redeploy that keeps the database; see docs/upgrading.md. |
 | `allowedOrgs` (required) | list of string matching `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`, at least 1 |  | GitHub orgs or users whose repositories LGTMoose reviews. Others are ignored. |
 | `providers` (required) | list of object, at least 1 |  | Model providers in fallback order: a rate limit, a used-up plan or a rejected credential moves a run to the next one. |
 | `providers[].id` (required) | string matching `^[a-z][a-z0-9-]{0,31}$` |  | Your name for the provider. Its credential is stored as lgtmoose/provider/&lt;id&gt;, and roles refer to it. |
@@ -30,6 +30,9 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `feedback.acceptanceThreshold` | number, 0 to 1 | `0.5` | Acceptance below which a rule category is flagged for a person to look at. |
 | `feedback.minSamples` | integer, 1 to 10000 | `10` | Accepted plus rejected findings a category needs before it's judged. |
 | `feedback.maxCommentsPerRun` | integer, 0 to 1000 | `100` | Most inline comments whose reactions one reconciler run reads (one GitHub call each). 0 stops reading them. |
+| `alarms` | object | `{}` | Where alarms notify: an email address (a new SNS topic) or an existing SNS topic. Without either, alarms only change state in CloudWatch. |
+| `alarms.email` | string matching `^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$` |  | An address subscribed to a new SNS topic for LGTMoose's alarms. AWS emails it a confirmation link first. |
+| `alarms.topicArn` | string matching `^arn:aws[a-z-]*:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$` |  | An existing SNS topic for alarms, such as one that already pages your team. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |

@@ -6,7 +6,12 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { parseDeployConfig } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ALLOW_DATABASE_DELETION, PURGE_DATA, buildApp } from "./app.js";
-import { ARTIFACT_RETENTION_DAYS, MIGRATIONS_DIR, hashDirectory } from "./data-stack.js";
+import {
+  ARTIFACT_RETENTION_DAYS,
+  FREE_STORAGE_ALARM_BYTES,
+  MIGRATIONS_DIR,
+  hashDirectory,
+} from "./data-stack.js";
 import type { Profile } from "./network-stack.js";
 import { appWithoutBundling, memoizeByProfile } from "./test-utils.js";
 
@@ -86,15 +91,92 @@ describe("DataStack", () => {
     purged.template.resourceCountIs("Custom::S3AutoDeleteObjects", 1);
   });
 
-  it("standard: Aurora Serverless v2 with a writer and a reader", () => {
+  it("standard: db.t4g.small PostgreSQL 18 with a Multi-AZ standby and 14 days of backups", () => {
     const { template } = synth("standard");
-    template.resourceCountIs("AWS::RDS::DBInstance", 2);
-    template.hasResourceProperties("AWS::RDS::DBCluster", {
-      Engine: "aurora-postgresql",
+    template.resourceCountIs("AWS::RDS::DBCluster", 0);
+    template.resourceCountIs("AWS::RDS::DBInstance", 1);
+    template.hasResourceProperties("AWS::RDS::DBInstance", {
+      Engine: "postgres",
+      DBInstanceClass: "db.t4g.small",
+      MultiAZ: true,
+      BackupRetentionPeriod: 14,
       StorageEncrypted: true,
       DeletionProtection: true,
-      ServerlessV2ScalingConfiguration: { MinCapacity: 0.5, MaxCapacity: 4 },
     });
+    template.hasResource("AWS::RDS::DBInstance", { DeletionPolicy: "Snapshot" });
+  });
+
+  it("standard alarms on database CPU and free storage; lean doesn't", () => {
+    const names = (profile: Profile) =>
+      Object.keys(synth(profile).template.findResources("AWS::CloudWatch::Alarm"));
+    expect(names("standard").some((id) => id.startsWith("DatabaseCpuAlarm"))).toBe(true);
+    expect(names("standard").some((id) => id.startsWith("DatabaseStorageAlarm"))).toBe(true);
+    expect(names("lean")).toHaveLength(0);
+    synth("standard").template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      MetricName: "FreeStorageSpace",
+      ComparisonOperator: "LessThanThreshold",
+      Threshold: FREE_STORAGE_ALARM_BYTES,
+    });
+  });
+
+  // Switching profile is a redeploy. CloudFormation replaces a resource whose logical ID or type
+  // changes, or when a property that "requires replacement" changes; a replaced database is a new,
+  // empty one. These properties all require replacement on AWS::RDS::DBInstance.
+  const REPLACING_PROPERTIES = [
+    "Engine",
+    "DBName",
+    "StorageEncrypted",
+    "KmsKeyId",
+    "MasterUsername",
+    "DBSubnetGroupName",
+    "DBInstanceIdentifier",
+    "DBClusterIdentifier",
+    "SourceDBInstanceIdentifier",
+    "DBSnapshotIdentifier",
+    "CharacterSetName",
+    "Timezone",
+    "AvailabilityZone",
+  ];
+
+  it("switching profile modifies the database in place: same resource, nothing that replaces it", () => {
+    const databaseOf = (profile: Profile) => {
+      const found = synth(profile).template.findResources("AWS::RDS::DBInstance");
+      const entries = Object.entries(found);
+      expect(entries).toHaveLength(1);
+      const [logicalId, resource] = entries[0] ?? [];
+      return { logicalId, resource };
+    };
+    const lean = databaseOf("lean");
+    const standard = databaseOf("standard");
+    expect(standard.logicalId).toBe(lean.logicalId);
+    expect(standard.resource?.Type).toBe(lean.resource?.Type);
+    for (const name of REPLACING_PROPERTIES) {
+      expect(standard.resource?.Properties?.[name], name).toEqual(
+        lean.resource?.Properties?.[name],
+      );
+    }
+    // Snapshot on delete, protected from deletion, in both.
+    expect(standard.resource?.DeletionPolicy).toBe("Snapshot");
+    expect(lean.resource?.DeletionPolicy).toBe("Snapshot");
+    expect(standard.resource?.UpdateReplacePolicy).toBe("Snapshot");
+    expect(lean.resource?.UpdateReplacePolicy).toBe("Snapshot");
+  });
+
+  it("switching profile keeps the subnet group, the parameter group family and the bucket", () => {
+    for (const type of [
+      "AWS::RDS::DBSubnetGroup",
+      "AWS::RDS::DBParameterGroup",
+      "AWS::S3::Bucket",
+    ]) {
+      const ids = (profile: Profile) =>
+        Object.keys(synth(profile).template.findResources(type)).sort();
+      expect(ids("standard"), type).toEqual(ids("lean"));
+    }
+    const family = (profile: Profile) =>
+      Object.values(synth(profile).template.findResources("AWS::RDS::DBParameterGroup")).map(
+        (group) => group.Properties?.Family,
+      );
+    expect(family("standard")).toEqual(family("lean"));
   });
 
   it.each<Profile>(["lean", "standard"])(

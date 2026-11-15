@@ -1,4 +1,7 @@
 import { App, Tags, type Environment } from "aws-cdk-lib";
+import { Alarm } from "aws-cdk-lib/aws-cloudwatch";
+import { SnsAction } from "aws-cdk-lib/aws-cloudwatch-actions";
+import type { ITopic } from "aws-cdk-lib/aws-sns";
 import {
   CDK_CONTEXT,
   STACK_NAMES,
@@ -48,7 +51,11 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     ...(process.env.CDK_DEFAULT_ACCOUNT ? { account: process.env.CDK_DEFAULT_ACCOUNT } : {}),
   };
 
-  const meta = new MetaStack(app, STACK_NAMES.meta, { env, version: LGTMOOSE_VERSION });
+  const meta = new MetaStack(app, STACK_NAMES.meta, {
+    env,
+    version: LGTMOOSE_VERSION,
+    alarms: config.alarms,
+  });
   const network = new NetworkStack(app, STACK_NAMES.network, { env, profile: config.profile });
   const data = new DataStack(app, STACK_NAMES.data, {
     env,
@@ -112,7 +119,18 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
   // Sandbox tasks can only reach model APIs once the proxy runs.
   workflow.addDependency(proxy);
 
+  notifyAlarms(app, meta.alarmTopic);
+
   return { app, meta, network, data, api, proxy, workflow };
+}
+
+/** Every alarm in the app, in any stack, notifies `topic` when it goes into ALARM. */
+function notifyAlarms(app: App, topic: ITopic | undefined): void {
+  if (topic === undefined) return;
+  const action = new SnsAction(topic);
+  for (const construct of app.node.findAll()) {
+    if (construct instanceof Alarm) construct.addAlarmAction(action);
+  }
 }
 
 /**

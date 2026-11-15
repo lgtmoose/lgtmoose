@@ -332,6 +332,22 @@ export class WorkflowStack extends Stack {
     });
 
     this.credentialAlarms = this.credentialHealth(props, retention);
+    if (!lean) {
+      // Standard only. A stopped (superseded) execution is ABORTED, not FAILED, so this counts
+      // reviews that broke, not ones a newer push replaced.
+      new Alarm(this, "ReviewFailuresAlarm", {
+        alarmDescription:
+          "3 or more LGTMoose review executions failed in the last hour. See the review workflow's failed executions.",
+        metric: this.reviewWorkflow.stateMachine.metricFailed({
+          period: Duration.hours(1),
+          statistic: "Sum",
+        }),
+        threshold: 3,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+    }
 
     this.conversationQueue = this.conversationQueueOf();
     this.dispatchFunction = this.dispatcher(props, retention);

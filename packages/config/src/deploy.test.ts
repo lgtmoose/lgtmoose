@@ -48,6 +48,7 @@ describe("parseDeployConfig", () => {
       reconcileLookbackHours: 24,
       maxReplyJudgements: 10,
       feedback: { acceptanceThreshold: 0.5, minSamples: 10, maxCommentsPerRun: 100 },
+      alarms: {},
       shadow: true,
       extraEgressHosts: [],
       learnings: { embeddings: { provider: "none" } },
