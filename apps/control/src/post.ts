@@ -34,10 +34,16 @@ import {
 import { syncStatusLabel } from "@lgtmoose/summary";
 import { z } from "zod";
 import { TASK_MISSING } from "./ecs.js";
-import { readOutcome } from "./outcomes.js";
+import {
+  replyWritesSchema,
+  settleReplies,
+  writeReplies,
+  type ReplyWrites,
+} from "./judged-replies.js";
+import { readJudgement, readOutcome } from "./outcomes.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
-import { readManifest } from "./prepare.js";
-import { resolutionHeld } from "./thread-policy.js";
+import { readManifest, type RunManifest } from "./prepare.js";
+import { resolutionHeld, type Permission } from "./thread-policy.js";
 
 /** What the post step did, for the log and the state machine. */
 export interface PostOutput {
@@ -103,6 +109,8 @@ interface PostProgress {
   quiet?: boolean;
   /** Its findings are recorded: outdated, reopened, escalated and new ones. */
   findings?: boolean;
+  /** What the reply judge led to is written: replies and resolved threads (`writeReplies`). */
+  replies?: boolean;
 }
 
 const postProgressSchema = z.object({
@@ -122,6 +130,7 @@ const postProgressSchema = z.object({
   reviewId: z.number().int().positive().optional(),
   quiet: z.boolean().optional(),
   findings: z.boolean().optional(),
+  replies: z.boolean().optional(),
 });
 
 /**
@@ -188,6 +197,54 @@ export function coveringReviews(
   const done = reviews.filter((review) => review.marker.endsWith(":complete"));
   const incomplete = reviews.filter((review) => review.marker.endsWith(":incomplete"));
   return [...done, ...(complete ? [] : incomplete)];
+}
+
+/**
+ * The run's judged replies, settled (`settleReplies`): decided and their findings closed, with
+ * what to write saved once to `replies.json`, which a retried attempt reads back instead. Undefined
+ * when the run judged none, or the stores it needs aren't there.
+ */
+async function settleRunReplies(
+  deps: ControlDeps,
+  runId: string,
+  manifest: RunManifest,
+  context: {
+    prAuthor: string;
+    permission: (login: string) => Promise<Permission>;
+    threadId: (firstCommentId: number) => string | undefined;
+    pullRequestId: string;
+  },
+): Promise<ReplyWrites | undefined> {
+  const judged = manifest.judgements ?? [];
+  const { findings } = deps;
+  if (
+    judged.length === 0 ||
+    deps.replies === undefined ||
+    findings.closeForReply === undefined ||
+    findings.disputesAnswered === undefined
+  ) {
+    return undefined;
+  }
+  const key = runKeys(runId).replies;
+  const saved = await deps.store.getText(key);
+  if (saved !== undefined) return replyWritesSchema.parse(JSON.parse(saved));
+  const close = findings.closeForReply.bind(findings);
+  const answered = findings.disputesAnswered.bind(findings);
+  const settled = await settleReplies(judged, {
+    judgement: (index) => readJudgement(deps.store, runId, index),
+    findings: await findings.trackedFindings(context.pullRequestId),
+    threadId: context.threadId,
+    prAuthor: context.prAuthor,
+    permission: context.permission,
+    close: (id, status, reply) => close(id, status, reply, manifest.review.pr.headSha),
+    disputesAnswered: answered,
+    log: (message, fields) => deps.log(message, fields),
+  });
+  // Written once: an attempt racing this one decided the same replies, and its file stands.
+  const created = await deps.store.createText(key, JSON.stringify(settled));
+  if (created !== undefined) return settled;
+  const theirs = await deps.store.getText(key);
+  return theirs === undefined ? settled : replyWritesSchema.parse(JSON.parse(theirs));
 }
 
 /** `read`, called the first time only: its promise is shared by every later call. */
@@ -834,6 +891,18 @@ export async function post(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  // People's replies on our findings, as the reply judge read them: the findings they close are
+  // closed before the decision, so it counts them closed. What to write on GitHub waits for the
+  // claim, below.
+  const replyWrites = await settleRunReplies(deps, runId, manifest, {
+    prAuthor: pr.author,
+    permission: memo(async (login: string) =>
+      github.permission === undefined ? "none" : github.permission(target, login),
+    ),
+    threadId: (firstCommentId) =>
+      threads?.find((thread) => thread.firstCommentId === firstCommentId)?.id,
+    pullRequestId: run.pullRequestId,
+  });
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -1266,8 +1335,14 @@ export async function post(
       // be complete either (see `coveringReviews`), and its run finished the head. A run that
       // didn't (it died after its review) leaves the head to this one, which posts a review
       // of its own. Holding the head's claim, nobody adds one between this look and the submit.
+      // A run someone asked for (a full review, or one for replies) is never covered: it ran
+      // because the head's review isn't the last word any more.
       let coveredBy: string | undefined;
-      for (const review of coveringReviews(await headReviews(), report.complete)) {
+      const coverable =
+        manifest.requested === undefined
+          ? coveringReviews(await headReviews(), report.complete)
+          : [];
+      for (const review of coverable) {
         if (await finishedHead(review.marker)) {
           coveredBy = review.marker;
           break;
@@ -1300,6 +1375,37 @@ export async function post(
         progress.coveredBy = coveredBy;
       }
       progress.review = true;
+      await save();
+    }
+    // What the judged replies led to, now that this attempt holds the run's claim.
+    if (replyWrites !== undefined && !progress.replies) {
+      const writer = github.conversation;
+      const replies = deps.replies;
+      const recordReply = deps.findings.recordReply?.bind(deps.findings);
+      if (writer !== undefined && replies !== undefined && recordReply !== undefined) {
+        const propose = deps.proposeLearning;
+        const replied = await writeReplies(replyWrites, {
+          reply: (root, body) => writer.reply(target, root, body),
+          resolveThread: (id) => writer.resolveThread(id),
+          recordReply: (id, type, commentId) => recordReply(id, type, commentId, pr.headSha),
+          ...(propose === undefined
+            ? {}
+            : {
+                proposeLearning: (write) =>
+                  propose(manifest.installationId, {
+                    text: write.learning ?? "",
+                    repo: `${target.owner}/${target.repo}`,
+                    prNumber: target.number,
+                    commentId: write.commentId,
+                    author: write.author,
+                  }),
+              }),
+          replies,
+          log: (message, fields) => deps.log(message, fields),
+        });
+        deps.log("replies written", { runId, closed: replyWrites.closed, replied });
+      }
+      progress.replies = true;
       await save();
     }
     if (progress.coveredBy !== undefined) {

@@ -1,5 +1,5 @@
-import { FINDING_LIMITS, findingSchema } from "@lgtmoose/core";
-import { transcriptKey } from "@lgtmoose/harness";
+import { FINDING_LIMITS, findingSchema, judgementSchema } from "@lgtmoose/core";
+import { MODEL_TIERS, transcriptKey } from "@lgtmoose/harness";
 import { z } from "zod";
 
 /**
@@ -48,6 +48,11 @@ export function runKeys(runId: string) {
      * lines, severities and sources, no comment text): what the bot missed, for the evals.
      */
     misses: `${root}misses.json`,
+    /**
+     * What the post step decided about the run's judged replies, written once before any of it
+     * is acted on, so a retried attempt writes the same replies rather than deciding again.
+     */
+    replies: `${root}replies.json`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,
@@ -118,6 +123,16 @@ export const batchInputSchema = z
       .int()
       .positive()
       .max(2 * 60 * 60_000),
+    /**
+     * What the batch runs: the reviewer on a batch of files (the default), or the reply judge on
+     * one person's reply to a finding (`buildReplyJudgePrompt`), whose output is a `judgement`.
+     */
+    role: z.enum(["reviewer", "judge"]).optional(),
+    /**
+     * The model tier: the judge runs on `fast`. The sandbox then runs its provider's fast model
+     * (`LGTMOOSE_FAST_MODEL`) instead of `model`.
+     */
+    tier: z.enum(MODEL_TIERS).optional(),
   })
   .strict();
 
@@ -170,14 +185,19 @@ export const batchOutputSchema = z
       .array(z.string().min(1).max(FINDING_LIMITS.note))
       .max(FINDING_LIMITS.notesPerRun)
       .optional(),
+    /** The reply judge's answer, for a judge batch (`BatchInput.role`). Model output. */
+    judgement: judgementSchema.optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
   })
   .strict()
-  .refine((output) => (output.findings === undefined) !== (output.error === undefined), {
-    message: "a batch output has either findings or an error",
-  })
+  .refine(
+    (output) =>
+      [output.findings, output.judgement, output.error].filter((part) => part !== undefined)
+        .length === 1,
+    { message: "a batch output has exactly one of findings, a judgement or an error" },
+  )
   .refine((output) => output.notes === undefined || output.findings !== undefined, {
     message: "only a batch with findings has notes",
   });

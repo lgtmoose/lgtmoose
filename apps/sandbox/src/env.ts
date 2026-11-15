@@ -20,6 +20,11 @@ export interface SandboxEnv {
    * model is used.
    */
   model?: string;
+  /**
+   * `LGTMOOSE_FAST_MODEL`: this provider's fast-tier model, for the reply judge; `default` (read
+   * as empty) for the harness's own choice. Undefined when unset.
+   */
+  fastModel?: string;
 }
 
 /** `LGTMOOSE_MODEL`'s value for the harness's default model. */
@@ -31,7 +36,7 @@ const VARIABLES = {
   harness: "LGTMOOSE_HARNESS",
   auth: "LGTMOOSE_AUTH",
   batchUrls: "LGTMOOSE_BATCH_URLS",
-} as const satisfies Record<Exclude<keyof SandboxEnv, "model">, string>;
+} as const satisfies Record<Exclude<keyof SandboxEnv, "model" | "fastModel">, string>;
 
 /** Reads the sandbox task's settings, or says which variables are missing (blank counts). */
 export function readSandboxEnv(
@@ -41,6 +46,7 @@ export function readSandboxEnv(
   if (missing.length > 0) return { missing };
   const read = (name: string) => env[name]?.trim() ?? "";
   const model = env.LGTMOOSE_MODEL?.trim();
+  const fastModel = env.LGTMOOSE_FAST_MODEL?.trim();
   return {
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
@@ -48,5 +54,8 @@ export function readSandboxEnv(
     auth: read(VARIABLES.auth),
     batchUrls: read(VARIABLES.batchUrls),
     ...(model === undefined || model === "" ? {} : { model: model === DEFAULT_MODEL ? "" : model }),
+    ...(fastModel === undefined || fastModel === ""
+      ? {}
+      : { fastModel: fastModel === DEFAULT_MODEL ? "" : fastModel }),
   };
 }

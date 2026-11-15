@@ -266,7 +266,7 @@ function memoryRuns(): RunStore & {
 
 /** A stored finding: tracked while open or outdated, kept once a person resolves or declines it. */
 type StoredFinding = Omit<FindingRecord, "status"> & {
-  status: FindingRecord["status"] | "resolved_by_human" | "declined";
+  status: FindingRecord["status"] | "resolved_by_human" | "declined" | "fixed" | "disputed";
 };
 
 /** `findings` for one PR, like `drizzleFindingStore`. */
@@ -276,9 +276,7 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
     rows,
     async trackedFindings() {
       return rows.flatMap((row) =>
-        row.status === "resolved_by_human" || row.status === "declined"
-          ? []
-          : [{ ...row, status: row.status }],
+        row.status === "open" || row.status === "outdated" ? [{ ...row, status: row.status }] : [],
       );
     },
     async closedFindings() {
@@ -1740,6 +1738,157 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.runs.pr).toMatchObject({ lastReviewedSha: headSha, statusLabel: expect.any(String) });
     expect(shadowRecords(h.objects, "summary-comment")).toHaveLength(2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  describe("replies judged by the reply judge", () => {
+    /** Wires the reply judge's stores and GitHub writes into a harness, with one pending reply. */
+    function withReplies(h: ReturnType<typeof harness>, reply: { body: string; author: string }) {
+      const writes: string[] = [];
+      const marked: Record<string, string[]> = {};
+      const events: string[] = [];
+      let pending = true;
+      h.deps.replies = {
+        add: async () => true,
+        take: async () => {
+          const row = h.findings.rows[0];
+          return pending && row !== undefined
+            ? [{ id: "r1", findingId: row.id, commentId: 555, attempts: 0, ...reply }]
+            : [];
+        },
+        finish: async (ids, status) => {
+          if (ids.length > 0) pending = false;
+          marked[status] = [...(marked[status] ?? []), ...ids];
+        },
+        failed: async (ids) => {
+          marked.failed = [...(marked.failed ?? []), ...ids];
+        },
+      };
+      h.findings.closeForReply = async (id, status) => {
+        const row = h.findings.rows.find((candidate) => candidate.id === id);
+        if (row === undefined || (row.status !== "open" && row.status !== "outdated")) return false;
+        row.status = status;
+        return true;
+      };
+      h.findings.recordReply = async (id, type) => {
+        events.push(`${id} ${type}`);
+      };
+      h.findings.disputesAnswered = async () => new Set();
+      const github = h.deps.github.bind(h.deps);
+      h.deps.github = async (installationId) => ({
+        ...(await github(installationId)),
+        conversation: {
+          reply: async (_target, root, body) => {
+            writes.push(`reply ${root}: ${body}`);
+          },
+          resolveThread: async (id) => {
+            writes.push(`resolve ${id}`);
+          },
+        },
+      });
+      return { writes, marked, events };
+    }
+
+    /** Prepares a run for replies and writes each batch's output: the judge's for its own. */
+    async function judgedRun(
+      h: ReturnType<typeof harness>,
+      n: number,
+      judgement: NonNullable<BatchOutput["judgement"]>,
+    ) {
+      const prepared = await prepare(h.deps, { ...JOB, requested: "replies" }, exec(n), {
+        ...SETTINGS,
+        maxReplyJudgements: 10,
+      });
+      const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+      const judges = new Set((manifest.judgements ?? []).map((judge) => judge.index));
+      for (const batch of prepared.batches) {
+        h.objects.set(
+          runKeys(prepared.runId).batchOutput(batch.index),
+          JSON.stringify(
+            judges.has(batch.index)
+              ? { version: 1, index: batch.index, judgement, transcriptKeys: [] }
+              : output({ index: batch.index, findings: [] }),
+          ),
+        );
+      }
+      return { prepared, manifest, posted: await post(h.deps, prepared.runId) };
+    }
+
+    it("closes a fix the judge saw at head, resolves its thread and approves", async () => {
+      const h = harness({
+        commentIds: true,
+        threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
+      });
+      await review(h, 1, [finding()]);
+      expect(h.findings.rows).toMatchObject([{ status: "open", githubCommentId: 1000 }]);
+      const r = withReplies(h, { body: "Fixed now.", author: "dev" });
+      // The fix lands in the finding's file, away from the cited line.
+      headSha = await commit(
+        {
+          "src/total.ts": HEAD_TOTAL.replace("sum += items[i].price;", "sum += items[i].price!;"),
+        },
+        "fix",
+      );
+
+      const { prepared, manifest, posted } = await judgedRun(h, 2, {
+        kind: "fixed",
+        fixed_at_head: true,
+      });
+
+      const [judge] = manifest.judgements ?? [];
+      expect(judge).toMatchObject({ replyId: "r1", commentId: 555, fileChanged: true });
+      const input = JSON.parse(
+        h.objects.get(runKeys(prepared.runId).batchInput(judge?.index ?? -1)) ?? "{}",
+      ) as Record<string, unknown>;
+      expect(input).toMatchObject({ role: "judge", tier: "fast" });
+      expect(input.prompt).toContain('<untrusted source="reply">\nFixed now.');
+      expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+      expect(posted).toMatchObject({ event: "APPROVE" });
+      expect(r.writes).toEqual(["resolve PRRT_1"]);
+      expect(r.marked).toMatchObject({ judged: ["r1"] });
+    });
+
+    it("keeps a blocking finding open when the author says it's fixed but nothing changed", async () => {
+      const h = harness({ commentIds: true });
+      await review(h, 1, [finding()]);
+      const r = withReplies(h, { body: "Done, trust me.", author: "dev" });
+
+      // Same head: the run for replies isn't covered by the head's review.
+      const { manifest, posted } = await judgedRun(h, 2, { kind: "fixed", fixed_at_head: true });
+
+      expect(manifest.judgements?.[0]?.fileChanged).toBe(false);
+      expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+      expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
+      expect(posted.coveredBy).toBeUndefined();
+      expect(r.writes).toHaveLength(1);
+      expect(r.writes[0]).toMatch(/^reply 1000: .*hasn't changed since this was raised/);
+      expect(r.writes[0]).toContain("<!-- lgtmoose:reply -->");
+      expect(r.events).toEqual([`${h.findings.rows[0]?.id} replied`]);
+    });
+
+    it("counts a failed judge as an attempt and leaves the finding as it is", async () => {
+      const h = harness({ commentIds: true });
+      await review(h, 1, [finding()]);
+      const r = withReplies(h, { body: "Why is this a problem?", author: "dev" });
+      const prepared = await prepare(h.deps, { ...JOB, requested: "replies" }, exec(2), {
+        ...SETTINGS,
+        maxReplyJudgements: 10,
+      });
+      for (const batch of prepared.batches) {
+        h.objects.set(
+          runKeys(prepared.runId).batchOutput(batch.index),
+          JSON.stringify({
+            version: 1,
+            index: batch.index,
+            error: "timeout: slow",
+            transcriptKeys: [],
+          }),
+        );
+      }
+      await post(h.deps, prepared.runId);
+      expect(r.marked).toMatchObject({ failed: ["r1"] });
+      expect(r.writes).toEqual([]);
+      expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    });
   });
 
   it("marks a finding outdated once its line changes, and approves", async () => {

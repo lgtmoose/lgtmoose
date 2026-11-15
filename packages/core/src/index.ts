@@ -67,6 +67,13 @@ export {
   type ToReviewJobOptions,
 } from "./review-job.js";
 export {
+  MAX_JUDGEMENT_TEXT,
+  REPLY_KINDS,
+  judgementSchema,
+  type Judgement,
+  type ReplyKind,
+} from "./judgement.js";
+export {
   MAX_FINDINGS_PER_VERIFIER_RUN,
   verdictSchema,
   verifierOutputSchema,

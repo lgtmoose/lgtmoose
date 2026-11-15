@@ -108,6 +108,11 @@ export interface ReconcileStore {
    * run that started meanwhile isn't overwritten. Returns whether it was.
    */
   restore(pullRequestId: string, recordedHead: string, run: PostedRun): Promise<boolean>;
+  /**
+   * The PR's oldest reply still waiting for the reply judge, and how many runs failed to judge
+   * it: a run for replies is queued for it (one for each attempt, so a failed one is retried).
+   */
+  pendingReply?(pullRequestId: string): Promise<{ id: string; attempts: number } | undefined>;
 }
 
 /** Where jobs go: the gateway's FIFO queue, one message group per PR. */
@@ -137,6 +142,8 @@ export interface ReconcileCounts {
   missedHeads: number;
   /** Comment jobs queued for human comments newer than the record. */
   missedComments: number;
+  /** Runs for replies queued: replies waiting for the reply judge that no run took. */
+  pendingReplies: number;
   /** Status labels synced back to the recorded one. */
   labelsResynced: number;
   /** PRs whose record was put back to their head's posted run. */
@@ -156,6 +163,7 @@ function emptyCounts(): ReconcileCounts {
     openPullRequests: 0,
     missedHeads: 0,
     missedComments: 0,
+    pendingReplies: 0,
     labelsResynced: 0,
     statesResynced: 0,
     unreviewed: 0,
@@ -307,6 +315,24 @@ async function reconcilePull(
       });
     }
   }
+  // A reply a run never judged (one was running when it came in, say): ask for a run again.
+  const waiting = await deps.store.pendingReply?.(record.id);
+  if (waiting !== undefined) {
+    const deliveryId = reconcileDeliveryId(
+      `${repo.toLowerCase()}#${pull.number}:replies:${waiting.id}:${waiting.attempts}`,
+    );
+    await deps.queue.send(
+      {
+        ...jobBase(context, pull),
+        kind: "pr_updated",
+        requested: "replies",
+        deliveryId,
+        actor: pull.author,
+      },
+      { groupId: reviewJobGroupId({ repo, prNumber: pull.number }), dedupeId: deliveryId },
+    );
+    counts.pendingReplies += 1;
+  }
   if (record.commentsThrough !== undefined) {
     const comment = await context.github.newestHumanComment(
       repo,
@@ -401,6 +427,7 @@ export function metricsLine(counts: ReconcileCounts, at: Date): string {
     openPullRequests: "OpenPullRequests",
     missedHeads: "MissedHeads",
     missedComments: "MissedComments",
+    pendingReplies: "PendingReplies",
     labelsResynced: "LabelsResynced",
     statesResynced: "StatesResynced",
     unreviewed: "Unreviewed",

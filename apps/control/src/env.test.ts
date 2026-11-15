@@ -14,7 +14,14 @@ describe("readReviewSettings", () => {
       model: "",
       batchTimeoutMs: DEFAULT_BATCH_TIMEOUT_MS,
       shadow: true,
+      maxReplyJudgements: 10,
     });
+  });
+
+  it("reads the most replies to judge per run", () => {
+    expect(readReviewSettings({ LGTMOOSE_MAX_REPLY_JUDGEMENTS: "0" }).maxReplyJudgements).toBe(0);
+    expect(() => readReviewSettings({ LGTMOOSE_MAX_REPLY_JUDGEMENTS: "-1" })).toThrow();
+    expect(() => readReviewSettings({ LGTMOOSE_MAX_REPLY_JUDGEMENTS: "x" })).toThrow();
   });
 
   it("posts only on an explicit false", () => {

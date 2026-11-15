@@ -44,6 +44,12 @@ export {
   type VerifyTarget,
 } from "./verifier.js";
 export {
+  REPLY_JUDGE_TIER,
+  buildReplyJudgePrompt,
+  type JudgedFinding,
+  type ReplyJudgeInput,
+} from "./reply-judge.js";
+export {
   CROSS_FILE_LIMITS,
   CROSS_FILE_TIER,
   buildCrossFilePrompt,

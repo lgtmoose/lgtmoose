@@ -92,6 +92,7 @@ async function main(): Promise<void> {
       },
       workDir: WORK,
       ...(env.model === undefined ? {} : { model: env.model }),
+      ...(env.fastModel === undefined ? {} : { fastModel: env.fastModel }),
       log,
     },
     env.batchUrls,

@@ -1,3 +1,4 @@
+import type { Judgement } from "@lgtmoose/core";
 import { batchOutputSchema, runKeys, type BatchOutcome } from "@lgtmoose/pipeline";
 import type { ArtifactStore } from "./ports.js";
 
@@ -7,6 +8,26 @@ function withoutUndefined<T extends object>(
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as {
     [K in keyof T]: Exclude<T[K], undefined>;
   };
+}
+
+/**
+ * A judge batch's judgement from its output object: undefined when there's no output, it failed,
+ * or it doesn't validate. The sandbox ran a model on a person's reply, so it's checked like any
+ * model output.
+ */
+export async function readJudgement(
+  store: ArtifactStore,
+  runId: string,
+  index: number,
+): Promise<Judgement | undefined> {
+  const text = await store.getText(runKeys(runId).batchOutput(index));
+  if (text === undefined) return undefined;
+  try {
+    const parsed = batchOutputSchema.safeParse(JSON.parse(text));
+    return parsed.success && parsed.data.index === index ? parsed.data.judgement : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

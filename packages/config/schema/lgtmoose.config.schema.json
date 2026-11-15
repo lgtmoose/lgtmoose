@@ -136,6 +136,13 @@
       "minimum": 1,
       "maximum": 720
     },
+    "maxReplyJudgements": {
+      "default": 10,
+      "description": "Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50
+    },
     "shadow": {
       "default": true,
       "description": "Record reviews to the artifact bucket and the log instead of posting them to GitHub.",

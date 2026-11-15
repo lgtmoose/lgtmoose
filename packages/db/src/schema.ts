@@ -240,6 +240,47 @@ export const findingEvents = pgTable(
   (t) => [index("finding_events_finding_idx").on(t.findingId, t.createdAt)],
 );
 
+export const pendingReplyStatus = pgEnum("pending_reply_status", [
+  // Waiting for a run to judge it.
+  "pending",
+  // Judged, and acted on.
+  "judged",
+  // Left alone: a later reply on the same thread took its place, or the judge failed too often.
+  "skipped",
+]);
+
+/**
+ * People's replies on our findings' review threads, waiting for the reply judge (NIC-833). The
+ * conversation handler records them; the next run judges up to its limit, oldest first, and
+ * the post step acts on each judgement. The body is the comment's text as GitHub had it, with
+ * credentials and personal data redacted before it's stored. It's untrusted.
+ */
+export const pendingReplies = pgTable(
+  "pending_replies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pullRequestId: uuid("pull_request_id")
+      .notNull()
+      .references(() => pullRequests.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id")
+      .notNull()
+      .references(() => findings.id, { onDelete: "cascade" }),
+    /** The reply's review comment ID. */
+    githubCommentId: bigint("github_comment_id", { mode: "number" }).notNull(),
+    author: text("author").notNull(),
+    body: text("body").notNull(),
+    status: pendingReplyStatus("status").notNull().default("pending"),
+    /** Runs that tried to judge it and got no judgement. */
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("pending_replies_comment_key").on(t.githubCommentId),
+    index("pending_replies_pull_request_idx").on(t.pullRequestId, t.status, t.createdAt),
+  ],
+);
+
 export const learnings = pgTable(
   "learnings",
   {

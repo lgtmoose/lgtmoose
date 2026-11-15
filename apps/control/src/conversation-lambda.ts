@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { drizzleConversationStore, githubConversation, sqsJobQueue } from "./conversation-aws.js";
 import { handleConversation, type ConversationDeps } from "./conversation.js";
+import { drizzleReplyStore } from "./replies-aws.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { parseQueuedJob, type DispatchJob, type QueueRecord } from "./dispatch.js";
 import { readConversationEnv } from "./env.js";
@@ -75,6 +76,7 @@ function conversationDeps(): Promise<ConversationDeps> {
       },
       store: drizzleConversationStore(db),
       learnings: drizzleLearningStore(db),
+      replies: drizzleReplyStore(db),
       queue: sqsJobQueue(new SQSClient({}), env.jobQueueUrl),
       shadow: env.shadow,
       log,

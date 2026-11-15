@@ -23,6 +23,7 @@ const commentReply = z.object({
   body: z.string().nullable().optional(),
   user: userSchema,
   in_reply_to_id: z.number().int().positive().optional(),
+  created_at: z.string().optional(),
 });
 const pullReply = z.object({
   state: z.string(),
@@ -65,6 +66,7 @@ export function githubConversation(
         authorIsBot: reply.user === null ? true : isBot(reply.user),
         // Replies on GitHub are to the thread's first comment.
         ...(kind === "review_comment" ? { threadRootId: reply.in_reply_to_id ?? reply.id } : {}),
+        ...(reply.created_at === undefined ? {} : { createdAt: reply.created_at }),
       };
     },
     async pull(repo, number) {
@@ -203,6 +205,15 @@ export function drizzleConversationStore(
         });
         return true;
       });
+    },
+    async commentsThrough(repo, number, at) {
+      await db
+        .update(pullRequests)
+        .set({
+          commentsThrough: sql`greatest(coalesce(${pullRequests.commentsThrough}, ${at}), ${at})`,
+          updatedAt: now(),
+        })
+        .where(ofPull(repo, number));
     },
   };
 }

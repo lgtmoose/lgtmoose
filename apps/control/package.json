@@ -31,6 +31,7 @@
     "@lgtmoose/learnings": "workspace:*",
     "@lgtmoose/pipeline": "workspace:*",
     "@lgtmoose/poster": "workspace:*",
+    "@lgtmoose/roles": "workspace:*",
     "@lgtmoose/summary": "workspace:*",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",

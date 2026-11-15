@@ -10,7 +10,7 @@ import { SEVERITIES, severityRank, type ReviewEvent } from "@lgtmoose/core";
 import { filesReviewed, findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { cloneAtSha, githubCloneUrl } from "@lgtmoose/git";
 import { githubPullReader } from "@lgtmoose/pipeline";
-import { graphQlThreadReader } from "./threads.js";
+import { graphQlThreadReader, resolveReviewThread } from "./threads.js";
 import {
   GitHubClient,
   GitHubLabelClient,
@@ -18,6 +18,7 @@ import {
   ShadowPoster,
   installationTokenProvider,
   appJwt,
+  repoPath,
 } from "@lgtmoose/poster";
 import { and, asc, desc, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -25,11 +26,12 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { z } from "zod";
-import { drizzleLearningStore } from "@lgtmoose/learnings";
+import { drizzleLearningStore, proposeLearning } from "@lgtmoose/learnings";
+import { drizzleReplyStore } from "./replies-aws.js";
 import type { ControlEnv, EmbeddingsSettings } from "./env.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
 import type { ControlDeps, FindingStore, RunRecord, RunStore, TaskTokens } from "./ports.js";
-import { collaboratorPermission } from "./github-access.js";
+import { collaboratorPermission, orgRole } from "./github-access.js";
 import { s3ArtifactStore } from "./s3-store.js";
 
 export { s3ArtifactStore };
@@ -391,7 +393,8 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         .where(
           and(
             eq(findings.pullRequestId, pullRequestId),
-            inArray(findings.status, ["resolved_by_human", "declined"]),
+            // A dispute the judge upheld is closed like a declined finding: raised again, dropped.
+            inArray(findings.status, ["resolved_by_human", "declined", "disputed"]),
             eq(findings.source, "self"),
           ),
         )
@@ -566,6 +569,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
       };
       const resolved = await move(ids(true), ["open", "outdated"], "resolved_by_human", "resolved");
       // Unresolved again: open again (the next follow decides whether its line still stands).
+      // Only findings a resolved thread closed: a thread that's unresolved now may never have
+      // been resolved, so findings closed after a reply are reopened only by the unresolve
+      // webhook itself (`followThread`).
       const unresolved = await move(ids(false), ["resolved_by_human"], "open", "unresolved");
       return { resolved, unresolved };
     },
@@ -593,6 +599,45 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             .values({ findingId: id, type: "escalated", actor: "self", sha });
         }
       });
+    },
+    async closeForReply(findingId, status, reply, sha) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(findings)
+          .set({ status, updatedAt: now() })
+          .where(and(eq(findings.id, findingId), inArray(findings.status, ["open", "outdated"])))
+          .returning({ id: findings.id });
+        if (row === undefined) return false;
+        await tx.insert(findingEvents).values({
+          findingId,
+          // A declined finding is the person's decision; fixed and disputed are ours, on the
+          // judge's answer and the checks around it.
+          type: status === "disputed" ? "dispute_answered" : status,
+          actor: status === "declined" ? "human" : "self",
+          actorLogin: reply.login,
+          sha,
+          githubCommentId: reply.commentId,
+        });
+        return true;
+      });
+    },
+    async recordReply(findingId, type, commentId, sha) {
+      await db
+        .insert(findingEvents)
+        .values({ findingId, type, actor: "self", sha, githubCommentId: commentId });
+    },
+    async disputesAnswered(ids) {
+      if (ids.length === 0) return new Set();
+      const rows = await db
+        .selectDistinct({ id: findingEvents.findingId })
+        .from(findingEvents)
+        .where(
+          and(
+            inArray(findingEvents.findingId, [...ids]),
+            eq(findingEvents.type, "dispute_answered"),
+          ),
+        );
+      return new Set(rows.map((row) => row.id));
     },
   };
 
@@ -676,6 +721,7 @@ export async function awsControlDeps(
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
   const db = drizzle({ client: pool });
+  const learningStore = drizzleLearningStore(db);
   const bedrock = new BedrockRuntimeClient({});
   const embedder = await embedderFor(options.embeddings ?? { provider: "none" }, {
     bedrock: () => async (modelId, body) => {
@@ -737,6 +783,29 @@ export async function awsControlDeps(
           (query, variables) => client.graphql(query, variables),
           (errors) => log("review threads partly unread", { errors }),
         ),
+        conversation: options.shadow
+          ? {
+              async reply(target, commentId, body) {
+                log("shadow: reply not posted", { pr: target.number, commentId, body });
+              },
+              async resolveThread(threadId) {
+                log("shadow: review thread not resolved", { threadId });
+              },
+            }
+          : {
+              async reply(target, commentId, body) {
+                await client.request(
+                  "POST",
+                  `${repoPath(target)}/pulls/${target.number}/comments/${commentId}/replies`,
+                  { body },
+                );
+              },
+              resolveThread: (threadId) =>
+                resolveReviewThread(
+                  (query, variables) => client.graphql(query, variables),
+                  threadId,
+                ),
+            },
         token,
         poster: (runId, pull) =>
           options.shadow
@@ -761,7 +830,41 @@ export async function awsControlDeps(
     },
     archive: tarArchive,
     log,
-    learnings: learningsRetriever(drizzleLearningStore(db), embedder, log),
+    replies: drizzleReplyStore(db),
+    async proposeLearning(installationId, proposal) {
+      const client = new GitHubClient({
+        token: installationTokenProvider({
+          appId: app.appId,
+          privateKey: app.privateKey,
+          installationId,
+          timeoutMs: GITHUB_TIMEOUT_MS,
+        }),
+        timeoutMs: GITHUB_TIMEOUT_MS,
+      });
+      const [owner = "", name = ""] = proposal.repo.split("/");
+      const result = await proposeLearning(
+        {
+          store: learningStore,
+          permissions: (_repo, login) =>
+            collaboratorPermission(client, { owner, repo: name }, login, log),
+          orgRoles: (org, login) => orgRole(client, org, login, log),
+        },
+        // A repo-wide convention from the person's reason, as `learn:` makes by default.
+        { kind: "convention", text: proposal.text, scope: { level: "repo" } },
+        {
+          repo: proposal.repo,
+          pr: proposal.prNumber,
+          commentId: proposal.commentId,
+          author: proposal.author,
+        },
+      );
+      log("learning proposed from a reply", {
+        commentId: proposal.commentId,
+        outcome: result.outcome,
+        ...(result.outcome === "refused" ? { reason: result.reason } : {}),
+      });
+    },
+    learnings: learningsRetriever(learningStore, embedder, log),
     close: () => pool.end(),
   };
 }

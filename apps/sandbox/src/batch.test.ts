@@ -36,6 +36,8 @@ interface Setup {
   credentialUrl?: boolean;
   /** The reviewer's notes for the cross-file pass. */
   notes?: string[];
+  /** What the model returns instead of a finding (a judgement, for a judge batch). */
+  output?: unknown;
 }
 
 function setup(options: Setup = {}) {
@@ -87,10 +89,12 @@ function setup(options: Setup = {}) {
         throw new HarnessError("timeout", "The run timed out.", { transcriptKeys: [TRANSCRIPT] });
       }
       return {
-        output: run.schema.parse({
-          findings: [FINDING],
-          ...(options.notes === undefined ? {} : { notes: options.notes }),
-        }),
+        output: run.schema.parse(
+          options.output ?? {
+            findings: [FINDING],
+            ...(options.notes === undefined ? {} : { notes: options.notes }),
+          },
+        ),
         transcriptKey: TRANSCRIPT,
         usage: { costUsd: 0.5 },
       };
@@ -159,6 +163,52 @@ describe("runSandboxBatch", () => {
       prompt: "Review src/total.ts",
     });
     expect(output.notes).toEqual(["exports total()", `${"x".repeat(499)}…`]);
+  });
+
+  it("runs the reply judge on the fast tier for a judge batch", async () => {
+    const s = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 4,
+        prompt: "Judge this reply",
+        role: "judge",
+        tier: "fast",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: { kind: "fixed", fixed_at_head: false, line: 3, text: "Still off by one." },
+    });
+    s.deps.model = "sonnet";
+    s.deps.fastModel = "haiku";
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.runs[0]).toMatchObject({ model: "haiku", tier: "fast", prompt: "Judge this reply" });
+    expect(s.runs[0]?.system).toBeUndefined();
+    expect(output).toMatchObject({
+      index: 4,
+      judgement: { kind: "fixed", fixed_at_head: false, line: 3 },
+    });
+    expect(output.findings).toBeUndefined();
+    expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
+  });
+
+  it("writes a judge's failure as the batch's error", async () => {
+    const s = setup({
+      run: "timeout",
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 4,
+        prompt: "Judge this reply",
+        role: "judge",
+        tier: "fast",
+        model: "",
+        timeoutMs: 60_000,
+      },
+    });
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(output.judgement).toBeUndefined();
+    expect(output.error).toMatch(/^timeout:/);
   });
 
   it("removes symlinks after extracting and before the harness runs", async () => {

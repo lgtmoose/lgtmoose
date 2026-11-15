@@ -11,6 +11,7 @@ import {
 } from "@lgtmoose/learnings";
 import { inline, paragraphs } from "@lgtmoose/summary";
 import { helpText, learningProposal, parseCommands, type Command } from "./commands.js";
+import { JUDGE_REPLY_MARKER, isTrivialReply, type ReplyStore } from "./replies.js";
 import { resolutionHeld } from "./thread-policy.js";
 
 /**
@@ -41,6 +42,8 @@ export interface CommentInfo {
    * starts the thread. That's the comment a finding records.
    */
   threadRootId?: number;
+  /** When it was written, as GitHub says: how far `comments_through` moves. */
+  createdAt?: string;
 }
 
 export interface PullInfo {
@@ -107,12 +110,22 @@ export interface ConversationStore {
    * when it wasn't open or outdated any more.
    */
   decline(findingId: string, login: string, commentId: number): Promise<boolean>;
+  /**
+   * Moves the PR's `comments_through` up to `at` (never back): comments up to then are
+   * handled, so the reconciler only queues ones written later.
+   */
+  commentsThrough?(repo: string, number: number, at: Date): Promise<void>;
 }
 
 export interface ConversationDeps {
   github(installationId: number): Promise<ConversationGitHub>;
   store: ConversationStore;
   learnings: LearningStore;
+  /**
+   * Replies on our findings' threads, waiting for the reply judge. Left out, replies are
+   * deferred as before.
+   */
+  replies?: ReplyStore;
   /** The job queue, for reviews a command asks for. */
   queue: { send(job: ReviewJob): Promise<void> };
   /** In shadow mode nothing is written to GitHub: reactions and replies are logged. */
@@ -123,6 +136,8 @@ export interface ConversationDeps {
 
 export type ConversationResult =
   | { action: "commands"; commands: string[]; ok: boolean; replied: boolean }
+  /** A reply on one of our findings' threads, recorded for the judge (`queued`: a run asked). */
+  | { action: "reply"; queued: boolean }
   | { action: "deferred"; reason: string }
   | { action: "ignored"; reason: string };
 
@@ -419,13 +434,35 @@ export async function handleConversation(
   const github = await deps.github(job.installationId);
   const comment = await github.comment(kind, job.repo, job.commentId);
   if (comment === undefined) return { action: "ignored", reason: "the comment is gone" };
-  if (comment.authorIsBot || comment.body.includes(REPLY_MARKER)) {
+  if (
+    comment.authorIsBot ||
+    comment.body.includes(REPLY_MARKER) ||
+    comment.body.includes(JUDGE_REPLY_MARKER)
+  ) {
     return { action: "ignored", reason: "a bot's comment" };
   }
+  // Handled one way or another from here: the reconciler needn't queue it again.
+  const handled = async () => {
+    if (comment.createdAt === undefined || deps.store.commentsThrough === undefined) return;
+    const at = new Date(comment.createdAt);
+    if (!Number.isNaN(at.getTime())) {
+      await deps.store.commentsThrough(job.repo, job.prNumber, at);
+    }
+  };
   const slug = await github.slug();
   const commands = parseCommands(comment.body, slug);
-  // Not a command: the reply judge's (NIC-833).
-  if (commands.length === 0) return { action: "deferred", reason: "not a command" };
+  // Not a command: a reply for the judge, if it's on one of our findings' threads.
+  if (commands.length === 0) {
+    const result = await recordReply(
+      deps,
+      github,
+      { ...job, commentId: job.commentId },
+      kind,
+      comment,
+    );
+    await handled();
+    return result;
+  }
 
   const [owner = ""] = job.repo.split("/");
   let pull: Promise<PullInfo> | undefined;
@@ -461,5 +498,62 @@ export async function handleConversation(
     await github.react(kind, job.repo, job.commentId, reaction);
     if (body !== undefined) await github.reply(kind, job.repo, job.prNumber, job.commentId, body);
   }
+  await handled();
   return { action: "commands", commands: names, ok, replied: body !== undefined };
+}
+
+/**
+ * A comment that isn't a command. A person's reply on one of our open findings' threads is
+ * recorded for the reply judge, and a run is asked for so it's judged without waiting for a
+ * push (`requested: "replies"`; the dispatcher leaves it alone on a paused PR). Thanks, emoji
+ * and other replies with nothing to judge are left alone, and so is everything else: top-level
+ * comments and other reviewers' threads.
+ */
+async function recordReply(
+  deps: ConversationDeps,
+  github: ConversationGitHub,
+  job: ReviewJob & { commentId: number },
+  kind: CommentKind,
+  comment: CommentInfo,
+): Promise<ConversationResult> {
+  const root = comment.threadRootId;
+  if (kind !== "review_comment" || root === undefined || root === job.commentId) {
+    return { action: "deferred", reason: "not a reply on a review thread" };
+  }
+  if (deps.replies === undefined) return { action: "deferred", reason: "no reply judge" };
+  const finding = await deps.store.findingByComment(job.repo, job.prNumber, root);
+  if (finding === undefined)
+    return { action: "ignored", reason: "not one of our findings' threads" };
+  if (finding.status !== "open" && finding.status !== "outdated") {
+    return { action: "ignored", reason: `the finding is ${finding.status}` };
+  }
+  if (isTrivialReply(comment.body)) return { action: "ignored", reason: "nothing to judge" };
+  const added = await deps.replies.add({
+    repo: job.repo,
+    prNumber: job.prNumber,
+    findingId: finding.id,
+    commentId: job.commentId,
+    author: comment.author,
+    body: comment.body,
+  });
+  // A redelivery: its run was asked for the first time.
+  if (!added) return { action: "reply", queued: false };
+  const pull = await github.pull(job.repo, job.prNumber);
+  if (!pull.open) return { action: "reply", queued: false };
+  const now = deps.now?.() ?? new Date();
+  await deps.queue.send({
+    kind: "pr_updated",
+    requested: "replies",
+    // One reply asks once: a redelivery dedupes on the queue and in the dispatcher.
+    deliveryId: `replies-${job.commentId}`,
+    installationId: job.installationId,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    headSha: pull.headSha,
+    actor: comment.author,
+    commentId: job.commentId,
+    receivedAt: now.toISOString(),
+    eventAt: job.eventAt ?? now.toISOString(),
+  });
+  return { action: "reply", queued: true };
 }

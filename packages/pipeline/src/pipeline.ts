@@ -7,10 +7,12 @@ import {
   dedupeFindings,
   fingerprint,
   fingerprintParts,
+  judgementSchema,
   reviewerOutputSchema,
   severityRank,
   type Finding,
   type HoldReason,
+  type Judgement,
   type FingerprintParts,
   type KnownFinding,
   type ReviewDecision,
@@ -28,6 +30,7 @@ import {
   type ReadingDepth,
 } from "@lgtmoose/planner";
 import {
+  REPLY_JUDGE_TIER,
   buildReviewerParts,
   clipBatchNotes,
   renderBatch,
@@ -728,6 +731,46 @@ export async function runBatch(
       index: job.index,
       findings: result.output.findings,
       ...(notes.length === 0 ? {} : { notes }),
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
+/** What the reply judge's run on one batch came to: a judgement, or why it failed. */
+export interface JudgeOutcome {
+  index: number;
+  judgement?: Judgement;
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the reply judge on one reply (its prompt from `buildReplyJudgePrompt`), on the fast tier.
+ * A failed run is an outcome with `error`, never a throw.
+ */
+export async function runJudge(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<JudgeOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: judgementSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      tier: REPLY_JUDGE_TIER,
+    });
+    return {
+      index: job.index,
+      judgement: result.output,
       transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };
