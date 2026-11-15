@@ -4,6 +4,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   index,
   integer,
   jsonb,
@@ -153,6 +154,12 @@ export const reviewRuns = pgTable(
     statusLabel: text("status_label"),
     reviewEvent: text("review_event"),
     reviewId: bigint("review_id", { mode: "number" }),
+    /**
+     * The spend cap that kept batches of this run from running (NIC-1079): `pr_runs`, `pr_cost`,
+     * `repo_monthly` or `monthly`. A run with one doesn't count as having reviewed its head, so
+     * `@lgtmoose review` or the next push reviews it.
+     */
+    spendCap: text("spend_cap"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -589,4 +596,44 @@ export const dashboardSessions = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("dashboard_sessions_expires_idx").on(t.expiresAt)],
+);
+
+/**
+ * Model spend per review run (NIC-1079), for the spend caps. Prepare reserves a run's estimated
+ * cost here before any batch is dispatched; post settles it with what the batches reported, and
+ * the reconciler settles a run post never reached. Every row counts, settled or not. Months and
+ * days are UTC, taken when the run was prepared.
+ */
+export const spendLedger = pgTable(
+  "spend_ledger",
+  {
+    runId: uuid("run_id")
+      .primaryKey()
+      .references(() => reviewRuns.id, { onDelete: "cascade" }),
+    /** owner/name, lower case. */
+    repo: text("repo").notNull(),
+    prNumber: integer("pr_number").notNull(),
+    /** YYYY-MM. */
+    month: text("month").notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+    /** The estimate while reserved, then the settled cost. */
+    costUsd: numeric("cost_usd", { precision: 12, scale: 4 }).notNull(),
+    /** Batches dispatched. */
+    batches: integer("batches").notNull(),
+    /** Which batches, and their tiers: to settle the run from their outputs if post never does. */
+    dispatched: jsonb("dispatched")
+      .$type<{ index: number; tier: string }[]>()
+      .notNull()
+      .default([]),
+    settled: boolean("settled").notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("spend_ledger_month_idx").on(t.month),
+    index("spend_ledger_repo_month_idx").on(t.repo, t.month),
+    index("spend_ledger_pr_day_idx").on(t.repo, t.prNumber, t.day),
+    // The reconciler's look for reservations post never settled.
+    index("spend_ledger_unsettled_idx").on(t.settled, t.createdAt),
+  ],
 );

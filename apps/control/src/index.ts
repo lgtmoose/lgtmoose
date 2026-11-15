@@ -12,6 +12,7 @@ import {
   readTicketSettings,
 } from "./env.js";
 import { runCommand } from "./run.js";
+import { readBudgets } from "./spend.js";
 
 /** `learnings.maxPendingPerAuthor`, as the Workflow stack sets it; unset, the policy's default. */
 function maxPending(): { maxPendingLearnings?: number } {
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
     shadow: settings.shadow,
     embeddings: readEmbeddingsSettings(process.env),
     tickets: readTicketSettings(process.env),
+    budgets: readBudgets(process.env),
     ...maxPending(),
   });
   const ecs = new ECSClient({});

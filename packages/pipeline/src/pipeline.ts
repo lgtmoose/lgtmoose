@@ -228,7 +228,16 @@ export interface FinishOptions {
   ourAppId?: number;
   /** Ticket coverage (NIC-839), when a ticket provider is configured. */
   tickets?: TicketReview;
+  /**
+   * Review batches a spend cap kept from running (NIC-1079), and what the summary says about it:
+   * which cap and when it resets. They count as not reviewed, so the review is incomplete and
+   * their files are reviewed by the next run, but not as failed.
+   */
+  spendCap?: { batches: readonly number[]; reason: string };
 }
+
+/** What a batch a spend cap kept from running reports as its error. */
+export const SPEND_CAP_ERROR = "not run: a spend cap was reached";
 
 /**
  * The tickets a PR names and how the ticket checker found the PR covers them (NIC-839), for the
@@ -1040,6 +1049,7 @@ export async function finishReview(
 ): Promise<ReviewReport> {
   const { pr, plan, config } = prepared;
   const byIndex = new Map(outcomes.map((outcome) => [outcome.index, outcome]));
+  const capped = new Set(options.spendCap?.batches ?? []);
   const batches: BatchReport[] = [];
   const inline: Finding[] = [];
   const body: Finding[] = [];
@@ -1073,6 +1083,15 @@ export async function finishReview(
     }
     if (job.done === true) {
       batches.push({ index: job.index, files: job.files, done: true, transcriptKeys: [] });
+      continue;
+    }
+    if (capped.has(job.index)) {
+      batches.push({
+        index: job.index,
+        files: job.files,
+        error: SPEND_CAP_ERROR,
+        transcriptKeys: [],
+      });
       continue;
     }
     const outcome = byIndex.get(job.index);
@@ -1184,8 +1203,9 @@ export async function finishReview(
   const open = [...ownOpen, ...others.map((entry) => entry.finding)];
 
   const unreviewed = unreviewedReasons(plan.skipped);
-  const failedBatches = batches.filter((batch) => batch.error !== undefined).length;
-  const complete = failedBatches === 0 && unreviewed.length === 0;
+  const cappedBatches = batches.filter((batch) => batch.error === SPEND_CAP_ERROR).length;
+  const failedBatches = batches.filter((batch) => batch.error !== undefined).length - cappedBatches;
+  const complete = failedBatches === 0 && cappedBatches === 0 && unreviewed.length === 0;
 
   // A ticket's missing core requirements count as should-fix findings, capped: model judgement,
   // so they can hold approval but never block on their own.
@@ -1205,6 +1225,12 @@ export async function finishReview(
   const reasons = [
     ...(decision.outcome === "skipped" ? ["the PR's head moved during the run"] : []),
     ...(failedBatches > 0 ? [`${count(failedBatches, "batch", "batches")} failed`] : []),
+    ...(cappedBatches > 0 || (options.spendCap !== undefined && decision.outcome !== "skipped")
+      ? [
+          options.spendCap?.reason ??
+            `${count(cappedBatches, "batch", "batches")} weren't run: a spend cap was reached`,
+        ]
+      : []),
     ...(decision.outcome === "skipped" ? [] : unreviewed),
     ...decision.holds.flatMap((hold) => holdReasons(hold, injection.text)),
     ...(decision.holds.includes("prompt_injection")

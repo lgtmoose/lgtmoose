@@ -132,10 +132,13 @@ services:
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
       LGTMOOSE_SECRETS_DIR: /run/lgtmoose/secrets
       LGTMOOSE_SITE_DIR: /app/site
+      # The deploy config, read-only, for the spend caps on the Usage page. It holds no secrets.
+      LGTMOOSE_CONFIG: /config/lgtmoose.config.json
       PORT: "3001"
     volumes:
       # Its own secrets only: the OAuth client, and the signing key it generates on first start.
       - ./secrets/dashboard:/run/lgtmoose/secrets
+      - ./lgtmoose.config.json:/config/lgtmoose.config.json:ro
     ports:
       - ${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-3001}:3001
     networks: [db, web]

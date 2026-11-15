@@ -8,7 +8,9 @@ import {
   postgresArtifactStore,
   postgresExecutions,
   postgresRunners,
+  postgresSpend,
   runExclusive,
+  STALE_RESERVATION_MS,
 } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER, runMigrations } from "@lgtmoose/db/migrate";
 import { drizzleLearningStore, retireUnusedLearnings } from "@lgtmoose/learnings";
@@ -28,6 +30,7 @@ import { embedderFor } from "../learnings.js";
 import { log } from "../log.js";
 import { metricsLine, reconcile } from "../reconcile.js";
 import { drizzleReconcileStore, githubReconcile } from "../reconcile-aws.js";
+import { settleStaleSpend } from "../spend.js";
 import { drizzleReplyStore } from "../replies-aws.js";
 import { ticketSourceFor } from "../tickets.js";
 import { Docker, socketTransport } from "./docker.js";
@@ -138,6 +141,7 @@ async function main(): Promise<void> {
     embedder,
     ...(tickets === undefined ? {} : { tickets }),
     maxPendingLearnings: config.learnings.maxPendingPerAuthor,
+    budgets: config.budgets,
   });
 
   const docker = new Docker(
@@ -280,6 +284,14 @@ async function main(): Promise<void> {
     counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
     counts.categoriesFlagged = feedback.categoriesFlagged;
     counts.errors += feedback.errors;
+    // Spend caps (NIC-1079): settle runs post never reached, from their batches' outputs.
+    await settleStaleSpend(
+      { store: postgresSpend(db), budgets: config.budgets },
+      store,
+      new Date(),
+      log,
+      STALE_RESERVATION_MS,
+    );
     process.stdout.write(`${metricsLine(counts, new Date())}\n`);
   };
   const health = () =>

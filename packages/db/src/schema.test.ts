@@ -67,6 +67,7 @@ describe("migrations", () => {
       "pull_request_dispatches",
       "pull_requests",
       "review_runs",
+      "spend_ledger",
     ]);
   });
 

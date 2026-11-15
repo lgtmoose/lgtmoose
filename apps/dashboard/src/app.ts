@@ -59,6 +59,20 @@ interface ProviderUse {
   fallbacks: number;
 }
 
+/** This month's estimated spend against the deploy config's caps (NIC-1079). */
+interface Spend {
+  month: string;
+  caps: {
+    monthlyUsd?: number;
+    perRepoMonthlyUsd?: number;
+    prCostPerDayUsd?: number;
+    prRunsPerDay?: number;
+  };
+  /** Only for an owner of one of the deployment's orgs. */
+  deploymentUsd?: number;
+  repos: { repo: string; usd: number }[];
+}
+
 interface Cooldown {
   providerId: string;
   until: string;
@@ -398,10 +412,11 @@ async function renderLearnings(status: LearningStatus): Promise<void> {
 }
 
 async function renderUsage(): Promise<void> {
-  const { days, providers, cooldowns } = await api<{
+  const { days, providers, cooldowns, spend } = await api<{
     days: number;
     providers: ProviderUse[];
     cooldowns: Cooldown[];
+    spend: Spend;
   }>("/api/usage");
   replace(
     main(),
@@ -429,6 +444,7 @@ async function renderUsage(): Promise<void> {
             count(use.fallbacks),
           ]),
         ),
+    ...spendSection(spend),
     el("h2", {}, "Sitting out now"),
     el(
       "p",
@@ -442,6 +458,38 @@ async function renderUsage(): Promise<void> {
           cooldowns.map((cooldown) => [cooldown.providerId, when(cooldown.until), cooldown.reason]),
         ),
   );
+}
+
+/** Spend this month against the caps: a share of a cap, or just the amount without one. */
+function spendSection(spend: Spend): HTMLElement[] {
+  const { caps } = spend;
+  const against = (usd: number, cap: number | undefined) =>
+    cap === undefined
+      ? money(usd)
+      : `${money(usd)} of ${money(cap)} (${percent(cap > 0 ? usd / cap : 1)})`;
+  const perPr = [
+    ...(caps.prCostPerDayUsd === undefined ? [] : [`${money(caps.prCostPerDayUsd)} a day`]),
+    ...(caps.prRunsPerDay === undefined ? [] : [`${count(caps.prRunsPerDay)} runs a day`]),
+  ];
+  return [
+    el("h2", {}, `Spend in ${spend.month}`),
+    el(
+      "p",
+      { class: "muted" },
+      `Estimated model cost, from each batch's tokens at its tier's price (UTC month). ${
+        perPr.length === 0 ? "No per-PR cap." : `Per PR: ${perPr.join(", ")}.`
+      } A repository's .lgtmoose.yaml can lower its own caps; those aren't shown.`,
+    ),
+    ...(spend.deploymentUsd === undefined
+      ? []
+      : [el("p", {}, `The whole deployment: ${against(spend.deploymentUsd, caps.monthlyUsd)}.`)]),
+    spend.repos.length === 0
+      ? el("p", { class: "muted" }, "No spend in your repositories this month.")
+      : table(
+          ["Repository", "This month"],
+          spend.repos.map((entry) => [entry.repo, against(entry.usd, caps.perRepoMonthlyUsd)]),
+        ),
+  ];
 }
 
 async function renderAcceptance(): Promise<void> {
