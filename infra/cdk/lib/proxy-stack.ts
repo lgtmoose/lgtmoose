@@ -2,10 +2,8 @@ import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, Stack, type StackProps } from "aws-cdk-lib";
 import type { ISecurityGroup, IVpc } from "aws-cdk-lib/aws-ec2";
 import { SubnetType } from "aws-cdk-lib/aws-ec2";
-import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import {
   Cluster,
-  ContainerImage,
   CpuArchitecture,
   FargateService,
   FargateTaskDefinition,
@@ -15,7 +13,8 @@ import {
 import { FilterPattern, LogGroup, MetricFilter, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { DnsRecordType, PrivateDnsNamespace } from "aws-cdk-lib/aws-servicediscovery";
 import type { Construct } from "constructs";
-import { STACK_OUTPUTS } from "@lgtmoose/config";
+import { STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import { taskImage } from "./images.js";
 import { PROXY_PORT, type Profile } from "./network-stack.js";
 
 const PROXY_DIR = fileURLToPath(new URL("../../../apps/egress-proxy/", import.meta.url));
@@ -34,6 +33,8 @@ export interface ProxyStackProps extends StackProps {
   proxySecurityGroup: ISecurityGroup;
   /** Exact hostnames the proxy lets through (see `egressAllowlist` in @lgtmoose/config). */
   allowedHosts: readonly string[];
+  /** Where the proxy image comes from (`images` in the deploy config). */
+  images?: DeployConfig["images"];
 }
 
 /**
@@ -86,7 +87,9 @@ export class ProxyStack extends Stack {
       },
     });
     task.addContainer("Proxy", {
-      image: ContainerImage.fromAsset(PROXY_DIR, { platform: Platform.LINUX_ARM64 }),
+      image: taskImage(props.images ?? { source: "build" }, "egressProxy", {
+        directory: PROXY_DIR,
+      }),
       environment: { ALLOWED_HOSTS: hosts.join(","), PORT: String(PROXY_PORT) },
       portMappings: [{ containerPort: PROXY_PORT }],
       readonlyRootFilesystem: true,

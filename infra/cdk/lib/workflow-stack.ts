@@ -3,14 +3,13 @@ import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { Alarm, ComparisonOperator, Metric, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import type { ISecurityGroup, IVpc, SubnetSelection } from "aws-cdk-lib/aws-ec2";
-import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import {
   Capability,
   Cluster,
-  ContainerImage,
   CpuArchitecture,
   FargateTaskDefinition,
   LinuxParameters,
+  type ContainerImage,
   LogDrivers,
   OperatingSystemFamily,
   Secret as EcsSecret,
@@ -44,6 +43,7 @@ import {
   secretArnPattern,
   type ReviewProvider,
 } from "./review-workflow.js";
+import { taskImage } from "./images.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -148,6 +148,8 @@ export interface WorkflowStackProps extends StackProps {
    * (`sandboxBuildArgs`). Off by default.
    */
   allowUnverifiedCursor?: boolean;
+  /** Where the control and sandbox images come from (`images` in the deploy config). */
+  images?: DeployConfig["images"];
 }
 
 /**
@@ -189,11 +191,19 @@ export class WorkflowStack extends Stack {
 
     this.cluster = new Cluster(this, "Cluster", { vpc: props.vpc });
 
-    const controlImage = image("apps/control/Dockerfile");
-    const sandboxImage = image(
-      "infra/sandbox/Dockerfile",
-      sandboxBuildArgs(props.providers, props.allowUnverifiedCursor ?? false),
-    );
+    const images = props.images ?? { source: "build" };
+    const controlImage = taskImage(images, "control", {
+      directory: REPO_ROOT,
+      file: "apps/control/Dockerfile",
+    });
+    const sandboxImage = taskImage(images, "sandbox", {
+      directory: REPO_ROOT,
+      file: "infra/sandbox/Dockerfile",
+      buildArgs:
+        images.source === "build"
+          ? sandboxBuildArgs(props.providers, props.allowUnverifiedCursor ?? false)
+          : {},
+    });
 
     this.controlTaskDefinition = this.taskDefinition("Control", {
       cpu: 1024,
@@ -708,12 +718,4 @@ export function embeddingsEnvironment(
         LGTMOOSE_EMBEDDINGS_SECRET_ID: SECRET_NAMES.openAiEmbeddings,
       };
   }
-}
-
-/**
- * An image CDK builds from the repository root with the given Dockerfile, for arm64 (see
- * `IMAGE_ARCH`).
- */
-function image(file: string, buildArgs: Record<string, string> = {}): ContainerImage {
-  return ContainerImage.fromAsset(REPO_ROOT, { file, platform: Platform.LINUX_ARM64, buildArgs });
 }

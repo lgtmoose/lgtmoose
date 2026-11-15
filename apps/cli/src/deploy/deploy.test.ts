@@ -203,6 +203,17 @@ describe("lgtmoose deploy", () => {
     }
   });
 
+  it("prints the release check's notice before deploying, and still deploys", async () => {
+    const h = harness();
+    h.deps.releaseCheck = () =>
+      Promise.resolve("Warning: this checkout is LGTMoose 0.1.0, and v0.2.0 is out.\n");
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toContain("v0.2.0 is out");
+    expect(result.all.indexOf("v0.2.0 is out")).toBeLessThan(result.all.indexOf("Bootstrapping"));
+    expect(h.calls).toEqual(["bootstrap:123456789012", "deploy", "webhook", "protect"]);
+  });
+
   it("only warns when it can't check deletion protection, since everything is live", async () => {
     const h = harness({ failProtect: true });
     const result = await run(runDeploy, [], h);

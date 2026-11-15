@@ -38,6 +38,11 @@ export interface DeployDeps {
   prompter: Prompter;
   /** Progress for the person. Never receives a secret. */
   out: (text: string) => void;
+  /**
+   * Checks this checkout against the latest release before a deploy (`releaseNotice`): a
+   * warning or a note to print, or nothing. Left out, no check runs.
+   */
+  releaseCheck?: () => Promise<string | undefined>;
   now?: () => Date;
 }
 
@@ -143,6 +148,9 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
   const config = await loadConfig(deps);
   const { app, webhookSecret } = await checkSecrets(config, deps.secrets(config.region));
   const cdk = deps.cdk({ configPath: deps.configPath, region: config.region });
+
+  const notice = await deps.releaseCheck?.();
+  if (notice !== undefined) deps.out(notice);
 
   // Every time, not just the first: it's a no-op when current, and a newer aws-cdk after
   // `git pull` can need a newer bootstrap stack.

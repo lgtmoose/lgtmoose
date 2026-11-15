@@ -1,6 +1,6 @@
 # Upgrading
 
-LGTMoose has no release channel yet: you upgrade your checkout and deploy it again.
+LGTMoose hasn't cut a release yet: you upgrade your checkout and deploy it again. Once releases exist, you can also check out a release's tag and deploy its published images (see [Releasing](releasing.md)); `deploy` warns when your checkout is older than the latest release.
 
 ```bash
 git pull
@@ -34,6 +34,7 @@ Migrations only add to the schema, so a review that's running while the Data sta
 - **Config keys.** New keys always have defaults. A removed or renamed key fails `deploy` with its path, so you can fix `lgtmoose.config.ts` before anything changes. The [configuration reference](configuration.md) lists every key.
 - **`standard` uses RDS PostgreSQL, not Aurora.** The `standard` profile used to create Aurora Serverless v2. It now uses the same RDS instance as `lean` (see [Switching profile](#switching-profile)). A deployment that already runs `standard` on Aurora can't be updated in place: CloudFormation would refuse to change the database's resource type. Stay on the older version, or move the data with a snapshot and restore first. No `standard` deployment is known to exist yet.
 - **Alarms can notify you.** Set `alarms.email` (LGTMoose creates an SNS topic and subscribes the address; confirm the email AWS sends) or `alarms.topicArn` (an existing topic). Every alarm in every stack then notifies it.
+- **Release images.** `images: { source: "release", … }` deploys a release's published images, pinned by digest, instead of building them. The default, `build`, is unchanged. See [Releasing](releasing.md#deploying-a-release).
 - **Shadow mode.** `shadow: true` is the default. Upgrading never turns it off; set `shadow: false` yourself when you want reviews posted.
 
 ## Switching profile

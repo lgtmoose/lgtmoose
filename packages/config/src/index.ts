@@ -9,6 +9,8 @@ export {
   TIERS,
   credentialConcurrency,
   defineConfig,
+  RELEASE_IMAGES,
+  imagesSchema,
   isGitHubHost,
   isPlanCredential,
   deployConfigSchema,

@@ -81,6 +81,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     vpc: network.vpc,
     proxySecurityGroup: network.proxySecurityGroup,
     allowedHosts: egressAllowlist(config),
+    images: config.images,
   });
 
   const reviewer = resolveRoles(config).reviewer;
@@ -114,6 +115,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     allowUnverifiedCursor:
       process.env[ALLOW_UNVERIFIED_CURSOR_ENV] === "1" ||
       isTrue(app.node.tryGetContext(CDK_CONTEXT.allowUnverifiedCursor)),
+    images: config.images,
   });
   workflow.addDependency(data);
   // Sandbox tasks can only reach model APIs once the proxy runs.

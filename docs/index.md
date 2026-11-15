@@ -19,6 +19,7 @@ A self-hosted, open-source AI pull request reviewer. You deploy it to your own A
 - [Security](security.md): the threat model and how to report a vulnerability
 - [Troubleshooting](troubleshooting.md)
 - [Upgrading](upgrading.md), and removing it
+- [Releasing](releasing.md): changesets, how a release is published, and deploying a release's images
 - [AWS smoke test](smoke-test.md): the end-to-end check on a throwaway account
 
 ## Quickstart

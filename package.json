@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "turbo run build",
+    "changeset": "changeset",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "lint": "turbo run lint lint:root",
@@ -23,6 +24,7 @@
     "lint:root": "oxlint --deny-warnings --no-error-on-unmatched-pattern -c .oxlintrc.json --ignore-pattern \"apps/**\" --ignore-pattern \"packages/**\" --ignore-pattern \"infra/**\" ."
   },
   "devDependencies": {
+    "@changesets/cli": "3.0.3",
     "@lgtmoose/config": "workspace:*",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
