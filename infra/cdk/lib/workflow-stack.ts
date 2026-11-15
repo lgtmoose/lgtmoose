@@ -24,7 +24,7 @@ import { LambdaInvoke } from "aws-cdk-lib/aws-scheduler-targets";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { IBucket } from "aws-cdk-lib/aws-s3";
 import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
-import type { IQueue } from "aws-cdk-lib/aws-sqs";
+import { Queue, QueueEncryption, type IQueue } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   credentialConcurrency,
@@ -49,6 +49,13 @@ const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
 const CREDENTIAL_HEALTH_HANDLER = join(REPO_ROOT, "apps/control/src/credential-health-lambda.ts");
 const RECONCILE_HANDLER = join(REPO_ROOT, "apps/control/src/reconcile-lambda.ts");
+const CONVERSATION_HANDLER = join(REPO_ROOT, "apps/control/src/conversation-lambda.ts");
+
+/** The conversation Lambda's limit per batch: a few GitHub calls per command. */
+export const CONVERSATION_TIMEOUT = Duration.seconds(60);
+
+/** Conversation Lambdas at once: each holds a database connection, like the dispatcher. */
+export const CONVERSATION_CONCURRENCY = 2;
 
 /** How often stored credentials are checked, and the period their alarms look at. */
 export const CREDENTIAL_CHECK_INTERVAL = Duration.hours(6);
@@ -165,6 +172,9 @@ export class WorkflowStack extends Stack {
   /** Provider id → the alarm on its credential's `CredentialProblem`. */
   readonly credentialAlarms: ReadonlyMap<string, Alarm>;
   readonly reconcileFunction: NodejsFunction;
+  /** Comment jobs the dispatcher forwards, for the conversation Lambda. */
+  readonly conversationQueue: Queue;
+  readonly conversationFunction: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: WorkflowStackProps) {
     super(scope, id, props);
@@ -315,8 +325,10 @@ export class WorkflowStack extends Stack {
 
     this.credentialAlarms = this.credentialHealth(props, retention);
 
+    this.conversationQueue = this.conversationQueueOf();
     this.dispatchFunction = this.dispatcher(props, retention);
     this.reconcileFunction = this.reconciler(props, retention);
+    this.conversationFunction = this.conversation(props, retention);
 
     const subnetIds = (selection: SubnetSelection) =>
       Fn.join(",", props.vpc.selectSubnets(selection).subnetIds);
@@ -366,6 +378,7 @@ export class WorkflowStack extends Stack {
         DEAD_LETTER_QUEUE_URL: props.deadLetterQueue.queueUrl,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
+        CONVERSATION_QUEUE_URL: this.conversationQueue.queueUrl,
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
@@ -377,6 +390,7 @@ export class WorkflowStack extends Stack {
     });
     props.databaseSecret.grantRead(fn);
     props.deadLetterQueue.grantSendMessages(fn);
+    this.conversationQueue.grantSendMessages(fn);
     stateMachine.grantStartExecution(fn);
     stateMachine.grantExecution(fn, "states:StopExecution", "states:DescribeExecution");
     fn.addEventSource(
@@ -386,6 +400,83 @@ export class WorkflowStack extends Stack {
         reportBatchItemFailures: true,
         // Each instance holds a database connection; the lean database has few to spare.
         maxConcurrency: DISPATCH_CONCURRENCY,
+      }),
+    );
+    return fn;
+  }
+
+  /**
+   * The conversation queue (FIFO, one message group per PR) and its dead-letter queue, with an
+   * alarm. Jobs that fail every attempt wait there for someone to look at them.
+   */
+  private conversationQueueOf(): Queue {
+    const deadLetter = new Queue(this, "ConversationDeadLetterQueue", {
+      fifo: true,
+      encryption: QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(14),
+    });
+    new Alarm(this, "ConversationDeadLetterAlarm", {
+      alarmDescription:
+        "LGTMoose comment jobs failed every attempt and wait in the dead-letter queue.",
+      metric: deadLetter.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
+      threshold: 0,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    return new Queue(this, "ConversationQueue", {
+      fifo: true,
+      // The dispatcher sets the deduplication ID to the job's delivery ID.
+      contentBasedDeduplication: false,
+      encryption: QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      // Well over the Lambda's timeout, as SQS event sources need.
+      visibilityTimeout: Duration.seconds(CONVERSATION_TIMEOUT.toSeconds() * 6),
+      retentionPeriod: Duration.days(4),
+      deadLetterQueue: { queue: deadLetter, maxReceiveCount: 5 },
+    });
+  }
+
+  /**
+   * The conversation Lambda: `@lgtmoose` commands in PR comments (`handleConversation` in
+   * @lgtmoose/control). It reads and answers comments as the GitHub App, so it holds the App's
+   * credentials and runs in the app subnets with the control security group, for the database
+   * and GitHub. It holds no model credential, and can't start executions: a review a command
+   * asks for goes on the job queue for the dispatcher.
+   */
+  private conversation(props: WorkflowStackProps, retention: RetentionDays): NodejsFunction {
+    const fn = lgtmooseFunction(this, "ConversationFunction", {
+      entry: CONVERSATION_HANDLER,
+      description: "Handles @lgtmoose commands in pull request comments.",
+      memorySize: 256,
+      timeout: CONVERSATION_TIMEOUT,
+      vpc: props.vpc,
+      vpcSubnets: props.controlSubnets,
+      securityGroups: [props.controlSecurityGroup],
+      environment: {
+        JOB_QUEUE_URL: props.jobQueue.queueUrl,
+        DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
+        DATABASE_NAME: props.databaseName,
+        GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        LGTMOOSE_SHADOW: String(props.shadow),
+        // Lets Node verify the RDS server certificate.
+        NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
+      },
+      bundling: { externalModules: ["pg-native"] },
+      logGroup: new LogGroup(this, "ConversationLogs", {
+        retention,
+        removalPolicy: RemovalPolicy.DESTROY,
+      }),
+    });
+    props.databaseSecret.grantRead(fn);
+    props.githubAppSecret.grantRead(fn);
+    props.jobQueue.grantSendMessages(fn);
+    fn.addEventSource(
+      new SqsEventSource(this.conversationQueue, {
+        batchSize: 5,
+        reportBatchItemFailures: true,
+        maxConcurrency: CONVERSATION_CONCURRENCY,
       }),
     );
     return fn;

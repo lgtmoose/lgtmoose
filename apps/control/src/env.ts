@@ -45,16 +45,44 @@ export interface DispatchEnv {
   deadLetterQueueUrl: string;
   databaseSecretArn: string;
   databaseName: string;
+  /** `CONVERSATION_QUEUE_URL`: where comment jobs go. Unset, they're dropped as before. */
+  conversationQueueUrl?: string;
 }
 
 /** Reads the dispatcher's settings, or says which variables are missing (blank counts). */
 export function readDispatchEnv(env: Env): DispatchEnv | { missing: string[] } {
-  return readVariables(env, {
+  const read = readVariables(env, {
     stateMachineArn: "STATE_MACHINE_ARN",
     deadLetterQueueUrl: "DEAD_LETTER_QUEUE_URL",
     databaseSecretArn: VARIABLES.databaseSecretArn,
     databaseName: VARIABLES.databaseName,
   });
+  if ("missing" in read) return read;
+  const conversationQueueUrl = env.CONVERSATION_QUEUE_URL?.trim();
+  return conversationQueueUrl ? { ...read, conversationQueueUrl } : read;
+}
+
+/** What the conversation Lambda reads from its environment, set by the Workflow stack. */
+export interface ConversationEnv {
+  /** The gateway's FIFO job queue, where reviews a command asks for are queued. */
+  jobQueueUrl: string;
+  databaseSecretArn: string;
+  databaseName: string;
+  githubAppSecretArn: string;
+  /** Nothing is written to GitHub in shadow mode. Anything but "false" is on. */
+  shadow: boolean;
+}
+
+/** Reads the conversation Lambda's settings, or says which variables are missing. */
+export function readConversationEnv(env: Env): ConversationEnv | { missing: string[] } {
+  const read = readVariables(env, {
+    jobQueueUrl: "JOB_QUEUE_URL",
+    databaseSecretArn: VARIABLES.databaseSecretArn,
+    databaseName: VARIABLES.databaseName,
+    githubAppSecretArn: VARIABLES.githubAppSecretArn,
+  });
+  if ("missing" in read) return read;
+  return { ...read, shadow: env.LGTMOOSE_SHADOW?.trim() !== "false" };
 }
 
 /** What the reconciler Lambda reads from its environment, set by the Workflow stack. */

@@ -22,7 +22,13 @@ import { workflowJobSchema } from "./job.js";
  *   so the next push in a burst stops it before it clones (see `debounceSeconds`).
  * - Closing a PR stops the executions of jobs up to the close. A reopen with the same time as
  *   the close is taken as older: the PR stays closed.
- * - Comment, review and thread jobs go to `conversation`, which does nothing until M5.
+ * - A paused PR (`@lgtmoose pause`) starts no review for a push, open or ready job; its event
+ *   time still advances. A review a person asked for (`requested`) runs anyway.
+ * - A requested `full_review` starts a new execution for the head even when it was reviewed,
+ *   unless one for the head is running.
+ * - Comment and review-comment jobs are forwarded to the conversation queue, whose handler
+ *   reads them on GitHub (the dispatcher can't): `@lgtmoose` commands, and later replies.
+ *   Review jobs wait for M5. Thread jobs update the finding behind the thread here.
  */
 
 /** How long a push waits for the next one before its review starts. */
@@ -94,8 +100,8 @@ export function executionName(
  * Pushes wait, so the next push in a burst stops the execution before it clones. Opening a PR
  * or marking it ready starts at once: those come one at a time.
  */
-export function debounceSeconds(job: Pick<ReviewJob, "kind">): number {
-  return job.kind === "pr_updated" ? PUSH_DEBOUNCE_SECONDS : 0;
+export function debounceSeconds(job: Pick<ReviewJob, "kind" | "requested">): number {
+  return job.kind === "pr_updated" && job.requested === undefined ? PUSH_DEBOUNCE_SECONDS : 0;
 }
 
 /** The review state machine, as the dispatcher uses it. */
@@ -140,6 +146,8 @@ export interface DispatchStore {
    * step never submits a second review for a head that has one of ours.
    */
   reviewed(repo: string, prNumber: number, headSha: string): Promise<boolean>;
+  /** Whether automatic reviews of the PR are paused (`@lgtmoose pause`). */
+  paused(repo: string, prNumber: number): Promise<boolean>;
   /**
    * Follows `actor` resolving or unresolving one of our review threads, by the thread's first
    * comment (the one the finding records). Unresolved: one resolved that way is open again.
@@ -164,6 +172,11 @@ export interface DispatchDeps {
   store: DispatchStore;
   /** Puts a message that isn't a valid job on the dead-letter queue, for someone to look at. */
   deadLetter(record: QueueRecord, reason: string): Promise<void>;
+  /**
+   * The conversation queue, for comment jobs. Unset, they're acknowledged and dropped, as
+   * before commands.
+   */
+  conversation?: { send(job: DispatchJob): Promise<void> };
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -175,6 +188,8 @@ export type DispatchResult =
   | { action: "stopped"; stopped: string[] }
   | { action: "stale"; reason: string }
   | { action: "deferred"; reason: string }
+  | { action: "forwarded" }
+  | { action: "paused" }
   | { action: "resolved" | "unresolved"; changed: number; held: number }
   | { action: "ignored"; reason: string };
 
@@ -233,6 +248,10 @@ async function review(
   eventAt: Date,
 ): Promise<DispatchResult> {
   await deps.store.advance(job.repo, job.prNumber, eventAt, false);
+  if (job.requested === undefined && (await deps.store.paused(job.repo, job.prNumber))) {
+    return { action: "paused" };
+  }
+  if (job.requested === "full_review") return fullReview(deps, job, eventAt);
   let name = executionName(job.repo, job.prNumber, job.headSha);
   let { started, executionArn } = await startExecution(deps, job, name, eventAt);
   let action: "started" | "retried" = "started";
@@ -249,6 +268,33 @@ async function review(
     keepHead: job.headSha,
   });
   return started ? { action, executionArn, stopped } : { action: "duplicate", name, stopped };
+}
+
+/**
+ * A full review a person asked for: a new execution for the head, named after the request so a
+ * redelivery dedupes, unless an execution for the head is running (its review is under way).
+ */
+async function fullReview(
+  deps: DispatchDeps,
+  job: ReviewJob & { headSha: string },
+  eventAt: Date,
+): Promise<DispatchResult> {
+  const unstopped = await deps.store.unstopped(job.repo, job.prNumber);
+  const name = executionName(job.repo, job.prNumber, job.headSha, job.deliveryId);
+  const sameHead = unstopped.filter((execution) => execution.headSha === job.headSha);
+  const statuses = await Promise.all(
+    sameHead
+      .filter((execution) => execution.executionArn !== deps.executions.arnOf(name))
+      .map((execution) => deps.executions.status(execution.executionArn)),
+  );
+  const stopped = await stopOlder(deps, unstopped, `Superseded by ${job.headSha}.`, eventAt, {
+    keepHead: job.headSha,
+  });
+  if (statuses.includes("RUNNING")) return { action: "duplicate", name, stopped };
+  const { started, executionArn } = await startExecution(deps, job, name, eventAt);
+  return started
+    ? { action: "retried", executionArn, stopped }
+    : { action: "duplicate", name, stopped };
 }
 
 /**
@@ -273,10 +319,18 @@ async function needsRetry(
 }
 
 /**
- * Comment and review jobs: replies and dispute handling, on a path that doesn't clone. The seam
- * for M5; until then they're acknowledged and dropped.
+ * Comment jobs go to the conversation handler, which reads the comment on GitHub: commands now,
+ * replies with M5. Submitted reviews, and everything without a conversation queue, are
+ * acknowledged and dropped.
  */
-async function conversation(_deps: DispatchDeps, job: ReviewJob): Promise<DispatchResult> {
+async function conversation(deps: DispatchDeps, job: DispatchJob): Promise<DispatchResult> {
+  if (
+    deps.conversation !== undefined &&
+    (job.kind === "comment" || job.kind === "review_comment")
+  ) {
+    await deps.conversation.send(job);
+    return { action: "forwarded" };
+  }
   return { action: "deferred", reason: `${job.kind} jobs arrive with M5` };
 }
 

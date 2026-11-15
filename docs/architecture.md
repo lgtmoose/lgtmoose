@@ -15,6 +15,7 @@ The model only reads repo files and returns findings as JSON. Plain code does ev
 | Control tasks     | Fargate                               | Yes                      | Clone and plan; dedupe, decide and post                                   |
 | Sandbox tasks     | Fargate, private subnet, egress proxy | **No**                   | Run the harness (`claude -p`, `codex exec`, `cursor agent`) on one batch  |
 | Credential broker | Lambdas + Secrets Manager             | No                       | Lease each sandbox task one model credential; write back refreshed tokens |
+| Conversation      | Lambda, fed by its own FIFO queue     | Yes (comments)           | `@lgtmoose` commands in PR comments. No model calls.                      |
 | Reconciler        | Scheduled Lambda                      | Yes (read, labels)       | Re-queue missed PRs updated recently, re-sync labels. No model calls.     |
 | State             | RDS Postgres + pgvector, S3           | n/a                      | Runs, findings, learnings, usage, transcripts                             |
 
@@ -53,6 +54,24 @@ Before using a plan credential, read [Providers](providers.md): what each vendor
 - **Notes for the cross-file pass.** Each batch's output keeps the reviewer's notes (exports, env vars, endpoints and props it adds, changes or relies on), cut to at most 30 notes of 500 characters. They're model output, so the cross-file pass treats them as leads to check.
 
 One AWS account and region holds one install. `lgtmoose setup` writes fixed Secrets Manager names (`lgtmoose/github-app`, `lgtmoose/github-webhook-secret`), so a second install there would overwrite the first one's App credentials. Use another account or region for staging until deployment names land.
+
+## Commands
+
+People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command are left for the reply judge (NIC-833).
+
+| Command               | Who                                                                                              | What it does                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `review`              | the PR's author, or write access                                                                 | Queues a review of the head unless it's reviewed already. Not debounced; runs on a paused PR.                                                     |
+| `full review`         | the PR's author, or write access                                                                 | Reviews the whole PR again, leaving earlier reviews out, unless a review of the head is running. Duplicates of posted comments are still dropped. |
+| `pause`, `resume`     | write access                                                                                     | Stops or restarts automatic reviews of the PR. Requested reviews still run.                                                                       |
+| `explain`             | anyone                                                                                           | In a finding's thread, or `explain path:line`: the stored finding's details.                                                                      |
+| `ignore`              | anyone; for blocking or protected findings, someone other than the PR's author with write access | In a finding's thread: declines it, as a person's decision.                                                                                       |
+| `learn: <text>`       | anyone; applied at once with write access (org owner for `[org]`), else pending                  | Proposes a learning (see `@lgtmoose/learnings`). Tags: `[path <glob>]`, `[org]`, `[kind <kind>]`, `[category <name>]`.                            |
+| `learnings`           | anyone                                                                                           | Lists the learnings that apply to the PR.                                                                                                         |
+| `forget <id>`         | write access (org owner for org-wide)                                                            | Retires one of this account's learnings.                                                                                                          |
+| `help`, anything else | anyone                                                                                           | The list of commands.                                                                                                                             |
+
+Who sent a command, and their access, come from GitHub (the comment's author, the collaborators API and the org memberships API), never from the comment's text. Replies escape whatever they repeat (finding titles, learning text), so a reply can't mention people or carry links it was fed. In shadow mode the Lambda writes nothing to GitHub and logs the reaction and reply instead; state changes (pause, learnings, declines) still apply.
 
 ## Security controls
 

@@ -368,6 +368,12 @@ export const pullRequestDispatches = pgTable(
     lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
     /** Set while the newest event closed the PR. */
     closedAt: timestamp("closed_at", { withTimezone: true }),
+    /**
+     * Set while automatic reviews are paused (`@lgtmoose pause`), with who paused them. A review
+     * a person asks for still runs.
+     */
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    pausedBy: text("paused_by"),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

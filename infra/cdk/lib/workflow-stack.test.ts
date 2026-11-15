@@ -543,11 +543,14 @@ describe("dispatcher", () => {
         "sqs:SendMessage",
       ]),
     );
-    // It sends only to the dead-letter queue, never to the job queue it consumes.
+    // It sends to the dead-letter queue and the conversation queue, never to the job queue it
+    // consumes.
     const sends = granted.filter((s) => actions([s]).includes("sqs:SendMessage"));
-    expect(sends.map((s) => JSON.stringify(s.Resource))).toEqual([
+    expect(sends.map((s) => JSON.stringify(s.Resource)).sort()).toEqual([
+      expect.stringContaining("ConversationQueue"),
       expect.stringContaining("JobDeadLetterQueue"),
     ]);
+    expect(JSON.stringify(sends)).not.toContain('"JobQueue');
     const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
     expect(secrets).toHaveLength(1);
     expect(actions(granted).some((a) => a.startsWith("s3:"))).toBe(false);
@@ -558,12 +561,62 @@ describe("dispatcher", () => {
   });
 });
 
+describe("conversation", () => {
+  function conversation() {
+    const entry = Object.entries(resources).find(
+      ([, r]) =>
+        r.Type === "AWS::Lambda::Function" &&
+        JSON.stringify(r.Properties.Description ?? "").includes("@lgtmoose commands"),
+    );
+    if (entry === undefined) throw new Error("no conversation function");
+    return entry;
+  }
+
+  it("has a FIFO queue with a dead-letter queue and an alarm on it", () => {
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      FifoQueue: true,
+      ContentBasedDeduplication: false,
+      RedrivePolicy: { maxReceiveCount: 5 },
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmDescription: Match.stringLikeRegexp("comment jobs failed"),
+    });
+  });
+
+  it("consumes the conversation queue with partial failures, in the VPC, with shadow mode", () => {
+    const [id, fn] = conversation();
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      FunctionName: { Ref: id },
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+      ScalingConfig: { MaximumConcurrency: 2 },
+    });
+    expect(fn.Properties.VpcConfig).toBeDefined();
+    const env = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(env).toMatchObject({ LGTMOOSE_SHADOW: "true" });
+  });
+
+  it("may send to the job queue and read the database and App secrets, and nothing else", () => {
+    const [, fn] = conversation();
+    const granted = statements(getAttId(fn.Properties.Role));
+    const sends = granted.filter((s) => actions([s]).includes("sqs:SendMessage"));
+    expect(sends.map((s) => JSON.stringify(s.Resource))).toEqual([
+      expect.stringContaining("JobQueue"),
+    ]);
+    const secrets = granted.filter((s) => actions([s]).includes("secretsmanager:GetSecretValue"));
+    expect(secrets).toHaveLength(2);
+    expect(actions(granted).some((a) => a.startsWith("s3:") || a.startsWith("states:"))).toBe(
+      false,
+    );
+    expect(actions(granted).some((a) => a.startsWith("bedrock:"))).toBe(false);
+  });
+});
+
 describe("reconciler", () => {
   function reconciler() {
     const entry = Object.entries(resources).find(
       ([, r]) =>
         r.Type === "AWS::Lambda::Function" &&
-        JSON.stringify(r.Properties.Environment).includes("JOB_QUEUE_URL"),
+        JSON.stringify(r.Properties.Environment).includes("ALLOWED_ORGS"),
     );
     if (entry === undefined) throw new Error("no reconciler function");
     return entry;

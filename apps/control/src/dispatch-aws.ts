@@ -1,4 +1,5 @@
 import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
+import { reviewJobGroupId } from "@lgtmoose/core";
 import { StartExecutionCommand, StopExecutionCommand, type SFNClient } from "@aws-sdk/client-sfn";
 import {
   dispatchedExecutions,
@@ -73,6 +74,28 @@ export function sqsDeadLetter(
   };
 }
 
+/**
+ * Forwards comment jobs to the conversation queue (FIFO): in the PR's message group, so a PR's
+ * comments are handled in order, and deduplicated on the delivery ID.
+ */
+export function sqsConversationQueue(
+  client: Pick<SQSClient, "send">,
+  queueUrl: string,
+): NonNullable<DispatchDeps["conversation"]> {
+  return {
+    async send(job) {
+      await client.send(
+        new SendMessageCommand({
+          QueueUrl: queueUrl,
+          MessageBody: JSON.stringify(job),
+          MessageGroupId: reviewJobGroupId(job),
+          MessageDeduplicationId: job.deliveryId,
+        }),
+      );
+    },
+  };
+}
+
 const lower = (repo: string) => repo.toLowerCase();
 
 /** The dispatcher's tables, and `review_runs` for the runs of the executions it stops. */
@@ -140,6 +163,18 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
         .update(dispatchedExecutions)
         .set({ stoppedAt: now() })
         .where(eq(dispatchedExecutions.executionArn, executionArn));
+    },
+    async paused(repo, number) {
+      const [row] = await db
+        .select({ pausedAt: pullRequestDispatches.pausedAt })
+        .from(pullRequestDispatches)
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, lower(repo)),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+      return row?.pausedAt !== undefined && row.pausedAt !== null;
     },
     async reviewed(repo, number, headSha) {
       const [row] = await db
