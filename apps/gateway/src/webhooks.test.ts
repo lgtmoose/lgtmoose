@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { ReviewJob } from "@lgtmoose/core";
+import type { CommitStatusJob, ReviewJob } from "@lgtmoose/core";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
@@ -47,10 +47,10 @@ function rotatingSecrets(initial: string) {
 }
 
 function setup(options: { secrets?: WebhookSecretSource; send?: JobQueue["send"] } = {}) {
-  const sent: { job: ReviewJob; options: SendOptions }[] = [];
+  const sent: { job: ReviewJob | CommitStatusJob; options: SendOptions }[] = [];
   const send = vi.fn(
     options.send ??
-      (async (job: ReviewJob, sendOptions: SendOptions) => {
+      (async (job: ReviewJob | CommitStatusJob, sendOptions: SendOptions) => {
         sent.push({ job, options: sendOptions });
       }),
   );
@@ -468,6 +468,44 @@ describe("verified", () => {
     const rotated = source({ cached: "stale", fresh: "the-real-secret" });
     expect(await verified(rotated, body, header, matches)).toBe(true);
     expect(matches).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("POST /webhooks/github: commit statuses", () => {
+  const sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
+
+  it("queues a status by repository and commit, not by a pull request", async () => {
+    const { app, sent } = setup();
+    const body = JSON.stringify({
+      sha,
+      state: "success",
+      context: "ci/circleci",
+      repository: { full_name: "acme-corp/widgets", owner: { login: "acme-corp" } },
+      installation: { id: 55667788 },
+    });
+    const response = await deliver(app, body, { event: "status" });
+    expect(response.status).toBe(202);
+    expect(sent).toEqual([
+      {
+        job: {
+          kind: "commit_status",
+          deliveryId: DELIVERY,
+          installationId: 55667788,
+          repo: "acme-corp/widgets",
+          sha,
+          receivedAt: NOW.toISOString(),
+        },
+        options: { groupId: `acme-corp/widgets#${sha}`, dedupeId: DELIVERY },
+      },
+    ]);
+  });
+
+  it("ignores a check run instead of queueing one job per check", async () => {
+    const { app, sent } = setup();
+    const response = await deliver(app, fixture("pull_request.opened"), { event: "check_run" });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ ignored: "check runs are covered by the check suite" });
+    expect(sent).toEqual([]);
   });
 });
 

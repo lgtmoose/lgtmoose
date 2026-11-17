@@ -886,3 +886,48 @@ describe("dispatch: checks finishing (NIC-1078)", () => {
     expect(await dispatch(closed.deps, checks())).toMatchObject({ action: "ignored" });
   });
 });
+
+describe("dispatch: commit statuses (NIC-1088)", () => {
+  const status = {
+    kind: "commit_status" as const,
+    deliveryId: "d-status",
+    installationId: 7,
+    repo: "acme/shop",
+    sha: NEW,
+    receivedAt: T3,
+  };
+
+  it("starts nothing when no pull request waits on the commit", async () => {
+    const f = fakeDeps();
+    f.deps.checksWaits = { get: async () => undefined, byHead: async () => [] };
+    expect(await dispatch(f.deps, status)).toMatchObject({ action: "ignored" });
+    expect(f.executions.size).toBe(0);
+  });
+
+  it("runs the check path for every pull request waiting on the commit", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ prNumber: 12 }));
+    await dispatch(f.deps, job({ prNumber: 13, deliveryId: "d-13" }));
+    must(f.executions.get(executionName("acme/shop", 12, NEW))).status = "SUCCEEDED";
+    must(f.executions.get(executionName("acme/shop", 13, NEW))).status = "SUCCEEDED";
+    const before = f.executions.size;
+    f.deps.checksWaits = {
+      get: async (_repo, number) =>
+        number === 12 || number === 13
+          ? { headSha: NEW, since: new Date(T1), state: "pending" }
+          : undefined,
+      byHead: async () => [13, 12],
+    };
+    expect(await dispatch(f.deps, status)).toEqual({ action: "fanned", count: 2 });
+    expect(f.executions.size).toBe(before + 2);
+    expect(
+      must(f.executions.get(executionName("acme/shop", 12, NEW, "d-status"))).input,
+    ).toMatchObject({
+      kind: "pr_checks",
+      prNumber: 12,
+      headSha: NEW,
+      debounceSeconds: 20,
+    });
+    expect(f.executions.has(executionName("acme/shop", 13, NEW, "d-status"))).toBe(true);
+  });
+});
