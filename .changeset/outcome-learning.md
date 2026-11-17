@@ -1,5 +1,0 @@
----
-"lgtmoose": minor
----
-
-LGTMoose learns from outcomes, after two or three signals instead of ten. When findings about the same thing are declined, disputed or 👎'd on `learnings.repeatThreshold` pull requests of a repository (2 by default), it proposes a scoping learning not to raise them, written in plain code and quoting the reasons: active only when everyone who rejected one has write access, pending otherwise, never for a protected category. A decline with no rule in it offers `@lgtmoose remember`, which makes the same learning from that finding. Fixed findings reinforce the learnings in their prompts, and a declined one records the learnings of its category that weren't followed. A review's summary lists the learnings it applied, and the dashboard shows what was learned in the last week and what wasn't followed. Category acceptance is smoothed with a prior, so `feedback.minSamples` now defaults to 3. Adds migration 0019 (`findings.learning_ids`, `learnings.pattern_key`, `learning_events.finding_id` and two event types).

@@ -1,6 +1,6 @@
 {
   "name": "lgtmoose",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "CLI for LGTMoose: set up, authenticate, deploy and dry-run reviews.",
   "license": "Apache-2.0",
