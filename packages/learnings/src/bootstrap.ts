@@ -1,4 +1,4 @@
-import { isProtectedCategory } from "@lgtmoose/core";
+import { isProtectedCategory, mentionsProtectedTopic } from "@lgtmoose/core";
 import { learningProposalSchema, type LearningProposal } from "./policy.js";
 import { redactSensitive, type RedactionKind } from "./redact.js";
 import { SYSTEM_ACTOR, type Learning, type LearningKind, type LearningStore } from "./store.js";
@@ -54,11 +54,18 @@ export function checkBootstrapProposal(candidate: BootstrapProposal): BootstrapC
       reason: `not a valid learning (${parsed.error.issues[0]?.message ?? "invalid"})`,
     };
   }
-  const { kind, category } = parsed.data;
+  const { kind, category, text } = parsed.data;
   if (category !== undefined && SUPPRESSING_KINDS.has(kind) && isProtectedCategory(category)) {
     return {
       ok: false,
       reason: `a ${kind} learning can't be about ${category}: findings in protected categories are never suppressed`,
+    };
+  }
+  if (category === undefined && SUPPRESSING_KINDS.has(kind) && mentionsProtectedTopic(text)) {
+    const article = /^[aeiou]/i.test(kind) ? "an" : "a";
+    return {
+      ok: false,
+      reason: `${article} ${kind} learning that mentions a protected topic needs a category`,
     };
   }
   return { ok: true, proposal: parsed.data, redacted: redacted.found };

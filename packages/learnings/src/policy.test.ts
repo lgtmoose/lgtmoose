@@ -158,6 +158,52 @@ describe("proposeLearning", () => {
     },
   );
 
+  it("requires a category when a suppressing learning names a protected topic and sets none", async () => {
+    const d = deps({ dana: "write" });
+    const result = await proposeLearning(
+      d,
+      {
+        ...repoScoped,
+        kind: "accepted_pattern",
+        text: "A missing authorization check on an admin route is fine.",
+      },
+      source,
+    );
+    expect(result).toMatchObject({
+      outcome: "refused",
+      reason: expect.stringContaining("needs a category"),
+    });
+    expect(d.store.all()).toEqual([]);
+    // A longer word is not the topic, and a convention may mention it.
+    expect(
+      await proposeLearning(
+        deps({ dana: "write" }),
+        { ...repoScoped, kind: "scoping", text: "The secretary of style owns this file." },
+        { ...source, commentId: 102 },
+      ),
+    ).toMatchObject({ outcome: "active" });
+    expect(
+      await proposeLearning(
+        deps({ dana: "write" }),
+        { ...repoScoped, text: "Never log a secret." },
+        { ...source, commentId: 103 },
+      ),
+    ).toMatchObject({ outcome: "active" });
+    // A category that is not protected still stores it.
+    expect(
+      await proposeLearning(
+        deps({ dana: "write" }),
+        {
+          ...repoScoped,
+          kind: "scoping",
+          category: "style",
+          text: "Don't flag a secret in a fixture.",
+        },
+        { ...source, commentId: 104 },
+      ),
+    ).toMatchObject({ outcome: "active", learning: { category: "style" } });
+  });
+
   it("allows a convention about a protected category: it only adds a rule", async () => {
     const result = await proposeLearning(
       deps({ dana: "write" }),
