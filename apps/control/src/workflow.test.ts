@@ -410,6 +410,10 @@ function memoryChecksWaits() {
     async clear() {
       row = undefined;
     },
+    // The prepare step reads this one PR with `get`. The dispatcher is what looks up a SHA.
+    async byHead() {
+      return [];
+    },
   };
   return {
     store,

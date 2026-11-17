@@ -155,7 +155,11 @@ export async function conversationBatch(
     }
     let job: DispatchJob;
     try {
-      job = parseQueuedJob(record.body);
+      const parsed = parseQueuedJob(record.body);
+      if (parsed.kind === "commit_status") {
+        throw new Error("The message isn't a conversation job.");
+      }
+      job = parsed;
     } catch (error) {
       deps.log("invalid conversation job dropped", {
         messageId: record.messageId,

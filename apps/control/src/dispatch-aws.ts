@@ -312,5 +312,18 @@ export function drizzleChecksWaits(db: Db): ChecksWaitStore {
         .set({ checksWaitSha: null, checksWaitSince: null, checksWaitState: null })
         .where(and(where(repo, number), sql`${pullRequestDispatches.checksWaitSha} is not null`));
     },
+    async byHead(repo, sha) {
+      const rows = await db
+        .select({ number: pullRequestDispatches.number })
+        .from(pullRequestDispatches)
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, lower(repo)),
+            eq(pullRequestDispatches.checksWaitSha, sha),
+          ),
+        )
+        .orderBy(pullRequestDispatches.number);
+      return rows.map((row) => row.number);
+    },
   };
 }

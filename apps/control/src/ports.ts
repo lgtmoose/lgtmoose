@@ -401,4 +401,9 @@ export interface ChecksWaitStore {
   ): Promise<ChecksWait | undefined>;
   /** The PR no longer waits: its review started, or nothing is to be waited for. */
   clear(repo: string, number: number): Promise<void>;
+  /**
+   * Pull requests of `repo` waiting on `sha`. A commit status names the commit and not a pull
+   * request, so the dispatcher asks here and runs each match. Empty when nothing waits.
+   */
+  byHead(repo: string, sha: string): Promise<readonly number[]>;
 }
