@@ -36,6 +36,25 @@ describe("checkBootstrapProposal", () => {
     ).toMatchObject({ ok: true });
   });
 
+  it("requires a category when a quieting kind names a protected topic and sets none", () => {
+    expect(
+      checkBootstrapProposal({
+        kind: "scoping",
+        text: "Skip the authorization check in internal tools.",
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("needs a category") });
+    expect(
+      checkBootstrapProposal({ kind: "convention", text: "Never log a secret." }),
+    ).toMatchObject({ ok: true });
+    expect(
+      checkBootstrapProposal({
+        kind: "correction",
+        category: "style",
+        text: "A hardcoded secret in a fixture is fine.",
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it("refuses a glob that leaves the repository", () => {
     expect(
       checkBootstrapProposal({ kind: "scoping", text: "x", pathGlob: "../secrets/**" }),

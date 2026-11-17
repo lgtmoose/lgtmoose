@@ -1,4 +1,4 @@
-import { isProtectedCategory } from "@lgtmoose/core";
+import { isProtectedCategory, mentionsProtectedTopic } from "@lgtmoose/core";
 import { z } from "zod";
 import { redactSensitive, type RedactionKind } from "./redact.js";
 import {
@@ -241,6 +241,13 @@ export async function proposeLearning(
     return {
       outcome: "refused",
       reason: `a ${kind} learning can't be about ${category}: findings in protected categories are never suppressed`,
+    };
+  }
+  if (category === undefined && SUPPRESSING_KINDS.has(kind) && mentionsProtectedTopic(text)) {
+    const article = /^[aeiou]/i.test(kind) ? "an" : "a";
+    return {
+      outcome: "refused",
+      reason: `${article} ${kind} learning that mentions a protected topic needs a category`,
     };
   }
   const { owner, full } = splitRepo(source.repo);

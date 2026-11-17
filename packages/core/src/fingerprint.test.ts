@@ -10,6 +10,7 @@ import {
   isProtectedCategory,
   isSimilar,
   matchesExactlyOnly,
+  mentionsProtectedTopic,
   normalizeCode,
   titleNouns,
   type FingerprintSubject,
@@ -201,6 +202,16 @@ describe("isProtectedCategory", () => {
       expect(isProtectedCategory(category)).toBe(true);
     }
     expect(isProtectedCategory("correctness")).toBe(false);
+  });
+});
+
+describe("mentionsProtectedTopic", () => {
+  it("matches a protected-topic word on its own", () => {
+    expect(mentionsProtectedTopic("skip the authorization check")).toBe(true);
+    expect(mentionsProtectedTopic("TENANT scoping")).toBe(true);
+    expect(mentionsProtectedTopic("a hardcoded secret")).toBe(true);
+    expect(mentionsProtectedTopic("the secretary keeps the minutes")).toBe(false);
+    expect(mentionsProtectedTopic("use the query builder")).toBe(false);
   });
 });
 

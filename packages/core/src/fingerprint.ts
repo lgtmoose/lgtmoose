@@ -32,6 +32,39 @@ export const PROTECTED_CATEGORIES: readonly string[] = [
   "secrets",
 ];
 
+/**
+ * Whole words for those four topics. A suppressing learning with no category that uses one is
+ * refused until a category is set (`mentionsProtectedTopic`). Matched as whole words, so
+ * "secretary" is not "secret".
+ */
+export const PROTECTED_TOPIC_WORDS: readonly string[] = [
+  "authorization",
+  "authorisation",
+  "authz",
+  "tenant",
+  "money",
+  "payment",
+  "payments",
+  "refund",
+  "refunds",
+  "billing",
+  "secret",
+  "secrets",
+  "credential",
+  "credentials",
+  "password",
+  "passwords",
+];
+
+const PROTECTED_TOPIC_WORD = new Set(PROTECTED_TOPIC_WORDS);
+
+/** Whether `text` uses a protected-topic word on its own, not inside a longer word. */
+export function mentionsProtectedTopic(text: string): boolean {
+  const words = text.toLowerCase().match(/[a-z0-9]+/g);
+  if (words === null) return false;
+  return words.some((word) => PROTECTED_TOPIC_WORD.has(word));
+}
+
 export function isProtectedCategory(category: string): boolean {
   return PROTECTED_CATEGORIES.includes(category);
 }
