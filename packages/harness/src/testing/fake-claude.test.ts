@@ -1,11 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { FakeClaude, isRunning, waitGone } from "./fake-claude.js";
+import { FakeClaude, isRunning } from "./fake-claude.js";
 
-function start(binary: string): ChildProcess {
-  const child = spawn(binary, [], { stdio: ["pipe", "ignore", "ignore"] });
+function track(pids: number[], pid: number | undefined): void {
+  if (pid !== undefined && pid > 0) pids.push(pid);
+}
+
+/** Runs one invocation and collects stdout. A missing pid is not recorded: `kill(0)` signals the whole group. */
+function start(binary: string, pids: number[]): { child: ChildProcess; output: Promise<string> } {
+  const child = spawn(binary, [], { stdio: ["pipe", "pipe", "ignore"] });
+  track(pids, child.pid);
+  const output = new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.once("error", reject);
+    child.once("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
   child.stdin.end();
-  return child;
+  return { child, output };
 }
 
 async function waitFor(read: () => number | undefined, ms = 5000): Promise<number> {
@@ -40,41 +52,22 @@ describe("FakeClaude", () => {
   });
 
   it("arms this invocation's response, not the first one's", async () => {
-    fake = await FakeClaude.create([
-      { hang: true, grandchild: true },
-      { hang: true, grandchild: true },
-    ]);
-    const first = start(fake.binaryPath);
-    leftovers.push(first.pid ?? 0);
-    const firstPid = await waitFor(() => fake?.pid("child"));
-    const firstGrandchild = await waitFor(() => fake?.pid("grandchild"));
-    leftovers.push(firstGrandchild);
-    const recorded = Date.now() + 5000;
-    while ((await fake.calls()).length < 1) {
-      if (Date.now() > recorded) throw new Error("the first invocation never recorded its call");
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    process.kill(firstPid, "SIGKILL");
-    process.kill(firstGrandchild, "SIGKILL");
-    expect(await waitGone(firstPid)).toBe(true);
-    expect(await waitGone(firstGrandchild)).toBe(true);
+    fake = await FakeClaude.create([{ stdout: "first-only\n" }, { hang: true, grandchild: true }]);
+    const first = start(fake.binaryPath, leftovers);
+    expect(await first.output).toBe("first-only\n");
+    expect(await fake.calls()).toHaveLength(1);
 
-    const second = start(fake.binaryPath);
-    leftovers.push(second.pid ?? 0);
-    const secondPid = await waitFor(() => {
-      const pid = fake?.pid("child");
-      return pid !== undefined && pid !== firstPid ? pid : undefined;
-    });
-    const secondGrandchild = await waitFor(() => {
-      const pid = fake?.pid("grandchild");
-      return pid !== undefined && pid !== firstGrandchild ? pid : undefined;
-    });
-    leftovers.push(secondGrandchild);
-    expect(secondPid).toBe(second.pid);
+    const second = start(fake.binaryPath, leftovers);
+    const secondPid = await waitFor(() => fake?.pid("child"));
+    const secondGrandchild = await waitFor(() => fake?.pid("grandchild"));
+    track(leftovers, secondGrandchild);
+    expect(secondPid).toBe(second.child.pid);
     expect(isRunning(secondGrandchild)).toBe(true);
 
+    // The first response exits. Only the second ignores SIGTERM.
     process.kill(secondPid, "SIGTERM");
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(isRunning(secondPid)).toBe(true);
+    expect(second.child.exitCode).toBeNull();
   });
 });

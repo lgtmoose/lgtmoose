@@ -332,9 +332,12 @@ describe("ClaudeCodeHarness", () => {
       harness.run({ prompt: "p", cwd, schema, model: "sonnet", timeoutMs: 2_500, runId: "slow" }),
     );
     expect(error.kind).toBe("timeout");
-    // SIGTERM is ignored, so this waited for the SIGKILL after the grace period.
-    // The timeout leaves room for Node to start the fake while the rest of the suite is running.
-    expect(Date.now() - started).toBeLessThan(10_000);
+    // Setup spends part of the 2.5s budget before the process timer starts, then the fake ignores
+    // SIGTERM and this harness's grace is 200ms (the default grace is 5s). The run has to outlast
+    // the timeout by most of that grace, and it must finish well short of the default grace.
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(2_500 + 200 - 50);
+    expect(elapsed).toBeLessThan(6_000);
     expect(await waitGone((fake as FakeClaude).pid("child"))).toBe(true);
     expect(await waitGone((fake as FakeClaude).pid("grandchild"))).toBe(true);
     expect(error.transcriptKeys).toEqual(["transcripts/slow/1.jsonl"]);
