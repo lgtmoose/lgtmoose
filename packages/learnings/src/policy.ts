@@ -26,7 +26,9 @@ import {
  *   enough, since anyone who creates a repo is admin on it. Otherwise it waits as `pending`
  *   until someone with that access approves it. Approving and forgetting need the same access.
  * - **Protected categories can't be suppressed.** A learning of a kind that can quiet findings
- *   (`accepted_pattern`, `scoping`, `correction`) can't name a protected category. Retrieval
+ *   (`accepted_pattern`, `scoping`, `correction`) can't name a protected category. With no
+ *   category, the same kinds are refused when the text, as written or after redaction, uses a
+ *   protected-topic word. Retrieval
  *   (NIC-837) must also never let a learning suppress a protected-category finding:
  *   `mayLearningSuppress`, for every finding, learnings with no category included.
  * - **Learning text stays untrusted.** It's proposal text from a comment or the model, so
@@ -124,6 +126,22 @@ const SUPPRESSING_KINDS: ReadonlySet<LearningKind> = new Set([
   "scoping",
   "correction",
 ]);
+
+/**
+ * Why a suppressing learning with no category is refused. Checked on every form of the text the
+ * caller has (as written, and after redaction), so a placeholder such as `[redacted secret value]`
+ * is a protected topic too. A category, including one that is not protected, skips this.
+ */
+export function untaggedProtectedTopicReason(
+  kind: LearningKind,
+  category: string | undefined,
+  texts: readonly string[],
+): string | undefined {
+  if (category !== undefined || !SUPPRESSING_KINDS.has(kind)) return undefined;
+  if (!texts.some((text) => mentionsProtectedTopic(text))) return undefined;
+  const article = /^[aeiou]/i.test(kind) ? "an" : "a";
+  return `${article} ${kind} learning that mentions a protected topic needs a category`;
+}
 
 /**
  * Whether a learning may quiet a finding of `category`: never for a protected one, whatever the
@@ -243,17 +261,12 @@ export async function proposeLearning(
       reason: `a ${kind} learning can't be about ${category}: findings in protected categories are never suppressed`,
     };
   }
-  if (category === undefined && SUPPRESSING_KINDS.has(kind) && mentionsProtectedTopic(text)) {
-    const article = /^[aeiou]/i.test(kind) ? "an" : "a";
-    return {
-      outcome: "refused",
-      reason: `${article} ${kind} learning that mentions a protected topic needs a category`,
-    };
-  }
+  const redacted = redactSensitive(text);
+  const topic = untaggedProtectedTopicReason(kind, category, [text, redacted.text]);
+  if (topic !== undefined) return { outcome: "refused", reason: topic };
   const { owner, full } = splitRepo(source.repo);
   const repo = scope.level === "org" ? undefined : full;
   const pathGlob = scope.level === "path" ? scope.pathGlob : undefined;
-  const redacted = redactSensitive(text);
   // From GitHub, at the time it's proposed.
   const { checked: authorPermission, ok: hasAccess } = await access(
     deps,

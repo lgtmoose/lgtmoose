@@ -204,6 +204,24 @@ describe("proposeLearning", () => {
     ).toMatchObject({ outcome: "active", learning: { category: "style" } });
   });
 
+  it("refuses when redaction is what names the protected topic", async () => {
+    const d = deps({ dana: "write" });
+    const result = await proposeLearning(
+      d,
+      {
+        ...repoScoped,
+        kind: "scoping",
+        text: "Don't flag token = abcdefghijklmnop in a fixture.",
+      },
+      source,
+    );
+    expect(result).toMatchObject({
+      outcome: "refused",
+      reason: expect.stringContaining("needs a category"),
+    });
+    expect(d.store.all()).toEqual([]);
+  });
+
   it("allows a convention about a protected category: it only adds a rule", async () => {
     const result = await proposeLearning(
       deps({ dana: "write" }),

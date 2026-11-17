@@ -930,4 +930,50 @@ describe("dispatch: commit statuses (NIC-1088)", () => {
     });
     expect(f.executions.has(executionName("acme/shop", 13, NEW, "d-status"))).toBe(true);
   });
+
+  it("returns that pull request's result when it is the only one waiting", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ prNumber: 12 }));
+    must(f.executions.get(executionName("acme/shop", 12, NEW))).status = "SUCCEEDED";
+    f.deps.checksWaits = {
+      get: async () => ({ headSha: NEW, since: new Date(T1), state: "pending" }),
+      byHead: async () => [12],
+    };
+    expect(await dispatch(f.deps, status)).toMatchObject({ action: "retried" });
+    expect(f.executions.has(executionName("acme/shop", 12, NEW, "d-status"))).toBe(true);
+  });
+
+  it("wakes the other pull requests when one of them fails, then retries the failure", async () => {
+    const f = fakeDeps();
+    await dispatch(f.deps, job({ prNumber: 12 }));
+    await dispatch(f.deps, job({ prNumber: 13, deliveryId: "d-13" }));
+    must(f.executions.get(executionName("acme/shop", 12, NEW))).status = "SUCCEEDED";
+    must(f.executions.get(executionName("acme/shop", 13, NEW))).status = "SUCCEEDED";
+    const executions = f.deps.executions;
+    const blocked = executionName("acme/shop", 13, NEW);
+    f.deps.executions = {
+      ...executions,
+      async status(executionArn) {
+        if (executionArn.endsWith(`:${blocked}`)) throw new Error("status down");
+        return executions.status(executionArn);
+      },
+    };
+    f.deps.checksWaits = {
+      get: async (_repo, number) =>
+        number === 12 || number === 13
+          ? { headSha: NEW, since: new Date(T1), state: "pending" }
+          : undefined,
+      byHead: async () => [13, 12],
+    };
+    await expect(dispatch(f.deps, status)).rejects.toThrow("status down");
+    expect(f.executions.has(executionName("acme/shop", 12, NEW, "d-status"))).toBe(true);
+    expect(f.executions.has(executionName("acme/shop", 13, NEW, "d-status"))).toBe(false);
+  });
+
+  it("fails when the checks-wait store can't look a commit up", async () => {
+    const f = fakeDeps();
+    f.deps.checksWaits = { get: async () => undefined };
+    await expect(dispatch(f.deps, status)).rejects.toThrow("find a head SHA");
+    expect(f.executions.size).toBe(0);
+  });
 });

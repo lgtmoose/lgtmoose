@@ -9,7 +9,7 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { describeStatus, errorName } from "./sfn.js";
 import type { DispatchDeps, DispatchStore, Executions } from "./dispatch.js";
@@ -320,6 +320,7 @@ export function drizzleChecksWaits(db: Db): ChecksWaitStore {
           and(
             eq(pullRequestDispatches.repo, lower(repo)),
             eq(pullRequestDispatches.checksWaitSha, sha),
+            isNotNull(pullRequestDispatches.checksWaitSince),
           ),
         )
         .orderBy(pullRequestDispatches.number);
