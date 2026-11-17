@@ -92,11 +92,10 @@ is older. It never stops a deploy, and says so when it can't check (offline, say
   **Contents: Read and write** and **Pull requests: Read and write**, install it on this
   repository, and store its id and private key as the repository secrets
   `LGTMOOSE_RELEASE_APP_ID` and `LGTMOOSE_RELEASE_APP_PRIVATE_KEY`. The version job mints an
-  installation token from those secrets. Create them before the next push to `main`, or that job
-  fails and you run `pnpm changeset version` yourself in a pull request.
-- **Let Actions open the version pull request:** Settings → Actions → General → Workflow
-  permissions → "Allow GitHub Actions to create and approve pull requests". The organization
-  setting has to allow it too. Without it, the version job fails.
+  installation token from those secrets for this repository only, and it asks for only those two
+  permissions. Create the secrets before the next push to `main`, or that job fails and you run
+  `pnpm changeset version` yourself in a pull request. The Actions setting that lets a workflow
+  token open pull requests does not apply to this job.
 - **Protect `v*` tags** (Settings → Rules → New tag ruleset) so only maintainers can push them:
   pushing one publishes images.
 
