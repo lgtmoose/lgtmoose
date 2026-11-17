@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEW_JOB_KINDS,
   SKIP_LABEL,
+  commitStatusGroupId,
   isReviewJobKind,
   reviewJobGroupId,
+  toCommitStatus,
   toReviewJob,
   type ReviewJob,
 } from "./review-job.js";
@@ -462,7 +464,7 @@ describe("toReviewJob: checks finishing (NIC-1078)", () => {
     };
   }
 
-  it.each(["check_suite", "check_run"] as const)(
+  it.each(["check_suite"] as const)(
     "maps a finished %s to a check job for the PR at that head, from a bot",
     (event) => {
       expect(toReviewJob(event, checkEvent(event), options)).toEqual({
@@ -475,13 +477,24 @@ describe("toReviewJob: checks finishing (NIC-1078)", () => {
     },
   );
 
-  it("ignores a check that hasn't finished, LGTMoose's own, and one naming no PR at its head", () => {
+  it("ignores a check run: the check suite already covers its jobs", () => {
+    expect(toReviewJob("check_run", checkEvent("check_run"), options)).toEqual({
+      ignored: "check runs are covered by the check suite",
+    });
     expect(toReviewJob("check_run", checkEvent("check_run", {}, "created"), options)).toEqual({
-      ignored: "unsupported action: check_run.created",
+      ignored: "check runs are covered by the check suite",
     });
     expect(
       toReviewJob("check_run", checkEvent("check_run", { name: "LGTMoose" }), options),
-    ).toEqual({ ignored: "not a pull request" });
+    ).toEqual({ ignored: "check runs are covered by the check suite" });
+  });
+
+  it("ignores a suite that hasn't finished, and one naming no PR at its head", () => {
+    expect(toReviewJob("check_suite", checkEvent("check_suite", {}, "requested"), options)).toEqual(
+      {
+        ignored: "unsupported action: check_suite.requested",
+      },
+    );
     // A fork's PR: GitHub names none. The reconciler catches it.
     expect(
       toReviewJob("check_suite", checkEvent("check_suite", { pull_requests: [] }), options),
@@ -493,5 +506,45 @@ describe("toReviewJob: checks finishing (NIC-1078)", () => {
         options,
       ),
     ).toEqual({ ignored: "not a pull request" });
+  });
+});
+
+describe("toCommitStatus", () => {
+  const sha = "abc123def456abc123def456abc123def456abc1";
+
+  it("maps a status, whatever its state, to one job grouped by the commit", () => {
+    for (const state of ["pending", "success", "failure", "error"]) {
+      expect(
+        toCommitStatus({ sha, state, context: "ci/circleci", repository, installation }, options),
+      ).toEqual({
+        kind: "commit_status",
+        deliveryId: options.deliveryId,
+        installationId: 4242,
+        repo: "acme-corp/widgets",
+        sha,
+        receivedAt: "2026-11-12T10:00:00.000Z",
+      });
+    }
+    expect(commitStatusGroupId("acme-corp/widgets", sha)).toBe(`acme-corp/widgets#${sha}`);
+  });
+
+  it("ignores a status for an owner that isn't allowed, or one without a commit SHA", () => {
+    expect(
+      toCommitStatus(
+        {
+          sha,
+          state: "success",
+          repository: { full_name: "other/widgets", owner: { login: "other" } },
+          installation,
+        },
+        options,
+      ),
+    ).toEqual({ ignored: "owner not allowed: other" });
+    expect(toCommitStatus({ state: "success", repository, installation }, options)).toEqual({
+      ignored: "payload is missing the repository, installation or SHA",
+    });
+    expect(toCommitStatus({ sha: "not-a-sha", repository, installation }, options)).toEqual({
+      ignored: "status SHA is not a commit",
+    });
   });
 });

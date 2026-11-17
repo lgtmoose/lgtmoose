@@ -1,4 +1,4 @@
-import type { ReviewJob } from "@lgtmoose/core";
+import type { CommitStatusJob, ReviewJob } from "@lgtmoose/core";
 
 /**
  * What the gateway needs from its host, kept free of any cloud SDK so the same webhook code runs
@@ -26,5 +26,5 @@ export interface SendOptions {
 
 /** Where verified, normalised jobs go for the dispatcher. */
 export interface JobQueue {
-  send(job: ReviewJob, options: SendOptions): Promise<void>;
+  send(job: ReviewJob | CommitStatusJob, options: SendOptions): Promise<void>;
 }

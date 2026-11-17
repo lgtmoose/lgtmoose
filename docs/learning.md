@@ -19,7 +19,7 @@ Kinds are `accepted_pattern`, `correction`, `convention` and `scoping`. A `learn
 
 - The model, or a comment's text, only proposes a learning: its kind, text, category and scope. Who proposed it, on which PR and comment, and their permission at the time come from GitHub, never from the proposal.
 - A repo or path learning is active at once when its author has write access or higher on the repo. An org-wide one needs an owner of the org (the org memberships API), since anyone who creates a repo is admin on it. Anything else waits as `pending`. Approving or forgetting needs the same access.
-- A learning that could quiet findings (`accepted_pattern`, `scoping`, `correction`) can't name a protected category: `authz`, `tenant_scoping`, `money` or `secrets`.
+- A learning that could quiet findings (`accepted_pattern`, `scoping`, `correction`) can't name a protected category: `authz`, `tenant_scoping`, `money` or `secrets`. If it sets no category and its text uses a word for one of those topics (such as authorization, tenant, money, payment, refund, secret, credential or password), it is refused until a category is set. A `convention` can mention those words. Naming a category that is not one of the four still stores the learning; that remains a known limit.
 - The text is scanned and redacted before it's stored, pending ones included: tokens, keys, credentials in URLs, JWTs, emails, phone and card numbers.
 - `@lgtmoose forget <id>` retires a learning. Its row and its `learning_events` history stay.
 
@@ -65,7 +65,7 @@ The post step checks every candidate:
 
 - It must cite at least two different comments of its batch. One remark is never a rule.
 - Its text must pass the prompt-injection detector.
-- It must pass the write policy. An `accepted_pattern` or `scoping` learning can't name a protected category, and the text is redacted.
+- It must pass the write policy. An `accepted_pattern`, `scoping` or `correction` learning can't name a protected category, and one that sets no category is refused when its text uses a word for one of those topics. The text is redacted.
 - It mustn't duplicate one of the repository's pending or active learnings: the same scope and text, ignoring case, spacing and punctuation.
 
 What's left is stored as **pending**, by `lgtmoose` (permission `system`), with links to the comments it rests on. At most 50 are stored per bootstrap. Nothing is used in a review until someone with write access approves it, one at a time or with **Approve all** on the dashboard, or with `@lgtmoose approve <id>`. The usual access rules apply. Running a bootstrap again, or retrying one, stores nothing twice.

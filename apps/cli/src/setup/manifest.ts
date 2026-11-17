@@ -23,7 +23,8 @@ export const APP_EVENTS = [
   "issue_comment",
   // A check finishing on a head whose review waits for CI (`review.wait_for_checks`).
   "check_suite",
-  "check_run",
+  // A commit status changed. Statuses name a commit, not a pull request.
+  "status",
 ] as const;
 
 type Access = "read" | "write";

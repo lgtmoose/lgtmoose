@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import type { ReviewJob } from "@lgtmoose/core";
+import type { CommitStatusJob, ReviewJob } from "@lgtmoose/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { ROUTES } from "./paths.js";
@@ -17,8 +17,10 @@ afterEach(async () => {
 });
 
 /** The real gateway app on a local port, with a queue that records jobs. */
-async function gateway(secret = SECRET): Promise<{ url: string; jobs: ReviewJob[] }> {
-  const jobs: ReviewJob[] = [];
+async function gateway(
+  secret = SECRET,
+): Promise<{ url: string; jobs: (ReviewJob | CommitStatusJob)[] }> {
+  const jobs: (ReviewJob | CommitStatusJob)[] = [];
   const app = createApp(
     { version: "test", trustProxyHops: 0 },
     {
