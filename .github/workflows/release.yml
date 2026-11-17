@@ -91,8 +91,7 @@ jobs:
           app-id: ${{ secrets.LGTMOOSE_RELEASE_APP_ID }}
           private-key: ${{ secrets.LGTMOOSE_RELEASE_APP_PRIVATE_KEY }}
           # This repository only, and only the two permissions the version pull request needs.
-          # Left unset, a later default of this action would mint a token for every repository
-          # the App is installed on, with every permission the App has.
+          # Without the permission inputs the token inherits every permission the App has.
           repositories: ${{ github.repository }}
           permission-contents: write
           permission-pull-requests: write
