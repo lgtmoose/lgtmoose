@@ -34,7 +34,15 @@ aws iam create-open-id-connect-provider \
 
 ### 3. An IAM role for the workflow
 
-Name it, for example, `lgtmoose-smoke`. Its trust policy accepts only jobs in this repository's `aws-smoke` environment. Pull requests and other workflows can't assume it. Replace `ACCOUNT_ID`:
+Name it, for example, `lgtmoose-smoke`. Its trust policy accepts only jobs in this repository's `aws-smoke` environment. Pull requests and other workflows can't assume it.
+
+GitHub's token names the repository by its subject prefix. For a repository created after July 15, 2026, the prefix carries the owner's and the repository's numeric IDs, so a policy with only the names matches no token and the run fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity". Print the prefix:
+
+```bash
+gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
+
+For this repository it's `repo:lgtmoose@355543799/lgtmoose@1454530152`. Use yours in the policy below, followed by `:environment:aws-smoke`, and replace `ACCOUNT_ID`:
 
 ```json
 {
@@ -49,7 +57,7 @@ Name it, for example, `lgtmoose-smoke`. Its trust policy accepts only jobs in th
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:lgtmoose/lgtmoose:environment:aws-smoke"
+          "token.actions.githubusercontent.com:sub": "repo:lgtmoose@355543799/lgtmoose@1454530152:environment:aws-smoke"
         }
       }
     }
