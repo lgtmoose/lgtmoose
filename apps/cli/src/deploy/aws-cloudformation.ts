@@ -1,4 +1,8 @@
-import { CloudFormationClient, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
+import {
+  CloudFormationClient,
+  DescribeStackResourcesCommand,
+  DescribeStacksCommand,
+} from "@aws-sdk/client-cloudformation";
 import { awsError } from "../aws-errors.js";
 
 /** A stack's status and outputs. */
@@ -7,14 +11,19 @@ export interface StackInfo {
   outputs: Record<string, string>;
 }
 
-/** The only CloudFormation call the CLI makes. Tests fake it. */
+/** The only CloudFormation calls the CLI makes. Tests fake them. */
 export interface StackLookup {
   /** The stack, or undefined when it doesn't exist. */
   describe(stackName: string): Promise<StackInfo | undefined>;
+  /**
+   * Physical ids of the stack's resources of one type. Works when the stack has no outputs, as
+   * after a create that failed and couldn't roll back.
+   */
+  physicalIds(stackName: string, resourceType: string): Promise<string[]>;
 }
 
 export interface CloudFormationSender {
-  send(command: DescribeStacksCommand): Promise<{
+  send(command: DescribeStacksCommand | DescribeStackResourcesCommand): Promise<{
     Stacks?:
       | {
           StackStatus?: string | undefined;
@@ -22,6 +31,8 @@ export interface CloudFormationSender {
             { OutputKey?: string | undefined; OutputValue?: string | undefined }[] | undefined;
         }[]
       | undefined;
+    StackResources?:
+      { ResourceType?: string | undefined; PhysicalResourceId?: string | undefined }[] | undefined;
   }>;
 }
 
@@ -41,6 +52,19 @@ export function cloudFormationLookup(client: CloudFormationSender, region: strin
       } catch (error) {
         // DescribeStacks reports a missing stack as a ValidationError.
         if (error instanceof Error && /does not exist/.test(error.message)) return undefined;
+        throw awsError("CloudFormation", region, stackName, error);
+      }
+    },
+    async physicalIds(stackName, resourceType) {
+      try {
+        const output = await client.send(
+          new DescribeStackResourcesCommand({ StackName: stackName }),
+        );
+        return (output.StackResources ?? [])
+          .filter((resource) => resource.ResourceType === resourceType)
+          .flatMap((resource) => resource.PhysicalResourceId ?? []);
+      } catch (error) {
+        if (error instanceof Error && /does not exist/.test(error.message)) return [];
         throw awsError("CloudFormation", region, stackName, error);
       }
     },

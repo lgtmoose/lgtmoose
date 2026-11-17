@@ -124,6 +124,13 @@ export class NetworkStack extends Stack {
         : { subnetGroupName: "sandbox" };
 
     const endpointSecurityGroup = this.securityGroup("EndpointSg", "VPC interface endpoints");
+    // Private DNS sends every call to these services from anywhere in the VPC to the endpoints,
+    // so control Lambdas, the proxy and the dashboard API must reach them too, not only sandboxes.
+    endpointSecurityGroup.addIngressRule(
+      Peer.ipv4(vpc.vpcCidrBlock),
+      Port.tcp(443),
+      "AWS services from inside the VPC",
+    );
     this.sandboxSecurityGroup.connections.allowTo(
       endpointSecurityGroup,
       Port.tcp(443),

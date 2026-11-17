@@ -257,9 +257,16 @@ async function destroy(flags: { yes: boolean; purge: boolean }, deps: DeployDeps
   // RDS refuses to delete a protected database, which would leave the Data stack in
   // DELETE_FAILED. Turn protection off straight through RDS: it works whatever state the stack
   // is in (DELETE_FAILED after an earlier attempt, say) and applies nothing from this checkout.
-  const data = await deps.stacks(config.region).describe(STACK_NAMES.data);
+  const stacks = deps.stacks(config.region);
+  const data = await stacks.describe(STACK_NAMES.data);
   const outputs = data?.outputs ?? {};
-  const databaseId = outputs[STACK_OUTPUTS.data.databaseIdentifier];
+  // A create that failed and couldn't roll back (the protected database blocks it) leaves the
+  // stack with a database but no outputs.
+  const databaseId =
+    outputs[STACK_OUTPUTS.data.databaseIdentifier] ??
+    (data === undefined
+      ? undefined
+      : (await stacks.physicalIds(STACK_NAMES.data, "AWS::RDS::DBInstance"))[0]);
   const database = deps.database(config.region);
   let databaseFound = false;
   let protectionTouched = false;

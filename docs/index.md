@@ -62,7 +62,7 @@ Each command takes `--help`. To try a review on one PR without deploying, run `p
 `deploy` uses your current AWS credentials (for example `aws sso login` or `AWS_PROFILE`) and the region in `lgtmoose.config.ts`. Administrator access is simplest. A scoped role needs to assume the CDK bootstrap roles and create the bootstrap stack, plus the calls the CLI makes itself:
 
 - `sts:GetCallerIdentity`
-- `cloudformation:DescribeStacks`
+- `cloudformation:DescribeStacks` and `DescribeStackResources` (destroy finds the database through the Data stack's resources when a failed create left it without outputs)
 - `secretsmanager:GetSecretValue`, `CreateSecret` and `PutSecretValue` on `lgtmoose/*` (setup writes them)
 - `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
 - For `auth`: `secretsmanager:CreateSecret`, `UpdateSecret`, `TagResource` (also needed to create a tagged secret), `RestoreSecret`, `DeleteSecret` and `DescribeSecret` on `lgtmoose/provider/*`, and `secretsmanager:ListSecrets`, which can't be limited to a resource

@@ -45,6 +45,8 @@ function harness(
     scheduled?: string[];
     /** Data stack status; "" for no stack. */
     dataStatus?: string;
+    /** The Data stack has no outputs, as after a create that couldn't roll back. */
+    noDataOutputs?: boolean;
     outputs?: StackOutputs;
     prompter?: Partial<Prompter>;
     failWebhook?: boolean;
@@ -147,8 +149,12 @@ function harness(
       describe: (name) =>
         Promise.resolve(
           name === STACK_NAMES.data && dataStatus !== ""
-            ? { status: dataStatus, outputs: dataOutputs }
+            ? { status: dataStatus, outputs: options.noDataOutputs ? {} : dataOutputs }
             : undefined,
+        ),
+      physicalIds: (name, type) =>
+        Promise.resolve(
+          name === STACK_NAMES.data && type === "AWS::RDS::DBInstance" ? ["lgtmoose-db-1"] : [],
         ),
     }),
     database: () => ({
@@ -444,6 +450,14 @@ describe("lgtmoose destroy", () => {
     const result = await run(runDestroy, ["--yes"], h);
     expect(result.exitCode).toBe(0);
     expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
+  });
+
+  it("finds the database from the stack's resources after a create that couldn't roll back", async () => {
+    const h = harness({ dataStatus: "ROLLBACK_FAILED", noDataOutputs: true });
+    const result = await run(runDestroy, ["--purge", "--yes"], h);
+    expect(result.exitCode).toBe(0);
+    expect(h.calls).toEqual(["unprotect", "destroy", "webhook"]);
+    expect(h.protection).toEqual(["lgtmoose-db-1:false"]);
   });
 
   it("switches the Data stack to delete its data with --purge", async () => {

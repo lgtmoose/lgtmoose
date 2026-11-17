@@ -19,6 +19,7 @@ function fakeDeps(options: { deployed?: boolean; cap?: number } = {}) {
         ...(options.cap === undefined ? {} : { learnings: { bootstrapMaxCostUsd: options.cap } }),
       }),
     stacks: () => ({
+      physicalIds: async () => [],
       describe: async (name) =>
         name === STACK_NAMES.data && options.deployed !== false
           ? {
