@@ -1,8 +1,8 @@
 # LGTMoose 🫎
 
-A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your own AWS account with one command, and teach it by tagging `@lgtmoose` in review comments.
+A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your own AWS account, and teach it by tagging `@lgtmoose` in review comments.
 
-> **Status: alpha.** LGTMoose hasn't been run in production yet, and the first tagged release (v0.1.0) is still to come. Reviews run in shadow mode by default: they're recorded, not posted. Setup is in [docs/](docs/); report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+> **Status: alpha.** LGTMoose hasn't been run in production yet, its end-to-end smoke test on a real AWS account hasn't passed, and the first tagged release (v0.1.0) is still to come. Reviews run in shadow mode by default: they're recorded, not posted. Setup is in [docs/](docs/); report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 - **Reviews every PR** as a GitHub App: inline comments, a summary, a status label and a check run. Plain code, not the model, decides whether to approve.
 - **Learns from your team.** `@lgtmoose learn: …` and declined findings become scoped learnings, stored in your database, and only people with write access can make them take effect. On a new install, it can start from your past code reviews: `lgtmoose learnings bootstrap` proposes your team's conventions for you to approve.

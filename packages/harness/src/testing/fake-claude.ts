@@ -43,31 +43,42 @@ const { spawn } = require("node:child_process");
 const dir = ${JSON.stringify(dir)};
 const responses = ${JSON.stringify(responses)};
 const callsFile = dir + "/calls.jsonl";
+function invocation() {
+  return fs.existsSync(callsFile)
+    ? fs.readFileSync(callsFile, "utf8").split("\\n").filter(Boolean).length
+    : 0;
+}
+function responseFor(n) {
+  return responses[Math.min(n, responses.length - 1)];
+}
+let armed = false;
 function arm(r) {
-  if (!r) return;
-  if (r.grandchild && !fs.existsSync(dir + "/grandchild.pid")) {
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  if (!r || armed) return;
+  armed = true;
+  if (r.grandchild) {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
     fs.writeFileSync(dir + "/grandchild.pid", String(child.pid));
     child.unref();
   }
-  if (r.hang && !fs.existsSync(dir + "/child.pid")) {
+  if (r.hang) {
     fs.writeFileSync(dir + "/child.pid", String(process.pid));
     process.on("SIGTERM", () => {});
   }
 }
-// Before stdin arrives, so a short timeout under a busy runner still finds the pids.
-arm(responses[0]);
+// This process's own response, before stdin, so a short timeout still finds its pids.
+// A later invocation reads the calls already recorded and arms its own response.
+arm(responseFor(invocation()));
 let input = "";
 process.stdin.on("data", (chunk) => (input += chunk));
 process.stdin.on("end", () => {
-  const n = fs.existsSync(callsFile)
-    ? fs.readFileSync(callsFile, "utf8").split("\\n").filter(Boolean).length
-    : 0;
+  const n = invocation();
   fs.appendFileSync(
     callsFile,
     JSON.stringify({ argv: process.argv.slice(2), env: process.env, stdin: input, cwd: process.cwd() }) + "\\n",
   );
-  const r = responses[Math.min(n, responses.length - 1)];
+  const r = responseFor(n);
   arm(r);
   for (const line of r.lines ?? []) process.stdout.write(JSON.stringify(line) + "\\n");
   if (r.stdout) process.stdout.write(r.stdout);
