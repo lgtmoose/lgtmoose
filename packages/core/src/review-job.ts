@@ -6,7 +6,7 @@
  * is checked before use rather than trusted to match a TypeScript type.
  */
 
-export const REVIEW_JOB_KINDS = [
+export const PULL_REQUEST_JOB_KINDS = [
   "pr_opened",
   "pr_updated",
   "pr_ready",
@@ -19,6 +19,11 @@ export const REVIEW_JOB_KINDS = [
   "thread_resolved",
   "thread_unresolved",
 ] as const;
+
+/** A commit status names a commit, not a pull request, so it is not one of the kinds above. */
+export const REVIEW_JOB_KINDS = [...PULL_REQUEST_JOB_KINDS, "commit_status"] as const;
+
+export type PullRequestJobKind = (typeof PULL_REQUEST_JOB_KINDS)[number];
 
 export type ReviewJobKind = (typeof REVIEW_JOB_KINDS)[number];
 
@@ -38,7 +43,7 @@ export type ReviewRequest = (typeof REVIEW_REQUESTS)[number];
  * it fetches anything else from GitHub itself, so a stale or oversized payload never travels.
  */
 export interface ReviewJob {
-  kind: ReviewJobKind;
+  kind: PullRequestJobKind;
   /**
    * X-GitHub-Delivery. The queue dedupes on it for five minutes; after that the dispatcher's
    * execution names (per head, plus this ID for a retry) catch redeliveries.
@@ -82,6 +87,20 @@ export interface ReviewJob {
   eventAt?: string;
 }
 
+/**
+ * A commit status changed (`status`). Statuses name a commit, not a pull request, so this is
+ * grouped by repository and SHA. The dispatcher finds the pull requests waiting on that SHA.
+ */
+export interface CommitStatusJob {
+  kind: "commit_status";
+  deliveryId: string;
+  installationId: number;
+  /** "owner/name", as GitHub spells it. */
+  repo: string;
+  sha: string;
+  receivedAt: string;
+}
+
 export interface Ignored {
   ignored: string;
 }
@@ -97,7 +116,7 @@ export interface ToReviewJobOptions {
 export const SKIP_LABEL = "skip-lgtmoose";
 
 /** Which actions of which events become jobs, and as what kind. */
-const KINDS: Record<string, Record<string, ReviewJobKind>> = {
+const KINDS: Record<string, Record<string, PullRequestJobKind>> = {
   pull_request: {
     opened: "pr_opened",
     // A reopened PR may have moved on since it closed; treat it as new.
@@ -113,17 +132,16 @@ const KINDS: Record<string, Record<string, ReviewJobKind>> = {
   pull_request_review: { submitted: "review" },
   pull_request_review_comment: { created: "review_comment" },
   pull_request_review_thread: { resolved: "thread_resolved", unresolved: "thread_unresolved" },
-  // A check finishing may be what a PR's review waits for (`review.wait_for_checks`, NIC-1078).
-  // The dispatcher drops it unless the PR waits on that head, so it costs nothing elsewhere.
+  // A check suite finishing may be what a PR's review waits for (`review.wait_for_checks`).
+  // One suite is one event per workflow. The dispatcher drops it unless the PR waits on that
+  // head. `check_run` is not here: a suite already covers its jobs, and a delivered run is
+  // ignored below so an App that still subscribes does not enqueue one per job.
   check_suite: { completed: "pr_checks" },
-  check_run: { completed: "pr_checks" },
 };
 
-/**
- * LGTMoose's own check run (`CHECK_NAME` in @lgtmoose/poster). Its finishing is never what a
- * review waits for, so it makes no job.
- */
-const OWN_CHECK_NAME = "LGTMoose";
+function isPullRequestJobKind(value: unknown): value is PullRequestJobKind {
+  return typeof value === "string" && (PULL_REQUEST_JOB_KINDS as readonly string[]).includes(value);
+}
 
 export function isReviewJobKind(value: unknown): value is ReviewJobKind {
   return typeof value === "string" && (REVIEW_JOB_KINDS as readonly string[]).includes(value);
@@ -132,6 +150,14 @@ export function isReviewJobKind(value: unknown): value is ReviewJobKind {
 /** FIFO message group: jobs for one PR are handled in order, different PRs in parallel. */
 export function reviewJobGroupId(job: Pick<ReviewJob, "repo" | "prNumber">): string {
   return `${job.repo}#${job.prNumber}`;
+}
+
+/**
+ * FIFO message group for a commit status: one SHA, not a pull request. Several PRs can wait on
+ * that SHA; the dispatcher runs each of them from this one job.
+ */
+export function commitStatusGroupId(repo: string, sha: string): string {
+  return `${repo}#${sha}`;
 }
 
 type Json = Record<string, unknown>;
@@ -181,7 +207,7 @@ function isBot(sender: Json): boolean {
 const BOT_REVIEW_REQUEST = /^[ \t]*@[A-Za-z0-9-]+[ \t]+review\b/im;
 
 /** Whether a bot's event may be a trusted agent's review trigger (see `ReviewJob.botActor`). */
-function botTrigger(kind: ReviewJobKind, payload: Json): boolean {
+function botTrigger(kind: PullRequestJobKind, payload: Json): boolean {
   // CI runs as a bot: a check finishing is a fact about the head, nobody asking for anything.
   if (kind === "pr_labeled" || kind === "pr_checks") return true;
   if (kind !== "comment") return false;
@@ -189,14 +215,13 @@ function botTrigger(kind: ReviewJobKind, payload: Json): boolean {
 }
 
 /**
- * The PR a finished check suite or check run is about: the first of its `pull_requests` whose
- * head is the commit it checked. GitHub leaves the list empty for a fork's PR; the reconciler
- * catches those. Shaped like a PR payload (its number and head), the rest left out.
+ * The PR a finished check suite is about: the first of its `pull_requests` whose head is the
+ * commit it checked. GitHub leaves the list empty for a fork's PR; the reconciler catches
+ * those. Shaped like a PR payload (its number and head), the rest left out.
  */
-function checkedPullRequest(event: string, payload: Json): Json | undefined {
-  const check = record(event === "check_suite" ? payload.check_suite : payload.check_run);
+function checkedPullRequest(payload: Json): Json | undefined {
+  const check = record(payload.check_suite);
   if (check === undefined) return undefined;
-  if (event === "check_run" && str(check.name) === OWN_CHECK_NAME) return undefined;
   const sha = str(check.head_sha);
   if (sha === undefined) return undefined;
   const pulls = Array.isArray(check.pull_requests) ? check.pull_requests : [];
@@ -216,7 +241,7 @@ function checkedPullRequest(event: string, payload: Json): Json | undefined {
 
 /** The PR the event is about. issue_comment carries it as an issue with a `pull_request` key. */
 function pullRequestOf(event: string, payload: Json): Json | undefined {
-  if (event === "check_suite" || event === "check_run") return checkedPullRequest(event, payload);
+  if (event === "check_suite") return checkedPullRequest(payload);
   if (event !== "issue_comment") return record(payload.pull_request);
   const issue = record(payload.issue);
   return issue !== undefined && record(issue.pull_request) !== undefined ? issue : undefined;
@@ -224,7 +249,7 @@ function pullRequestOf(event: string, payload: Json): Json | undefined {
 
 /** The comment, review or thread that triggered the job, under the field the dispatcher reads. */
 function trigger(
-  kind: ReviewJobKind,
+  kind: PullRequestJobKind,
   payload: Json,
 ): Pick<ReviewJob, "commentId" | "reviewId" | "threadNodeId"> {
   switch (kind) {
@@ -271,13 +296,17 @@ export function toReviewJob(
   const body = record(payload);
   if (body === undefined) return { ignored: "payload is not an object" };
 
+  // A check run is one event per job. The check suite already wakes a wait, so a run is never
+  // a job, including for an App that still subscribes to it.
+  if (event === "check_run") return { ignored: "check runs are covered by the check suite" };
+
   const action = str(body.action);
   // Own-property lookups only: `event` comes from a header and `action` from the payload, and
   // plain indexing would resolve names like "constructor" or "__proto__" to inherited values.
   const kinds = Object.hasOwn(KINDS, event) ? KINDS[event] : undefined;
   if (kinds === undefined) return { ignored: `unsupported event: ${event}` };
   const kind = action !== undefined && Object.hasOwn(kinds, action) ? kinds[action] : undefined;
-  if (!isReviewJobKind(kind)) {
+  if (!isPullRequestJobKind(kind)) {
     return { ignored: `unsupported action: ${event}.${action ?? "none"}` };
   }
 
@@ -337,5 +366,49 @@ export function toReviewJob(
     ...(bot && kind !== "pr_closed" && kind !== "pr_checks" ? { botActor: true as const } : {}),
     receivedAt: options.receivedAt.toISOString(),
     ...(eventAt === undefined ? {} : { eventAt }),
+  };
+}
+
+/** A Git SHA, the 40-hex form or the 64-hex SHA-256 form GitHub also sends. */
+const COMMIT_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/**
+ * A verified `status` delivery: the repository, the commit and the installation. Statuses never
+ * name a pull request. Every state is a job (`pending` included); the dispatcher drops it unless
+ * some pull request waits on that commit. A status on a fork's repository is not the commit the
+ * base repository waits on, so it stays the reconciler's.
+ */
+export function toCommitStatus(
+  payload: unknown,
+  options: ToReviewJobOptions,
+): CommitStatusJob | Ignored {
+  const body = record(payload);
+  if (body === undefined) return { ignored: "payload is not an object" };
+
+  const repository = record(body.repository);
+  const repo = str(repository?.full_name);
+  const owner = str(record(repository?.owner)?.login);
+  const installationId = positiveInt(record(body.installation)?.id);
+  const sha = str(body.sha)?.toLowerCase();
+  if (
+    repo === undefined ||
+    owner === undefined ||
+    installationId === undefined ||
+    sha === undefined
+  ) {
+    return { ignored: "payload is missing the repository, installation or SHA" };
+  }
+  if (!COMMIT_SHA.test(sha)) return { ignored: "status SHA is not a commit" };
+
+  const allowed = options.allowedOrgs.some((org) => org.toLowerCase() === owner.toLowerCase());
+  if (!allowed) return { ignored: `owner not allowed: ${owner}` };
+
+  return {
+    kind: "commit_status",
+    deliveryId: options.deliveryId,
+    installationId,
+    repo,
+    sha,
+    receivedAt: options.receivedAt.toISOString(),
   };
 }

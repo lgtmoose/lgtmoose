@@ -34,7 +34,7 @@ describe("buildManifest", () => {
       "pull_request_review_thread",
       "issue_comment",
       "check_suite",
-      "check_run",
+      "status",
     ]);
     expect(manifest.default_events).toEqual([...APP_EVENTS]);
   });

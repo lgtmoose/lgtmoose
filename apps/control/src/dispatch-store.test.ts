@@ -233,4 +233,21 @@ describe("the wait for CI (NIC-1078)", () => {
     // The dispatcher’s record itself stays.
     expect(await store.latest("acme/shop", 70)).toEqual({ eventAt: T1, closed: false });
   });
+
+  it("finds every pull request waiting on a commit, and none after the wait is cleared", async () => {
+    const other = "c".repeat(40);
+    await store.advance("Acme/Shop", 70, T1, false);
+    await store.advance("Acme/Shop", 71, T1, false);
+    await store.advance("elsewhere/shop", 3, T1, false);
+    await waits.wait("acme/shop", 71, A, "pending", T1);
+    await waits.wait("ACME/shop", 70, A, "success", T2);
+    await waits.wait("elsewhere/shop", 3, A, "pending", T1);
+    await store.advance("acme/shop", 80, T1, false);
+    await waits.wait("acme/shop", 80, other, "pending", T1);
+    expect(await waits.byHead("ACME/shop", A)).toEqual([70, 71]);
+    expect(await waits.byHead("acme/shop", other)).toEqual([80]);
+
+    await waits.clear("acme/shop", 71);
+    expect(await waits.byHead("acme/shop", A)).toEqual([70]);
+  });
 });

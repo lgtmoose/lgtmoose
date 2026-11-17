@@ -1,5 +1,5 @@
 import express, { Router, type RequestHandler } from "express";
-import { reviewJobGroupId, toReviewJob } from "@lgtmoose/core";
+import { commitStatusGroupId, reviewJobGroupId, toCommitStatus, toReviewJob } from "@lgtmoose/core";
 import { MAX_WEBHOOK_BYTES } from "../paths.js";
 import type { JobQueue, WebhookSecretSource } from "../ports.js";
 import { parseSignature, signatureMatches } from "../signature.js";
@@ -87,6 +87,24 @@ export function githubWebhookHandler(deps: WebhookDeps): RequestHandler {
 
     if (event === "ping") {
       res.status(200).json({ ok: true });
+      return;
+    }
+
+    if (event === "status") {
+      const status = toCommitStatus(parsed.payload, {
+        deliveryId,
+        allowedOrgs: deps.allowedOrgs,
+        receivedAt: now(),
+      });
+      if ("ignored" in status) {
+        res.status(200).json({ ignored: status.ignored });
+        return;
+      }
+      await deps.queue.send(status, {
+        groupId: commitStatusGroupId(status.repo, status.sha),
+        dedupeId: deliveryId,
+      });
+      res.status(202).json({ queued: true });
       return;
     }
 

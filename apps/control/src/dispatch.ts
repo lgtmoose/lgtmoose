@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { REVIEW_JOB_KINDS, type ReviewJob } from "@lgtmoose/core";
+import { PULL_REQUEST_JOB_KINDS, type CommitStatusJob, type ReviewJob } from "@lgtmoose/core";
 import { z } from "zod";
 import { workflowJobSchema } from "./job.js";
 import type { ChecksWaitStore } from "./ports.js";
@@ -55,7 +55,7 @@ function hex(text: string, length: number): string {
 
 /** The queue message, validated: the gateway wrote it, but it's still read from the network. */
 export const reviewJobSchema = workflowJobSchema.extend({
-  kind: z.enum(REVIEW_JOB_KINDS),
+  kind: z.enum(PULL_REQUEST_JOB_KINDS),
   deliveryId: z.string().min(1),
   actor: z.string().min(1),
   commentId: z.number().int().positive().optional(),
@@ -70,6 +70,18 @@ export const reviewJobSchema = workflowJobSchema.extend({
 
 /** A queued job, as the dispatcher accepts it: with the event time it orders jobs by. */
 export type DispatchJob = ReviewJob & { eventAt: string };
+
+const COMMIT_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** A `status` webhook, grouped by repository and SHA. No pull request and no actor. */
+const commitStatusSchema = z.object({
+  kind: z.literal("commit_status"),
+  deliveryId: z.string().min(1),
+  installationId: z.number().int().positive(),
+  repo: workflowJobSchema.shape.repo,
+  sha: z.string().regex(COMMIT_SHA),
+  receivedAt: z.iso.datetime(),
+});
 
 /** The review workflow's input: the job, and how long to wait before preparing. */
 export interface WorkflowInput extends ReviewJob {
@@ -216,7 +228,7 @@ export interface DispatchDeps {
    * Which head each PR's review waits for CI on (NIC-1078). Left out, a finished check starts
    * nothing.
    */
-  checksWaits?: Pick<ChecksWaitStore, "get">;
+  checksWaits?: Pick<ChecksWaitStore, "get"> & Partial<Pick<ChecksWaitStore, "byHead">>;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -231,6 +243,7 @@ export type DispatchResult =
   | { action: "forwarded" }
   | { action: "paused" }
   | { action: "resolved" | "unresolved"; changed: number; held: number }
+  | { action: "fanned"; count: number }
   | { action: "ignored"; reason: string };
 
 /**
@@ -418,6 +431,34 @@ async function checksJob(deps: DispatchDeps, job: DispatchJob): Promise<Dispatch
 }
 
 /**
+ * A commit status changed. Statuses name a commit, so every pull request of the repository
+ * waiting on that commit gets the check path. None waiting is one database read and no review.
+ * One match returns that path's result. Several return how many were asked, each through
+ * `checksJob`.
+ */
+async function statusJob(deps: DispatchDeps, job: CommitStatusJob): Promise<DispatchResult> {
+  const numbers = (await deps.checksWaits?.byHead?.(job.repo, job.sha)) ?? [];
+  if (numbers.length === 0) {
+    return { action: "ignored", reason: "not waiting for CI on this head" };
+  }
+  let last: DispatchResult = { action: "ignored", reason: "not waiting for CI on this head" };
+  for (const prNumber of numbers) {
+    last = await checksJob(deps, {
+      kind: "pr_checks",
+      deliveryId: job.deliveryId,
+      installationId: job.installationId,
+      repo: job.repo,
+      prNumber,
+      headSha: job.sha,
+      actor: "commit-status",
+      receivedAt: job.receivedAt,
+      eventAt: job.receivedAt,
+    });
+  }
+  return numbers.length === 1 ? last : { action: "fanned", count: numbers.length };
+}
+
+/**
  * Comment jobs and submitted reviews go to the conversation handler, which reads them on GitHub:
  * commands in all three, replies for the judge in review comments. Without a conversation queue
  * they're acknowledged and dropped.
@@ -474,7 +515,11 @@ async function threadJob(deps: DispatchDeps, job: ReviewJob): Promise<DispatchRe
 }
 
 /** Handles one job. Throws when it should be retried (and, in the end, dead-lettered). */
-export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<DispatchResult> {
+export async function dispatch(
+  deps: DispatchDeps,
+  job: DispatchJob | CommitStatusJob,
+): Promise<DispatchResult> {
+  if (job.kind === "commit_status") return statusJob(deps, job);
   switch (job.kind) {
     case "comment":
     case "review":
@@ -518,21 +563,26 @@ export async function dispatch(deps: DispatchDeps, job: DispatchJob): Promise<Di
 }
 
 /** A queue message's job. Errors name the bad fields, never their values. */
-export function parseQueuedJob(body: string): DispatchJob {
+export function parseQueuedJob(body: string): DispatchJob | CommitStatusJob {
   let value: unknown;
   try {
     value = JSON.parse(body);
   } catch {
     throw new Error("The message isn't JSON.");
   }
-  const parsed = reviewJobSchema.safeParse(value);
+  const kind =
+    typeof value === "object" && value !== null && "kind" in value ? value.kind : undefined;
+  const parsed =
+    kind === "commit_status"
+      ? commitStatusSchema.safeParse(value)
+      : reviewJobSchema.safeParse(value);
   if (!parsed.success) {
     const fields = parsed.error.issues.map((issue) => issue.path.join(".") || "(root)");
     throw new Error(`The message isn't a review job: ${fields.join(", ")}.`);
   }
   // JSON has no undefined, so an optional field is absent rather than set to undefined, as
   // ReviewJob's exact optional properties want.
-  return parsed.data as DispatchJob;
+  return parsed.data as DispatchJob | CommitStatusJob;
 }
 
 /** One SQS record, as Lambda delivers it. */
@@ -565,7 +615,7 @@ export async function dispatchBatch(
       failures.push({ itemIdentifier: record.messageId });
       continue;
     }
-    let job: DispatchJob | undefined;
+    let job: DispatchJob | CommitStatusJob | undefined;
     try {
       try {
         job = parseQueuedJob(record.body);
@@ -580,7 +630,7 @@ export async function dispatchBatch(
         messageId: record.messageId,
         deliveryId: job.deliveryId,
         repo: job.repo,
-        prNumber: job.prNumber,
+        ...(job.kind === "commit_status" ? { sha: job.sha } : { prNumber: job.prNumber }),
         kind: job.kind,
         ...result,
       });

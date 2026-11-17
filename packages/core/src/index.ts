@@ -58,12 +58,16 @@ export {
   type KnownFinding,
 } from "./fingerprint.js";
 export {
+  PULL_REQUEST_JOB_KINDS,
   REVIEW_JOB_KINDS,
   REVIEW_REQUESTS,
   SKIP_LABEL,
   isReviewJobKind,
   reviewJobGroupId,
+  commitStatusGroupId,
+  toCommitStatus,
   toReviewJob,
+  type CommitStatusJob,
   type Ignored,
   type ReviewJob,
   type ReviewJobKind,
