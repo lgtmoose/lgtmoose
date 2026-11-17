@@ -76,6 +76,12 @@ jobs:
           '
           cat lgtmoose.config.ts
 
+      # Deploy builds linux/arm64 images. This runner is x86, so QEMU has to be registered
+      # first or `docker build` fails with "exec format error" while running the image.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
       - name: Deploy
         run: pnpm lgtmoose deploy --yes
 
