@@ -77,6 +77,24 @@ describe("PostgresQueue", () => {
     expect((await queue.receive(10, 60_000)).map((m) => m.body)).toEqual(["first"]);
   });
 
+  it("hides a retried message until its delay has passed", async () => {
+    const queue = new PostgresQueue(db, "retry-delay");
+    await queue.send({ groupId: "g", dedupeId: "1", body: "first" });
+    await queue.send({ groupId: "g", dedupeId: "2", body: "second" });
+    const [taken] = await queue.receive(1, 60_000);
+    if (taken === undefined) throw new Error("no message");
+    await queue.retryLater(taken.id, 60_000);
+    // Still ahead of its group, and not due yet. A delay of 0 would hand it straight back.
+    expect(await queue.receive(10, 60_000)).toEqual([]);
+    const locked = await client.query<{ secs: string }>(
+      "select extract(epoch from (locked_until - now())) as secs from job_queue where id = $1",
+      [taken.id],
+    );
+    const secs = Number(locked.rows[0]?.secs);
+    expect(secs).toBeGreaterThan(50);
+    expect(secs).toBeLessThan(70);
+  });
+
   it("dead-letters a message with its reason and lets its group go on", async () => {
     const queue = new PostgresQueue(db, "jobs-dl");
     const dead = new PostgresQueue(db, "dead-dl");

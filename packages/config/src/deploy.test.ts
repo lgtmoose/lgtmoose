@@ -151,7 +151,7 @@ describe("parseDeployConfig", () => {
       defineConfig({
         region: "eu-west-2",
         profile: "standard",
-        allowedOrgs: ["lgtmoose", "partake-technologies"],
+        allowedOrgs: ["lgtmoose", "example-org"],
         providers: [
           { id: "claude", harness: "claude-code", auth: "oauth-token", models: { deep: "opus" } },
           { id: "chatgpt", harness: "codex", auth: "chatgpt-login" },

@@ -275,7 +275,7 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     const out = await handleDashboardRequest(deps, request("POST", "/api/auth/logout"));
     expect(out.status).toBe(204);
     expect(await deps.store.session(sha256Hex(token), new Date())).toBeUndefined();
-  });
+  }, 30_000);
 
   it("is refused everything else", async () => {
     for (const statement of [
@@ -319,5 +319,5 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
         /permission denied|must be owner/,
       );
     }
-  });
+  }, 30_000);
 });

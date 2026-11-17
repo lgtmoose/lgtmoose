@@ -26,8 +26,10 @@ describe("tar", () => {
     ]);
     await writeFile(join(dir, "a.tar"), archive);
     const { stdout } = await exec("tar", ["-tvf", join(dir, "a.tar"), "--numeric-owner"]);
-    expect(stdout).toMatch(/drwx------ 10001\/10001 .* io\//);
-    expect(stdout).toMatch(/-rw------- 10001\/10001 .* io\/input.json/);
+    // GNU tar prints `uid/gid`. bsdtar (macOS) prints the link count, then uid and gid.
+    const owner = String.raw`(?:0\s+)?10001(?:/|\s+)10001`;
+    expect(stdout).toMatch(new RegExp(String.raw`drwx------\s+${owner} .* io/`));
+    expect(stdout).toMatch(new RegExp(String.raw`-rw-------\s+${owner} .* io/input\.json`));
     await exec("tar", ["-xf", join(dir, "a.tar"), "-C", dir]);
     expect(await readFile(join(dir, "io/input.json"), "utf8")).toBe('{"a":1}');
   });
@@ -35,7 +37,10 @@ describe("tar", () => {
   it("reads regular files back, and skips links", async () => {
     await writeFile(join(dir, "out.json"), "x".repeat(700));
     await exec("ln", ["-s", "/etc/passwd", join(dir, "link")]);
-    await exec("tar", ["-cf", join(dir, "b.tar"), "-C", dir, "out.json", "link"]);
+    // COPYFILE_DISABLE stops macOS tar adding AppleDouble `._` files to the archive.
+    await exec("tar", ["-cf", join(dir, "b.tar"), "-C", dir, "out.json", "link"], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
     const files = readTar(await readFile(join(dir, "b.tar")), 10_000);
     expect([...files.keys()]).toEqual(["out.json"]);
     expect(files.get("out.json")?.toString()).toBe("x".repeat(700));

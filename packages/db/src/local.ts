@@ -33,8 +33,10 @@ export const DEDUPE_KEEP_MS = 24 * 60 * 60 * 1000;
  * - **In order per group.** A message is handed out only when no older message of its group is
  *   waiting or in flight, so a PR's jobs are handled one at a time, oldest first. Other groups go
  *   on.
- * - **At least once.** A message in flight that isn't acknowledged before its visibility timeout
- *   (the consumer died) is handed out again.
+ * - **At least once.** A message in flight that isn't acknowledged by the time its visibility
+ *   timeout is reached (the consumer died) is handed out again. `locked_until <= now()` so a
+ *   timeout of exactly now is already due: PGlite's `now()` often stays on the same millisecond
+ *   for the next statement, and a strict `<` would keep that message locked.
  * - **Deduplicated.** A message with a `dedupeId` already in the queue is dropped, for as long as
  *   the first is kept (until `DEDUPE_KEEP_MS` after it's done). SQS's window is five minutes: a
  *   longer one only drops more redeliveries.
@@ -77,7 +79,7 @@ export class PostgresQueue {
           select q.id from ${jobQueue} q
           where q.queue = ${this.name}
             and q.done_at is null
-            and (q.locked_until is null or q.locked_until < now())
+            and (q.locked_until is null or q.locked_until <= now())
             and not exists (
               select 1 from ${jobQueue} o
               where o.queue = q.queue and o.group_id = q.group_id
@@ -106,12 +108,13 @@ export class PostgresQueue {
 
   /**
    * The message failed: it's handed out again after `delayMs`, and its group waits for it, as
-   * SQS FIFO does with a failed message.
+   * SQS FIFO does with a failed message. The delay is added to the database clock, the same
+   * clock `receive` compares against, so a delay of 0 is due on the next receive.
    */
   async retryLater(id: number, delayMs: number): Promise<void> {
     await this.db
       .update(jobQueue)
-      .set({ lockedUntil: new Date(Date.now() + delayMs) })
+      .set({ lockedUntil: sql`now() + make_interval(secs => ${delayMs / 1000})` })
       .where(and(eq(jobQueue.id, id), sql`${jobQueue.doneAt} is null`));
   }
 

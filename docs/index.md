@@ -2,7 +2,7 @@
 
 A self-hosted, open-source AI pull request reviewer. You deploy it to your own AWS account as a GitHub App, and it reviews every pull request: inline comments, a summary, a status label and a check run. Your team steers it with `@lgtmoose` commands and replies, and teaches it with learnings.
 
-> **Status: pre-release.** The review workflow, commands and learnings are built, but no release has been cut and the stack hasn't yet passed its end-to-end smoke test on a real AWS account. Reviews run in shadow mode by default: they're recorded, not posted.
+> **Status: alpha.** LGTMoose hasn't been run in production yet, its end-to-end smoke test on a real AWS account hasn't passed, and the first tagged release (v0.1.0) is still to come. Reviews run in shadow mode by default: they're recorded, not posted. Report a vulnerability as described in [Security](security.md).
 
 ## Pages
 
