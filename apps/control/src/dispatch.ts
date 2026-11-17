@@ -434,28 +434,46 @@ async function checksJob(deps: DispatchDeps, job: DispatchJob): Promise<Dispatch
  * A commit status changed. Statuses name a commit, so every pull request of the repository
  * waiting on that commit gets the check path. None waiting is one database read and no review.
  * One match returns that path's result. Several return how many were asked, each through
- * `checksJob`.
+ * `checksJob`. A failure still asks the rest, then the message fails so the failed one is retried.
  */
 async function statusJob(deps: DispatchDeps, job: CommitStatusJob): Promise<DispatchResult> {
-  const numbers = (await deps.checksWaits?.byHead?.(job.repo, job.sha)) ?? [];
+  const byHead = deps.checksWaits?.byHead;
+  if (byHead === undefined) {
+    throw new Error("A commit status needs a checks-wait store that can find a head SHA.");
+  }
+  const numbers = await byHead(job.repo, job.sha);
   if (numbers.length === 0) {
     return { action: "ignored", reason: "not waiting for CI on this head" };
   }
-  let last: DispatchResult = { action: "ignored", reason: "not waiting for CI on this head" };
+  const results: DispatchResult[] = [];
+  const failures: unknown[] = [];
   for (const prNumber of numbers) {
-    last = await checksJob(deps, {
-      kind: "pr_checks",
-      deliveryId: job.deliveryId,
-      installationId: job.installationId,
-      repo: job.repo,
-      prNumber,
-      headSha: job.sha,
-      actor: "commit-status",
-      receivedAt: job.receivedAt,
-      eventAt: job.receivedAt,
-    });
+    try {
+      results.push(
+        await checksJob(deps, {
+          kind: "pr_checks",
+          deliveryId: job.deliveryId,
+          installationId: job.installationId,
+          repo: job.repo,
+          prNumber,
+          headSha: job.sha,
+          actor: "commit-status",
+          receivedAt: job.receivedAt,
+          eventAt: job.receivedAt,
+        }),
+      );
+    } catch (error) {
+      failures.push(error);
+    }
   }
-  return numbers.length === 1 ? last : { action: "fanned", count: numbers.length };
+  // One pull request's failure must not skip the others. The message still fails so the failed
+  // one is retried; a start that already happened dedupes by its execution name.
+  if (failures.length > 0) throw failures[0];
+  if (results.length === 1) {
+    const only = results[0];
+    if (only !== undefined) return only;
+  }
+  return { action: "fanned", count: numbers.length };
 }
 
 /**

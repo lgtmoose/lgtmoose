@@ -1,8 +1,14 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
+import {
+  findingEvents,
+  findings,
+  pullRequestDispatches,
+  pullRequests,
+  reviewRuns,
+} from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -249,5 +255,14 @@ describe("the wait for CI (NIC-1078)", () => {
 
     await waits.clear("acme/shop", 71);
     expect(await waits.byHead("acme/shop", A)).toEqual([70]);
+    // A SHA without the moment the wait started is not a wait `get` would return.
+    await db
+      .update(pullRequestDispatches)
+      .set({ checksWaitSince: null })
+      .where(
+        and(eq(pullRequestDispatches.repo, "acme/shop"), eq(pullRequestDispatches.number, 70)),
+      );
+    expect(await waits.get("acme/shop", 70)).toBeUndefined();
+    expect(await waits.byHead("acme/shop", A)).toEqual([]);
   });
 });

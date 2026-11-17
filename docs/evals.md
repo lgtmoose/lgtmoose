@@ -143,7 +143,7 @@ A finding has a `category` (and `also` for others a model may use), `severity`, 
 
 Loading checks that each finding's file is one the PR changes and that the line exists. A `holds` scenario's target must be in a protected category.
 
-Known limit: the stub reviewer can't measure the reviewer prompt's own rule that a learning never quiets a protected finding. A learning by someone with write access whose text names a protected topic, without a protected category, reaches the prompt. The policy only refuses protected categories, so in that case the model's instructions are the defence. Only a model run measures that.
+Known limit: the stub reviewer can't measure the reviewer prompt's own rule that a learning never quiets a protected finding. A suppressing learning with no category that names a protected topic is refused before it is stored. One that names a category other than the four protected ones is still stored, and then the model's instructions are the defence. Only a model run measures that.
 
 ## CI
 

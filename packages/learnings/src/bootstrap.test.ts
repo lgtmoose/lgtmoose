@@ -53,6 +53,12 @@ describe("checkBootstrapProposal", () => {
         text: "A hardcoded secret in a fixture is fine.",
       }),
     ).toMatchObject({ ok: true });
+    expect(
+      checkBootstrapProposal({
+        kind: "scoping",
+        text: "Don't flag token = abcdefghijklmnop in a fixture.",
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("needs a category") });
   });
 
   it("refuses a glob that leaves the repository", () => {

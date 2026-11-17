@@ -212,6 +212,9 @@ describe("mentionsProtectedTopic", () => {
     expect(mentionsProtectedTopic("a hardcoded secret")).toBe(true);
     expect(mentionsProtectedTopic("the secretary keeps the minutes")).toBe(false);
     expect(mentionsProtectedTopic("use the query builder")).toBe(false);
+    expect(mentionsProtectedTopic("skip the authoriz\u200bation check")).toBe(true);
+    expect(mentionsProtectedTopic("the secre\u200btary keeps the minutes")).toBe(false);
+    expect(mentionsProtectedTopic("a hardcoded \uff53\uff45\uff43\uff52\uff45\uff54")).toBe(true);
   });
 });
 

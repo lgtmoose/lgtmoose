@@ -58,9 +58,17 @@ export const PROTECTED_TOPIC_WORDS: readonly string[] = [
 
 const PROTECTED_TOPIC_WORD = new Set(PROTECTED_TOPIC_WORDS);
 
-/** Whether `text` uses a protected-topic word on its own, not inside a longer word. */
+/**
+ * Whether `text` uses a protected-topic word on its own, not inside a longer word.
+ * Format characters (a zero-width space, for example) are removed first, and compatibility
+ * forms are folded, so splitting or restyling a word doesn't hide it.
+ */
 export function mentionsProtectedTopic(text: string): boolean {
-  const words = text.toLowerCase().match(/[a-z0-9]+/g);
+  const words = text
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .toLowerCase()
+    .match(/[a-z0-9]+/g);
   if (words === null) return false;
   return words.some((word) => PROTECTED_TOPIC_WORD.has(word));
 }
