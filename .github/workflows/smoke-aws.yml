@@ -20,7 +20,9 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # Deploy builds linux/arm64 images, so an arm64 runner builds them natively. On x86 they'd
+    # need QEMU, which is slow enough to risk the timeout.
+    runs-on: ubuntu-24.04-arm
     environment: aws-smoke
     # RDS alone takes about 15 minutes each way; the image builds add more.
     timeout-minutes: 150
@@ -44,7 +46,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup
 
@@ -75,12 +77,6 @@ jobs:
             require("node:fs").writeFileSync("lgtmoose.config.ts", text);
           '
           cat lgtmoose.config.ts
-
-      # Deploy builds linux/arm64 images. This runner is x86, so QEMU has to be registered
-      # first or `docker build` fails with "exec format error" while running the image.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        with:
-          platforms: arm64
 
       - name: Deploy
         run: pnpm lgtmoose deploy --yes
