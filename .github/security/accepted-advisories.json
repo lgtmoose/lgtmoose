@@ -1,4 +1,11 @@
 {
   "$comment": "High and critical npm advisories the dependency audit (tools/security/audit.mjs) accepts until their expiry. Each needs a reason. An expired entry fails the audit, so fix the dependency or accept it again with a new reason and date.",
-  "accepted": []
+  "accepted": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "reason": "picomatch 4.0.7 is the newest release and this advisory has no patched version. The hang needs a crafted extglob, and the globs we compile come from repository config and approved learnings, which need write access.",
+      "expires": "2027-02-15"
+    }
+  ]
 }
