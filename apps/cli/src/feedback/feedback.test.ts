@@ -79,6 +79,7 @@ function fakeDeps(options: {
         providers: [{ id: "claude", harness: "claude-code", auth: "oauth-token" }],
       }),
     stacks: () => ({
+      physicalIds: async () => [],
       describe: async (name) =>
         name === STACK_NAMES.data && options.deployed !== false
           ? {

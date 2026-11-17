@@ -82,6 +82,25 @@ describe("NetworkStack", () => {
       for (const endpoint of interfaces) expect(endpoint?.PrivateDnsEnabled).toBe(true);
       expect(endpoints.filter((e) => e?.VpcEndpointType === "Gateway")).toHaveLength(1);
     });
+
+    it("lets everything in the VPC reach the interface endpoints over HTTPS", () => {
+      const { resources } = synth(profile);
+      const [, endpointSg] =
+        ofType(resources, "AWS::EC2::SecurityGroup").find(
+          ([, group]) => group.Properties?.GroupDescription === "LGTMoose VPC interface endpoints",
+        ) ?? [];
+      const ingress = (endpointSg?.Properties?.SecurityGroupIngress ?? []) as Record<
+        string,
+        unknown
+      >[];
+      expect(ingress).toContainEqual(
+        expect.objectContaining({
+          FromPort: 443,
+          ToPort: 443,
+          CidrIp: { "Fn::GetAtt": [expect.stringMatching(/^Vpc/), "CidrBlock"] },
+        }),
+      );
+    });
   });
 
   it("lean: one t4g.nano NAT instance and no NAT gateways", () => {

@@ -37,6 +37,32 @@ describe("cloudFormationLookup", () => {
   });
 });
 
+describe("physicalIds", () => {
+  it("returns the ids of one resource type, and nothing for a missing stack", async () => {
+    const lookup = cloudFormationLookup(
+      {
+        send: () =>
+          Promise.resolve({
+            StackResources: [
+              { ResourceType: "AWS::RDS::DBInstance", PhysicalResourceId: "db-1" },
+              { ResourceType: "AWS::S3::Bucket", PhysicalResourceId: "bucket-1" },
+              { ResourceType: "AWS::RDS::DBInstance" },
+            ],
+          }),
+      },
+      "us-east-1",
+    );
+    await expect(lookup.physicalIds("Lgtmoose-Data", "AWS::RDS::DBInstance")).resolves.toEqual([
+      "db-1",
+    ]);
+    const missing = cloudFormationLookup(
+      { send: () => Promise.reject(new Error("Stack with id Lgtmoose-Data does not exist")) },
+      "us-east-1",
+    );
+    await expect(missing.physicalIds("Lgtmoose-Data", "AWS::RDS::DBInstance")).resolves.toEqual([]);
+  });
+});
+
 describe("isUpdatable", () => {
   it("accepts only stacks that finished and still have resources", () => {
     for (const status of ["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"]) {
