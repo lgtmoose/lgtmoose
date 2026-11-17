@@ -82,7 +82,17 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # A pull request opened with the workflow token does not start other workflows, so the
+      # version pull request would have no checks. This App's token does. The owner stores its
+      # id and key (docs/releasing.md).
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: release-token
+        with:
+          app-id: ${{ secrets.LGTMOOSE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.LGTMOOSE_RELEASE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.release-token.outputs.token }}
       - uses: ./.github/actions/setup
       # Opens or updates "Version packages" from the pending changesets. No `publish`: a release
       # happens only when the owner pushes a tag.
@@ -91,8 +101,9 @@ jobs:
           version-script: pnpm changeset version
           pr-title: Version packages
           commit-message: Version packages
+          github-token: ${{ steps.release-token.outputs.token }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
 
   images:
     name: image (${{ matrix.image.name }})
