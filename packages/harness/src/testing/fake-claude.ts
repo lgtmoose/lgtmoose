@@ -43,6 +43,20 @@ const { spawn } = require("node:child_process");
 const dir = ${JSON.stringify(dir)};
 const responses = ${JSON.stringify(responses)};
 const callsFile = dir + "/calls.jsonl";
+function arm(r) {
+  if (!r) return;
+  if (r.grandchild && !fs.existsSync(dir + "/grandchild.pid")) {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    fs.writeFileSync(dir + "/grandchild.pid", String(child.pid));
+    child.unref();
+  }
+  if (r.hang && !fs.existsSync(dir + "/child.pid")) {
+    fs.writeFileSync(dir + "/child.pid", String(process.pid));
+    process.on("SIGTERM", () => {});
+  }
+}
+// Before stdin arrives, so a short timeout under a busy runner still finds the pids.
+arm(responses[0]);
 let input = "";
 process.stdin.on("data", (chunk) => (input += chunk));
 process.stdin.on("end", () => {
@@ -54,17 +68,11 @@ process.stdin.on("end", () => {
     JSON.stringify({ argv: process.argv.slice(2), env: process.env, stdin: input, cwd: process.cwd() }) + "\\n",
   );
   const r = responses[Math.min(n, responses.length - 1)];
-  if (r.grandchild) {
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    fs.writeFileSync(dir + "/grandchild.pid", String(child.pid));
-    child.unref();
-  }
+  arm(r);
   for (const line of r.lines ?? []) process.stdout.write(JSON.stringify(line) + "\\n");
   if (r.stdout) process.stdout.write(r.stdout);
   if (r.stderr) process.stderr.write(r.stderr);
   if (r.hang) {
-    fs.writeFileSync(dir + "/child.pid", String(process.pid));
-    process.on("SIGTERM", () => {});
     setInterval(() => {}, 1000);
     return;
   }

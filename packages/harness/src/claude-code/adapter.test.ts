@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -111,7 +111,7 @@ describe("ClaudeCodeHarness", () => {
     if (!call) throw new Error("claude wasn't called");
     const argv = call.argv;
     expect(call.stdin).toBe("Review the batch.");
-    expect(call.cwd).toBe(cwd);
+    expect(call.cwd).toBe(await realpath(cwd));
     expect(argv[0]).toBe("-p");
     expect(flagValues(argv, "--output-format")).toEqual(["stream-json"]);
     expect(argv).toContain("--verbose");
@@ -182,7 +182,9 @@ describe("ClaudeCodeHarness", () => {
         !name.startsWith("CLAUDE_CODE_") &&
         !name.startsWith("DISABLE_") &&
         !name.startsWith("GIT_") &&
-        name !== "PAGER",
+        name !== "PAGER" &&
+        // macOS adds this to every process. The harness doesn't pass it.
+        name !== "__CF_USER_TEXT_ENCODING",
     );
     expect(extra).toEqual([]);
   });
@@ -327,16 +329,17 @@ describe("ClaudeCodeHarness", () => {
     const harness = await harnessFor([{ grandchild: true, hang: true }]);
     const started = Date.now();
     const error = await failure(
-      harness.run({ prompt: "p", cwd, schema, model: "sonnet", timeoutMs: 500, runId: "slow" }),
+      harness.run({ prompt: "p", cwd, schema, model: "sonnet", timeoutMs: 2_500, runId: "slow" }),
     );
     expect(error.kind).toBe("timeout");
     // SIGTERM is ignored, so this waited for the SIGKILL after the grace period.
-    expect(Date.now() - started).toBeLessThan(5000);
+    // The timeout leaves room for Node to start the fake while the rest of the suite is running.
+    expect(Date.now() - started).toBeLessThan(10_000);
     expect(await waitGone((fake as FakeClaude).pid("child"))).toBe(true);
     expect(await waitGone((fake as FakeClaude).pid("grandchild"))).toBe(true);
     expect(error.transcriptKeys).toEqual(["transcripts/slow/1.jsonl"]);
     expect(store.objects.get("transcripts/slow/1.jsonl")).toContain('"stopped":"timeout"');
-  });
+  }, 15_000);
 
   it("kills processes the CLI leaves behind when it exits", async () => {
     const harness = await harnessFor([
