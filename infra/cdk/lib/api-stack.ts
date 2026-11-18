@@ -96,7 +96,9 @@ export class ApiStack extends Stack {
       environment: {
         LGTMOOSE_VERSION: props.version,
         JOB_QUEUE_URL: this.jobQueue.queueUrl,
-        GITHUB_WEBHOOK_SECRET_ARN: webhookSecret.secretArn,
+        // The name, not secretArn. A secret imported by name has an ARN without the random
+        // suffix, and GetSecretValue rejects that (ResourceNotFound), so every webhook 500s.
+        GITHUB_WEBHOOK_SECRET_ARN: webhookSecret.secretName,
         // Org names can't contain commas (the config schema allows letters, digits and hyphens).
         ALLOWED_ORGS: props.allowedOrgs.join(","),
       },

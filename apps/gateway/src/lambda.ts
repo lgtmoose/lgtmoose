@@ -10,9 +10,10 @@ import { parseAllowedOrgs, requiredEnv } from "./env.js";
  * Lambda entry point behind the API Gateway HTTP API (payload format 2.0). The only
  * Lambda-specific code: everything else is a normal Express app.
  *
- * Environment (set by the Api stack): JOB_QUEUE_URL, GITHUB_WEBHOOK_SECRET_ARN, ALLOWED_ORGS
- * (comma-separated) and LGTMOOSE_VERSION. A missing value fails the cold start, which shows up
- * as failed deliveries in GitHub rather than webhooks quietly ignored.
+ * Environment (set by the Api stack): JOB_QUEUE_URL, GITHUB_WEBHOOK_SECRET_ARN (the secret's
+ * name; an ARN missing the random suffix does not resolve), ALLOWED_ORGS (comma-separated) and
+ * LGTMOOSE_VERSION. A missing value fails the cold start, which shows up as failed deliveries
+ * in GitHub rather than webhooks quietly ignored.
  */
 const app = createApp(
   // API Gateway is the one proxy in front of the Lambda.
