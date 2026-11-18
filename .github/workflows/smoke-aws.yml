@@ -96,8 +96,8 @@ jobs:
             pnpm --filter @lgtmoose/gateway smoke:webhook
 
       # The gateway answers 202 only once the job is on the queue. The dispatcher consumes the
-      # queue, so the job is looked for in its log: a comment job is acknowledged there without
-      # starting a review.
+      # queue and forwards a comment to the conversation queue, without starting a review. The
+      # comment has no id, so the conversation Lambda ignores it before calling GitHub.
       - name: Check the dispatcher took the job from the queue
         env:
           DELIVERY_ID: ${{ steps.webhook.outputs.delivery_id }}
@@ -111,8 +111,8 @@ jobs:
             found=$(aws logs filter-log-events --log-group-name "$group" \
               --filter-pattern "\"$DELIVERY_ID\"" --query 'events[].message' --output json)
             if echo "$found" | jq -e --arg id "$DELIVERY_ID" \
-              'map(fromjson? // {}) | any(.message == "dispatched" and .deliveryId == $id and .action == "deferred")' >/dev/null; then
-              echo "The dispatcher took delivery $DELIVERY_ID from the queue and deferred it."
+              'map(fromjson? // {}) | any(.message == "dispatched" and .deliveryId == $id and .action == "forwarded")' >/dev/null; then
+              echo "The dispatcher took delivery $DELIVERY_ID from the queue and forwarded it."
               exit 0
             fi
             sleep 10

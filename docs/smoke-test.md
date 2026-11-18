@@ -8,7 +8,7 @@
    - a `ping`, which must answer 200;
    - the same `ping` with a wrong signature, which must answer 401;
    - a comment on a made-up PR in the allowed org, which must answer 202. The gateway answers 202 only once the job is on the SQS queue.
-4. Looks for that delivery in the dispatcher's log, to show the job went from the queue to the dispatcher. A comment job is acknowledged there without starting a review, so the run makes no model calls and starts no review tasks.
+4. Looks for that delivery in the dispatcher's log, to show the job went from the queue to the dispatcher. A comment job is forwarded to the conversation queue and starts no review, so the run makes no model calls and starts no review tasks. The comment has no id, so the conversation Lambda ignores it before calling GitHub.
 5. Runs `pnpm lgtmoose destroy --purge --yes`, always: also when an earlier step failed or the run was cancelled.
 6. Checks that no `Lgtmoose-*` stack is left.
 

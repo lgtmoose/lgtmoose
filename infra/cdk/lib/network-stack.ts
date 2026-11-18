@@ -53,7 +53,7 @@ const SANDBOX_INTERFACE_ENDPOINTS = {
  *   through the proxy, and AWS services only through VPC endpoints.
  *
  * Both profiles span two AZs, because an RDS subnet group needs two.
- * - lean: one NAT instance (t4g.nano); sandbox subnet and interface endpoints in one AZ
+ * - lean: one NAT instance (t4g.micro); sandbox subnet and interface endpoints in one AZ
  * - standard: a NAT gateway, sandbox subnet and interface endpoints in each AZ
  */
 export class NetworkStack extends Stack {
@@ -73,7 +73,10 @@ export class NetworkStack extends Stack {
 
     const natInstance = lean
       ? NatProvider.instanceV2({
-          instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.NANO),
+          // nano has 512 MiB. The instance installs iptables on boot so it can masquerade, and
+          // that install is killed for lack of memory. With no masquerade, calls from the app
+          // subnets to SQS, GitHub and the model APIs hang until they time out.
+          instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.MICRO),
           machineImage: MachineImage.latestAmazonLinux2023({ cpuType: AmazonLinuxCpuType.ARM_64 }),
           defaultAllowedTraffic: NatTrafficDirection.OUTBOUND_ONLY,
         })

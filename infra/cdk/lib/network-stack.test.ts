@@ -103,11 +103,11 @@ describe("NetworkStack", () => {
     });
   });
 
-  it("lean: one t4g.nano NAT instance and no NAT gateways", () => {
+  it("lean: one t4g.micro NAT instance and no NAT gateways", () => {
     const { template, resources } = synth("lean");
     template.resourceCountIs("AWS::EC2::NatGateway", 0);
     template.resourceCountIs("AWS::EC2::Instance", 1);
-    template.hasResourceProperties("AWS::EC2::Instance", { InstanceType: "t4g.nano" });
+    template.hasResourceProperties("AWS::EC2::Instance", { InstanceType: "t4g.micro" });
 
     // The NAT instance never accepts connections from the internet.
     const ingress = ofType(resources, "AWS::EC2::SecurityGroup").flatMap(
