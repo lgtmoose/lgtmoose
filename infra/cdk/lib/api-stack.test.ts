@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
+import { SECRET_NAMES } from "@lgtmoose/config";
 import { ROUTES } from "@lgtmoose/gateway/paths";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiStack, JOB_VISIBILITY_TIMEOUT, MAX_JOB_ATTEMPTS } from "./api-stack.js";
@@ -70,7 +71,7 @@ describe("ApiStack", () => {
         Variables: {
           LGTMOOSE_VERSION: "1.2.3",
           JOB_QUEUE_URL: Match.anyValue(),
-          GITHUB_WEBHOOK_SECRET_ARN: Match.anyValue(),
+          GITHUB_WEBHOOK_SECRET_ID: SECRET_NAMES.githubWebhook,
           ALLOWED_ORGS: "acme-corp,octo-dev",
         },
       },

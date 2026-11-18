@@ -42,9 +42,9 @@ import {
   BATCH_TIMEOUT,
   RUN_PREFIX,
   ReviewWorkflow,
-  secretArnPattern,
   type ReviewProvider,
 } from "./review-workflow.js";
+import { partialArnHidesName, secretArnPattern, secretId } from "./secret-ref.js";
 import { taskImage } from "./images.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
@@ -240,7 +240,7 @@ export class WorkflowStack extends Stack {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
-        GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        GITHUB_APP_SECRET_ARN: secretId(props.githubAppSecret),
         LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),
         LGTMOOSE_SHADOW: String(props.shadow),
@@ -321,7 +321,7 @@ export class WorkflowStack extends Stack {
         // read any secret.
         ...(secret === undefined
           ? {}
-          : { secrets: { LGTMOOSE_PROVIDER_CREDENTIAL: EcsSecret.fromSecretsManager(secret) } }),
+          : { secrets: { LGTMOOSE_PROVIDER_CREDENTIAL: sandboxCredential(provider.id, secret) } }),
       });
       if (provider.auth === "bedrock") {
         for (const statement of bedrockStatements(provider, this.partition, this.account)) {
@@ -529,7 +529,7 @@ export class WorkflowStack extends Stack {
         JOB_QUEUE_URL: props.jobQueue.queueUrl,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
-        GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        GITHUB_APP_SECRET_ARN: secretId(props.githubAppSecret),
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
         LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
@@ -578,7 +578,7 @@ export class WorkflowStack extends Stack {
         JOB_QUEUE_URL: props.jobQueue.queueUrl,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
-        GITHUB_APP_SECRET_ARN: props.githubAppSecret.secretArn,
+        GITHUB_APP_SECRET_ARN: secretId(props.githubAppSecret),
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         LGTMOOSE_SHADOW: String(props.shadow),
         RECONCILE_LOOKBACK_HOURS: String(props.reconcileLookbackHours),
@@ -698,7 +698,7 @@ export class WorkflowStack extends Stack {
             stored.map(({ provider, secret }) => [
               provider.id,
               {
-                secretId: secret.secretArn,
+                secretId: secretId(secret),
                 auth: provider.auth,
                 limit: credentialConcurrency(provider),
               },
@@ -796,6 +796,22 @@ export class WorkflowStack extends Stack {
     }
     return container;
   }
+}
+
+/**
+ * The sandbox task's provider credential. ECS injects a secret only by ARN, and a secret imported
+ * by name has no full ARN. A partial ARN is fine unless the name ends in a hyphen and six
+ * characters: Secrets Manager then looks up a different secret and the task never starts.
+ */
+function sandboxCredential(providerId: string, secret: ISecret): EcsSecret {
+  if (partialArnHidesName(secret.secretName)) {
+    throw new Error(
+      `The sandbox for provider "${providerId}" can't be given secret "${secret.secretName}" by ARN. ` +
+        "The name ends in a hyphen and six characters, so Secrets Manager reads that ending as the " +
+        "secret's random suffix and looks up a different secret. Choose a provider id that doesn't end that way.",
+    );
+  }
+  return EcsSecret.fromSecretsManager(secret);
 }
 
 /**
