@@ -115,7 +115,10 @@ describe("NetworkStack", () => {
     expect(userData).toContain("ip -4 route show default");
     expect(userData).toContain("MASQUERADE");
     expect(userData).toContain("for attempt in 1 2 3 4 5");
+    expect(userData).toContain("systemctl start iptables");
     expect(userData).not.toContain("route | awk");
+    expect(userData).not.toContain("systemctl restart");
+    expect(userData).not.toContain("service iptables save");
 
     // The NAT instance never accepts connections from the internet.
     const ingress = ofType(resources, "AWS::EC2::SecurityGroup").flatMap(

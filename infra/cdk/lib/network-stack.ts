@@ -61,9 +61,13 @@ function leanNatUserData(): UserData {
     'test -n "$nic"',
     '/sbin/iptables -t nat -A POSTROUTING -o "$nic" -j MASQUERADE',
     "/sbin/iptables -P FORWARD ACCEPT",
+    "/sbin/iptables -F FORWARD",
+    // `service iptables save` is not a supported action on Amazon Linux 2023, so it would not
+    // persist the rules. The rules are already in the kernel; enabling the service loads this
+    // file on the next boot. Restarting it here would flush them first.
     "/sbin/iptables-save > /etc/sysconfig/iptables",
     "systemctl enable iptables",
-    "systemctl restart iptables",
+    "systemctl start iptables",
   );
   return userData;
 }
