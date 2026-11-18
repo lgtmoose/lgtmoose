@@ -115,7 +115,21 @@ describe("WorkflowStack", () => {
     const [container] = taskDefinition("control").ContainerDefinitions as {
       Environment: { Name: string; Value: unknown }[];
     }[];
-    const names = (container?.Environment ?? []).map((e) => e.Name);
+    const env = Object.fromEntries((container?.Environment ?? []).map((e) => [e.Name, e.Value]));
+    const names = Object.keys(env);
+    expect(env.GITHUB_APP_SECRET_ARN).toBe(SECRET_NAMES.githubApp);
+    const lambdaSecretIds = Object.values(resources)
+      .filter((resource) => resource.Type === "AWS::Lambda::Function")
+      .flatMap((resource) => {
+        const variables =
+          (resource.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables ??
+          {};
+        return variables.GITHUB_APP_SECRET_ARN === undefined
+          ? []
+          : [variables.GITHUB_APP_SECRET_ARN];
+      });
+    expect(lambdaSecretIds.length).toBeGreaterThan(0);
+    expect(lambdaSecretIds).toEqual(lambdaSecretIds.map(() => SECRET_NAMES.githubApp));
     expect(names).toContain("DATABASE_SECRET_ARN");
     expect(names).not.toContain("DATABASE_HOST");
     // A cross-stack import of it would be named after the GetAtt: ...EndpointAddress...
@@ -133,6 +147,14 @@ describe("WorkflowStack", () => {
       expect(bedrock.length > 0).toBe(provider === "bedrock");
     }
   });
+
+  it("refuses a provider whose secret name ends like a random suffix", () => {
+    const config = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      providers: [{ id: "x-backup", harness: "claude-code", auth: "oauth-token" }],
+    });
+    expect(() => buildApp(config, appWithoutBundling())).toThrow(/lgtmoose\/provider\/x-backup/);
+  }, 120_000);
 
   it("injects only the task's own provider credential, read by its execution role", () => {
     const claude = taskDefinition("claude");

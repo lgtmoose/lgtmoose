@@ -133,7 +133,11 @@ describe("credential broker", () => {
     const env = stack.broker()?.env ?? {};
     const credentials = JSON.parse(envText(env.LGTMOOSE_CREDENTIALS)) as Record<string, unknown>;
     expect(Object.keys(credentials)).toEqual(["claude"]);
-    expect(credentials.claude).toMatchObject({ auth: "oauth-token", limit: 2 });
+    expect(credentials.claude).toMatchObject({
+      auth: "oauth-token",
+      limit: 2,
+      secretId: SECRET_NAMES.provider("claude"),
+    });
     // An attempt may run 30 minutes.
     expect(Number(env.LGTMOOSE_LEASE_TTL_SECONDS)).toBeGreaterThan(30 * 60);
   });
@@ -180,7 +184,12 @@ describe("credential broker", () => {
 
   it("checks stored credentials every 6 hours without reading them, and alarms per provider", () => {
     const health = stack.health();
-    expect(Object.keys(JSON.parse(envText(health?.env.LGTMOOSE_CREDENTIALS)))).toEqual(["claude"]);
+    const credentials = JSON.parse(envText(health?.env.LGTMOOSE_CREDENTIALS)) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(credentials)).toEqual(["claude"]);
+    expect(credentials.claude).toMatchObject({ secretId: SECRET_NAMES.provider("claude") });
     expect(actions(stack.statements(health!.fn)).sort()).toEqual([
       "secretsmanager:DescribeSecret",
       "secretsmanager:ListSecretVersionIds",
@@ -218,6 +227,7 @@ describe("credential broker", () => {
       expect(JSON.parse(envText(broker.env.LGTMOOSE_CREDENTIALS)).codex).toMatchObject({
         auth: "chatgpt-login",
         limit: 1,
+        secretId: SECRET_NAMES.provider("codex"),
       });
       const values = codex
         .statements(broker.fn)

@@ -2,4 +2,4 @@
 "lgtmoose": patch
 ---
 
-The gateway reads the webhook secret by its name. The ARN of a secret imported by name has no random suffix, and Secrets Manager rejects that, so every webhook came back as an internal error.
+Imported secrets are read by name. A partial ARN whose name ends in a hyphen and six characters is resolved as a different secret, which made every webhook fail before its signature was checked. A provider id that would produce such a name is refused for the sandbox, which can only be given an ARN.

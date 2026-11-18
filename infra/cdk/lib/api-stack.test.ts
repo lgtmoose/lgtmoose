@@ -71,7 +71,7 @@ describe("ApiStack", () => {
         Variables: {
           LGTMOOSE_VERSION: "1.2.3",
           JOB_QUEUE_URL: Match.anyValue(),
-          GITHUB_WEBHOOK_SECRET_ARN: SECRET_NAMES.githubWebhook,
+          GITHUB_WEBHOOK_SECRET_ID: SECRET_NAMES.githubWebhook,
           ALLOWED_ORGS: "acme-corp,octo-dev",
         },
       },

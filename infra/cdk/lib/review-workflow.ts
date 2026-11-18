@@ -37,6 +37,7 @@ import {
 } from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
 import { lgtmooseFunction } from "./lambda.js";
+import { secretArnPattern, secretId } from "./secret-ref.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const PRESIGN_HANDLER = join(REPO_ROOT, "apps/control/src/lambda.ts");
@@ -561,7 +562,7 @@ export class ReviewWorkflow extends Construct {
             stored.map((credential) => [
               credential.id,
               {
-                secretId: credential.secret.secretArn,
+                secretId: secretId(credential.secret),
                 auth: credential.auth,
                 limit: credential.limit,
               },
@@ -703,12 +704,4 @@ export class ReviewWorkflow extends Construct {
     }
     return acquire.next(presign).next(sandbox).next(releaseAfterTask).next(done);
   }
-}
-
-/**
- * A secret's ARN for IAM. A secret referenced by name has no full ARN; this matches it with the
- * six random characters Secrets Manager adds.
- */
-export function secretArnPattern(secret: ISecret): string {
-  return secret.secretFullArn ?? `${secret.secretArn}-??????`;
 }

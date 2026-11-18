@@ -12,6 +12,7 @@ import type { Construct } from "constructs";
 import { SECRET_NAMES, STACK_OUTPUTS } from "@lgtmoose/config";
 import { ROUTES } from "@lgtmoose/gateway/paths";
 import { lgtmooseFunction } from "./lambda.js";
+import { secretId } from "./secret-ref.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const GATEWAY_HANDLER = join(REPO_ROOT, "apps/gateway/src/lambda.ts");
@@ -96,9 +97,7 @@ export class ApiStack extends Stack {
       environment: {
         LGTMOOSE_VERSION: props.version,
         JOB_QUEUE_URL: this.jobQueue.queueUrl,
-        // The name, not secretArn. A secret imported by name has an ARN without the random
-        // suffix, and GetSecretValue rejects that (ResourceNotFound), so every webhook 500s.
-        GITHUB_WEBHOOK_SECRET_ARN: webhookSecret.secretName,
+        GITHUB_WEBHOOK_SECRET_ID: secretId(webhookSecret),
         // Org names can't contain commas (the config schema allows letters, digits and hyphens).
         ALLOWED_ORGS: props.allowedOrgs.join(","),
       },
