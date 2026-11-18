@@ -13,6 +13,7 @@ import {
   Port,
   SecurityGroup,
   SubnetType,
+  UserData,
   Vpc,
   type ISecurityGroup,
   type SubnetSelection,
@@ -32,6 +33,40 @@ export interface NetworkStackProps extends StackProps {
 
 /** Port the egress proxy (NIC-813) listens on. */
 export const PROXY_PORT = 3128;
+
+/**
+ * Boot script for the lean NAT instance. It has to finish for anything in an app subnet to
+ * reach SQS, GitHub or a model API: those have no VPC endpoint, so they go out through here.
+ */
+function leanNatUserData(): UserData {
+  const userData = UserData.forLinux();
+  userData.addCommands(
+    "set -euo pipefail",
+    // The root volume is XFS, where a fallocate'd file has holes and cannot be swap.
+    "dd if=/dev/zero of=/swapfile bs=1M count=512",
+    "chmod 600 /swapfile",
+    "mkswap /swapfile",
+    "swapon /swapfile",
+    // cloud-init also runs dnf, and that can delete this install's cache mid-transaction.
+    "installed=0",
+    "for attempt in 1 2 3 4 5; do",
+    "  if yum install iptables-services -y; then installed=1; break; fi",
+    "  sleep 5",
+    "done",
+    'test "$installed" = 1',
+    'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/custom-ip-forwarding.conf',
+    "sysctl -p /etc/sysctl.d/custom-ip-forwarding.conf",
+    // `ip` is on the AMI. `route` is not, and an empty interface makes this rule a no-op.
+    "nic=$(/sbin/ip -4 route show default | awk '{print $5; exit}')",
+    'test -n "$nic"',
+    '/sbin/iptables -t nat -A POSTROUTING -o "$nic" -j MASQUERADE',
+    "/sbin/iptables -P FORWARD ACCEPT",
+    "/sbin/iptables-save > /etc/sysconfig/iptables",
+    "systemctl enable iptables",
+    "systemctl restart iptables",
+  );
+  return userData;
+}
 
 export const POSTGRES_PORT = 5432;
 
@@ -73,12 +108,14 @@ export class NetworkStack extends Stack {
 
     const natInstance = lean
       ? NatProvider.instanceV2({
-          // nano has 512 MiB. The instance installs iptables on boot so it can masquerade, and
-          // that install is killed for lack of memory. With no masquerade, calls from the app
-          // subnets to SQS, GitHub and the model APIs hang until they time out.
+          // nano has 512 MiB, and the boot install of iptables is killed there. micro has 1 GiB;
+          // the swap below covers dnf while cloud-init is also running. The default user data is
+          // replaced because Amazon Linux 2023 has no `route` command, so that script never
+          // adds the masquerade rule and private-subnet traffic is dropped.
           instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.MICRO),
           machineImage: MachineImage.latestAmazonLinux2023({ cpuType: AmazonLinuxCpuType.ARM_64 }),
           defaultAllowedTraffic: NatTrafficDirection.OUTBOUND_ONLY,
+          userData: leanNatUserData(),
         })
       : undefined;
 
