@@ -103,11 +103,22 @@ describe("NetworkStack", () => {
     });
   });
 
-  it("lean: one t4g.nano NAT instance and no NAT gateways", () => {
+  it("lean: one t4g.micro NAT instance and no NAT gateways", () => {
     const { template, resources } = synth("lean");
     template.resourceCountIs("AWS::EC2::NatGateway", 0);
     template.resourceCountIs("AWS::EC2::Instance", 1);
-    template.hasResourceProperties("AWS::EC2::Instance", { InstanceType: "t4g.nano" });
+    template.hasResourceProperties("AWS::EC2::Instance", { InstanceType: "t4g.micro" });
+    const [instance] = ofType(resources, "AWS::EC2::Instance");
+    const userData = JSON.stringify(instance?.[1].Properties?.UserData);
+    // Amazon Linux 2023 has `ip` and no `route`. The default script's `route` leaves the
+    // instance unable to masquerade.
+    expect(userData).toContain("ip -4 route show default");
+    expect(userData).toContain("MASQUERADE");
+    expect(userData).toContain("for attempt in 1 2 3 4 5");
+    expect(userData).toContain("systemctl start iptables");
+    expect(userData).not.toContain("route | awk");
+    expect(userData).not.toContain("systemctl restart");
+    expect(userData).not.toContain("service iptables save");
 
     // The NAT instance never accepts connections from the internet.
     const ingress = ofType(resources, "AWS::EC2::SecurityGroup").flatMap(

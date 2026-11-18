@@ -54,8 +54,9 @@ describe("runWebhookSmoke", () => {
       deliveryId: "smoke-3",
       repo: "Acme-Corp/lgtmoose-smoke-test",
       prNumber: 1,
-      commentId: 1,
     });
+    // No comment id: the conversation Lambda ignores the job before it calls GitHub.
+    expect(jobs[0]).not.toHaveProperty("commentId");
   });
 
   it("fails every signed check when the secret is wrong, and queues nothing", async () => {

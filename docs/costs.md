@@ -9,7 +9,7 @@ These run whether or not anyone opens a PR. `profile` in `lgtmoose.config.ts` pi
 | Part                                                                 | `lean` (default)                                     | `standard`                                                           |
 | -------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | Database                                                             | RDS PostgreSQL on `db.t4g.micro`, one AZ, 20 GiB gp3 | RDS PostgreSQL on `db.t4g.small` with a Multi-AZ standby, 20 GiB gp3 |
-| NAT for the app subnets                                              | one `t4g.nano` NAT instance                          | a NAT gateway in each of two AZs                                     |
+| NAT for the app subnets                                              | one `t4g.micro` NAT instance                         | a NAT gateway in each of two AZs                                     |
 | Egress proxy (Fargate, ARM64, 0.25 vCPU, 512 MiB)                    | one task                                             | two tasks                                                            |
 | Interface VPC endpoints (ECR API, ECR Docker, Secrets Manager, Logs) | 4, in one AZ                                         | 4 in each of two AZs: 8                                              |
 | Log retention                                                        | a week (the credential audit log: 3 months)          | a month (the credential audit log: a year)                           |
@@ -25,7 +25,7 @@ Both profiles span two AZs, because an RDS subnet group needs two; `lean` puts i
 
 | Line                                                       | `lean`                                     | `standard`                                |
 | ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------- |
-| NAT                                                        | t4g.nano at $0.0042/h: $3.07               | 2 NAT gateways at $0.045/h: $65.70        |
+| NAT                                                        | t4g.micro at $0.0084/h: $6.13              | 2 NAT gateways at $0.045/h: $65.70        |
 | NAT public IPv4 ($0.005/h each)                            | 1: $3.65                                   | 2: $7.30                                  |
 | NAT instance disk (8 GiB gp3 at $0.08/GB-mo)               | $0.64                                      | none                                      |
 | Interface endpoints ($0.01/h each per AZ)                  | 4: $29.20                                  | 8: $58.40                                 |
@@ -34,7 +34,7 @@ Both profiles span two AZs, because an RDS subnet group needs two; `lean` puts i
 | Egress proxy (Fargate ARM: $0.03238/vCPU-h, $0.00356/GB-h) | 1 task: $7.21                              | 2 tasks: $14.42                           |
 | Secrets Manager ($0.40 each; 4 with one stored provider)   | $1.60                                      | $1.60                                     |
 | CloudWatch alarms ($0.10 each, one stored provider)        | 3: $0.30                                   | 6: $0.60                                  |
-| **Fixed total**                                            | **about $60 a month**                      | **about $200 a month**                    |
+| **Fixed total**                                            | **about $63 a month**                      | **about $200 a month**                    |
 
 On top of the fixed total, and growing with use:
 

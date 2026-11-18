@@ -8,10 +8,10 @@ import { signBody } from "./signature.js";
  * 1. A `ping` signed with the webhook secret: 200 `{ ok: true }`.
  * 2. The same `ping` with a wrong signature: 401. A gateway that accepts it isn't verifying.
  * 3. An `issue_comment` on a PR in an allowed org: 202 `{ queued: true }`. The gateway answers
- *    202 only once the job is on the queue. A comment job is used because the dispatcher
- *    acknowledges it without starting a review (comment handling arrives with M5), so the smoke
- *    test costs no model call and starts no task. The workflow then finds the delivery ID in the
- *    dispatcher's log.
+ *    202 only once the job is on the queue. The dispatcher forwards a comment to the conversation
+ *    queue and logs that, without starting a review, so the smoke test costs no model call and
+ *    starts no task. The comment has no id, so the conversation Lambda ignores it before calling
+ *    GitHub. The workflow then finds the delivery ID in the dispatcher's log.
  *
  * The repository and PR are made up: nothing is read from or written to GitHub.
  */
@@ -34,7 +34,8 @@ export function commentPayload(owner: string, now: Date): Record<string, unknown
   return {
     action: "created",
     issue: { number: 1, pull_request: { url: "" }, updated_at: at, labels: [] },
-    comment: { id: 1, body: "lgtmoose smoke test", created_at: at },
+    // No id: the conversation Lambda ignores the job before it asks GitHub about the comment.
+    comment: { body: "lgtmoose smoke test", created_at: at },
     repository: { full_name: `${owner}/lgtmoose-smoke-test`, owner: { login: owner } },
     installation: { id: 1 },
     sender: { login: "lgtmoose-smoke-test", type: "User" },
