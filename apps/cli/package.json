@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@lgtmoose/evals": "workspace:*",
-    "prettier": "^3.10.0",
+    "prettier": "^3.10.1",
     "typescript": "catalog:"
   }
 }
