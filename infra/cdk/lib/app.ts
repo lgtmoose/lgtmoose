@@ -96,6 +96,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     reviewerProviderId: reviewer.id,
     reviewerModel: reviewerModel(reviewer),
     maxConcurrency: config.maxConcurrency,
+    batchStaggerSeconds: config.batchStaggerSeconds,
     shadow: config.shadow,
     vpc: network.vpc,
     controlSubnets: { subnetGroupName: "app" },

@@ -62,6 +62,17 @@ describe("readConventionFilesAt", () => {
     });
   });
 
+  it("omits a later file with the same text", async () => {
+    const sha = await commit({
+      "AGENTS.md": "Same rules.\n",
+      "CLAUDE.md": "Same rules.\n",
+    });
+    expect(await readConventionFilesAt(repo, sha)).toEqual({
+      files: [{ path: "AGENTS.md", text: "Same rules.\n" }],
+      omitted: ["CLAUDE.md"],
+    });
+  });
+
   it("ignores symlinks in the tree", async () => {
     await writeFile(join(dir, "real.md"), "real");
     await symlink("real.md", join(dir, "AGENTS.md"));

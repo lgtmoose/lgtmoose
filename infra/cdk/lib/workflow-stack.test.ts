@@ -237,6 +237,7 @@ interface State {
   ResultPath?: string | null;
   MaxConcurrency?: number;
   ItemsPath?: string;
+  Seconds?: number;
   SecondsPath?: string;
   HeartbeatSeconds?: number;
   Parameters?: Record<string, unknown>;
@@ -244,7 +245,12 @@ interface State {
   Catch?: { ErrorEquals: string[]; Next: string }[];
   ItemProcessor?: { StartAt: string; States: Record<string, State> };
   Branches?: { StartAt: string; States: Record<string, State> }[];
-  Choices?: { Variable: string; BooleanEquals?: boolean; Next: string }[];
+  Choices?: {
+    Variable: string;
+    BooleanEquals?: boolean;
+    NumericGreaterThan?: number;
+    Next: string;
+  }[];
   Default?: string;
 }
 
@@ -330,8 +336,15 @@ describe("review state machine", () => {
     expect(overrides(States.Post).LGTMOOSE_TASK_TOKEN).toBe("$:$$.Task.Token");
 
     const items = States.Batches?.ItemProcessor;
+    // Batch 0 starts at once. The rest wait so they can read its prompt cache.
+    expect(items?.StartAt).toBe("Stagger?");
+    expect(items?.States["Stagger?"]).toMatchObject({
+      Type: "Choice",
+      Choices: [{ Variable: "$.index", NumericGreaterThan: 0, Next: "Stagger" }],
+      Default: "Attempt",
+    });
+    expect(items?.States.Stagger).toMatchObject({ Type: "Wait", Seconds: 30, Next: "Attempt" });
     // Each attempt presigns afresh: Presign and Review run inside one retried Parallel.
-    expect(items?.StartAt).toBe("Attempt");
     expect(items?.States.Attempt?.Type).toBe("Parallel");
     const attempt = batchStates();
     expect(attempt.Presign?.Next).toBe("Review");
@@ -344,6 +357,7 @@ describe("review state machine", () => {
     const bedrockFirst = parseDeployConfig({
       allowedOrgs: ["lgtmoose"],
       maxConcurrency: 6,
+      batchStaggerSeconds: 0,
       providers: [{ id: "bedrock", harness: "claude-code", auth: "bedrock" }],
     });
     const machine = Object.values(
@@ -353,9 +367,10 @@ describe("review state machine", () => {
     const body = machine?.Properties.DefinitionString as { "Fn::Join": [string, unknown[]] };
     const text = body["Fn::Join"][1].map((p) => (typeof p === "string" ? p : "REF")).join("");
     // Bedrock has no stored credential to limit it.
-    expect((JSON.parse(text) as ReturnType<typeof definition>).States.Batches?.MaxConcurrency).toBe(
-      6,
-    );
+    const parsed = JSON.parse(text) as ReturnType<typeof definition>;
+    expect(parsed.States.Batches?.MaxConcurrency).toBe(6);
+    // 0 starts every batch at once: no wait state.
+    expect(parsed.States.Batches?.ItemProcessor?.StartAt).toBe("Attempt");
   }, 120_000);
 
   it("falls back to the next provider when a batch hits a limit, and fails it after the last", () => {

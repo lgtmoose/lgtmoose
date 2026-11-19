@@ -15,6 +15,13 @@ export interface HarnessRunOptions<T> {
    * `prompt` (see `fullPrompt`).
    */
   system?: string;
+  /**
+   * Untrusted context that is the same on every batch of a run (conventions, the pull request
+   * and its general comments). CLI harnesses put it between `system` and `prompt`. Claude Code
+   * sends it as its own turn, then resumes the session with `prompt`, so the next batch reads
+   * it from the prompt cache instead of writing it again.
+   */
+  shared?: string;
   /** The checkout to review. The model can read only inside it. */
   cwd: string;
   /** What the model must return. Its output is parsed and validated with this. */
@@ -32,9 +39,16 @@ export interface HarnessRunOptions<T> {
   tier?: ModelTier;
 }
 
-/** The task for a harness without a system prompt: `system` (when given), then `prompt`. */
-export function fullPrompt(options: Pick<HarnessRunOptions<unknown>, "prompt" | "system">): string {
-  return options.system === undefined ? options.prompt : `${options.system}\n\n${options.prompt}`;
+/**
+ * The task for a harness without a separate system prompt: `system`, then `shared`, then
+ * `prompt`, skipping whichever were left out.
+ */
+export function fullPrompt(
+  options: Pick<HarnessRunOptions<unknown>, "prompt" | "system" | "shared">,
+): string {
+  return [options.system, options.shared, options.prompt]
+    .filter((part) => part !== undefined && part !== "")
+    .join("\n\n");
 }
 
 /** Model tiers from the deploy config: cheap and quick, the default, and the strongest. */

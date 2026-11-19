@@ -7,7 +7,7 @@ import { z } from "zod";
 import { HarnessError } from "../harness.js";
 import { FakeClaude, resultLine, waitGone, type FakeResponse } from "../testing/fake-claude.js";
 import { MemoryTranscriptStore, type TranscriptStore } from "../transcript.js";
-import { ClaudeCodeHarness, type ClaudeCodeHarnessOptions } from "./adapter.js";
+import { ClaudeCodeHarness, SHARED_TURN_NOTE, type ClaudeCodeHarnessOptions } from "./adapter.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS } from "./policy.js";
 
 const API_KEY = "sk-ant-api03-test-key-0123456789";
@@ -419,5 +419,81 @@ describe("ClaudeCodeHarness", () => {
     ]);
     const result = await harness.run({ prompt: "p", cwd, schema, model: "m", timeoutMs: 10_000 });
     expect(result.transcriptKey).toMatch(/^transcripts\/[0-9a-f-]{36}\/1\.jsonl$/);
+  });
+
+  it("sends the shared context first, then resumes with the diff, and adds the usage", async () => {
+    const harness = await harnessFor([
+      { lines: [resultLine({ structured_output: { findings: [] } })] },
+      {
+        lines: [
+          resultLine({
+            structured_output: { findings: [finding] },
+            total_cost_usd: 0.4,
+            usage: {
+              input_tokens: 10,
+              output_tokens: 30,
+              cache_read_input_tokens: 80,
+              cache_creation_input_tokens: 4,
+            },
+          }),
+        ],
+      },
+    ]);
+    const result = await harness.run({
+      prompt: "Review the batch.",
+      system: "# Role",
+      shared: "Shared conventions.",
+      cwd,
+      schema,
+      model: "sonnet",
+      timeoutMs: 10_000,
+      runId: "run-1",
+    });
+    expect(result.output).toEqual({ findings: [finding] });
+    expect(result.usage).toEqual({
+      inputTokens: 110,
+      outputTokens: 50,
+      cacheReadTokens: 85,
+      cacheWriteTokens: 11,
+      costUsd: 0.4,
+    });
+    expect(result.transcriptKeys).toEqual([
+      "transcripts/run-1/1.jsonl",
+      "transcripts/run-1/2.jsonl",
+    ]);
+    const [first, second] = await (fake as FakeClaude).calls();
+    const sessionId = flagValues(first?.argv ?? [], "--session-id")[0];
+    expect(first?.argv).not.toContain("--resume");
+    expect(flagValues(second?.argv ?? [], "--resume")).toEqual([sessionId]);
+    expect(flagValues(first?.argv ?? [], "--json-schema")).toEqual(
+      flagValues(second?.argv ?? [], "--json-schema"),
+    );
+    expect(flagValues(first?.argv ?? [], "--tools")).toEqual(
+      flagValues(second?.argv ?? [], "--tools"),
+    );
+    expect(first?.stdin).toContain("# Role");
+    expect(first?.stdin).toContain("Shared conventions.");
+    expect(first?.stdin).toContain(SHARED_TURN_NOTE);
+    expect(first?.stdin).not.toContain("Review the batch.");
+    expect(second?.stdin).toBe("Review the batch.");
+  });
+
+  it("fails the attempt when the shared-context turn returns nothing", async () => {
+    const harness = await harnessFor([
+      { lines: [{ type: "system", subtype: "init" }], exitCode: 1 },
+    ]);
+    const error = await failure(
+      harness.run({
+        prompt: "Review the batch.",
+        shared: "Shared conventions.",
+        cwd,
+        schema,
+        model: "sonnet",
+        timeoutMs: 10_000,
+        runId: "run-1",
+      }),
+    );
+    expect(error.kind).toBe("process");
+    expect(await (fake as FakeClaude).calls()).toHaveLength(1);
   });
 });

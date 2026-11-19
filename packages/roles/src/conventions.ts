@@ -99,6 +99,10 @@ export async function readConventionFiles(
       continue;
     }
     const { text, truncated } = await readCapped(full, Math.min(maxBytes, remaining));
+    if (files.some((file) => file.text === text)) {
+      omitted.push(path);
+      continue;
+    }
     remaining -= Buffer.byteLength(text, "utf8");
     files.push(truncated ? { path, text, truncated } : { path, text });
   }
@@ -157,6 +161,10 @@ export async function readConventionFilesAt(
     const truncated = content.length > limit;
     // Cutting can split a multi-byte character; the decoder replaces the stray bytes.
     const text = content.subarray(0, limit).toString("utf8");
+    if (files.some((file) => file.text === text)) {
+      omitted.push(path);
+      continue;
+    }
     remaining -= Buffer.byteLength(text, "utf8");
     files.push(truncated ? { path, text, truncated } : { path, text });
   }

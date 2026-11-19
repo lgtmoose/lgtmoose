@@ -145,6 +145,21 @@ The dashboard's Usage page shows this month's spend in your repositories against
 - **`profile`**: `lean` or `standard`, above. Switching is a redeploy that keeps the database ([Upgrading](upgrading.md#switching-profile)).
 - **`providers[].models`**: the model for each tier. The reviewer runs on `standard`, the reply judge on `fast`.
 - **`maxConcurrency`**: fewer batches at once makes a big PR slower but doesn't change its total model usage.
+- **`batchStaggerSeconds`**: batches after the first wait this long (30 seconds by default) so they can read the first batch's prompt cache. `0` starts them together, and each one pays to write the shared prompt again. The wait adds wall-clock time, about `(batches − 1) × batchStaggerSeconds`, and does not add model tokens.
+
+## What a batch sends the model
+
+Most of a review's model cost is the prompt, not the findings. Each batch pays to write its prompt into the cache, then reads that cache again on every turn of the agent. The prompt is, in order:
+
+1. Claude Code's own instructions and tools. This is the same for every batch and every review on that CLI version, so a later batch can read it from a cache an earlier batch wrote.
+2. LGTMoose's reviewer rules and the built-in rule packs. Trusted, and the same on every batch.
+3. The shared context: the repository's convention files (identical files are sent once), the pull request's title and body, and comments that are not attached to a file. A bot comment's `<details>` block and HTML comments are left out. This text is the same on every batch of one run. Claude Code sends it as its own turn and returns an empty findings list; the diff comes in the next turn of the same session.
+4. This batch only: its learnings, the inline comments on its own files, and its diff.
+
+Because batches used to start together, none of them could read another's cache, and each one wrote the whole prefix. With `batchStaggerSeconds` above 0, batch 0 writes it and the others read it, which is about a tenth of the write price. A pull request's inline comments used to be copied into every batch; now a batch only sees the ones on its files.
+
+A 33-file review of four batches (Sonnet 4.6, before this split) cost $2.30 of model usage: about $1.25 to write the prompt cache, $0.35 to read it back, and $0.69 of output, nearly all of it the model's thinking. Each batch's first request was 70k to 82k tokens, and the four batches started within two seconds, so each one wrote that prefix itself. The same review after this change is the comparison for whether the shared turn and the stagger are doing that work.
+
 - **`maxReplyJudgements`**: replies judged per run, 10 by default. 0 turns the reply judge off.
 - **`learnings.embeddings`**: `none` (the default) ranks learnings by keywords with no calls; `bedrock` or `openai` add an embeddings call per batch, and when a learning is first ranked.
 - **`tickets`**: off unless set. With Linear, each linked ticket (up to `maxPerPullRequest`, 3 by default) costs one fast-tier run per commit reviewed, plus a Linear API call. See [Ticket coverage](tickets.md).

@@ -135,6 +135,13 @@
       "minimum": 1,
       "maximum": 64
     },
+    "batchStaggerSeconds": {
+      "default": 30,
+      "description": "Seconds batches after the first wait before starting, so they read the first batch's prompt cache. 0 starts every batch at once.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120
+    },
     "reconcileIntervalMinutes": {
       "default": 30,
       "description": "Minutes between reconciler runs, which catch missed webhooks and drifted status labels.",

@@ -164,8 +164,13 @@ export class AgentSdkHarness implements Harness {
         return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
-      // `system` goes in the system prompt, not the user turn.
-      return await withRepair(attempt, options.prompt + promptSuffix, secrets, keys);
+      // `system` goes in the system prompt, not the user turn. `shared` is untrusted PR
+      // content, so it stays in the user turn, ahead of this batch's diff.
+      const user =
+        options.shared === undefined || options.shared === ""
+          ? options.prompt
+          : `${options.shared}\n\n${options.prompt}`;
+      return await withRepair(attempt, user + promptSuffix, secrets, keys);
     } finally {
       await removeRunHome(home);
     }

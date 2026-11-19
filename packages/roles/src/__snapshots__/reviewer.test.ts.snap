@@ -383,12 +383,16 @@ Closes #12.
 
 Existing comments on the PR:
 
-<untrusted source="pr_comment" author="hubot" path="src/total.ts" line="9">
-Is the loop bound right?
-</untrusted>
-
 <untrusted source="pr_comment" author="octocat">
 Looks good to me.
+</untrusted>
+
+# Comments on these files
+
+Comments already on the files in this batch. Don't repeat a problem one of them raised, unless the code still has it and the comment was ignored.
+
+<untrusted source="pr_comment" author="hubot" path="src/total.ts" line="9">
+Is the loop bound right?
 </untrusted>
 
 # Diff

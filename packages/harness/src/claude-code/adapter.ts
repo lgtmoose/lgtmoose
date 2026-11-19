@@ -22,9 +22,18 @@ import {
   failIfUnusable,
   findResult,
   isAuthRetry,
+  resumedUsage,
   withRepair,
   type ClaudeAttempt,
 } from "./stream.js";
+
+/**
+ * What the first turn of a two-turn review says. It is the same on every batch, so it stays
+ * inside the cached prefix. `--json-schema` makes this turn return the schema too: an empty
+ * findings list, which the second turn replaces.
+ */
+export const SHARED_TURN_NOTE =
+  "The files to review come in the next message. Do not review yet. Return a JSON object whose findings list is empty and omit notes.";
 
 export interface ClaudeCodeHarnessOptions {
   /** Where each attempt's stream-json transcript is saved. */
@@ -81,7 +90,11 @@ export class ClaudeCodeHarness implements Harness {
       const sessionId = randomUUID();
       const secrets = auth.secrets;
 
-      const attempt = async (n: number, prompt: string): Promise<ClaudeAttempt<T>> => {
+      const call = async (
+        transcriptIndex: number,
+        prompt: string,
+        resume: boolean,
+      ): Promise<ClaudeAttempt<T>> => {
         const timeoutMs = deadline - Date.now();
         if (timeoutMs <= 0) {
           throw new HarnessError("timeout", `Timed out after ${options.timeoutMs} ms.`, {
@@ -95,7 +108,7 @@ export class ClaudeCodeHarness implements Harness {
             model: options.model,
             settings,
             sessionId,
-            resume: n > 1,
+            resume,
             ...(schema.json === undefined ? {} : { jsonSchema: JSON.stringify(schema.json) }),
             ...(this.options.maxTurns === undefined ? {} : { maxTurns: this.options.maxTurns }),
           }),
@@ -111,8 +124,15 @@ export class ClaudeCodeHarness implements Harness {
             return authRetries >= MAX_AUTH_RETRIES ? "kill" : undefined;
           },
         });
-        const key = transcriptKey(runId, n);
-        await saveAttemptTranscript(this.options.transcripts, key, proc, n, secrets, keys);
+        const key = transcriptKey(runId, transcriptIndex);
+        await saveAttemptTranscript(
+          this.options.transcripts,
+          key,
+          proc,
+          transcriptIndex,
+          secrets,
+          keys,
+        );
         const result = findResult(proc.stdout);
         failIfUnusable(proc, result, {
           secrets,
@@ -125,7 +145,27 @@ export class ClaudeCodeHarness implements Harness {
         return checkAnswer(result, options.schema, secrets, keys, key);
       };
 
-      return await withRepair(attempt, fullPrompt(options) + schema.promptSuffix, secrets, keys);
+      const shared = options.shared;
+      const attempt = async (n: number, prompt: string): Promise<ClaudeAttempt<T>> => {
+        if (shared === undefined || shared === "") return call(n, prompt, n > 1);
+        if (n > 1) return call(n + 1, prompt, true);
+        const context = await call(1, sharedTurnPrompt(options) + schema.promptSuffix, false);
+        if (context.kind === "invalid") {
+          throw new HarnessError(
+            "invalid_output",
+            `The shared-context turn did not match the schema: ${context.problems}`,
+            { transcriptKeys: keys },
+          );
+        }
+        const diff = await call(2, prompt, true);
+        return { ...diff, usage: resumedUsage(context.usage, diff.usage) };
+      };
+
+      const task =
+        shared === undefined || shared === ""
+          ? fullPrompt(options) + schema.promptSuffix
+          : options.prompt + schema.promptSuffix;
+      return await withRepair(attempt, task, secrets, keys);
     } finally {
       await removeRunHome(home);
     }
@@ -177,4 +217,10 @@ export function claudeArgs(options: ClaudeArgsOptions): string[] {
   if (options.jsonSchema !== undefined) args.push("--json-schema", options.jsonSchema);
   if (options.maxTurns !== undefined) args.push("--max-turns", String(options.maxTurns));
   return args;
+}
+
+/** Turn 1: the trusted rules, the shared context, and the note that the diff comes next. */
+function sharedTurnPrompt(options: HarnessRunOptions<unknown>): string {
+  const body = `${options.shared ?? ""}\n\n${SHARED_TURN_NOTE}`;
+  return options.system === undefined ? body : `${options.system}\n\n${body}`;
 }
