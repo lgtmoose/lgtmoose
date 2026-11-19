@@ -101,9 +101,15 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
   && claude --version \
   && codex --version
 
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin lgtmoose
+RUN groupadd --gid 10001 lgtmoose \
+  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin lgtmoose
 COPY --from=build --chown=root:root /out /app
+COPY infra/task-entrypoint.sh /usr/local/bin/lgtmoose-entrypoint
+RUN chmod 755 /usr/local/bin/lgtmoose-entrypoint
+# Local runs keep the image user. Fargate sets user 0 so the entrypoint can open
+# the mounted volumes, then it becomes uid 10001.
 USER lgtmoose
+ENV HOME=/tmp
 # The root filesystem is read-only in the task; /work and /tmp are writable volumes.
 WORKDIR /work
-ENTRYPOINT ["node", "/app/dist/index.js"]
+ENTRYPOINT ["/usr/local/bin/lgtmoose-entrypoint"]

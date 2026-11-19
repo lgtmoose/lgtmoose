@@ -97,7 +97,11 @@ describe("WorkflowStack", () => {
       const [container] = def.ContainerDefinitions as Record<string, unknown>[];
       expect(container).toMatchObject({
         ReadonlyRootFilesystem: true,
-        LinuxParameters: { Capabilities: { Drop: ["ALL"] }, InitProcessEnabled: true },
+        User: "0",
+        LinuxParameters: {
+          Capabilities: { Drop: ["ALL"], Add: ["SETUID", "SETGID", "SETPCAP"] },
+          InitProcessEnabled: true,
+        },
         MountPoints: [
           { ContainerPath: "/work", SourceVolume: "work", ReadOnly: false },
           { ContainerPath: "/tmp", SourceVolume: "tmp", ReadOnly: false },
@@ -547,6 +551,19 @@ describe("review state machine", () => {
     expect(dockerfile).toContain("BEGIN CERTIFICATE");
     expect(dockerfile).not.toContain("NODE_EXTRA_CA_CERTS");
     expect(dockerfile).toMatch(/[a-f0-9]{64} {2}\/etc\/ssl\/rds-global-bundle\.pem/);
+    expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/lgtmoose-entrypoint"]');
+    const sandbox = readFileSync(
+      join(fileURLToPath(new URL(".", import.meta.url)), "../../../infra/sandbox/Dockerfile"),
+      "utf8",
+    );
+    expect(sandbox).toContain('ENTRYPOINT ["/usr/local/bin/lgtmoose-entrypoint"]');
+    const entrypoint = readFileSync(
+      join(fileURLToPath(new URL(".", import.meta.url)), "../../../infra/task-entrypoint.sh"),
+      "utf8",
+    );
+    expect(entrypoint).toContain("chmod 1777 /tmp /work");
+    expect(entrypoint).toContain("--reuid=10001");
+    expect(entrypoint).toContain("--inh-caps=-all");
   });
 
   it("passes the spend caps to the control task, and alarms only with a monthly cap", () => {

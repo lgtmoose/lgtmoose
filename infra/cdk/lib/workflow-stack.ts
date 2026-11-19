@@ -192,8 +192,10 @@ export interface WorkflowStackProps extends StackProps {
  *   instead. It can call Bedrock when the provider uses it. One task definition per
  *   provider means a task can only ever see its own credential.
  *
- * Both run as a non-root user with a read-only root filesystem, all Linux capabilities dropped,
- * and writable volumes only at /work and /tmp. Networking is set when a task is started
+ * Both run as a non-root user with a read-only root filesystem and writable volumes only at
+ * /work and /tmp. Fargate mounts those volumes owned by root, so the task starts as root with
+ * only the capabilities the entrypoint needs to open them and become uid 10001. The process
+ * then holds no capabilities. Networking is set when a task is started
  * (RunTask), so the workflow must start sandbox tasks in `sandboxSubnets` with the sandbox
  * security group and no public IP; the outputs give both.
  */
@@ -783,10 +785,13 @@ export class WorkflowStack extends Stack {
       initProcessEnabled: true,
     });
     linuxParameters.dropCapabilities(Capability.ALL);
+    // Kept only so the entrypoint can become uid 10001. It clears them before node runs.
+    linuxParameters.addCapabilities(Capability.SETUID, Capability.SETGID, Capability.SETPCAP);
     const container = definition.addContainer(name, {
       image: options.image,
       essential: true,
       readonlyRootFilesystem: true,
+      user: "0",
       linuxParameters,
       environment: options.environment,
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
