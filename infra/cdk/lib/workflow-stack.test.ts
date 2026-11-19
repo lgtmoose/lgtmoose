@@ -121,9 +121,13 @@ describe("WorkflowStack", () => {
           { ContainerPath: "/tmp", SourceVolume: "tmp", ReadOnly: false },
         ],
       });
-      const capabilities = (container.LinuxParameters as { Capabilities: { Add?: unknown } })
-        .Capabilities;
-      expect(capabilities.Add).toBeUndefined();
+      expect(container).toEqual(
+        expect.objectContaining({
+          LinuxParameters: expect.objectContaining({
+            Capabilities: expect.not.objectContaining({ Add: expect.anything() }),
+          }),
+        }),
+      );
     }
   });
 
