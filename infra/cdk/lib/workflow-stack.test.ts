@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import {
   BOOTSTRAP_REQUEST_PREFIX,
@@ -8,6 +11,7 @@ import {
 } from "@lgtmoose/config";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type LgtmooseStacks } from "./app.js";
+import { DATABASE_CA_FILE } from "./workflow-stack.js";
 import { PROXY_URL } from "./proxy-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
 
@@ -528,7 +532,21 @@ describe("review state machine", () => {
       LGTMOOSE_REVIEWER_MODEL: "sonnet",
       LGTMOOSE_SHADOW: "true",
       LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
+      LGTMOOSE_DATABASE_CA_FILE: DATABASE_CA_FILE,
     });
+    expect(env).not.toHaveProperty("NODE_EXTRA_CA_CERTS");
+  });
+
+  it("installs the database CA at the path the task reads, and checks the bundle", () => {
+    const dockerfile = readFileSync(
+      join(fileURLToPath(new URL(".", import.meta.url)), "../../../apps/control/Dockerfile"),
+      "utf8",
+    );
+    expect(dockerfile).toContain(DATABASE_CA_FILE);
+    expect(dockerfile).toContain("sha256sum -c");
+    expect(dockerfile).toContain("BEGIN CERTIFICATE");
+    expect(dockerfile).not.toContain("NODE_EXTRA_CA_CERTS");
+    expect(dockerfile).toMatch(/[a-f0-9]{64} {2}\/etc\/ssl\/rds-global-bundle\.pem/);
   });
 
   it("passes the spend caps to the control task, and alarms only with a monthly cap", () => {

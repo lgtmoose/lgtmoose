@@ -49,6 +49,12 @@ import { taskImage } from "./images.js";
 import { sandboxBuildArgs } from "./sandbox-image.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+
+/**
+ * Where the control image installs the RDS global bundle. The task passes this file only to
+ * the Postgres client. It is not added to Node's trust store.
+ */
+export const DATABASE_CA_FILE = "/etc/ssl/rds-global-bundle.pem";
 const DISPATCH_HANDLER = join(REPO_ROOT, "apps/control/src/dispatch-lambda.ts");
 const CREDENTIAL_HEALTH_HANDLER = join(REPO_ROOT, "apps/control/src/credential-health-lambda.ts");
 const RECONCILE_HANDLER = join(REPO_ROOT, "apps/control/src/reconcile-lambda.ts");
@@ -240,6 +246,7 @@ export class WorkflowStack extends Stack {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
+        LGTMOOSE_DATABASE_CA_FILE: DATABASE_CA_FILE,
         GITHUB_APP_SECRET_ARN: secretId(props.githubAppSecret),
         LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),

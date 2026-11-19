@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactSensitive, type RedactionKind } from "@lgtmoose/learnings";
 import { isBootstrapInput, postBootstrap, prepareBootstrap } from "./bootstrap.js";
 import type { ControlCommand, ReviewSettings } from "./env.js";
 import { fail } from "./fail.js";
@@ -114,10 +115,44 @@ async function withHeartbeat<T>(
   }
 }
 
-/** Message of an error, short, for the task token's cause. Never a credential: see the stages. */
-function causeOf(error: unknown): string {
+/** How much of a failure is sent on the task token. */
+const MAX_CAUSE = 1000;
+/** The underlying error is kept in front, so a long query doesn't push it off the end. */
+const MAX_NESTED_CAUSE = 400;
+
+const CREDENTIAL_KINDS = new Set<RedactionKind>([
+  "private key",
+  "token",
+  "aws key",
+  "jwt",
+  "credential in url",
+  "secret value",
+]);
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * A nested error's message, with a credential replaced. One that is already in the outer
+ * message, or that isn't an error, is left out.
+ */
+function nestedCause(error: unknown, text: string): string {
+  if (!(error instanceof Error) || !(error.cause instanceof Error)) return "";
+  const message = error.cause.message;
+  if (message.length === 0 || text.includes(message)) return "";
+  const scanned = redactSensitive(message);
+  const credential = scanned.found.some((kind) => CREDENTIAL_KINDS.has(kind));
+  return credential ? scanned.text : message;
+}
+
+/** Message of an error, short, for the task token's cause. A credential in the cause is redacted. */
+export function causeOf(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
-  return text.length > 1000 ? `${text.slice(0, 999)}…` : text;
+  const nested = nestedCause(error, text);
+  if (nested.length === 0) return clip(text, MAX_CAUSE);
+  const head = clip(nested, MAX_NESTED_CAUSE);
+  return `${head}\n${clip(text, MAX_CAUSE - head.length - 1)}`;
 }
 
 /**

@@ -39,6 +39,7 @@ import { drizzleReplyStore } from "./replies-aws.js";
 import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { githubBootstrap } from "./bootstrap-github.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
+import { databaseTls } from "./database.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -756,7 +757,7 @@ export async function awsControlDeps(
     user: database.username,
     password: database.password,
     database: env.databaseName,
-    ssl: { rejectUnauthorized: true },
+    ssl: databaseTls(env.databaseCaFile),
     max: 2,
   });
   const store = s3ArtifactStore(new S3Client({}), env.artifactBucket);
