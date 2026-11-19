@@ -193,10 +193,11 @@ export interface WorkflowStackProps extends StackProps {
  *   provider means a task can only ever see its own credential.
  *
  * Both run as a non-root user with a read-only root filesystem and writable volumes only at
- * /work and /tmp. Fargate mounts those volumes owned by root, so the task starts as root with
- * only the capabilities the entrypoint needs to open them and become uid 10001. It clears those
- * capabilities and execs tini, which reaps child processes. The platform init stays off, because
- * that init would keep running as root. Networking is set when a task is started
+ * /work and /tmp. Fargate mounts those volumes owned by root, so the task starts as root. Fargate
+ * can drop capabilities and can only add SYS_PTRACE, so the task keeps SETUID, SETGID and SETPCAP
+ * from Docker's defaults and drops the rest. The entrypoint uses them to open the volumes and
+ * become uid 10001, then clears them and execs tini. The platform init stays off, because that
+ * init would keep running as root. Networking is set when a task is started
  * (RunTask), so the workflow must start sandbox tasks in `sandboxSubnets` with the sandbox
  * security group and no public IP; the outputs give both.
  */
@@ -786,9 +787,21 @@ export class WorkflowStack extends Stack {
       // root with the capabilities below, so it stays off.
       initProcessEnabled: false,
     });
-    linuxParameters.dropCapabilities(Capability.ALL);
-    // Kept only so the entrypoint can become uid 10001. It clears them before tini runs.
-    linuxParameters.addCapabilities(Capability.SETUID, Capability.SETGID, Capability.SETPCAP);
+    // Fargate rejects adding SETUID. These three stay because they are Docker defaults and are
+    // not in this list. The entrypoint clears them before tini runs.
+    linuxParameters.dropCapabilities(
+      Capability.AUDIT_WRITE,
+      Capability.CHOWN,
+      Capability.DAC_OVERRIDE,
+      Capability.FOWNER,
+      Capability.FSETID,
+      Capability.KILL,
+      Capability.MKNOD,
+      Capability.NET_BIND_SERVICE,
+      Capability.NET_RAW,
+      Capability.SETFCAP,
+      Capability.SYS_CHROOT,
+    );
     const container = definition.addContainer(name, {
       image: options.image,
       essential: true,

@@ -99,7 +99,21 @@ describe("WorkflowStack", () => {
         ReadonlyRootFilesystem: true,
         User: "0",
         LinuxParameters: {
-          Capabilities: { Drop: ["ALL"], Add: ["SETUID", "SETGID", "SETPCAP"] },
+          Capabilities: {
+            Drop: [
+              "AUDIT_WRITE",
+              "CHOWN",
+              "DAC_OVERRIDE",
+              "FOWNER",
+              "FSETID",
+              "KILL",
+              "MKNOD",
+              "NET_BIND_SERVICE",
+              "NET_RAW",
+              "SETFCAP",
+              "SYS_CHROOT",
+            ],
+          },
           InitProcessEnabled: false,
         },
         MountPoints: [
@@ -107,6 +121,9 @@ describe("WorkflowStack", () => {
           { ContainerPath: "/tmp", SourceVolume: "tmp", ReadOnly: false },
         ],
       });
+      const capabilities = (container.LinuxParameters as { Capabilities: { Add?: unknown } })
+        .Capabilities;
+      expect(capabilities.Add).toBeUndefined();
     }
   });
 
