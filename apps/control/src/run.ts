@@ -117,7 +117,9 @@ async function withHeartbeat<T>(
 /** Message of an error, short, for the task token's cause. Never a credential: see the stages. */
 function causeOf(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
-  return text.length > 1000 ? `${text.slice(0, 999)}…` : text;
+  const nested = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
+  const combined = nested.length > 0 && !text.includes(nested) ? `${text} (${nested})` : text;
+  return combined.length > 1000 ? `${combined.slice(0, 999)}…` : combined;
 }
 
 /**

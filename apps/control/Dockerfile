@@ -18,10 +18,15 @@ RUN pnpm install --frozen-lockfile --filter "@lgtmoose/control..." --filter @lgt
 
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
-# git clones the PR being reviewed.
+# git clones the PR being reviewed. ca-certificates covers public hosts. The RDS
+# certificate (rds-ca-rsa2048-g1) is signed by an Amazon RDS root that is not in
+# that set, so the database connection also trusts the RDS global bundle. Lambdas
+# get the same roots from the runtime bundle.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/rds-global-bundle.pem
 
 # npm, npx, corepack and yarn come with the base image, but the control task runs only node
 # and git (dependencies are installed in the build stage). Removing them takes their bundled

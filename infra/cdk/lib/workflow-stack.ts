@@ -240,6 +240,10 @@ export class WorkflowStack extends Stack {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         DATABASE_SECRET_ARN: props.databaseSecret.secretArn,
         DATABASE_NAME: props.databaseName,
+        // The control image adds the RDS global bundle at this path. The public
+        // trust store does not include the RDS root, so without it the task
+        // cannot verify the database.
+        NODE_EXTRA_CA_CERTS: "/etc/ssl/rds-global-bundle.pem",
         GITHUB_APP_SECRET_ARN: secretId(props.githubAppSecret),
         LGTMOOSE_REVIEWER_MODEL: props.reviewerModel,
         LGTMOOSE_BATCH_TIMEOUT_MS: String(BATCH_TIMEOUT.toMilliseconds()),

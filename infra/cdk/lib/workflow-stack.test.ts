@@ -528,6 +528,7 @@ describe("review state machine", () => {
       LGTMOOSE_REVIEWER_MODEL: "sonnet",
       LGTMOOSE_SHADOW: "true",
       LGTMOOSE_BATCH_TIMEOUT_MS: String(20 * 60_000),
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/rds-global-bundle.pem",
     });
   });
 
