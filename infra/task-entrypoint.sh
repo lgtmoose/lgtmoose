@@ -1,13 +1,13 @@
 #!/bin/sh
-# Fargate mounts the writable volumes owned by root, mode 755. The task user cannot
-# create a directory there. This starts as root only long enough to open /tmp and
-# /work, then becomes uid 10001 with no capabilities. A container that is already
-# that user (local compose, the image default) runs the process directly.
+# Fargate mounts /tmp and /work owned by root, mode 755. Started as root, this opens them
+# and becomes uid 10001 with no capabilities. tini is then pid 1 and reaps the agent CLIs.
+# The platform init stays off: it would keep running as root with the capabilities used here.
+# A container that is already uid 10001 (the image default) skips the drop.
 set -eu
 if [ "$(id -u)" = 0 ]; then
   chmod 1777 /tmp /work
-  exec setpriv --reuid=10001 --regid=10001 --clear-groups \
+  exec /usr/bin/setpriv --reuid=10001 --regid=10001 --clear-groups \
     --inh-caps=-all --bounding-set=-all --no-new-privs \
-    node /app/dist/index.js
+    -- /usr/bin/tini -g -- /usr/local/bin/node /app/dist/index.js "$@"
 fi
-exec node /app/dist/index.js
+exec /usr/bin/tini -g -- /usr/local/bin/node /app/dist/index.js "$@"

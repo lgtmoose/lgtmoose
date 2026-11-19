@@ -65,7 +65,7 @@ ARG CLAUDE_CODE_VERSION=2.1.311
 ARG CODEX_VERSION=0.166.0
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates tini \
   && rm -rf /var/lib/apt/lists/*
 
 # The postinstall step puts the native binary in place. `claude --version` checks that it did.
@@ -102,7 +102,9 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
   && codex --version
 
 RUN groupadd --gid 10001 lgtmoose \
-  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin lgtmoose
+  && useradd --uid 10001 --gid 10001 --home-dir /tmp --no-create-home --shell /usr/sbin/nologin lgtmoose \
+  && test -x /usr/bin/setpriv \
+  && test -x /usr/bin/tini
 COPY --from=build --chown=root:root /out /app
 COPY infra/task-entrypoint.sh /usr/local/bin/lgtmoose-entrypoint
 RUN chmod 755 /usr/local/bin/lgtmoose-entrypoint
