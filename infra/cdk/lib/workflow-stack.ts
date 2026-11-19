@@ -192,8 +192,11 @@ export interface WorkflowStackProps extends StackProps {
  *   instead. It can call Bedrock when the provider uses it. One task definition per
  *   provider means a task can only ever see its own credential.
  *
- * Both run as a non-root user with a read-only root filesystem, all Linux capabilities dropped,
- * and writable volumes only at /work and /tmp. Networking is set when a task is started
+ * Both run as a non-root user with a read-only root filesystem and writable volumes only at
+ * /work and /tmp. Fargate mounts those volumes owned by root, so the task starts as root with
+ * only the capabilities the entrypoint needs to open them and become uid 10001. It clears those
+ * capabilities and execs tini, which reaps child processes. The platform init stays off, because
+ * that init would keep running as root. Networking is set when a task is started
  * (RunTask), so the workflow must start sandbox tasks in `sandboxSubnets` with the sandbox
  * security group and no public IP; the outputs give both.
  */
@@ -779,14 +782,18 @@ export class WorkflowStack extends Stack {
     },
   ): ContainerDefinition {
     const linuxParameters = new LinuxParameters(this, `${definition.node.id}Linux`, {
-      // Reaps the processes the agent CLIs leave behind.
-      initProcessEnabled: true,
+      // The entrypoint execs tini after it drops privileges. The platform init would stay
+      // root with the capabilities below, so it stays off.
+      initProcessEnabled: false,
     });
     linuxParameters.dropCapabilities(Capability.ALL);
+    // Kept only so the entrypoint can become uid 10001. It clears them before tini runs.
+    linuxParameters.addCapabilities(Capability.SETUID, Capability.SETGID, Capability.SETPCAP);
     const container = definition.addContainer(name, {
       image: options.image,
       essential: true,
       readonlyRootFilesystem: true,
+      user: "0",
       linuxParameters,
       environment: options.environment,
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),

@@ -23,7 +23,7 @@ FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23f
 # (LGTMOOSE_DATABASE_CA_FILE). It is not added to Node's trust store. A changed
 # bundle fails this build until the hash is updated.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates curl \
+  && apt-get install -y --no-install-recommends git ca-certificates curl tini \
   && curl -fsSL -o /etc/ssl/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
   && echo "90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b  /etc/ssl/rds-global-bundle.pem" | sha256sum -c - \
   && grep -q "BEGIN CERTIFICATE" /etc/ssl/rds-global-bundle.pem \
@@ -32,16 +32,24 @@ RUN apt-get update \
   && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
-# npm, npx, corepack and yarn come with the base image, but the control task runs only node
-# and git (dependencies are installed in the build stage). Removing them takes their bundled
+# npm, npx, corepack and yarn come with the base image, but the control task runs only node,
+# git and tini (dependencies are installed in the build stage). Removing them takes their bundled
 # packages, and those packages' advisories, out of the image.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-v* \
   /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn \
   /usr/local/bin/yarnpkg \
   && node --version
 
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin lgtmoose
+RUN groupadd --gid 10001 lgtmoose \
+  && useradd --uid 10001 --gid 10001 --home-dir /tmp --no-create-home --shell /usr/sbin/nologin lgtmoose \
+  && test -x /usr/bin/setpriv \
+  && test -x /usr/bin/tini
 COPY --from=build --chown=root:root /out /app
+COPY infra/task-entrypoint.sh /usr/local/bin/lgtmoose-entrypoint
+RUN chmod 755 /usr/local/bin/lgtmoose-entrypoint
+# Local runs keep the image user. Fargate sets user 0 so the entrypoint can open
+# the mounted volumes, then it becomes uid 10001.
 USER lgtmoose
+ENV HOME=/tmp
 WORKDIR /work
-ENTRYPOINT ["node", "/app/dist/index.js"]
+ENTRYPOINT ["/usr/local/bin/lgtmoose-entrypoint"]

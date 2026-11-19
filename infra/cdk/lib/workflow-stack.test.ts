@@ -85,7 +85,7 @@ describe("WorkflowStack", () => {
     expect(stacks.workflow.sandboxTaskDefinitions.size).toBe(2);
   });
 
-  it("runs every container as hardened ARM64 Fargate: read-only root, no capabilities", () => {
+  it("runs every container as hardened ARM64 Fargate: read-only root, privileges only to drop them", () => {
     for (const name of ["control", "claude", "bedrock"]) {
       const def = taskDefinition(name);
       expect(def.RuntimePlatform).toEqual({
@@ -97,7 +97,11 @@ describe("WorkflowStack", () => {
       const [container] = def.ContainerDefinitions as Record<string, unknown>[];
       expect(container).toMatchObject({
         ReadonlyRootFilesystem: true,
-        LinuxParameters: { Capabilities: { Drop: ["ALL"] }, InitProcessEnabled: true },
+        User: "0",
+        LinuxParameters: {
+          Capabilities: { Drop: ["ALL"], Add: ["SETUID", "SETGID", "SETPCAP"] },
+          InitProcessEnabled: false,
+        },
         MountPoints: [
           { ContainerPath: "/work", SourceVolume: "work", ReadOnly: false },
           { ContainerPath: "/tmp", SourceVolume: "tmp", ReadOnly: false },
@@ -547,6 +551,26 @@ describe("review state machine", () => {
     expect(dockerfile).toContain("BEGIN CERTIFICATE");
     expect(dockerfile).not.toContain("NODE_EXTRA_CA_CERTS");
     expect(dockerfile).toMatch(/[a-f0-9]{64} {2}\/etc\/ssl\/rds-global-bundle\.pem/);
+  });
+
+  it("opens the mounted volumes as root, then runs as uid 10001 with no capabilities", () => {
+    const root = fileURLToPath(new URL(".", import.meta.url));
+    const entrypoint = readFileSync(join(root, "../../../infra/task-entrypoint.sh"), "utf8");
+    expect(entrypoint).toContain("chmod 1777 /tmp /work");
+    expect(entrypoint).toMatch(
+      /exec \/usr\/bin\/setpriv --reuid=10001 --regid=10001 --clear-groups \\\s+--inh-caps=-all --bounding-set=-all --no-new-privs \\\s+-- \/usr\/bin\/tini -g -- \/usr\/local\/bin\/node \/app\/dist\/index\.js "\$@"/,
+    );
+    expect(entrypoint).toMatch(
+      /exec \/usr\/bin\/tini -g -- \/usr\/local\/bin\/node \/app\/dist\/index\.js "\$@"/,
+    );
+    for (const file of ["../../../apps/control/Dockerfile", "../../../infra/sandbox/Dockerfile"]) {
+      const dockerfile = readFileSync(join(root, file), "utf8");
+      expect(dockerfile).toContain("test -x /usr/bin/tini");
+      expect(dockerfile).toContain("test -x /usr/bin/setpriv");
+      expect(dockerfile).toContain("--home-dir /tmp");
+      expect(dockerfile).toContain("USER lgtmoose");
+      expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/lgtmoose-entrypoint"]');
+    }
   });
 
   it("passes the spend caps to the control task, and alarms only with a monthly cap", () => {
