@@ -142,6 +142,15 @@ describe("readControlEnv", () => {
       databaseName: "lgtmoose",
       githubAppSecretArn: "arn:gh",
     });
+    expect(
+      readControlEnv({
+        ARTIFACT_BUCKET: "bucket",
+        DATABASE_SECRET_ARN: "arn:db",
+        DATABASE_NAME: "lgtmoose",
+        GITHUB_APP_SECRET_ARN: "arn:gh",
+        LGTMOOSE_DATABASE_CA_FILE: " /etc/ssl/rds-global-bundle.pem ",
+      }),
+    ).toMatchObject({ databaseCaFile: "/etc/ssl/rds-global-bundle.pem" });
   });
 
   it("names the missing ones, counting blank as missing", () => {

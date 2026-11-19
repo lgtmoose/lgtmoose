@@ -19,14 +19,18 @@ RUN pnpm install --frozen-lockfile --filter "@lgtmoose/control..." --filter @lgt
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 # git clones the PR being reviewed. ca-certificates covers public hosts. The RDS
-# certificate (rds-ca-rsa2048-g1) is signed by an Amazon RDS root that is not in
-# that set, so the database connection also trusts the RDS global bundle. Lambdas
-# get the same roots from the runtime bundle.
+# root is not in that set. The pinned bundle is only for the Postgres client
+# (LGTMOOSE_DATABASE_CA_FILE). It is not added to Node's trust store. A changed
+# bundle fails this build until the hash is updated.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates curl \
+  && curl -fsSL -o /etc/ssl/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+  && echo "90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b  /etc/ssl/rds-global-bundle.pem" | sha256sum -c - \
+  && grep -q "BEGIN CERTIFICATE" /etc/ssl/rds-global-bundle.pem \
+  && chmod 644 /etc/ssl/rds-global-bundle.pem \
+  && apt-get purge -y curl \
+  && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
-ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/rds-global-bundle.pem
-ENV NODE_EXTRA_CA_CERTS=/etc/ssl/rds-global-bundle.pem
 
 # npm, npx, corepack and yarn come with the base image, but the control task runs only node
 # and git (dependencies are installed in the build stage). Removing them takes their bundled

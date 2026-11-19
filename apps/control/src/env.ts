@@ -13,6 +13,11 @@ export interface ControlEnv {
   databaseName: string;
   /** The GitHub App secret (App ID, private key and the rest). */
   githubAppSecretArn: string;
+  /**
+   * `LGTMOOSE_DATABASE_CA_FILE`: a PEM bundle the Postgres client trusts, and nothing else.
+   * Unset on Lambda, which uses the runtime bundle.
+   */
+  databaseCaFile?: string;
 }
 
 const VARIABLES = {
@@ -20,7 +25,7 @@ const VARIABLES = {
   databaseSecretArn: "DATABASE_SECRET_ARN",
   databaseName: "DATABASE_NAME",
   githubAppSecretArn: "GITHUB_APP_SECRET_ARN",
-} as const satisfies Record<keyof ControlEnv, string>;
+} as const satisfies Record<Exclude<keyof ControlEnv, "databaseCaFile">, string>;
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -40,7 +45,10 @@ function readVariables<K extends string>(
 
 /** Reads the control task's settings, or says which variables are missing (blank counts). */
 export function readControlEnv(env: Env): ControlEnv | { missing: string[] } {
-  return readVariables(env, VARIABLES);
+  const read = readVariables(env, VARIABLES);
+  if ("missing" in read) return read;
+  const databaseCaFile = env.LGTMOOSE_DATABASE_CA_FILE?.trim();
+  return { ...read, ...(databaseCaFile ? { databaseCaFile } : {}) };
 }
 
 /** What the dispatcher Lambda reads from its environment, set by the Workflow stack. */

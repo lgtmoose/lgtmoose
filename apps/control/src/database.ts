@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
@@ -35,6 +36,26 @@ const databaseSecretSchema = z.object({
   password: z.string().min(1),
 });
 
+/**
+ * TLS for one Postgres pool. With `caFile`, only that connection trusts the file.
+ * Without it, verification uses Node's own trust store (the Lambda runtime bundle,
+ * via `NODE_EXTRA_CA_CERTS`).
+ */
+export function databaseTls(caFile?: string): { rejectUnauthorized: true; ca?: string } {
+  if (caFile === undefined) return { rejectUnauthorized: true };
+  let ca: string;
+  try {
+    ca = readFileSync(caFile, "utf8");
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? String(error.code) : "unknown";
+    throw new Error(`Database CA file ${caFile} could not be read (${code}).`);
+  }
+  if (!ca.includes("BEGIN CERTIFICATE")) {
+    throw new Error(`Database CA file ${caFile} has no certificate.`);
+  }
+  return { rejectUnauthorized: true, ca };
+}
+
 /** A TLS-verified pool on the database whose generated secret is `secretId`. */
 export async function databasePool(
   client: SecretsManagerClient,
@@ -53,7 +74,7 @@ export async function databasePool(
     user: database.username,
     password: database.password,
     database: databaseName,
-    ssl: { rejectUnauthorized: true },
+    ssl: databaseTls(),
     max,
   });
 }
