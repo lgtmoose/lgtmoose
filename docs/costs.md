@@ -158,7 +158,7 @@ Most of a review's model cost is the prompt, not the findings. Each batch pays t
 
 Because batches used to start together, none of them could read another's cache, and each one wrote the whole prefix. With `batchStaggerSeconds` above 0, batch 0 writes it and the others read it, which is about a tenth of the write price. A pull request's inline comments used to be copied into every batch; now a batch only sees the ones on its files.
 
-A 33-file review of four batches (Sonnet 4.6, before this split) cost $2.30 of model usage: about $1.25 to write the prompt cache, $0.35 to read it back, and $0.69 of output, nearly all of it the model's thinking. Each batch's first request was 70k to 82k tokens, and the four batches started within two seconds, so each one wrote that prefix itself. The same review after this change is the comparison for whether the shared turn and the stagger are doing that work.
+A 33-file review of four batches (Sonnet 4.6, before this split) cost $2.30 of model usage: about $1.25 to write the prompt cache, $0.35 to read it back, and $0.69 of output, nearly all of it the model's thinking. Each batch's first request was 70k to 82k tokens, and the four batches started within two seconds, so each one wrote that prefix itself. The same pull request after this change, still four batches on Sonnet 4.6, settled at $0.90. The first batch wrote a 25,355-token shared prefix and the other three read those 25,355 tokens on their first request, writing none of it.
 
 - **`maxReplyJudgements`**: replies judged per run, 10 by default. 0 turns the reply judge off.
 - **`learnings.embeddings`**: `none` (the default) ranks learnings by keywords with no calls; `bedrock` or `openai` add an embeddings call per batch, and when a learning is first ranked.
