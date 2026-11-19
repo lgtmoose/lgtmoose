@@ -245,6 +245,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
       timeoutMs: input.timeoutMs,
       runId: batchRunId(input.runId, input.index),
       ...(input.system === undefined ? {} : { system: input.system }),
+      ...(input.shared === undefined ? {} : { shared: input.shared }),
     },
   );
   const output: BatchOutput = batchOutputSchema.parse({

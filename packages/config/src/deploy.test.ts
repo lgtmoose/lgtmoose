@@ -44,6 +44,7 @@ describe("parseDeployConfig", () => {
       providers: [{ id: "claude", harness: "claude-code", auth: "bedrock" }],
       roles: {},
       maxConcurrency: 4,
+      batchStaggerSeconds: 30,
       reconcileIntervalMinutes: 30,
       reconcileLookbackHours: 24,
       maxReplyJudgements: 10,

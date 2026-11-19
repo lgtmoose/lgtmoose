@@ -371,6 +371,12 @@ export interface PreparedReview {
    */
   reviewerSystem?: string;
   /**
+   * Conventions, the PR and its general comments: untrusted, and byte-identical on every batch,
+   * so the harness can send it once and read it from the cache (`buildReviewerParts`). Inline
+   * comments stay in the batch's `prompt`.
+   */
+  reviewerShared?: string;
+  /**
    * `incremental`: only the files whose PR change moved since each was last reviewed (see
    * `reviewDiff`). `full`: the whole PR, also when no file has a usable earlier review.
    */
@@ -546,13 +552,49 @@ function lineReader(repo: Repo): (blob: string | undefined) => Promise<string[]>
   };
 }
 
+/**
+ * A bot comment's finding is the sentence before its collapsible detail. The `<details>` block
+ * and HTML comments are the same text on every batch and are most of a busy PR's prompt, so
+ * they are dropped before the length cut. A person's comment is left as they wrote it.
+ */
+function trimBotCommentBody(author: string, body: string): string {
+  if (!author.endsWith("[bot]")) return body;
+  return body
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, "")
+    .trim();
+}
+
 function contextComments(comments: readonly PullComment[]): PullRequestComment[] {
-  return comments.map((comment) => ({
-    author: comment.author,
-    body: comment.body.slice(0, COMMENT_BODY_LIMIT),
-    ...(comment.path === undefined ? {} : { path: comment.path }),
-    ...(comment.line === undefined ? {} : { line: comment.line }),
-  }));
+  const kept: PullRequestComment[] = [];
+  for (const comment of comments) {
+    const body = trimBotCommentBody(comment.author, comment.body).slice(0, COMMENT_BODY_LIMIT);
+    if (body.trim() === "") continue;
+    kept.push({
+      author: comment.author,
+      body,
+      ...(comment.path === undefined ? {} : { path: comment.path }),
+      ...(comment.line === undefined ? {} : { line: comment.line }),
+    });
+  }
+  return kept;
+}
+
+/** General comments, plus inline comments on one of the batch's paths (its name or its old one). */
+function commentsForBatch(
+  general: readonly PullRequestComment[],
+  inline: readonly PullRequestComment[],
+  batch: Batch,
+): PullRequestComment[] {
+  const paths = new Set<string>();
+  for (const planned of batch.files) {
+    paths.add(planned.file.path);
+    if (planned.file.oldPath !== undefined) paths.add(planned.file.oldPath);
+  }
+  return [
+    ...general,
+    ...inline.filter((comment) => comment.path !== undefined && paths.has(comment.path)),
+  ];
 }
 
 /**
@@ -700,6 +742,16 @@ export async function prepareReview(
     `${count(plan.files.length, "file")} to review in ${count(plan.batches.length, "batch", "batches")}, ${plan.skipped.length} skipped${done.size > 0 ? `, ${done.size} already reviewed` : ""}.`,
   );
 
+  const visible = contextComments(
+    comments.filter((comment) => {
+      const hidden = options.hiddenThreads;
+      if (hidden === undefined) return true;
+      const root = comment.inReplyTo ?? comment.id;
+      return root === undefined || !hidden.has(root);
+    }),
+  );
+  const generalComments = visible.filter((comment) => comment.path === undefined);
+  const inlineComments = visible.filter((comment) => comment.path !== undefined);
   const context = {
     pr: {
       title: pr.title,
@@ -708,19 +760,12 @@ export async function prepareReview(
       baseRef: pr.baseRef,
       headRef: pr.headRef,
     },
-    comments: contextComments(
-      comments.filter((comment) => {
-        const hidden = options.hiddenThreads;
-        if (hidden === undefined) return true;
-        const root = comment.inReplyTo ?? comment.id;
-        return root === undefined || !hidden.has(root);
-      }),
-    ),
     conventions: conventions.files,
     rulePacks,
   };
   // The same for every batch: it doesn't depend on the batch's files.
   let reviewerSystem: string | undefined;
+  let reviewerShared: string | undefined;
   const jobs: BatchJob[] = [];
   // One batch at a time: retrieval may call an embeddings provider.
   for (const batch of plan.batches) {
@@ -736,12 +781,14 @@ export async function prepareReview(
     }
     const reviewBatch = { ...batch, files: todo };
     const learnings = await batchLearnings(deps, reviewBatch);
-    const { system, prompt } = buildReviewerParts({
+    const { system, shared, prompt } = buildReviewerParts({
       ...context,
+      comments: commentsForBatch(generalComments, inlineComments, reviewBatch),
       ...(learnings.length === 0 ? {} : { learnings }),
       batch: reviewBatch,
     });
     reviewerSystem = system;
+    reviewerShared = shared;
     const learningIds = learnings.flatMap((learning) =>
       learning.id === undefined ? [] : [learning.id],
     );
@@ -764,6 +811,7 @@ export async function prepareReview(
     rulePackProblems: selected.problems,
     jobs,
     ...(reviewerSystem === undefined ? {} : { reviewerSystem }),
+    ...(reviewerShared === undefined ? {} : { reviewerShared }),
     kind: diff.kind,
     ...(diff.fallbackReason === undefined ? {} : { fallbackReason: diff.fallbackReason }),
     done: [...done].map(([path, depth]) => ({ path, depth })),
@@ -901,6 +949,8 @@ export interface RunBatchOptions {
   runId: string;
   /** The prompt part every batch shares (`PreparedReview.reviewerSystem`). */
   system?: string;
+  /** Conventions and the PR, sent once so later batches read them from the cache. */
+  shared?: string;
 }
 
 /** Runs the reviewer on one batch. A failed run is an outcome with `error`, never a throw. */
@@ -914,6 +964,7 @@ export async function runBatch(
     const result = await harness.run({
       prompt: job.prompt,
       ...(options.system === undefined ? {} : { system: options.system }),
+      ...(options.shared === undefined ? {} : { shared: options.shared }),
       cwd: options.cwd,
       schema: reviewerOutputSchema,
       model: options.model,
@@ -1482,6 +1533,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
           timeoutMs: options.batchTimeoutMs,
           runId: `${options.runId}-batch-${job.index}`,
           ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
+          ...(prepared.reviewerShared === undefined ? {} : { shared: prepared.reviewerShared }),
         }),
       );
     }

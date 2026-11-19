@@ -138,6 +138,12 @@ export const batchInputSchema = z
      */
     system: z.string().min(1).optional(),
     /**
+     * Conventions, the pull request and its general comments (`PreparedReview.reviewerShared`).
+     * The same on every reviewer batch. Claude Code sends it as its own turn so the next batch
+     * reads it from the cache. Absent for the other roles, and for inputs written before it.
+     */
+    shared: z.string().min(1).optional(),
+    /**
      * The reviewer provider's model name or alias; empty means the harness's default. A sandbox
      * task runs its own provider's model (`LGTMOOSE_MODEL` on its task definition), which for the
      * reviewer provider is this one, so a batch that falls back to another provider runs that

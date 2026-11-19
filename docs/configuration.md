@@ -24,6 +24,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `providers[].concurrency` | integer, 1 to 64 |  | Sandbox tasks that may use this provider's credential at once, across reviews. |
 | `roles` | map of `"reviewer"` or `"crossFile"` or `"verifier"` or `"replyJudge"` or `"ticketExtractor"` to string | `{}` | The provider id each role starts on. A role left out starts on the first provider; the others follow as fallbacks. |
 | `maxConcurrency` | integer, 1 to 64 | `4` | Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower. |
+| `batchStaggerSeconds` | integer, 0 to 120 | `30` | Seconds batches after the first wait before starting, so they read the first batch's prompt cache. 0 starts every batch at once. |
 | `reconcileIntervalMinutes` | integer, 5 to 1440 | `30` | Minutes between reconciler runs, which catch missed webhooks and drifted status labels. |
 | `reconcileLookbackHours` | integer, 1 to 720 | `24` | Hours back the reconciler queues reviews for: only PRs updated within this window. At least the interval. |
 | `feedback` | object | `{"acceptanceThreshold":0.5,"minSamples":3,"maxCommentsPerRun":100}` | Feedback signals: how often findings are accepted per rule category, from fixes, declines and 👍/👎. Signals only; see docs/feedback.md. |

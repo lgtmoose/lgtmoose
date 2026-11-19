@@ -38,6 +38,19 @@ describe("readConventionFiles", () => {
     ]);
   });
 
+  it("omits a file whose text is the same as one already read", async () => {
+    await writeFile(join(checkout, "AGENTS.md"), "One label.\n");
+    await writeFile(join(checkout, "CLAUDE.md"), "One label.\n");
+    await writeFile(join(checkout, ".github", "copilot-instructions.md"), "One label.\n");
+    const result = await readConventionFiles(checkout, {
+      globs: ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"],
+    });
+    expect(result.files).toEqual([
+      { path: ".github/copilot-instructions.md", text: "One label.\n" },
+    ]);
+    expect(result.omitted).toEqual(["AGENTS.md", "CLAUDE.md"]);
+  });
+
   it("gives an empty list when there are none", async () => {
     expect(await read()).toEqual([]);
   });

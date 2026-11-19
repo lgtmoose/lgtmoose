@@ -299,6 +299,20 @@ export const deployConfigSchema = z
         "Most review batches of one PR run at once. Lower when the reviewer credential's concurrency is lower.",
       ),
     /**
+     * How long batches after the first wait before they start. The first batch writes the
+     * shared prompt into the cache; the rest then read it instead of writing it again. 0
+     * starts every batch at once.
+     */
+    batchStaggerSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(120)
+      .default(30)
+      .describe(
+        "Seconds batches after the first wait before starting, so they read the first batch's prompt cache. 0 starts every batch at once.",
+      ),
+    /**
      * How often the reconciler compares open PRs with what the database recorded, catching
      * missed webhooks and drifted status labels. It makes no model calls.
      */

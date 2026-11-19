@@ -796,6 +796,7 @@ export async function prepare(
         index: batch.index,
         prompt: batch.prompt,
         ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
+        ...(prepared.reviewerShared === undefined ? {} : { shared: prepared.reviewerShared }),
         model: settings.model,
         timeoutMs: settings.batchTimeoutMs,
       });

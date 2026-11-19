@@ -123,6 +123,11 @@ export interface ReviewWorkflowProps {
    * credential allows fewer (its `limit`).
    */
   maxConcurrency: number;
+  /**
+   * Seconds batches after the first wait before their first state. 0 starts them all at once.
+   * The wait lets the first batch write the shared prompt into the cache.
+   */
+  batchStaggerSeconds: number;
   /** How long the broker's audit log is kept. */
   auditRetention: RetentionDays;
 }
@@ -167,6 +172,22 @@ export interface ReviewProvider {
  * Extension points (M4): the cross-file and verify passes go between the batches and post, as
  * steps in `afterBatches`; each reads and writes the run's objects like the batches do.
  */
+/**
+ * Batch 0 starts immediately. Every later batch waits `seconds`, so the first batch can write
+ * the shared prompt into the cache before the others send the same prefix. `0` starts them all
+ * at once.
+ */
+function staggeredStart(scope: Construct, batch: IChainable, seconds: number): IChainable {
+  if (seconds === 0) return batch;
+  const stagger = new Wait(scope, "Stagger", {
+    time: WaitTime.duration(Duration.seconds(seconds)),
+  });
+  stagger.next(batch);
+  return new Choice(scope, "Stagger?")
+    .when(Condition.numberGreaterThan("$.index", 0), stagger)
+    .otherwise(batch);
+}
+
 export class ReviewWorkflow extends Construct {
   readonly stateMachine: StateMachine;
 
@@ -331,7 +352,7 @@ export class ReviewWorkflow extends Construct {
       },
       resultPath: JsonPath.DISCARD,
     });
-    batches.itemProcessor(batch);
+    batches.itemProcessor(staggeredStart(this, batch, props.batchStaggerSeconds));
 
     const post = runControl(
       "Post",

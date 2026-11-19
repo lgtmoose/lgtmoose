@@ -111,6 +111,8 @@ export interface WorkflowStackProps extends StackProps {
   reviewerModel: string;
   /** Sandbox tasks per review at once. */
   maxConcurrency: number;
+  /** How long batches after the first wait, so they can read its prompt cache. */
+  batchStaggerSeconds: number;
   /** Record reviews instead of posting them to GitHub. */
   shadow: boolean;
   vpc: IVpc;
@@ -383,6 +385,7 @@ export class WorkflowStack extends Stack {
       sandboxSubnets: props.sandboxSubnets,
       sandboxSecurityGroup: props.sandboxSecurityGroup,
       maxConcurrency: props.maxConcurrency,
+      batchStaggerSeconds: props.batchStaggerSeconds,
       auditRetention: lean ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_YEAR,
     });
 
