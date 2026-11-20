@@ -279,7 +279,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
       model: deps.model ?? input.model,
       timeoutMs: input.timeoutMs,
       runId: batchRunId(input.runId, input.index),
-      ...modelControls(deps, undefined),
+      ...modelControls(deps, input.tier),
       ...(input.system === undefined ? {} : { system: input.system }),
       ...(input.shared === undefined ? {} : { shared: input.shared }),
     },

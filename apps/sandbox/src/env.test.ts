@@ -55,6 +55,9 @@ describe("readSandboxEnv", () => {
     expect(readSandboxEnv({ ...env, LGTMOOSE_DEEP_EFFORT: "high" })).toMatchObject({
       deepEffort: "high",
     });
+    expect(readSandboxEnv({ ...env, LGTMOOSE_DEEP_EFFORT: "turbo" })).not.toHaveProperty(
+      "deepEffort",
+    );
   });
 
   it("names the missing ones", () => {

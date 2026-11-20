@@ -173,6 +173,23 @@ describe("runSandboxBatch", () => {
     await runSandboxBatch(reviewer.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
     expect(reviewer.runs[0]).toMatchObject({ effort: "medium" });
 
+    const deepReview = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 1,
+        prompt: "Review src/total.ts",
+        role: "reviewer",
+        tier: "deep",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+    });
+    deepReview.deps.effort = "medium";
+    deepReview.deps.deepEffort = "high";
+    await runSandboxBatch(deepReview.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(deepReview.runs[0]).toMatchObject({ effort: "high" });
+
     const judge = setup({
       input: {
         version: 1,

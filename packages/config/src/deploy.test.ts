@@ -74,6 +74,14 @@ describe("parseDeployConfig", () => {
         ],
       }),
     ).toEqual([expect.objectContaining({ path: "providers[0].effort.fast" })]);
+    expect(
+      issuesOf({
+        ...minimal,
+        providers: [
+          { id: "claude", harness: "claude-code", auth: "bedrock", effort: { deep: "turbo" } },
+        ],
+      }),
+    ).toEqual([expect.objectContaining({ path: "providers[0].effort.deep" })]);
   });
 
   it("fills defaults for a minimal config", () => {
