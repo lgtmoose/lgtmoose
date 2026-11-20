@@ -434,12 +434,22 @@ describe("scoring", () => {
       ["the bug", 2],
       ["the other bug", 1],
     ]);
-    expect(combineRepeatedRuns([both, onlyFirst])).toMatchObject({
+    const combined = combineRepeatedRuns([both, onlyFirst]);
+    expect(combined).toMatchObject({
       matched: both.matched,
       costUsd: 0.5,
       durationMs: 6,
-      errors: ["the second run failed"],
+      errors: [],
+      repeatErrors: ["the second run failed"],
     });
+    expect(totals(combined === undefined ? [] : [combined]).failedRuns).toBe(0);
+    expect(
+      renderMarkdown(
+        buildReport(combined === undefined ? [] : [combined], "sonnet", new Date(0)),
+        undefined,
+        { ok: true, message: "ok" },
+      ),
+    ).toContain("later run had a failure");
     expect(combineRepeatedRuns([both])).toBe(both);
   });
 });
