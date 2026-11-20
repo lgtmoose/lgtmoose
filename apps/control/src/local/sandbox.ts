@@ -75,6 +75,8 @@ export interface SandboxProvider {
   effort?: string;
   /** How hard the fast tier thinks. Undefined keeps the model's own effort. */
   fastEffort?: string;
+  /** How hard the deep tier thinks. Undefined keeps the model's own effort. */
+  deepEffort?: string;
   /** The stored credential, with how many sandboxes may hold it at once. Undefined: none. */
   credential?: { secretId: string; limit: number };
 }
@@ -198,6 +200,7 @@ async function runContainer(
         : { LGTMOOSE_FAST_THINKING_TOKENS: String(provider.fastThinkingTokens) }),
       ...(provider.effort === undefined ? {} : { LGTMOOSE_EFFORT: provider.effort }),
       ...(provider.fastEffort === undefined ? {} : { LGTMOOSE_FAST_EFFORT: provider.fastEffort }),
+      ...(provider.deepEffort === undefined ? {} : { LGTMOOSE_DEEP_EFFORT: provider.deepEffort }),
       LGTMOOSE_BATCH_URLS: presigned.urls,
       LGTMOOSE_BATCH_DIR: BATCH_DIR,
       HTTPS_PROXY: deps.proxyUrl,

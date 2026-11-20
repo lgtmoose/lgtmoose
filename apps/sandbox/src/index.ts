@@ -102,6 +102,7 @@ async function main(): Promise<void> {
         : { fastThinkingTokens: env.fastThinkingTokens }),
       ...(env.effort === undefined ? {} : { effort: env.effort }),
       ...(env.fastEffort === undefined ? {} : { fastEffort: env.fastEffort }),
+      ...(env.deepEffort === undefined ? {} : { deepEffort: env.deepEffort }),
       log,
     },
     env.batchUrls,

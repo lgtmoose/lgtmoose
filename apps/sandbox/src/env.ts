@@ -35,6 +35,8 @@ export interface SandboxEnv {
   effort?: EffortLevel;
   /** `LGTMOOSE_FAST_EFFORT`: how hard the fast tier thinks. Undefined when unset. */
   fastEffort?: EffortLevel;
+  /** `LGTMOOSE_DEEP_EFFORT`: how hard the deep tier thinks. Undefined when unset. */
+  deepEffort?: EffortLevel;
 }
 
 /** `LGTMOOSE_MODEL`'s value for the harness's default model. */
@@ -49,7 +51,13 @@ const VARIABLES = {
 } as const satisfies Record<
   Exclude<
     keyof SandboxEnv,
-    "model" | "fastModel" | "thinkingTokens" | "fastThinkingTokens" | "effort" | "fastEffort"
+    | "model"
+    | "fastModel"
+    | "thinkingTokens"
+    | "fastThinkingTokens"
+    | "effort"
+    | "fastEffort"
+    | "deepEffort"
   >,
   string
 >;
@@ -73,6 +81,7 @@ export function readSandboxEnv(
   const fastThinkingTokens = cap("LGTMOOSE_FAST_THINKING_TOKENS");
   const effort = effortLevel(env.LGTMOOSE_EFFORT);
   const fastEffort = effortLevel(env.LGTMOOSE_FAST_EFFORT);
+  const deepEffort = effortLevel(env.LGTMOOSE_DEEP_EFFORT);
   return {
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
@@ -87,6 +96,7 @@ export function readSandboxEnv(
     ...(fastThinkingTokens === undefined ? {} : { fastThinkingTokens }),
     ...(effort === undefined ? {} : { effort }),
     ...(fastEffort === undefined ? {} : { fastEffort }),
+    ...(deepEffort === undefined ? {} : { deepEffort }),
   };
 }
 

@@ -144,10 +144,12 @@ describe("AgentSdkHarness", () => {
       // Claude Code restores the session's cost on resume, so this includes the first 0.40.
       () => [result({ structured_output: { findings: [] }, total_cost_usd: 0.55 })],
     ]);
-    const out = await run(harness(query).harness);
+    const out = await run(harness(query).harness, { effort: "medium" });
     expect(out.output).toEqual({ findings: [] });
     expect(out.usage).toMatchObject({ inputTokens: 20, outputTokens: 10, costUsd: 0.55 });
     expect(calls[0]!.options.sessionId).toBeDefined();
+    expect(calls[0]!.options.effort).toBe("medium");
+    expect(calls[1]!.options.effort).toBe("medium");
     expect(calls[1]!.options.resume).toBe(calls[0]!.options.sessionId);
     expect(calls[1]!.prompt).toMatch(/did not match/i);
     expect(out.transcriptKeys).toHaveLength(2);

@@ -55,6 +55,8 @@ export interface SandboxDeps {
   effort?: EffortLevel;
   /** How hard the fast tier thinks (`LGTMOOSE_FAST_EFFORT`). Unset: the model's own. */
   fastEffort?: EffortLevel;
+  /** How hard the deep tier thinks (`LGTMOOSE_DEEP_EFFORT`). Unset: the model's own. */
+  deepEffort?: EffortLevel;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -65,11 +67,18 @@ function modelControls(
 ): { thinkingTokens?: number; effort?: EffortLevel } {
   const fast = tier === "fast";
   const cap = fast ? deps.fastThinkingTokens : deps.thinkingTokens;
-  const effort = fast ? deps.fastEffort : deps.effort;
+  const effort = effortFor(deps, tier);
   return {
     ...(cap === undefined ? {} : { thinkingTokens: cap }),
     ...(effort === undefined ? {} : { effort }),
   };
+}
+
+/** A tier left unset keeps the model's own effort. A reviewer batch is the standard tier. */
+function effortFor(deps: SandboxDeps, tier: string | undefined): EffortLevel | undefined {
+  if (tier === "fast") return deps.fastEffort;
+  if (tier === "deep") return deps.deepEffort;
+  return deps.effort;
 }
 
 /** The URL's path only: the query string is the signature. */

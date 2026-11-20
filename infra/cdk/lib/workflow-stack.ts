@@ -340,6 +340,9 @@ export class WorkflowStack extends Stack {
           ...(provider.effort?.fast === undefined
             ? {}
             : { LGTMOOSE_FAST_EFFORT: provider.effort.fast }),
+          ...(provider.effort?.deep === undefined
+            ? {}
+            : { LGTMOOSE_DEEP_EFFORT: provider.effort.deep }),
           ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't

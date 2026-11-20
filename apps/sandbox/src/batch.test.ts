@@ -165,6 +165,72 @@ describe("runSandboxBatch", () => {
     expect(output.notes).toEqual(["exports total()", `${"x".repeat(499)}…`]);
   });
 
+  it("gives each tier its own effort, and leaves an unset tier alone", async () => {
+    const reviewer = setup();
+    reviewer.deps.effort = "medium";
+    reviewer.deps.fastEffort = "low";
+    reviewer.deps.deepEffort = "high";
+    await runSandboxBatch(reviewer.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(reviewer.runs[0]).toMatchObject({ effort: "medium" });
+
+    const judge = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 4,
+        prompt: "Judge this reply",
+        role: "judge",
+        tier: "fast",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: { kind: "fixed", fixed_at_head: false, line: 3, text: "Still off by one." },
+    });
+    judge.deps.effort = "medium";
+    judge.deps.fastEffort = "low";
+    await runSandboxBatch(judge.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(judge.runs[0]).toMatchObject({ effort: "low", tier: "fast" });
+
+    const deep = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 6,
+        prompt: "Check this ticket",
+        role: "ticket",
+        tier: "deep",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: {
+        requirements: [{ text: "Round to cents", core: true, status: "missing" }],
+      },
+    });
+    deep.deps.effort = "medium";
+    deep.deps.deepEffort = "high";
+    await runSandboxBatch(deep.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(deep.runs[0]).toMatchObject({ effort: "high" });
+
+    const unset = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 6,
+        prompt: "Check this ticket",
+        role: "ticket",
+        tier: "deep",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: {
+        requirements: [{ text: "Round to cents", core: true, status: "missing" }],
+      },
+    });
+    unset.deps.effort = "medium";
+    await runSandboxBatch(unset.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(unset.runs[0]?.effort).toBeUndefined();
+  });
+
   it("runs the reply judge on the fast tier for a judge batch", async () => {
     const s = setup({
       input: {
