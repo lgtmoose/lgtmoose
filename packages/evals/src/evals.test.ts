@@ -15,7 +15,14 @@ import {
   type Baseline,
 } from "./report.js";
 import { runFixture, runFixtures } from "./run.js";
-import { hitsMustNotFlag, matchesExpected, recallByTag, scoreFixture, totals } from "./score.js";
+import {
+  findingHitRates,
+  hitsMustNotFlag,
+  matchesExpected,
+  recallByTag,
+  scoreFixture,
+  totals,
+} from "./score.js";
 
 const FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
 
@@ -105,6 +112,7 @@ describe("fixtures", () => {
     expect(crossFile).toEqual([
       "ci-wrong-working-directory",
       "env-var-undefined",
+      "saved-card-ignored",
       "unused-new-export",
     ]);
   });
@@ -346,6 +354,45 @@ describe("scoring", () => {
       failedRuns: 1,
     });
     expect(totals([])).toMatchObject({ recall: 1, falsePositiveRate: 0, severityAccuracy: 1 });
+  });
+
+  it("counts how often a repeated run reports each expected finding, and ignores a single run", () => {
+    const spec = fixture({
+      expected: [
+        {
+          category: "correctness",
+          path: "src/cart.ts",
+          lines: [10, 10],
+          side: "RIGHT",
+          severity: "blocking",
+          note: "the bug",
+        },
+      ],
+    });
+    const hit = scoreFixture(spec, {
+      findings: [finding()],
+      costUsd: 0.1,
+      durationMs: 1,
+      errors: [],
+    });
+    const miss = scoreFixture(spec, { findings: [], costUsd: 0.1, durationMs: 1, errors: [] });
+    expect(findingHitRates([hit])).toEqual([]);
+    expect(findingHitRates([hit, miss, hit])).toEqual([
+      {
+        path: "src/cart.ts",
+        lines: [10, 10],
+        note: "the bug",
+        hits: 2,
+        runs: 3,
+      },
+    ]);
+    const report = renderMarkdown(
+      buildReport([{ ...hit, hitRates: findingHitRates([hit, miss]) }], "sonnet", new Date(0)),
+      undefined,
+      { ok: true, message: "ok" },
+    );
+    expect(report).toContain("1 of 2");
+    expect(report).toContain("the first run only");
   });
 });
 

@@ -187,6 +187,19 @@ export function renderMarkdown(
     "",
     `${t.found} of ${t.expected} seeded problems found, ${t.falsePositives} false positives, ${report.fixtures.length} fixtures, model ${inline(report.model)}.`,
   ];
+  const hitRates = report.fixtures.flatMap((score) =>
+    (score.hitRates ?? []).map((rate) => ({ name: score.name, ...rate })),
+  );
+  if (hitRates.length > 0) {
+    lines.push(
+      "",
+      "Hit rates over repeated runs (the recall above is the first run only):",
+      ...hitRates.map(
+        (rate) =>
+          `- ${inline(rate.name)}: ${where(rate.path, rate.lines)}, ${rate.hits} of ${rate.runs}${rate.note === undefined ? "" : `, ${inline(rate.note)}`}`,
+      ),
+    );
+  }
   if (t.failedRuns > 0) {
     lines.push(
       "",

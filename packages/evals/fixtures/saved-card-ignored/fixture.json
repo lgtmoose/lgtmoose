@@ -1,0 +1,21 @@
+{
+  "title": "Pay with a saved card",
+  "body": "Checkout offers the customer's saved card. Confirming it should charge that card.",
+  "kind": "seeded",
+  "tags": ["cross-file"],
+  "expected": [
+    {
+      "category": "correctness",
+      "path": "src/pay.ts",
+      "lines": [5, 7],
+      "severity": "blocking",
+      "note": "pay accepts savedPaymentMethodId but only charges confirmationTokenId, so a saved card is never charged"
+    }
+  ],
+  "mustNotFlag": [
+    {
+      "path": "src/cards.ts",
+      "note": "listSavedCards only reads cards"
+    }
+  ]
+}

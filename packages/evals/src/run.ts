@@ -4,7 +4,7 @@ import { cloneAtSha } from "@lgtmoose/git";
 import type { Harness } from "@lgtmoose/harness";
 import { runReview, type PullReader } from "@lgtmoose/pipeline";
 import { buildFixtureRepo, type Fixture } from "./fixture.js";
-import { scoreFixture, type FixtureScore } from "./score.js";
+import { findingHitRates, scoreFixture, type FixtureScore } from "./score.js";
 
 export interface RunOptions {
   harness: Harness;
@@ -20,6 +20,11 @@ export interface RunOptions {
   now?: () => number;
   /** Cap on the reviewer's thinking tokens. Unset keeps the model's own thinking. */
   thinkingTokens?: number;
+  /**
+   * How many times to run each fixture. The returned score is the first run, so a baseline still
+   * compares one run. Further runs only fill `hitRates`.
+   */
+  repeat?: number;
 }
 
 /** A PR reader that serves the fixture as the PR, with no comments on it. */
@@ -44,13 +49,19 @@ function fixturePull(fixture: Fixture, headSha: string, baseSha: string): PullRe
  * scores what it would post. A run that fails outright is scored as finding nothing, with the
  * error recorded.
  */
-export async function runFixture(fixture: Fixture, options: RunOptions): Promise<FixtureScore> {
+export async function runFixture(
+  fixture: Fixture,
+  options: RunOptions,
+  runNumber = 1,
+): Promise<FixtureScore> {
   const now = options.now ?? Date.now;
   const root = await mkdtemp(join(options.workRoot, `${fixture.name}-`));
   const started = now();
   try {
     const repo = await buildFixtureRepo(fixture, join(root, "repo"));
-    options.progress?.(`Reviewing fixture ${fixture.name}…`);
+    const repeat = options.repeat ?? 1;
+    const which = repeat > 1 ? ` (run ${runNumber} of ${repeat})` : "";
+    options.progress?.(`Reviewing fixture ${fixture.name}${which}…`);
     const report = await runReview(
       {
         github: fixturePull(fixture, repo.headSha, repo.baseSha),
@@ -68,7 +79,7 @@ export async function runFixture(fixture: Fixture, options: RunOptions): Promise
         target: { owner: "evals", repo: fixture.name, number: 1 },
         model: options.model,
         batchTimeoutMs: options.batchTimeoutMs,
-        runId: `evals-${fixture.name}`,
+        runId: repeat > 1 ? `evals-${fixture.name}-run-${runNumber}` : `evals-${fixture.name}`,
         ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       },
     );
@@ -99,7 +110,20 @@ export async function runFixtures(
   fixtures: readonly Fixture[],
   options: RunOptions,
 ): Promise<FixtureScore[]> {
+  const repeat = options.repeat ?? 1;
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    throw new Error("repeat is how many times to run each fixture, at least 1.");
+  }
   const scores: FixtureScore[] = [];
-  for (const fixture of fixtures) scores.push(await runFixture(fixture, options));
+  for (const fixture of fixtures) {
+    const runs: FixtureScore[] = [];
+    for (let runNumber = 1; runNumber <= repeat; runNumber += 1) {
+      runs.push(await runFixture(fixture, options, runNumber));
+    }
+    const first = runs[0];
+    if (first === undefined) continue;
+    const hitRates = findingHitRates(runs);
+    scores.push(hitRates.length === 0 ? first : { ...first, hitRates });
+  }
   return scores;
 }
