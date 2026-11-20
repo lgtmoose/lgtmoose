@@ -443,13 +443,27 @@ describe("scoring", () => {
       repeatErrors: ["the second run failed"],
     });
     expect(totals(combined === undefined ? [] : [combined]).failedRuns).toBe(0);
+    const report = renderMarkdown(
+      buildReport(combined === undefined ? [] : [combined], "sonnet", new Date(0)),
+      undefined,
+      { ok: true, message: "ok" },
+    );
+    expect(report).toContain("A later run reported 1 failure");
+    expect(report).toContain("a later run failed: the second run failed");
+    const two =
+      combined === undefined
+        ? undefined
+        : { ...combined, repeatErrors: ["batch one", "batch two"] };
     expect(
       renderMarkdown(
-        buildReport(combined === undefined ? [] : [combined], "sonnet", new Date(0)),
+        buildReport(two === undefined ? [] : [two], "sonnet", new Date(0)),
         undefined,
-        { ok: true, message: "ok" },
+        {
+          ok: true,
+          message: "ok",
+        },
       ),
-    ).toContain("later run had a failure");
+    ).toContain("Later runs reported 2 failures");
     expect(combineRepeatedRuns([both])).toBe(both);
   });
 });
