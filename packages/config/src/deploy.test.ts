@@ -58,6 +58,22 @@ describe("parseDeployConfig", () => {
         ],
       }),
     ).toEqual([expect.objectContaining({ path: "providers[0].thinkingTokens.fast" })]);
+    expect(
+      parseDeployConfig({
+        ...minimal,
+        providers: [
+          { id: "claude", harness: "claude-code", auth: "bedrock", effort: { standard: "medium" } },
+        ],
+      }).providers[0],
+    ).toMatchObject({ effort: { standard: "medium" } });
+    expect(
+      issuesOf({
+        ...minimal,
+        providers: [
+          { id: "claude", harness: "claude-code", auth: "bedrock", effort: { fast: "turbo" } },
+        ],
+      }),
+    ).toEqual([expect.objectContaining({ path: "providers[0].effort.fast" })]);
   });
 
   it("fills defaults for a minimal config", () => {

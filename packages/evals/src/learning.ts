@@ -11,7 +11,7 @@ import {
 } from "@lgtmoose/control/outcome-learning";
 import { isProtectedCategory, type Finding } from "@lgtmoose/core";
 import { cloneAtSha } from "@lgtmoose/git";
-import type { Harness, HarnessRunOptions } from "@lgtmoose/harness";
+import type { EffortLevel, Harness, HarnessRunOptions } from "@lgtmoose/harness";
 import {
   approveLearning,
   checkBootstrapProposal,
@@ -385,6 +385,8 @@ export interface LearningRunOptions {
   progress?: (line: string) => void;
   /** Cap on thinking tokens. Unset keeps the model's own thinking. */
   thinkingTokens?: number;
+  /** How hard the reviewer thinks. Unset keeps the model's own effort. */
+  effort?: EffortLevel;
 }
 
 /** A PR reader for one scenario PR, with no comments on it. */
@@ -525,6 +527,7 @@ export async function runScenario(
           ...(options.thinkingTokens === undefined
             ? {}
             : { thinkingTokens: options.thinkingTokens }),
+          ...(options.effort === undefined ? {} : { effort: options.effort }),
         },
       );
       found = [...report.inline, ...report.body];

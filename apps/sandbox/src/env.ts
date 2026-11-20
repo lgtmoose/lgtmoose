@@ -1,3 +1,5 @@
+import { EFFORT_LEVELS, type EffortLevel } from "@lgtmoose/harness";
+
 /**
  * What the sandbox task reads from its environment. The Workflow stack sets the provider and the
  * proxy on the task definition; the review state machine adds `LGTMOOSE_BATCH_URLS` per task.
@@ -29,6 +31,10 @@ export interface SandboxEnv {
   thinkingTokens?: number;
   /** `LGTMOOSE_FAST_THINKING_TOKENS`: the fast tier's thinking cap. Undefined when unset. */
   fastThinkingTokens?: number;
+  /** `LGTMOOSE_EFFORT`: how hard the standard tier thinks. Undefined when unset. */
+  effort?: EffortLevel;
+  /** `LGTMOOSE_FAST_EFFORT`: how hard the fast tier thinks. Undefined when unset. */
+  fastEffort?: EffortLevel;
 }
 
 /** `LGTMOOSE_MODEL`'s value for the harness's default model. */
@@ -41,7 +47,10 @@ const VARIABLES = {
   auth: "LGTMOOSE_AUTH",
   batchUrls: "LGTMOOSE_BATCH_URLS",
 } as const satisfies Record<
-  Exclude<keyof SandboxEnv, "model" | "fastModel" | "thinkingTokens" | "fastThinkingTokens">,
+  Exclude<
+    keyof SandboxEnv,
+    "model" | "fastModel" | "thinkingTokens" | "fastThinkingTokens" | "effort" | "fastEffort"
+  >,
   string
 >;
 
@@ -62,6 +71,8 @@ export function readSandboxEnv(
   };
   const thinkingTokens = cap("LGTMOOSE_THINKING_TOKENS");
   const fastThinkingTokens = cap("LGTMOOSE_FAST_THINKING_TOKENS");
+  const effort = effortLevel(env.LGTMOOSE_EFFORT);
+  const fastEffort = effortLevel(env.LGTMOOSE_FAST_EFFORT);
   return {
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
@@ -74,5 +85,14 @@ export function readSandboxEnv(
       : { fastModel: fastModel === DEFAULT_MODEL ? "" : fastModel }),
     ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
     ...(fastThinkingTokens === undefined ? {} : { fastThinkingTokens }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(fastEffort === undefined ? {} : { fastEffort }),
   };
+}
+
+function effortLevel(raw: string | undefined): EffortLevel | undefined {
+  const value = raw?.trim();
+  return value !== undefined && (EFFORT_LEVELS as readonly string[]).includes(value)
+    ? (value as EffortLevel)
+    : undefined;
 }

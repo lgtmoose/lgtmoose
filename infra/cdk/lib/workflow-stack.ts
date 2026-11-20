@@ -334,6 +334,12 @@ export class WorkflowStack extends Stack {
           ...(provider.thinkingTokens?.fast === undefined
             ? {}
             : { LGTMOOSE_FAST_THINKING_TOKENS: String(provider.thinkingTokens.fast) }),
+          ...(provider.effort?.standard === undefined
+            ? {}
+            : { LGTMOOSE_EFFORT: provider.effort.standard }),
+          ...(provider.effort?.fast === undefined
+            ? {}
+            : { LGTMOOSE_FAST_EFFORT: provider.effort.fast }),
           ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't

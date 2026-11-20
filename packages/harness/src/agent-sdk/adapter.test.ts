@@ -80,6 +80,13 @@ const run = (h: AgentSdkHarness, extra: Record<string, unknown> = {}) =>
   h.run({ prompt: "Review this.", cwd: tmp, schema, model: "sonnet", timeoutMs: 5000, ...extra });
 
 describe("AgentSdkHarness", () => {
+  it("passes effort through to the SDK", async () => {
+    const { query, calls } = fakeQuery([() => [result({ structured_output: { findings: [] } })]]);
+    const { harness: h } = harness(query);
+    await run(h, { effort: "medium" });
+    expect(calls[0]?.options.effort).toBe("medium");
+  });
+
   it("passes a thinking cap through MAX_THINKING_TOKENS", async () => {
     const { query, calls } = fakeQuery([() => [result({ structured_output: { findings: [] } })]]);
     const { harness: h } = harness(query);

@@ -29,7 +29,7 @@ import {
 } from "@lgtmoose/core";
 import type { CloneOptions, FileDiff, Repo } from "@lgtmoose/git";
 import { reviewDiff } from "@lgtmoose/git";
-import { HarnessError, type Harness, type HarnessUsage } from "@lgtmoose/harness";
+import { HarnessError, type EffortLevel, type Harness, type HarnessUsage } from "@lgtmoose/harness";
 import {
   planReview,
   readHeaders,
@@ -95,6 +95,8 @@ export interface ReviewOptions {
   batchTimeoutMs: number;
   /** Cap on the reviewer's thinking tokens. Unset keeps the model's own thinking. */
   thinkingTokens?: number;
+  /** How hard the reviewer thinks. Unset keeps the model's own effort. */
+  effort?: EffortLevel;
   /** Groups this run's transcripts. */
   runId: string;
 }
@@ -962,6 +964,8 @@ export interface RunBatchOptions {
   shared?: string;
   /** Cap on the model's thinking tokens. Unset keeps the model's own thinking. */
   thinkingTokens?: number;
+  /** How hard the model thinks. Unset keeps the model's own effort. */
+  effort?: EffortLevel;
 }
 
 /** Runs the reviewer on one batch. A failed run is an outcome with `error`, never a throw. */
@@ -982,6 +986,7 @@ export async function runBatch(
       timeoutMs: options.timeoutMs,
       runId: options.runId,
       ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
     });
     const notes = clipBatchNotes(result.output.notes ?? []);
     return {
@@ -1024,6 +1029,7 @@ export async function runJudge(
       timeoutMs: options.timeoutMs,
       runId: options.runId,
       ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
       tier: REPLY_JUDGE_TIER,
     });
     return {
@@ -1065,6 +1071,7 @@ export async function runTicketCheck(
       timeoutMs: options.timeoutMs,
       runId: options.runId,
       ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
       tier: TICKET_CHECKER_TIER,
     });
     return {
@@ -1106,6 +1113,7 @@ export async function runExplain(
       timeoutMs: options.timeoutMs,
       runId: options.runId,
       ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
       tier: EXPLAINER_TIER,
     });
     return {
@@ -1148,6 +1156,7 @@ export async function runBootstrap(
       timeoutMs: options.timeoutMs,
       runId: options.runId,
       ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
       tier: BOOTSTRAPPER_TIER,
     });
     return {
@@ -1551,6 +1560,7 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
           ...(options.thinkingTokens === undefined
             ? {}
             : { thinkingTokens: options.thinkingTokens }),
+          ...(options.effort === undefined ? {} : { effort: options.effort }),
           ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
           ...(prepared.reviewerShared === undefined ? {} : { shared: prepared.reviewerShared }),
         }),

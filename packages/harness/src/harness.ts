@@ -43,7 +43,16 @@ export interface HarnessRunOptions<T> {
    * the model's own thinking. Codex and Cursor ignore it.
    */
   thinkingTokens?: number;
+  /**
+   * How hard Claude thinks. Claude Code sends `--effort` on every turn and the Agent SDK sends
+   * `effort`. Unset keeps the model's own effort. Codex and Cursor ignore it.
+   */
+  effort?: EffortLevel;
 }
+
+/** Claude's effort levels, the same set `--effort` and the Agent SDK accept. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 /**
  * The task for a harness without a separate system prompt: `system`, then `shared`, then

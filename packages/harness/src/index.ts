@@ -3,9 +3,11 @@
  * read-only tools on the checkout and returns JSON, which is validated with zod.
  */
 export {
+  EFFORT_LEVELS,
   HarnessError,
   MODEL_TIERS,
   fullPrompt,
+  type EffortLevel,
   type Harness,
   type HarnessErrorKind,
   type HarnessResult,

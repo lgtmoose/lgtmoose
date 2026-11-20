@@ -44,6 +44,11 @@ describe("readSandboxEnv", () => {
     expect(readSandboxEnv({ ...env, LGTMOOSE_THINKING_TOKENS: "200" })).not.toHaveProperty(
       "thinkingTokens",
     );
+    expect(readSandboxEnv(env)).not.toHaveProperty("effort");
+    expect(
+      readSandboxEnv({ ...env, LGTMOOSE_EFFORT: "medium", LGTMOOSE_FAST_EFFORT: "low" }),
+    ).toMatchObject({ effort: "medium", fastEffort: "low" });
+    expect(readSandboxEnv({ ...env, LGTMOOSE_EFFORT: "turbo" })).not.toHaveProperty("effort");
   });
 
   it("names the missing ones", () => {

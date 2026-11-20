@@ -116,6 +116,7 @@ export class ClaudeCodeHarness implements Harness {
             resume,
             ...(schema.json === undefined ? {} : { jsonSchema: JSON.stringify(schema.json) }),
             ...(this.options.maxTurns === undefined ? {} : { maxTurns: this.options.maxTurns }),
+            ...(options.effort === undefined ? {} : { effort: options.effort }),
           }),
           cwd: options.cwd,
           env,
@@ -186,6 +187,8 @@ export interface ClaudeArgsOptions {
   resume: boolean;
   jsonSchema?: string;
   maxTurns?: number;
+  /** `--effort` on this turn. Unset leaves the model's own effort. */
+  effort?: string;
 }
 
 /** The command line. The prompt goes on stdin. */
@@ -221,6 +224,7 @@ export function claudeArgs(options: ClaudeArgsOptions): string[] {
   else args.push("--session-id", options.sessionId);
   if (options.jsonSchema !== undefined) args.push("--json-schema", options.jsonSchema);
   if (options.maxTurns !== undefined) args.push("--max-turns", String(options.maxTurns));
+  if (options.effort !== undefined && options.effort !== "") args.push("--effort", options.effort);
   return args;
 }
 

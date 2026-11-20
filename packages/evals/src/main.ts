@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { EFFORT_LEVELS, type EffortLevel } from "@lgtmoose/harness";
 import { FileTranscriptStore } from "@lgtmoose/pipeline";
 import { loadFixtures, type Fixture } from "./fixture.js";
 import { learningTotals, loadScenarios, runScenarios, type Scenario } from "./learning.js";
@@ -65,6 +66,8 @@ Options:
   --timeout <minutes>  Time limit for each batch (default: 15)
   --thinking-tokens <n>
                        Cap thinking tokens (at least 1024). Unset keeps the model's own thinking.
+  --effort <level>     How hard the reviewer thinks: low, medium, high, xhigh or max.
+                       Unset keeps the model's own effort.
   --repeat <n>         Run each fixture this many times (default: 1). Recall stays the first
                        run. The report adds how often each expected finding was hit.
   --claude <path>      The claude binary (default: claude on PATH), also for agent-sdk
@@ -117,6 +120,7 @@ async function main(argv: readonly string[]): Promise<number> {
       model: { type: "string", multiple: true },
       timeout: { type: "string" },
       "thinking-tokens": { type: "string" },
+      effort: { type: "string" },
       repeat: { type: "string" },
       claude: { type: "string" },
       codex: { type: "string" },
@@ -144,6 +148,10 @@ async function main(argv: readonly string[]): Promise<number> {
     (!Number.isInteger(thinkingTokens) || thinkingTokens < 1024)
   ) {
     throw new Error("--thinking-tokens is a whole number of tokens, at least 1024.");
+  }
+  const effort = values.effort;
+  if (effort !== undefined && !(EFFORT_LEVELS as readonly string[]).includes(effort)) {
+    throw new Error("--effort is low, medium, high, xhigh or max.");
   }
   const models = modelsFrom(values.model);
   const out = resolve(values.out ?? "eval-report");
@@ -230,6 +238,7 @@ async function main(argv: readonly string[]): Promise<number> {
       workRoot,
       progress,
       ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
+      ...(effort === undefined ? {} : { effort: effort as EffortLevel }),
       ...(repeat === 1 ? {} : { repeat }),
     });
     let learning: LearningReport | undefined;
@@ -243,6 +252,7 @@ async function main(argv: readonly string[]): Promise<number> {
         progress,
         concurrency: LEARNING_CONCURRENCY,
         ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
+        ...(effort === undefined ? {} : { effort: effort as EffortLevel }),
       });
       learning = { model: learningModel, totals: learningTotals(scored), scenarios: scored };
     }

@@ -133,6 +133,7 @@ export class AgentSdkHarness implements Harness {
             ? {}
             : { pathToClaudeCodeExecutable: this.options.binaryPath }),
           ...(this.options.maxTurns === undefined ? {} : { maxTurns: this.options.maxTurns }),
+          ...(options.effort === undefined ? {} : { effort: options.effort }),
           ...(n > 1 ? { resume: sessionId } : { sessionId }),
           // The SDK's `thinking: { type: "enabled" }` becomes adaptive thinking on this CLI and
           // drops the budget, so the cap goes through the same variable the CLI harness sets.

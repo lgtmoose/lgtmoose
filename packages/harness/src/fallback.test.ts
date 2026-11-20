@@ -216,6 +216,10 @@ describe("claudeArgs without a model", () => {
     expect(claudeArgs({ ...base, model: "opus" })).toEqual(
       expect.arrayContaining(["--model", "opus"]),
     );
+    expect(claudeArgs({ ...base, model: "opus", effort: "medium" })).toEqual(
+      expect.arrayContaining(["--effort", "medium"]),
+    );
+    expect(claudeArgs({ ...base, model: "opus" })).not.toContain("--effort");
   });
 });
 

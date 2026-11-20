@@ -426,6 +426,8 @@ describe("review state machine", () => {
       ).map((e) => e.Name);
     expect(names("claude")).not.toContain("LGTMOOSE_THINKING_TOKENS");
     expect(names("bedrock")).not.toContain("LGTMOOSE_FAST_THINKING_TOKENS");
+    expect(names("claude")).not.toContain("LGTMOOSE_EFFORT");
+    expect(names("bedrock")).not.toContain("LGTMOOSE_FAST_EFFORT");
 
     const config = parseDeployConfig({
       allowedOrgs: ["lgtmoose"],
@@ -435,6 +437,7 @@ describe("review state machine", () => {
           harness: "claude-code",
           auth: "oauth-token",
           thinkingTokens: { standard: 2000, fast: 1024 },
+          effort: { standard: "medium", fast: "low" },
         },
       ],
     });
@@ -449,6 +452,8 @@ describe("review state machine", () => {
     );
     expect(envs).toContainEqual({ Name: "LGTMOOSE_THINKING_TOKENS", Value: "2000" });
     expect(envs).toContainEqual({ Name: "LGTMOOSE_FAST_THINKING_TOKENS", Value: "1024" });
+    expect(envs).toContainEqual({ Name: "LGTMOOSE_EFFORT", Value: "medium" });
+    expect(envs).toContainEqual({ Name: "LGTMOOSE_FAST_EFFORT", Value: "low" });
   }, 120_000);
 
   it("passes each step its command and the execution, and the job to prepare", () => {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { cloneAtSha } from "@lgtmoose/git";
-import type { Harness } from "@lgtmoose/harness";
+import type { EffortLevel, Harness } from "@lgtmoose/harness";
 import { runReview, type PullReader } from "@lgtmoose/pipeline";
 import { buildFixtureRepo, type Fixture } from "./fixture.js";
 import { combineRepeatedRuns, scoreFixture, type FixtureScore } from "./score.js";
@@ -20,6 +20,8 @@ export interface RunOptions {
   now?: () => number;
   /** Cap on the reviewer's thinking tokens. Unset keeps the model's own thinking. */
   thinkingTokens?: number;
+  /** How hard the reviewer thinks. Unset keeps the model's own effort. */
+  effort?: EffortLevel;
   /**
    * How many times to run each fixture. The returned score is the first run, so a baseline still
    * compares one run. Further runs only fill `hitRates`.
@@ -81,6 +83,7 @@ export async function runFixture(
         batchTimeoutMs: options.batchTimeoutMs,
         runId: repeat > 1 ? `evals-${fixture.name}-run-${runNumber}` : `evals-${fixture.name}`,
         ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+        ...(options.effort === undefined ? {} : { effort: options.effort }),
       },
     );
     const costUsd = report.batches.reduce((sum, batch) => sum + (batch.usage?.costUsd ?? 0), 0);

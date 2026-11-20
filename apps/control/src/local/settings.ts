@@ -59,6 +59,8 @@ export function localSettings(config: DeployConfig): LocalSettings {
     ...(provider.thinkingTokens?.fast === undefined
       ? {}
       : { fastThinkingTokens: provider.thinkingTokens.fast }),
+    ...(provider.effort?.standard === undefined ? {} : { effort: provider.effort.standard }),
+    ...(provider.effort?.fast === undefined ? {} : { fastEffort: provider.effort.fast }),
     ...(providerNeedsSecret(provider)
       ? {
           credential: {

@@ -114,6 +114,16 @@ const providerSchema = z
         "Cap on thinking tokens per tier (fast, standard, deep), at least 1024. Tiers left out keep the model's own thinking. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it.",
       ),
     /**
+     * How hard a tier thinks. Claude Code sends `--effort` on every turn and the Agent SDK sends
+     * `effort`. Unset keeps the model's own effort. Codex and Cursor ignore it.
+     */
+    effort: z
+      .partialRecord(z.enum(TIERS), z.enum(["low", "medium", "high", "xhigh", "max"]))
+      .optional()
+      .describe(
+        "How hard a tier thinks: low, medium, high, xhigh or max. Tiers left out keep the model's own effort. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it.",
+      ),
+    /**
      * Google Cloud settings for `vertex` auth. The service-account key itself is the stored
      * credential (`lgtmoose auth`); its `project_id` is used when `projectId` is left out.
      */

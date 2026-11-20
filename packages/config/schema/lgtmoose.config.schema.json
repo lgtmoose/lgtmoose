@@ -93,6 +93,28 @@
               "maximum": 128000
             }
           },
+          "effort": {
+            "description": "How hard a tier thinks: low, medium, high, xhigh or max. Tiers left out keep the model's own effort. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "fast",
+                "standard",
+                "deep"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          },
           "vertex": {
             "description": "Google Cloud settings, for auth: \"vertex\" only.",
             "type": "object",
