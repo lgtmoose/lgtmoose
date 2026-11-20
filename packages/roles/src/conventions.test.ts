@@ -51,6 +51,15 @@ describe("readConventionFiles", () => {
     expect(result.omitted).toEqual(["AGENTS.md", "CLAUDE.md"]);
   });
 
+  it("omits a copy that only changes a title line", async () => {
+    const rules = Array.from({ length: 20 }, (_, i) => `Rule ${i}: keep one review label.`);
+    await writeFile(join(checkout, "AGENTS.md"), ["# Agents", ...rules].join("\n"));
+    await writeFile(join(checkout, "CLAUDE.md"), ["# Claude", ...rules].join("\n"));
+    const result = await readConventionFiles(checkout, { globs: ["AGENTS.md", "CLAUDE.md"] });
+    expect(result.files.map((file) => file.path)).toEqual(["AGENTS.md"]);
+    expect(result.omitted).toEqual(["CLAUDE.md"]);
+  });
+
   it("gives an empty list when there are none", async () => {
     expect(await read()).toEqual([]);
   });

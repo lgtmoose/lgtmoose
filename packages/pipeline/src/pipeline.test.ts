@@ -191,14 +191,14 @@ const OPTIONS = {
 
 describe("runReview", () => {
   it("reviews the PR against its base commit's config and conventions", async () => {
-    const { deps: d, prompts, shared } = deps({ findings: [finding()] });
+    const { deps: d, prompts } = deps({ findings: [finding()] });
     const report = await runReview(d, OPTIONS);
 
     // The head's `skip: ['**']` and its CLAUDE.md don't count: the base's do.
     expect(report.plan).toEqual({ reviewed: 3, skipped: 0 });
     expect(prompts).toHaveLength(1);
     // The head's CLAUDE.md is in the diff under review, but the rules come from the base.
-    const context = shared[0] ?? "";
+    const context = prompts[0] ?? "";
     const conventions = context.slice(
       context.indexOf("# Repo conventions"),
       context.indexOf("# Pull request"),
@@ -277,14 +277,13 @@ describe("runReview", () => {
     await runReview(d, OPTIONS);
     const system = systems[0] ?? "";
     expect(system).toContain("## Rule pack: generic");
-    // PR and repository content stay out of the trusted system part. Conventions and the PR
-    // are the shared part, sent once so the later batches read them from the cache.
+    // PR and repository content stay out of the trusted system part. With one batch there's
+    // no later batch to read a shared turn's cache, so conventions and the PR lead its prompt.
     expect(system).not.toMatch(/<untrusted source=/);
     expect(system).not.toContain("Fix totals");
-    expect(shared[0]).toContain("# Repo conventions");
-    expect(shared[0]).toContain("Fix totals");
-    expect(shared[0]).not.toContain("## Rule pack: generic");
-    expect(prompts[0]).not.toContain("# Repo conventions");
+    expect(shared).toEqual([undefined]);
+    expect(prompts[0]?.startsWith("# Repo conventions")).toBe(true);
+    expect(prompts[0]).toContain("Fix totals");
     expect(prompts[0]).not.toContain("## Rule pack: generic");
   });
 
@@ -297,7 +296,7 @@ describe("runReview", () => {
     expect(report.batches[0]?.notes?.[1]).toHaveLength(500);
   });
 
-  it("finishes a 300-file PR in one run, every batch with the same system part", async () => {
+  it("finishes a 300-file PR in one run, every batch with the same system and shared parts", async () => {
     const files = Object.fromEntries(
       Array.from({ length: 300 }, (_, i) => [
         `src/gen/file-${String(i).padStart(3, "0")}.ts`,
@@ -305,9 +304,13 @@ describe("runReview", () => {
       ]),
     );
     headSha = await commit(files, "300 files");
-    const { deps: d, systems } = deps();
+    const { deps: d, systems, shared, prompts } = deps();
     const report = await runReview(d, OPTIONS);
     expect(report.plan.reviewed).toBe(303);
+    expect(new Set(shared).size).toBe(1);
+    expect(shared[0]).toContain("# Repo conventions");
+    expect(shared[0]).toContain("Fix totals");
+    for (const prompt of prompts) expect(prompt).not.toContain("# Repo conventions");
     expect(report.batches.length).toBeGreaterThanOrEqual(30);
     expect(report.batches.every((batch) => batch.error === undefined)).toBe(true);
     expect(report.complete).toBe(true);
@@ -381,7 +384,6 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(asked[0]?.diff).toContain('source="diff"');
     for (const prompt of prompts) expect(prompt).toContain("Totals are in cents.");
     expect(prepared.reviewerSystem).not.toContain("Totals are in cents.");
-    expect(prepared.reviewerShared).not.toContain("Totals are in cents.");
 
     const progress: string[] = [];
     const failing = await prepareReview(
@@ -425,10 +427,11 @@ describe("prepareReview and finishReview with earlier runs", () => {
       { hiddenThreads: new Set([9]) },
     );
     const prompt = prepared.jobs[0]?.prompt ?? "";
-    const sharedText = prepared.reviewerShared ?? "";
-    expect(sharedText).toContain("Please look at the loop.");
-    expect(sharedText).not.toContain("The bound is wrong.");
-    expect(prompt).toContain("The bound is wrong.");
+    expect(prepared.reviewerShared).toBeUndefined();
+    // One batch: the shared context leads its prompt, and the inline comments come after it.
+    const general = prompt.indexOf("Please look at the loop.");
+    expect(general).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf("The bound is wrong.")).toBeGreaterThan(general);
     expect(prompt).toContain("Real note.");
     expect(prompt).not.toContain("noise");
     expect(prompt).not.toContain("hide me");

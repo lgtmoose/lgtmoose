@@ -73,6 +73,23 @@ describe("readConventionFilesAt", () => {
     });
   });
 
+  it("omits a copy with its own title, and keeps a file with rules of its own", async () => {
+    const rules = Array.from({ length: 20 }, (_, i) => `Rule ${i}: keep one review label.`);
+    const copy = (title: string, extra: string[] = []) =>
+      [`# ${title}`, "", ...rules, ...extra, ""].join("\n");
+    const sha = await commit({
+      ".github/copilot-instructions.md": copy("Copilot"),
+      "AGENTS.md": copy("Agent instructions"),
+      "CLAUDE.md": copy("Claude instructions", ["Use pnpm.", "No PATCH.", "Short lines."]),
+    });
+    const { files, omitted } = await readConventionFilesAt(repo, sha);
+    expect(files.map((file) => file.path)).toEqual([
+      ".github/copilot-instructions.md",
+      "CLAUDE.md",
+    ]);
+    expect(omitted).toEqual(["AGENTS.md"]);
+  });
+
   it("ignores symlinks in the tree", async () => {
     await writeFile(join(dir, "real.md"), "real");
     await symlink("real.md", join(dir, "AGENTS.md"));

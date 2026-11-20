@@ -373,7 +373,8 @@ export interface PreparedReview {
   /**
    * Conventions, the PR and its general comments: untrusted, and byte-identical on every batch,
    * so the harness can send it once and read it from the cache (`buildReviewerParts`). Inline
-   * comments stay in the batch's `prompt`.
+   * comments stay in the batch's `prompt`. Undefined when only one batch reviews: its prompt
+   * starts with this text instead.
    */
   reviewerShared?: string;
   /**
@@ -798,6 +799,12 @@ export async function prepareReview(
       prompt,
       ...(learningIds.length === 0 ? {} : { learningIds }),
     });
+  }
+  // With one batch, no later batch reads the shared turn's cache, so the turn only adds cost.
+  const reviewing = jobs.filter((job) => job.prompt !== undefined);
+  if (reviewing.length === 1 && reviewing[0] !== undefined && reviewerShared !== undefined) {
+    reviewing[0].prompt = `${reviewerShared}\n\n${reviewing[0].prompt}`;
+    reviewerShared = undefined;
   }
   return {
     target,
