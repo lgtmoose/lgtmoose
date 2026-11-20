@@ -210,6 +210,7 @@ async function main(argv: readonly string[]): Promise<number> {
         models,
         binaries,
         batchTimeoutMs: Math.round(minutes * 60_000),
+        ...(repeat === 1 ? {} : { repeat }),
         results: values.results === undefined ? undefined : resolve(values.results),
       });
     }
@@ -317,6 +318,7 @@ async function runMatrixMode(
     models: Record<string, string>;
     binaries: Record<string, string | undefined>;
     batchTimeoutMs: number;
+    repeat?: number;
     results: string | undefined;
   },
 ): Promise<number> {
@@ -334,6 +336,7 @@ async function runMatrixMode(
     models: run.models,
     batchTimeoutMs: run.batchTimeoutMs,
     workRoot: run.workRoot,
+    ...(run.repeat === undefined ? {} : { repeat: run.repeat }),
     progress: (line) => process.stderr.write(`${line}\n`),
     onReport: async (assignment, report) => {
       const dir = join(run.out, folderOf(assignment));

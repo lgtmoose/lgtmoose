@@ -201,6 +201,8 @@ export interface MatrixOptions {
   /** `--model` per provider (see `modelsFrom`); a provider left out runs its default. */
   models: Readonly<Record<string, string>>;
   batchTimeoutMs: number;
+  /** How many times to run each fixture. Unset runs each once. */
+  repeat?: number;
   workRoot: string;
   progress?: (line: string) => void;
   /** Each ran configuration's full report, to write next to the results. */
@@ -248,6 +250,7 @@ export async function runMatrix(
       model,
       batchTimeoutMs: options.batchTimeoutMs,
       workRoot: options.workRoot,
+      ...(options.repeat === undefined ? {} : { repeat: options.repeat }),
       ...(options.progress === undefined ? {} : { progress: options.progress }),
     });
     const report = buildReport(scores, model, startedAt);

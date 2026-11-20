@@ -193,7 +193,7 @@ export function renderMarkdown(
   if (hitRates.length > 0) {
     lines.push(
       "",
-      "Hit rates over repeated runs (the recall above is the first run only):",
+      "Hit rates over repeated runs (the recall above is the first run only; cost and time are every run):",
       ...hitRates.map(
         (rate) =>
           `- ${inline(rate.name)}: ${where(rate.path, rate.lines)}, ${rate.hits} of ${rate.runs}${rate.note === undefined ? "" : `, ${inline(rate.note)}`}`,

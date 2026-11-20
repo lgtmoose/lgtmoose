@@ -43,6 +43,8 @@ pnpm --filter @lgtmoose/evals run eval --out /tmp/evals
 
 The run writes `report.md` and `report.json`, and exits 1 when recall is more than 5 points below `baseline.json`.
 
+`--repeat <n>` runs each fixture n times. Recall stays the first run, so the baseline compares one run. The report adds how often each expected finding was hit, and its cost and time are the sum of the runs.
+
 After a change that's meant to move the numbers, run it with `--update-baseline` and commit `baseline.json`. The committed baseline starts at 0, because no real run has been measured yet, so the gate passes until the first one is.
 
 ## Provider matrix
