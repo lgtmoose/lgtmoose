@@ -120,12 +120,12 @@ export function modelsFrom(values: readonly string[] | undefined): Record<string
 /** Failures that are a provider's limit (`HarnessError` kinds), as batch errors carry them. */
 const LIMIT_ERROR = /\b(?:rate_limit|plan_limit):/;
 
-/** Batch failures that were a rate or plan limit, over a configuration's fixtures. */
+/** Batch failures that were a rate or plan limit, including runs after the first. */
 export function limitHits(scores: readonly FixtureScore[]): number {
-  return scores.reduce(
-    (n, score) => n + score.errors.filter((error) => LIMIT_ERROR.test(error)).length,
-    0,
-  );
+  return scores.reduce((n, score) => {
+    const errors = [...score.errors, ...(score.repeatErrors ?? [])];
+    return n + errors.filter((error) => LIMIT_ERROR.test(error)).length;
+  }, 0);
 }
 
 const ratio = z.number().min(0).max(1);
@@ -326,6 +326,15 @@ export function renderMatrixMarkdown(results: MatrixResults): string {
     );
   }
   const partial = results.configurations.filter((entry) => (entry.totals?.failedRuns ?? 0) > 0);
+  const later = results.configurations.some((entry) =>
+    entry.fixtures?.some((fixture) => (fixture.repeatErrors?.length ?? 0) > 0),
+  );
+  if (later) {
+    lines.push(
+      "",
+      "A later run failed on a row above. Recall stays the first run. See each configuration's report.md.",
+    );
+  }
   if (partial.length > 0) {
     lines.push(
       "",
