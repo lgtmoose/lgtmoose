@@ -22,7 +22,7 @@ export interface RunOptions {
   thinkingTokens?: number;
   /**
    * How many times to run each fixture. The returned score is the first run, so a baseline still
-   * compares one run. Further runs only fill `hitRates`.
+   * compares one run. Further runs fill `hitRates` and `repeatErrors`, and add to the cost and time.
    */
   repeat?: number;
 }

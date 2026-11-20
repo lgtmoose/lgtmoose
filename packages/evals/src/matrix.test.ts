@@ -128,14 +128,16 @@ describe("built-in providers", () => {
 
 describe("limit hits", () => {
   it("counts batch failures that were a rate or plan limit", () => {
-    const score = (errors: string[]) => ({ errors }) as unknown as FixtureScore;
+    const score = (errors: string[], repeatErrors: string[] = []) =>
+      ({ errors, repeatErrors }) as unknown as FixtureScore;
     expect(
       limitHits([
         score(["batch 1: plan_limit: Usage limit reached.", "batch 2: timeout: too slow"]),
         score(["batch 1: rate_limit: Slow down."]),
         score([]),
+        score([], ["batch 1: plan_limit: Usage limit reached."]),
       ]),
-    ).toBe(2);
+    ).toBe(3);
   });
 });
 
@@ -216,6 +218,43 @@ describe("running the matrix", () => {
     // The reason is a harness's message, so it's escaped.
     expect(table).toContain("| skipped: absent\\: No credential found\\. | | | | | |");
     expect(table).toContain("lower bound");
+  }, 60_000);
+
+  it("keeps a later run's failures in the matrix results", async () => {
+    const fixtures = (await loadFixtures(FIXTURES)).filter((f) => f.name === "off-by-one");
+    const flaky: EvalProvider = {
+      ...fakeProvider("flaky", () => [OFF_BY_ONE]),
+      create: (): Harness => ({
+        id: "flaky",
+        run: async (options) => {
+          if (options.runId?.includes("-run-2") === true) {
+            throw new HarnessError("timeout", "the second run failed");
+          }
+          return {
+            output: options.schema.parse({ findings: [OFF_BY_ONE] }),
+            transcriptKey: "t",
+            usage: { costUsd: 0.1 },
+          };
+        },
+      }),
+    };
+    const results = await runMatrix(
+      fixtures,
+      matrixAssignments({ providers: "flaky" }, { flaky }),
+      {
+        providers: { flaky },
+        env: {},
+        harnessFor: (provider) => provider.create({ transcripts: undefined as never, env: {} }),
+        models: {},
+        batchTimeoutMs: 1000,
+        workRoot,
+        repeat: 2,
+      },
+    );
+    expect(
+      matrixResultsSchema.parse(results).configurations[0]?.fixtures?.[0]?.repeatErrors,
+    ).toEqual(["batch 1: timeout: the second run failed"]);
+    expect(renderMatrixMarkdown(results)).toContain("A later run failed on a row above");
   }, 60_000);
 
   it("says nothing ran when every configuration was skipped or failed", () => {
