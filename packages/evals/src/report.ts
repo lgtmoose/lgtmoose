@@ -193,12 +193,23 @@ export function renderMarkdown(
   if (hitRates.length > 0) {
     lines.push(
       "",
-      "Hit rates over repeated runs (the recall above is the first run only):",
+      "Hit rates over repeated runs (the recall above is the first run only; cost and time are every run):",
       ...hitRates.map(
         (rate) =>
           `- ${inline(rate.name)}: ${where(rate.path, rate.lines)}, ${rate.hits} of ${rate.runs}${rate.note === undefined ? "" : `, ${inline(rate.note)}`}`,
       ),
     );
+  }
+  const repeatErrors = report.fixtures.reduce(
+    (n, score) => n + (score.repeatErrors?.length ?? 0),
+    0,
+  );
+  if (repeatErrors > 0) {
+    const later =
+      repeatErrors === 1
+        ? "1 later run had a failure. Recall stays the first run, so it is not a miss."
+        : `${repeatErrors} later runs had failures. Recall stays the first run, so they are not misses.`;
+    lines.push("", later);
   }
   if (t.failedRuns > 0) {
     lines.push(

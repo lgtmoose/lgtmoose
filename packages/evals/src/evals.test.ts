@@ -16,6 +16,7 @@ import {
 } from "./report.js";
 import { runFixture, runFixtures } from "./run.js";
 import {
+  combineRepeatedRuns,
   findingHitRates,
   hitsMustNotFlag,
   matchesExpected,
@@ -393,6 +394,63 @@ describe("scoring", () => {
     );
     expect(report).toContain("1 of 2");
     expect(report).toContain("the first run only");
+    expect(report).toContain("cost and time are every run");
+  });
+
+  it("keeps findings at the same lines apart, and adds up every run's cost and errors", () => {
+    const spec = fixture({
+      expected: [
+        {
+          category: "correctness",
+          path: "src/cart.ts",
+          lines: [10, 10],
+          side: "RIGHT",
+          severity: "blocking",
+          note: "the bug",
+        },
+        {
+          category: "security",
+          path: "src/cart.ts",
+          lines: [10, 10],
+          side: "RIGHT",
+          severity: "should_fix",
+          note: "the other bug",
+        },
+      ],
+    });
+    const both = scoreFixture(spec, {
+      findings: [finding(), finding({ rule_category: "security", severity: "should_fix" })],
+      costUsd: 0.2,
+      durationMs: 2,
+      errors: [],
+    });
+    const onlyFirst = scoreFixture(spec, {
+      findings: [finding()],
+      costUsd: 0.3,
+      durationMs: 4,
+      errors: ["the second run failed"],
+    });
+    expect(findingHitRates([both, onlyFirst]).map((rate) => [rate.note, rate.hits])).toEqual([
+      ["the bug", 2],
+      ["the other bug", 1],
+    ]);
+    const combined = combineRepeatedRuns([both, onlyFirst]);
+    expect(combined).toMatchObject({
+      matched: both.matched,
+      costUsd: 0.5,
+      durationMs: 6,
+      errors: [],
+      repeatErrors: ["the second run failed"],
+    });
+    expect(totals(combined === undefined ? [] : [combined]).failedRuns).toBe(0);
+    expect(
+      renderMarkdown(
+        buildReport(combined === undefined ? [] : [combined], "sonnet", new Date(0)),
+        undefined,
+        { ok: true, message: "ok" },
+      ),
+    ).toContain("later run had a failure");
+    expect(combineRepeatedRuns([both])).toBe(both);
   });
 });
 

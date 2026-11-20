@@ -71,6 +71,11 @@ export interface FixtureScore {
   durationMs: number;
   errors: readonly string[];
   /**
+   * Failures of runs after the first. Shown in the report. They are not misses, and they don't
+   * fail the baseline gate: that still follows the first run.
+   */
+  repeatErrors?: readonly string[];
+  /**
    * Set when the fixture ran more than once. One entry per expected finding, in the first run's
    * order: how many of the runs reported it. The score's own matched and missed stay the first run,
    * so a baseline still compares one run.
@@ -204,7 +209,10 @@ export function totals(scores: readonly FixtureScore[]): EvalTotals {
 }
 
 function expectedKey(expected: ExpectedFinding): string {
-  return `${expected.side}:${expected.path}:${expected.lines[0]}-${expected.lines[1]}`;
+  const category = Array.isArray(expected.category)
+    ? expected.category.join(",")
+    : expected.category;
+  return `${category}:${expected.side}:${expected.path}:${expected.lines[0]}-${expected.lines[1]}`;
 }
 
 /**
@@ -228,6 +236,25 @@ export function findingHitRates(runs: readonly FixtureScore[]): FindingHitRate[]
       runs: runs.length,
     };
   });
+}
+
+/**
+ * The first run's findings and errors, so a baseline still compares one run, with the cost and
+ * time of every run. A later run's failure is `repeatErrors`. Hit rates are set when there is
+ * more than one run.
+ */
+export function combineRepeatedRuns(runs: readonly FixtureScore[]): FixtureScore | undefined {
+  const first = runs[0];
+  if (first === undefined) return undefined;
+  if (runs.length < 2) return first;
+  const repeatErrors = runs.slice(1).flatMap((run) => run.errors);
+  return {
+    ...first,
+    costUsd: runs.reduce((sum, run) => sum + run.costUsd, 0),
+    durationMs: runs.reduce((sum, run) => sum + run.durationMs, 0),
+    ...(repeatErrors.length === 0 ? {} : { repeatErrors }),
+    hitRates: findingHitRates(runs),
+  };
 }
 
 /** Recall per tag, over the seeded fixtures with that tag, sorted by tag. */
