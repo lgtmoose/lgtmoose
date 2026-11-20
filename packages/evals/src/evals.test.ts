@@ -472,6 +472,38 @@ describe("scoring", () => {
     expect(twoReport).toContain("a later run failed: batch 2 timed out");
     expect(combineRepeatedRuns([both])).toBe(both);
   });
+
+  it("says nothing about later runs when they all succeeded, and adds failures across fixtures", () => {
+    const spec = fixture();
+    const ok = scoreFixture(spec, { findings: [], costUsd: 0.1, durationMs: 1, errors: [] });
+    const again = scoreFixture(spec, { findings: [], costUsd: 0.1, durationMs: 1, errors: [] });
+    const clean = combineRepeatedRuns([ok, again]);
+    const cleanReport = renderMarkdown(
+      buildReport(clean === undefined ? [] : [clean], "sonnet", new Date(0)),
+      undefined,
+      { ok: true, message: "ok" },
+    );
+    expect(cleanReport).not.toContain("after the first run");
+
+    const failed = scoreFixture(spec, {
+      findings: [],
+      costUsd: 0.1,
+      durationMs: 1,
+      errors: ["timed out"],
+    });
+    const left = combineRepeatedRuns([ok, failed]);
+    const right = combineRepeatedRuns([ok, failed]);
+    const bothReport = renderMarkdown(
+      buildReport(
+        [left, right].filter((score) => score !== undefined),
+        "sonnet",
+        new Date(0),
+      ),
+      undefined,
+      { ok: true, message: "ok" },
+    );
+    expect(bothReport).toContain("2 failures were reported after the first run");
+  });
 });
 
 describe("baseline gate", () => {

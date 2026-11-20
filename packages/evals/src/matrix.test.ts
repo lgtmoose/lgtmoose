@@ -225,7 +225,7 @@ describe("running the matrix", () => {
       create: (): Harness => ({
         id: "flaky",
         run: async (options) => {
-          if (options.runId.includes("-run-2")) {
+          if (options.runId?.includes("-run-2") === true) {
             throw new HarnessError("timeout", "the second run failed");
           }
           return {
