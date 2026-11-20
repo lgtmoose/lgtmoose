@@ -204,7 +204,10 @@ export function totals(scores: readonly FixtureScore[]): EvalTotals {
 }
 
 function expectedKey(expected: ExpectedFinding): string {
-  return `${expected.side}:${expected.path}:${expected.lines[0]}-${expected.lines[1]}`;
+  const category = Array.isArray(expected.category)
+    ? expected.category.join(",")
+    : expected.category;
+  return `${category}:${expected.side}:${expected.path}:${expected.lines[0]}-${expected.lines[1]}`;
 }
 
 /**
@@ -228,6 +231,23 @@ export function findingHitRates(runs: readonly FixtureScore[]): FindingHitRate[]
       runs: runs.length,
     };
   });
+}
+
+/**
+ * The first run's findings, so a baseline still compares one run, with the cost, time and errors
+ * of every run. Hit rates are set when there is more than one run.
+ */
+export function combineRepeatedRuns(runs: readonly FixtureScore[]): FixtureScore | undefined {
+  const first = runs[0];
+  if (first === undefined) return undefined;
+  if (runs.length < 2) return first;
+  return {
+    ...first,
+    costUsd: runs.reduce((sum, run) => sum + run.costUsd, 0),
+    durationMs: runs.reduce((sum, run) => sum + run.durationMs, 0),
+    errors: runs.flatMap((run) => run.errors),
+    hitRates: findingHitRates(runs),
+  };
 }
 
 /** Recall per tag, over the seeded fixtures with that tag, sorted by tag. */

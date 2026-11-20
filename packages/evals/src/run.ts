@@ -4,7 +4,7 @@ import { cloneAtSha } from "@lgtmoose/git";
 import type { Harness } from "@lgtmoose/harness";
 import { runReview, type PullReader } from "@lgtmoose/pipeline";
 import { buildFixtureRepo, type Fixture } from "./fixture.js";
-import { findingHitRates, scoreFixture, type FixtureScore } from "./score.js";
+import { combineRepeatedRuns, scoreFixture, type FixtureScore } from "./score.js";
 
 export interface RunOptions {
   harness: Harness;
@@ -120,10 +120,8 @@ export async function runFixtures(
     for (let runNumber = 1; runNumber <= repeat; runNumber += 1) {
       runs.push(await runFixture(fixture, options, runNumber));
     }
-    const first = runs[0];
-    if (first === undefined) continue;
-    const hitRates = findingHitRates(runs);
-    scores.push(hitRates.length === 0 ? first : { ...first, hitRates });
+    const combined = combineRepeatedRuns(runs);
+    if (combined !== undefined) scores.push(combined);
   }
   return scores;
 }
