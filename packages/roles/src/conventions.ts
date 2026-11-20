@@ -39,6 +39,33 @@ function isSafeGlob(pattern: string): boolean {
   );
 }
 
+/** The most of a file's lines that may be missing from a kept file for it to count as a copy. */
+const NEAR_COPY_NEW_LINES = 0.1;
+
+function contentLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+/**
+ * Whether a file is a copy of one already kept, allowing a few lines of its own: repositories
+ * keep the same rules in `AGENTS.md`, `CLAUDE.md` and editor rule files, each with its own
+ * title or "this rule is also in" line. Every file is sent on every batch, so a copy only
+ * costs tokens.
+ */
+function isCopyOfKept(text: string, files: readonly ConventionFile[]): boolean {
+  if (files.some((file) => file.text === text)) return true;
+  const lines = contentLines(text);
+  if (lines.length === 0) return false;
+  return files.some((file) => {
+    const kept = new Set(contentLines(file.text));
+    const added = lines.filter((line) => !kept.has(line)).length;
+    return added / lines.length <= NEAR_COPY_NEW_LINES;
+  });
+}
+
 function isInside(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
@@ -99,7 +126,7 @@ export async function readConventionFiles(
       continue;
     }
     const { text, truncated } = await readCapped(full, Math.min(maxBytes, remaining));
-    if (files.some((file) => file.text === text)) {
+    if (isCopyOfKept(text, files)) {
       omitted.push(path);
       continue;
     }
@@ -161,7 +188,7 @@ export async function readConventionFilesAt(
     const truncated = content.length > limit;
     // Cutting can split a multi-byte character; the decoder replaces the stray bytes.
     const text = content.subarray(0, limit).toString("utf8");
-    if (files.some((file) => file.text === text)) {
+    if (isCopyOfKept(text, files)) {
       omitted.push(path);
       continue;
     }
