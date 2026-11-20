@@ -457,6 +457,11 @@ export const pullRequestDispatches = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     pausedBy: text("paused_by"),
     /**
+     * Automatic reviews that started after this don't count toward `review.auto_pause_after`.
+     * Set by `resume` and by a review someone asked for. Unset counts every automatic review.
+     */
+    reviewCountResetAt: timestamp("review_count_reset_at", { withTimezone: true }),
+    /**
      * Set while the PR's review waits for its CI (`review.wait_for_checks`, NIC-1078): the head
      * that waits, and since when. A check finishing on that head asks for a run again; one on any
      * other head, or on a PR that isn't waiting, does nothing. Cleared when the review starts.

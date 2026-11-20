@@ -1,0 +1,1 @@
+ALTER TABLE "pull_request_dispatches" ADD COLUMN "review_count_reset_at" timestamp with time zone;

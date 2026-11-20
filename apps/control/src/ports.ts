@@ -263,6 +263,13 @@ export interface RunStore {
   ): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
+  /**
+   * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
+   * and not one a spend cap stopped) that started after `resume` or a review someone asked for.
+   */
+  automaticReviews(repo: string, number: number): Promise<number>;
+  /** Starts that count over: `resume`, or a `review` / `full review` that is about to run. */
+  resetAutomaticReviews(repo: string, number: number): Promise<void>;
 }
 
 /** Step Functions task tokens, for the prepare step (`waitForTaskToken`). */

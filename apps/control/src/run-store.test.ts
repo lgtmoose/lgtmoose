@@ -49,6 +49,32 @@ async function runRow(runId: string) {
 }
 
 describe("drizzleRunStore", () => {
+  it("counts succeeded automatic reviews since the count was reset", async () => {
+    const automatic = await start("arn:exec:auto-1", 90);
+    const requested = await start("arn:exec:auto-full", 90, "c".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({
+        status: "succeeded",
+        kind: "incremental",
+        startedAt: new Date("2026-01-02T00:00:00Z"),
+      })
+      .where(eq(reviewRuns.id, automatic.runId));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "full", startedAt: new Date("2026-01-03T00:00:00Z") })
+      .where(eq(reviewRuns.id, requested.runId));
+    expect(await store.automaticReviews("Acme/Shop", 90)).toBe(1);
+    await store.resetAutomaticReviews("Acme/Shop", 90);
+    expect(await store.automaticReviews("acme/shop", 90)).toBe(0);
+    const later = await start("arn:exec:auto-2", 90, "d".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "first", startedAt: new Date("2099-01-01T00:00:00Z") })
+      .where(eq(reviewRuns.id, later.runId));
+    expect(await store.automaticReviews("acme/shop", 90)).toBe(1);
+  });
+
   it("records a running run with its execution ARN, once per execution", async () => {
     const run = await start("arn:exec:1");
     expect(await start("arn:exec:1")).toEqual(run);

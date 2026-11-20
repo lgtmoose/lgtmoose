@@ -263,6 +263,10 @@ function memoryRuns(): RunStore & {
         }
       }
     },
+    async automaticReviews() {
+      return 0;
+    },
+    async resetAutomaticReviews() {},
     async supersedeRun(runId) {
       const run = runs.get(runId);
       if (run?.status === "running") run.status = "superseded";

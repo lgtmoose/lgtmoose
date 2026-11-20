@@ -167,6 +167,31 @@ describe("waitingCheckRun", () => {
     expect(waitingCheckRun(settings(), gate("off"), "moose", true)).toBeUndefined();
   });
 
+  it("pauses a push after the configured number of automatic reviews", () => {
+    const limited = settings({ auto_pause_after: 2 });
+    expect(reviewGate(limited, push, none, true, 1)).toEqual({ review: true });
+    expect(reviewGate(limited, push, none, true, 2)).toMatchObject({
+      review: false,
+      waiting: true,
+      reason: "paused after 2 reviews",
+    });
+    expect(reviewGate(limited, { ...push, requested: "review" }, none, true, 2)).toEqual({
+      review: true,
+    });
+    expect(reviewGate(limited, { ...push, requested: "full_review" }, none, true, 5)).toEqual({
+      review: true,
+    });
+    expect(reviewGate(limited, opened, none, false, 2)).toEqual({ review: true });
+  });
+
+  it("says how many automatic reviews ran and how to continue", () => {
+    const summary = waitingCheckRun(settings({ auto_pause_after: 2 }), gate(), "moose", true, 2)
+      ?.summary;
+    expect(summary).toContain("paused after 2");
+    expect(summary).toContain("`@moose review`");
+    expect(summary).toContain("`resume`");
+  });
+
   it("says when commits since the last review wait", () => {
     expect(
       waitingCheckRun(settings({ on_push: "manual" }), gate(), "moose", true)?.summary,

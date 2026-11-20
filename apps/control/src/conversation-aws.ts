@@ -179,7 +179,12 @@ export function drizzleConversationStore(
     and(sql`lower(${pullRequests.repo}) = ${lower(repo)}`, eq(pullRequests.number, number));
   return {
     async setPaused(repo, number, by) {
-      const values = { pausedAt: by === undefined ? null : now(), pausedBy: by ?? null };
+      const values = {
+        pausedAt: by === undefined ? null : now(),
+        pausedBy: by ?? null,
+        // resume starts the automatic-review count over. Pausing leaves it where it was.
+        ...(by === undefined ? { reviewCountResetAt: now() } : {}),
+      };
       await db
         .insert(pullRequestDispatches)
         // A PR the dispatcher hasn't seen yet: no event acted on, so any job is newer.

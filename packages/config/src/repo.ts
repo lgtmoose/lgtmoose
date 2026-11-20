@@ -182,6 +182,15 @@ export const repoConfigSchema = z
           .describe(
             "With wait_for_checks: how long to wait for checks that haven't finished before reviewing anyway. A failed check holds the review until it passes; this doesn't.",
           ),
+        auto_pause_after: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe(
+            "After this many automatic reviews of a pull request, later pushes wait. Unset never pauses. @lgtmoose review, full review and resume start the count over.",
+          ),
       })
       .strict()
       .prefault({})

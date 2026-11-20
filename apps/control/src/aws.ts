@@ -12,6 +12,7 @@ import {
   findingEvents,
   findings,
   postgresSpend,
+  pullRequestDispatches,
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
@@ -28,7 +29,7 @@ import {
   appJwt,
   repoPath,
 } from "@lgtmoose/poster";
-import { and, asc, desc, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, max, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
@@ -391,6 +392,42 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         .update(reviewRuns)
         .set({ status: "superseded", finishedAt: now() })
         .where(and(eq(reviewRuns.id, runId), inArray(reviewRuns.status, ["queued", "running"])));
+    },
+    async automaticReviews(repo, number) {
+      const [dispatch] = await db
+        .select({ resetAt: pullRequestDispatches.reviewCountResetAt })
+        .from(pullRequestDispatches)
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, repo.toLowerCase()),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+      const [row] = await db
+        .select({ reviews: count() })
+        .from(reviewRuns)
+        .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
+        .where(
+          and(
+            sql`lower(${pullRequests.repo}) = ${repo.toLowerCase()}`,
+            eq(pullRequests.number, number),
+            eq(reviewRuns.status, "succeeded"),
+            inArray(reviewRuns.kind, ["first", "incremental"]),
+            isNull(reviewRuns.spendCap),
+            ...(dispatch?.resetAt == null ? [] : [gt(reviewRuns.startedAt, dispatch.resetAt)]),
+          ),
+        );
+      return row?.reviews ?? 0;
+    },
+    async resetAutomaticReviews(repo, number) {
+      const values = { reviewCountResetAt: now() };
+      await db
+        .insert(pullRequestDispatches)
+        .values({ repo: repo.toLowerCase(), number, lastEventAt: new Date(0), ...values })
+        .onConflictDoUpdate({
+          target: [pullRequestDispatches.repo, pullRequestDispatches.number],
+          set: { ...values, updatedAt: now() },
+        });
     },
   };
 }

@@ -414,7 +414,20 @@ async function triggered(
     deps.log("not triggered", { runId, reason: "the PR isn't one to review" });
     return { mode: "skip" };
   }
-  const gate = reviewGate(config.review, job, { labels: pr.labels ?? [] }, reviewedBefore);
+  // A review someone asked for starts the automatic-review count over, including when it then
+  // waits for CI, so the pushes after it get a fresh allowance. This run started before the
+  // reset, so it isn't one of the reviews the count includes.
+  if (job.requested === "review" || job.requested === "full_review") {
+    await deps.runs.resetAutomaticReviews(job.repo, job.prNumber);
+  }
+  const automaticReviews = await deps.runs.automaticReviews(job.repo, job.prNumber);
+  const gate = reviewGate(
+    config.review,
+    job,
+    { labels: pr.labels ?? [] },
+    reviewedBefore,
+    automaticReviews,
+  );
   // Its trigger says the review may start: it may still wait for the head's CI (NIC-1078).
   const ci = gate.review
     ? await waitForChecks(deps, github, job, target, pr, runId, config)
@@ -442,7 +455,13 @@ async function triggered(
   }
   deps.log("not triggered", { runId, reason: gate.reason, waiting: gate.waiting, conversation });
   if (!gate.waiting) return { mode: waitMode };
-  const check = waitingCheckRun(config.review, config.gate, await github.slug?.(), reviewedBefore);
+  const check = waitingCheckRun(
+    config.review,
+    config.gate,
+    await github.slug?.(),
+    reviewedBefore,
+    automaticReviews,
+  );
   if (check !== undefined) {
     await github.poster(runId, pull).completeCheckRun(pull, {
       headSha: pr.headSha,
