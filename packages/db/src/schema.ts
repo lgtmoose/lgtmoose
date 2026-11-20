@@ -462,6 +462,16 @@ export const pullRequestDispatches = pgTable(
      */
     reviewCountResetAt: timestamp("review_count_reset_at", { withTimezone: true }),
     /**
+     * Head of a review someone asked for whose run hasn't started yet (it was waiting for CI).
+     * Cleared when that run starts, or when the pull request moves to another commit.
+     */
+    reviewRequestHead: text("review_request_head"),
+    /**
+     * The run that fulfills a review someone asked for. It is not an automatic review. Other runs
+     * that started after the count was reset still count.
+     */
+    excludedAutomaticRunId: text("excluded_automatic_run_id"),
+    /**
      * Set while the PR's review waits for its CI (`review.wait_for_checks`, NIC-1078): the head
      * that waits, and since when. A check finishing on that head asks for a run again; one on any
      * other head, or on a PR that isn't waiting, does nothing. Cleared when the review starts.

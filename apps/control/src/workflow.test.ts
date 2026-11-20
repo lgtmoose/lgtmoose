@@ -163,10 +163,31 @@ function memoryRuns(): RunStore & {
   runs: Map<string, Run>;
   pr: Partial<RunRecord>;
   newer: { posted: boolean };
+  /** The automatic-review count, as the test sets it and the prepare step resets it. */
+  pause: {
+    reviews: number;
+    head: string | undefined;
+    resets: number;
+    arms: string[];
+    noted: string[];
+  };
 } {
   const runs = new Map<string, Run>();
   /** Whether a newer run of the PR has posted, as the test sets it. */
   const newer = { posted: false };
+  const pause: {
+    reviews: number;
+    head: string | undefined;
+    resets: number;
+    arms: string[];
+    noted: string[];
+  } = {
+    reviews: 0,
+    head: undefined,
+    resets: 0,
+    arms: [],
+    noted: [],
+  };
   const pr: Partial<RunRecord> = { summaryCommentId: 41 };
   const current = (run: Run): Run =>
     Object.assign(run, {
@@ -180,6 +201,7 @@ function memoryRuns(): RunStore & {
     runs,
     pr,
     newer,
+    pause,
     async newerRunPosted() {
       return newer.posted;
     },
@@ -264,9 +286,28 @@ function memoryRuns(): RunStore & {
       }
     },
     async automaticReviews() {
-      return 0;
+      return pause.reviews;
     },
-    async resetAutomaticReviews() {},
+    async resetAutomaticReviews() {
+      pause.resets += 1;
+      pause.head = undefined;
+      pause.reviews = 0;
+    },
+    async armRequestedReview(_repo, _number, headSha) {
+      pause.arms.push(headSha);
+      pause.head = headSha;
+      pause.reviews = 0;
+    },
+    async requestedReviewHead() {
+      return pause.head;
+    },
+    async forgetRequestedReview() {
+      pause.head = undefined;
+    },
+    async noteRequestedRun(_repo, _number, runId) {
+      pause.noted.push(runId);
+      pause.head = undefined;
+    },
     async supersedeRun(runId) {
       const run = runs.get(runId);
       if (run?.status === "running") run.status = "superseded";
@@ -798,6 +839,51 @@ describe("prepare", () => {
       expect(result).toMatchObject({ superseded: false });
     });
 
+    it("pauses a push after its automatic reviews, and a requested review starts the count over", async () => {
+      const config = "review:\n  auto_pause_after: 2\n";
+      const paused = harness({ config });
+      paused.runs.pause.reviews = 2;
+      expect(await prepare(paused.deps, push, EXECUTION, SETTINGS)).toMatchObject({
+        superseded: true,
+      });
+      expect(paused.logs).toContain("not triggered");
+      const [check] = shadowRecords(paused.objects, "check-run");
+      expect(String(check?.summary)).toContain("paused after 2");
+      expect(String(check?.summary)).toContain("`resume`");
+
+      const asked = harness({ config });
+      asked.runs.pause.reviews = 2;
+      expect(
+        await prepare(asked.deps, { ...push, requested: "review" }, EXECUTION, SETTINGS),
+      ).toMatchObject({ superseded: false });
+      expect(asked.runs.pause.arms).toEqual([headSha]);
+      expect(asked.runs.pause.reviews).toBe(0);
+      expect(asked.runs.pause.noted).toEqual([RUN_ID]);
+      expect(asked.runs.pause.head).toBeUndefined();
+    });
+
+    it("leaves the run CI releases out of the count, and not a push of the same commit", async () => {
+      const config = "review:\n  auto_pause_after: 2\n";
+      const released = harness({ config });
+      released.runs.pause.head = headSha;
+      released.runs.pause.reviews = 1;
+      expect(
+        await prepare(released.deps, { ...push, kind: "pr_checks" }, EXECUTION, SETTINGS),
+      ).toMatchObject({ superseded: false });
+      expect(released.runs.pause.noted).toEqual([RUN_ID]);
+      expect(released.runs.pause.head).toBeUndefined();
+      expect(released.runs.pause.reviews).toBe(1);
+
+      const sameCommit = harness({ config });
+      sameCommit.runs.pause.head = headSha;
+      sameCommit.runs.pause.reviews = 1;
+      expect(await prepare(sameCommit.deps, push, EXECUTION, SETTINGS)).toMatchObject({
+        superseded: false,
+      });
+      expect(sameCommit.runs.pause.noted).toEqual([]);
+      expect(sameCommit.runs.pause.head).toBe(headSha);
+    });
+
     it("posts no check run while waiting with gate.check_run: off", async () => {
       const h = harness({ config: "review:\n  trigger: command\ngate:\n  check_run: off\n" });
       expect(await prepare(h.deps, push, EXECUTION, SETTINGS)).toMatchObject({ superseded: true });
@@ -911,6 +997,27 @@ describe("waiting for CI (NIC-1078)", () => {
     await prepare(h.deps, push, EXECUTION, SETTINGS);
     expect(waits.row?.headSha).toBe(headSha);
     expect(waits.row?.since.getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  it("leaves out the review CI starts for a head someone asked to review", async () => {
+    const checks = { current: running };
+    const { h } = waiting({
+      checks: () => checks.current,
+      config: `${CONFIG}  auto_pause_after: 2\n`,
+    });
+    expect(
+      await prepare(h.deps, { ...push, requested: "review", actor: "dev" }, EXECUTION, SETTINGS),
+    ).toMatchObject({ superseded: true });
+    expect(h.runs.pause.head).toBe(headSha);
+    expect(h.runs.pause.resets).toBe(0);
+
+    checks.current = passed;
+    expect(
+      await prepare(h.deps, { ...push, kind: "pr_checks" }, `${EXECUTION}:ci`, SETTINGS),
+    ).toMatchObject({ superseded: false });
+    expect(h.runs.pause.resets).toBe(0);
+    expect(h.runs.pause.noted).toEqual(["0b6f6d8e-3c1a-4c3e-9a51-000000000001"]);
+    expect(h.runs.pause.head).toBeUndefined();
   });
 
   it("lets a review command from someone with write access skip the wait, not the author's", async () => {

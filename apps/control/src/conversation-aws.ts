@@ -183,7 +183,13 @@ export function drizzleConversationStore(
         pausedAt: by === undefined ? null : now(),
         pausedBy: by ?? null,
         // resume starts the automatic-review count over. Pausing leaves it where it was.
-        ...(by === undefined ? { reviewCountResetAt: now() } : {}),
+        ...(by === undefined
+          ? {
+              reviewCountResetAt: now(),
+              reviewRequestHead: null,
+              excludedAutomaticRunId: null,
+            }
+          : {}),
       };
       await db
         .insert(pullRequestDispatches)

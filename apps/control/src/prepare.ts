@@ -415,10 +415,15 @@ async function triggered(
     return { mode: "skip" };
   }
   // A review someone asked for starts the automatic-review count over, including when it then
-  // waits for CI, so the pushes after it get a fresh allowance. This run started before the
-  // reset, so it isn't one of the reviews the count includes.
+  // waits for CI. The head is remembered so the run CI releases can be left out of the count
+  // without also dropping reviews that finished while it waited.
   if (job.requested === "review" || job.requested === "full_review") {
-    await deps.runs.resetAutomaticReviews(job.repo, job.prNumber);
+    await deps.runs.armRequestedReview(job.repo, job.prNumber, pr.headSha);
+  }
+  let armedHead = await deps.runs.requestedReviewHead(job.repo, job.prNumber);
+  if (armedHead !== undefined && armedHead !== pr.headSha) {
+    await deps.runs.forgetRequestedReview(job.repo, job.prNumber);
+    armedHead = undefined;
   }
   const automaticReviews = await deps.runs.automaticReviews(job.repo, job.prNumber);
   const gate = reviewGate(
@@ -433,6 +438,14 @@ async function triggered(
     ? await waitForChecks(deps, github, job, target, pr, runId, config)
     : undefined;
   if (gate.review && ci?.wait !== true) {
+    const fulfillsRequest =
+      job.requested === "review" ||
+      job.requested === "full_review" ||
+      (job.kind === "pr_checks" && armedHead === pr.headSha);
+    if (fulfillsRequest) {
+      // Leaves this run out of the count. A push on the same commit does not: that is another review.
+      await deps.runs.noteRequestedRun(job.repo, job.prNumber, runId);
+    }
     if (gate.removeLabel !== undefined) {
       try {
         await github.poster(runId, pull).labels(pull).removePrLabel(gate.removeLabel);

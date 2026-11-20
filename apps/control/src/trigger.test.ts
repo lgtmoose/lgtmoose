@@ -185,8 +185,13 @@ describe("waitingCheckRun", () => {
   });
 
   it("says how many automatic reviews ran and how to continue", () => {
-    const summary = waitingCheckRun(settings({ auto_pause_after: 2 }), gate(), "moose", true, 2)
-      ?.summary;
+    const summary = waitingCheckRun(
+      settings({ auto_pause_after: 2 }),
+      gate(),
+      "moose",
+      true,
+      2,
+    )?.summary;
     expect(summary).toContain("paused after 2");
     expect(summary).toContain("`@moose review`");
     expect(summary).toContain("`resume`");

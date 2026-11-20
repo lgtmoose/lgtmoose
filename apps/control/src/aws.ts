@@ -214,6 +214,23 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         };
   }
 
+  const writeReviewCount = (
+    repo: string,
+    number: number,
+    values: {
+      reviewCountResetAt: Date;
+      reviewRequestHead: string | null;
+      excludedAutomaticRunId: string | null;
+    },
+  ) =>
+    db
+      .insert(pullRequestDispatches)
+      .values({ repo: repo.toLowerCase(), number, lastEventAt: new Date(0), ...values })
+      .onConflictDoUpdate({
+        target: [pullRequestDispatches.repo, pullRequestDispatches.number],
+        set: { ...values, updatedAt: now() },
+      });
+
   return {
     async startRun(input) {
       // A retried prepare step finds the run its first attempt recorded.
@@ -395,7 +412,10 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
     },
     async automaticReviews(repo, number) {
       const [dispatch] = await db
-        .select({ resetAt: pullRequestDispatches.reviewCountResetAt })
+        .select({
+          resetAt: pullRequestDispatches.reviewCountResetAt,
+          excludedRunId: pullRequestDispatches.excludedAutomaticRunId,
+        })
         .from(pullRequestDispatches)
         .where(
           and(
@@ -415,19 +435,58 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             inArray(reviewRuns.kind, ["first", "incremental"]),
             isNull(reviewRuns.spendCap),
             ...(dispatch?.resetAt == null ? [] : [gt(reviewRuns.startedAt, dispatch.resetAt)]),
+            ...(dispatch?.excludedRunId == null ? [] : [ne(reviewRuns.id, dispatch.excludedRunId)]),
           ),
         );
       return row?.reviews ?? 0;
     },
     async resetAutomaticReviews(repo, number) {
-      const values = { reviewCountResetAt: now() };
+      await writeReviewCount(repo, number, {
+        reviewCountResetAt: now(),
+        reviewRequestHead: null,
+        excludedAutomaticRunId: null,
+      });
+    },
+    async armRequestedReview(repo, number, headSha) {
+      await writeReviewCount(repo, number, {
+        reviewCountResetAt: now(),
+        reviewRequestHead: headSha,
+        excludedAutomaticRunId: null,
+      });
+    },
+    async requestedReviewHead(repo, number) {
+      const [row] = await db
+        .select({ head: pullRequestDispatches.reviewRequestHead })
+        .from(pullRequestDispatches)
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, repo.toLowerCase()),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+      return row?.head ?? undefined;
+    },
+    async forgetRequestedReview(repo, number) {
       await db
-        .insert(pullRequestDispatches)
-        .values({ repo: repo.toLowerCase(), number, lastEventAt: new Date(0), ...values })
-        .onConflictDoUpdate({
-          target: [pullRequestDispatches.repo, pullRequestDispatches.number],
-          set: { ...values, updatedAt: now() },
-        });
+        .update(pullRequestDispatches)
+        .set({ reviewRequestHead: null, updatedAt: now() })
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, repo.toLowerCase()),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+    },
+    async noteRequestedRun(repo, number, runId) {
+      await db
+        .update(pullRequestDispatches)
+        .set({ excludedAutomaticRunId: runId, reviewRequestHead: null, updatedAt: now() })
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, repo.toLowerCase()),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
     },
   };
 }

@@ -1,5 +1,5 @@
 {
-  "id": "653ac46e-756b-4766-958c-a297ee18b74f",
+  "id": "f5e03c7b-a039-433b-b0ae-2c8a3b5c1ea3",
   "prevId": "aa2b74db-9e18-4508-bad6-2277e3a872e7",
   "version": "7",
   "dialect": "postgresql",
@@ -1898,6 +1898,18 @@
         "review_count_reset_at": {
           "name": "review_count_reset_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "review_request_head": {
+          "name": "review_request_head",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "excluded_automatic_run_id": {
+          "name": "excluded_automatic_run_id",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

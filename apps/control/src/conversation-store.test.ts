@@ -1,6 +1,12 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
+import {
+  findingEvents,
+  findings,
+  pullRequestDispatches,
+  pullRequests,
+  reviewRuns,
+} from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -85,6 +91,13 @@ describe("drizzleConversationStore", () => {
     expect(await dispatch.paused("acme/shop", 40)).toBe(true);
     await store.setPaused("acme/shop", 40, undefined);
     expect(await dispatch.paused("ACME/shop", 40)).toBe(false);
+    const [dispatchRow] = await db
+      .select()
+      .from(pullRequestDispatches)
+      .where(eq(pullRequestDispatches.number, 40));
+    expect(dispatchRow?.reviewCountResetAt).toBeInstanceOf(Date);
+    expect(dispatchRow?.reviewRequestHead).toBeNull();
+    expect(dispatchRow?.excludedAutomaticRunId).toBeNull();
     expect(await dispatch.latest("acme/shop", 40)).toEqual({ eventAt: T1, closed: false });
   });
 

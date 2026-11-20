@@ -266,10 +266,22 @@ export interface RunStore {
   /**
    * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
    * and not one a spend cap stopped) that started after `resume` or a review someone asked for.
+   * The run that fulfills the request is not one of them. A failed run is not one of them.
    */
   automaticReviews(repo: string, number: number): Promise<number>;
-  /** Starts that count over: `resume`, or a `review` / `full review` that is about to run. */
+  /** Starts that count over and forgets a review someone asked for that hadn't started. */
   resetAutomaticReviews(repo: string, number: number): Promise<void>;
+  /**
+   * A `review` or `full review` was asked for on `headSha`. The count starts over now. The run
+   * that then reviews this head (this one, or the one CI releases) is not an automatic review.
+   */
+  armRequestedReview(repo: string, number: number, headSha: string): Promise<void>;
+  /** The head from `armRequestedReview`, until that run starts or the pull request moves on. */
+  requestedReviewHead(repo: string, number: number): Promise<string | undefined>;
+  /** The pull request moved to another commit, so the asked-for review is no longer waiting. */
+  forgetRequestedReview(repo: string, number: number): Promise<void>;
+  /** `runId` is the review someone asked for, so it does not count as an automatic one. */
+  noteRequestedRun(repo: string, number: number, runId: string): Promise<void>;
 }
 
 /** Step Functions task tokens, for the prepare step (`waitForTaskToken`). */
