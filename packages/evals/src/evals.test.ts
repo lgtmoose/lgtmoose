@@ -448,7 +448,9 @@ describe("scoring", () => {
       undefined,
       { ok: true, message: "ok" },
     );
-    expect(report).toContain("A later run reported 1 failure");
+    expect(report).toContain(
+      "1 failure was reported after the first run. Recall stays the first run, so it is not a miss.",
+    );
     expect(report).toContain("a later run failed: the second run failed");
     const twoBatches = scoreFixture(spec, {
       findings: [finding()],

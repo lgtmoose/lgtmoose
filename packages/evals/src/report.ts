@@ -207,7 +207,7 @@ export function renderMarkdown(
   if (repeatErrors > 0) {
     const later =
       repeatErrors === 1
-        ? "A later run reported 1 failure. Recall stays the first run, so it is not a miss."
+        ? "1 failure was reported after the first run. Recall stays the first run, so it is not a miss."
         : `${repeatErrors} failures were reported after the first run. Recall stays the first run, so they are not misses.`;
     lines.push("", later);
   }

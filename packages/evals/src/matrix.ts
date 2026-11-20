@@ -167,6 +167,8 @@ const configurationSchema = z
             costUsd: z.number().min(0),
             durationMs: z.number().min(0),
             errors: z.array(z.string()),
+            /** Failures from runs after the first. Absent when every later run succeeded. */
+            repeatErrors: z.array(z.string()).optional(),
           })
           .strict(),
       )
@@ -268,6 +270,9 @@ export async function runMatrix(
         costUsd: score.costUsd,
         durationMs: score.durationMs,
         errors: [...score.errors],
+        ...(score.repeatErrors === undefined || score.repeatErrors.length === 0
+          ? {}
+          : { repeatErrors: [...score.repeatErrors] }),
       })),
     });
   }

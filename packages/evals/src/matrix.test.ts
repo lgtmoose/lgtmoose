@@ -218,6 +218,42 @@ describe("running the matrix", () => {
     expect(table).toContain("lower bound");
   }, 60_000);
 
+  it("keeps a later run's failures in the matrix results", async () => {
+    const fixtures = (await loadFixtures(FIXTURES)).filter((f) => f.name === "off-by-one");
+    const flaky: EvalProvider = {
+      ...fakeProvider("flaky", () => [OFF_BY_ONE]),
+      create: (): Harness => ({
+        id: "flaky",
+        run: async (options) => {
+          if (options.runId.includes("-run-2")) {
+            throw new HarnessError("timeout", "the second run failed");
+          }
+          return {
+            output: options.schema.parse({ findings: [OFF_BY_ONE] }),
+            transcriptKey: "t",
+            usage: { costUsd: 0.1 },
+          };
+        },
+      }),
+    };
+    const results = await runMatrix(
+      fixtures,
+      matrixAssignments({ providers: "flaky" }, { flaky }),
+      {
+        providers: { flaky },
+        env: {},
+        harnessFor: (provider) => provider.create({ transcripts: undefined as never, env: {} }),
+        models: {},
+        batchTimeoutMs: 1000,
+        workRoot,
+        repeat: 2,
+      },
+    );
+    expect(
+      matrixResultsSchema.parse(results).configurations[0]?.fixtures?.[0]?.repeatErrors,
+    ).toEqual(["batch 1: timeout: the second run failed"]);
+  }, 60_000);
+
   it("says nothing ran when every configuration was skipped or failed", () => {
     const results: MatrixResults = {
       version: 1,
