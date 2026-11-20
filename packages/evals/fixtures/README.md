@@ -23,6 +23,7 @@ exactly as it is. Edit a fixture's files and its `fixture.json` together.
 | `nosql-operator-injection` | A request body value used as a MongoDB query value | security | blocking |
 | `off-by-one` | A loop bound that skips the last item | correctness | blocking |
 | `path-traversal-download` | A file name from the query string joined into a path | security | blocking |
+| `saved-card-ignored` | Checkout offers a saved card, and pay never charges it | correctness | blocking |
 | `secret-in-log` | Request headers with the API key written to the log | secrets | blocking |
 | `sql-injection-search` | Search text built into an SQL string | security | blocking |
 | `swallowed-error` | A failed email ignored, and the invoice marked sent anyway | error_handling | should_fix |
@@ -31,7 +32,7 @@ exactly as it is. Edit a fixture's files and its `fixture.json` together.
 | `unused-new-export` | A new export meant for the jobs list that nothing calls | wiring | should_fix |
 
 Fixtures tagged `cross-file` (`ci-wrong-working-directory`, `env-var-undefined`,
-`unused-new-export`) hold bugs that show up only when reading files the PR didn't change. The
+`saved-card-ignored`, `unused-new-export`) hold bugs that show up only when reading files the PR didn't change. The
 cross-file pass is built for them; the report shows their recall separately.
 
 `injected-approval` is caught by the prompt-injection detector, which is plain code: it scores
