@@ -450,20 +450,24 @@ describe("scoring", () => {
     );
     expect(report).toContain("A later run reported 1 failure");
     expect(report).toContain("a later run failed: the second run failed");
-    const two =
-      combined === undefined
-        ? undefined
-        : { ...combined, repeatErrors: ["batch one", "batch two"] };
-    expect(
-      renderMarkdown(
-        buildReport(two === undefined ? [] : [two], "sonnet", new Date(0)),
-        undefined,
-        {
-          ok: true,
-          message: "ok",
-        },
-      ),
-    ).toContain("Later runs reported 2 failures");
+    const twoBatches = scoreFixture(spec, {
+      findings: [finding()],
+      costUsd: 0.1,
+      durationMs: 1,
+      errors: ["batch 1 timed out", "batch 2 timed out"],
+    });
+    const two = combineRepeatedRuns([both, twoBatches]);
+    expect(two?.repeatErrors).toEqual(["batch 1 timed out", "batch 2 timed out"]);
+    const twoReport = renderMarkdown(
+      buildReport(two === undefined ? [] : [two], "sonnet", new Date(0)),
+      undefined,
+      { ok: true, message: "ok" },
+    );
+    expect(twoReport).toContain(
+      "2 failures were reported after the first run. Recall stays the first run, so they are not misses.",
+    );
+    expect(twoReport).toContain("a later run failed: batch 1 timed out");
+    expect(twoReport).toContain("a later run failed: batch 2 timed out");
     expect(combineRepeatedRuns([both])).toBe(both);
   });
 });
