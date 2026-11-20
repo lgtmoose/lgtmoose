@@ -93,6 +93,8 @@ export interface ReviewOptions {
   model: string;
   /** Deadline for each batch's run. */
   batchTimeoutMs: number;
+  /** Cap on the reviewer's thinking tokens. Unset keeps the model's own thinking. */
+  thinkingTokens?: number;
   /** Groups this run's transcripts. */
   runId: string;
 }
@@ -958,6 +960,8 @@ export interface RunBatchOptions {
   system?: string;
   /** Conventions and the PR, sent once so later batches read them from the cache. */
   shared?: string;
+  /** Cap on the model's thinking tokens. Unset keeps the model's own thinking. */
+  thinkingTokens?: number;
 }
 
 /** Runs the reviewer on one batch. A failed run is an outcome with `error`, never a throw. */
@@ -977,6 +981,7 @@ export async function runBatch(
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
     });
     const notes = clipBatchNotes(result.output.notes ?? []);
     return {
@@ -1018,6 +1023,7 @@ export async function runJudge(
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       tier: REPLY_JUDGE_TIER,
     });
     return {
@@ -1058,6 +1064,7 @@ export async function runTicketCheck(
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       tier: TICKET_CHECKER_TIER,
     });
     return {
@@ -1098,6 +1105,7 @@ export async function runExplain(
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       tier: EXPLAINER_TIER,
     });
     return {
@@ -1139,6 +1147,7 @@ export async function runBootstrap(
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       tier: BOOTSTRAPPER_TIER,
     });
     return {
@@ -1539,6 +1548,9 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
           model: options.model,
           timeoutMs: options.batchTimeoutMs,
           runId: `${options.runId}-batch-${job.index}`,
+          ...(options.thinkingTokens === undefined
+            ? {}
+            : { thinkingTokens: options.thinkingTokens }),
           ...(prepared.reviewerSystem === undefined ? {} : { system: prepared.reviewerSystem }),
           ...(prepared.reviewerShared === undefined ? {} : { shared: prepared.reviewerShared }),
         }),

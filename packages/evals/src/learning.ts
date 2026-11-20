@@ -383,6 +383,8 @@ export interface LearningRunOptions {
   batchTimeoutMs: number;
   workRoot: string;
   progress?: (line: string) => void;
+  /** Cap on thinking tokens. Unset keeps the model's own thinking. */
+  thinkingTokens?: number;
 }
 
 /** A PR reader for one scenario PR, with no comments on it. */
@@ -520,6 +522,9 @@ export async function runScenario(
           model: options.model,
           batchTimeoutMs: options.batchTimeoutMs,
           runId: scenarioRunId(scenario, number),
+          ...(options.thinkingTokens === undefined
+            ? {}
+            : { thinkingTokens: options.thinkingTokens }),
         },
       );
       found = [...report.inline, ...report.body];

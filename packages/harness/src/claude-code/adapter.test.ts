@@ -421,6 +421,35 @@ describe("ClaudeCodeHarness", () => {
     expect(result.transcriptKey).toMatch(/^transcripts\/[0-9a-f-]{36}\/1\.jsonl$/);
   });
 
+  it("sets the thinking cap on the shared turn, the diff turn and the repair", async () => {
+    const harness = await harnessFor([
+      { lines: [resultLine({ structured_output: { findings: [] } })] },
+      { lines: [resultLine({ structured_output: { findings: [{ path: "a.ts", line: 1.5 }] } })] },
+      { lines: [resultLine({ structured_output: { findings: [finding] } })] },
+    ]);
+    await harness.run({
+      prompt: "Review the batch.",
+      shared: "Shared conventions.",
+      cwd,
+      schema,
+      model: "sonnet",
+      timeoutMs: 10_000,
+      thinkingTokens: 2000,
+    });
+    const calls = await (fake as FakeClaude).calls();
+    expect(calls).toHaveLength(3);
+    for (const call of calls) expect(call.env.MAX_THINKING_TOKENS).toBe("2000");
+  });
+
+  it("leaves thinking uncapped when no cap is set", async () => {
+    const harness = await harnessFor([
+      { lines: [resultLine({ structured_output: { findings: [] } })] },
+    ]);
+    await run(harness);
+    const [call] = await (fake as FakeClaude).calls();
+    expect(call?.env.MAX_THINKING_TOKENS).toBeUndefined();
+  });
+
   it("sends the shared context first, then resumes with the diff, and adds the usage", async () => {
     const harness = await harnessFor([
       { lines: [resultLine({ structured_output: { findings: [] } })] },

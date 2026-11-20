@@ -33,6 +33,17 @@ describe("readSandboxEnv", () => {
     });
     expect(readSandboxEnv({ ...env, LGTMOOSE_MODEL: "default" })).toMatchObject({ model: "" });
     expect(readSandboxEnv(env)).not.toHaveProperty("model");
+    expect(readSandboxEnv(env)).not.toHaveProperty("thinkingTokens");
+    expect(
+      readSandboxEnv({
+        ...env,
+        LGTMOOSE_THINKING_TOKENS: "2000",
+        LGTMOOSE_FAST_THINKING_TOKENS: "1024",
+      }),
+    ).toMatchObject({ thinkingTokens: 2000, fastThinkingTokens: 1024 });
+    expect(readSandboxEnv({ ...env, LGTMOOSE_THINKING_TOKENS: "200" })).not.toHaveProperty(
+      "thinkingTokens",
+    );
   });
 
   it("names the missing ones", () => {

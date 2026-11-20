@@ -63,6 +63,8 @@ Options:
   --model <name>       Reviewer model for Claude Code (default: sonnet). In a matrix run,
                        --model <provider>=<name> sets one provider's model (repeatable)
   --timeout <minutes>  Time limit for each batch (default: 15)
+  --thinking-tokens <n>
+                       Cap thinking tokens (at least 1024). Unset keeps the model's own thinking.
   --claude <path>      The claude binary (default: claude on PATH), also for agent-sdk
   --codex <path>       The codex binary (default: codex on PATH)
   --cursor <path>      The Cursor agent binary (default: agent on PATH)
@@ -112,6 +114,7 @@ async function main(argv: readonly string[]): Promise<number> {
       "update-baseline": { type: "boolean" },
       model: { type: "string", multiple: true },
       timeout: { type: "string" },
+      "thinking-tokens": { type: "string" },
       claude: { type: "string" },
       codex: { type: "string" },
       cursor: { type: "string" },
@@ -127,6 +130,14 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const minutes = Number(values.timeout ?? "15");
   if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("--timeout is minutes per batch.");
+  const thinkingTokens =
+    values["thinking-tokens"] === undefined ? undefined : Number(values["thinking-tokens"]);
+  if (
+    thinkingTokens !== undefined &&
+    (!Number.isInteger(thinkingTokens) || thinkingTokens < 1024)
+  ) {
+    throw new Error("--thinking-tokens is a whole number of tokens, at least 1024.");
+  }
   const models = modelsFrom(values.model);
   const out = resolve(values.out ?? "eval-report");
   const matrix = values.providers !== undefined || values.roles !== undefined;
@@ -210,6 +221,7 @@ async function main(argv: readonly string[]): Promise<number> {
       batchTimeoutMs: Math.round(minutes * 60_000),
       workRoot,
       progress,
+      ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
     });
     let learning: LearningReport | undefined;
     if (scenarios.length > 0) {
@@ -221,6 +233,7 @@ async function main(argv: readonly string[]): Promise<number> {
         workRoot,
         progress,
         concurrency: LEARNING_CONCURRENCY,
+        ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
       });
       learning = { model: learningModel, totals: learningTotals(scored), scenarios: scored };
     }

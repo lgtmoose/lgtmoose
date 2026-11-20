@@ -67,6 +67,10 @@ export interface SandboxProvider {
   /** `default` for the harness's own model. */
   model: string;
   fastModel: string;
+  /** The standard tier's thinking cap. Undefined keeps the model's own thinking. */
+  thinkingTokens?: number;
+  /** The fast tier's thinking cap. Undefined keeps the model's own thinking. */
+  fastThinkingTokens?: number;
   /** The stored credential, with how many sandboxes may hold it at once. Undefined: none. */
   credential?: { secretId: string; limit: number };
 }
@@ -182,6 +186,12 @@ async function runContainer(
       LGTMOOSE_AUTH: provider.auth,
       LGTMOOSE_MODEL: provider.model,
       LGTMOOSE_FAST_MODEL: provider.fastModel,
+      ...(provider.thinkingTokens === undefined
+        ? {}
+        : { LGTMOOSE_THINKING_TOKENS: String(provider.thinkingTokens) }),
+      ...(provider.fastThinkingTokens === undefined
+        ? {}
+        : { LGTMOOSE_FAST_THINKING_TOKENS: String(provider.fastThinkingTokens) }),
       LGTMOOSE_BATCH_URLS: presigned.urls,
       LGTMOOSE_BATCH_DIR: BATCH_DIR,
       HTTPS_PROXY: deps.proxyUrl,

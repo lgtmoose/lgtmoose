@@ -76,6 +76,23 @@
               "pattern": "^[\\w.:@/[\\]-]{1,128}$"
             }
           },
+          "thinkingTokens": {
+            "description": "Cap on thinking tokens per tier (fast, standard, deep), at least 1024. Tiers left out keep the model's own thinking. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "fast",
+                "standard",
+                "deep"
+              ]
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 128000
+            }
+          },
           "vertex": {
             "description": "Google Cloud settings, for auth: \"vertex\" only.",
             "type": "object",

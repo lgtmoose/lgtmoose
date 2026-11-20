@@ -47,7 +47,17 @@ export interface SandboxDeps {
    * alone picks it, where the harness maps tiers.
    */
   fastModel?: string;
+  /** Thinking-token cap for the standard tier (`LGTMOOSE_THINKING_TOKENS`). Unset: the model's own. */
+  thinkingTokens?: number;
+  /** Thinking-token cap for the fast tier (`LGTMOOSE_FAST_THINKING_TOKENS`). Unset: the model's own. */
+  fastThinkingTokens?: number;
   log(message: string, fields?: Record<string, unknown>): void;
+}
+
+/** The cap for this batch's tier. A reviewer batch is the standard tier. */
+function thinkingCap(deps: SandboxDeps, tier: string | undefined): { thinkingTokens?: number } {
+  const cap = tier === "fast" ? deps.fastThinkingTokens : deps.thinkingTokens;
+  return cap === undefined ? {} : { thinkingTokens: cap };
 }
 
 /** The URL's path only: the query string is the signature. */
@@ -134,6 +144,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
         model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
         timeoutMs: input.timeoutMs,
         runId: batchRunId(input.runId, input.index),
+        ...thinkingCap(deps, input.tier),
       },
     );
     const output: BatchOutput = batchOutputSchema.parse({
@@ -161,6 +172,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
         model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
         timeoutMs: input.timeoutMs,
         runId: batchRunId(input.runId, input.index),
+        ...thinkingCap(deps, input.tier),
       },
     );
     const output: BatchOutput = batchOutputSchema.parse({
@@ -189,6 +201,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
         model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
         timeoutMs: input.timeoutMs,
         runId: batchRunId(input.runId, input.index),
+        ...thinkingCap(deps, input.tier),
       },
     );
     const output: BatchOutput = batchOutputSchema.parse({
@@ -216,6 +229,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
         model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
         timeoutMs: input.timeoutMs,
         runId: batchRunId(input.runId, input.index),
+        ...thinkingCap(deps, input.tier),
       },
     );
     const output: BatchOutput = batchOutputSchema.parse({
@@ -244,6 +258,7 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
       model: deps.model ?? input.model,
       timeoutMs: input.timeoutMs,
       runId: batchRunId(input.runId, input.index),
+      ...thinkingCap(deps, undefined),
       ...(input.system === undefined ? {} : { system: input.system }),
       ...(input.shared === undefined ? {} : { shared: input.shared }),
     },

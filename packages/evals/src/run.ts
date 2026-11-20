@@ -18,6 +18,8 @@ export interface RunOptions {
   progress?: (line: string) => void;
   /** Clock, for tests. */
   now?: () => number;
+  /** Cap on the reviewer's thinking tokens. Unset keeps the model's own thinking. */
+  thinkingTokens?: number;
 }
 
 /** A PR reader that serves the fixture as the PR, with no comments on it. */
@@ -67,6 +69,7 @@ export async function runFixture(fixture: Fixture, options: RunOptions): Promise
         model: options.model,
         batchTimeoutMs: options.batchTimeoutMs,
         runId: `evals-${fixture.name}`,
+        ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
       },
     );
     const costUsd = report.batches.reduce((sum, batch) => sum + (batch.usage?.costUsd ?? 0), 0);

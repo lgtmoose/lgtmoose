@@ -96,6 +96,10 @@ async function main(): Promise<void> {
       workDir: WORK,
       ...(env.model === undefined ? {} : { model: env.model }),
       ...(env.fastModel === undefined ? {} : { fastModel: env.fastModel }),
+      ...(env.thinkingTokens === undefined ? {} : { thinkingTokens: env.thinkingTokens }),
+      ...(env.fastThinkingTokens === undefined
+        ? {}
+        : { fastThinkingTokens: env.fastThinkingTokens }),
       log,
     },
     env.batchUrls,

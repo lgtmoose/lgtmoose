@@ -85,7 +85,12 @@ export class ClaudeCodeHarness implements Harness {
           : { scrubSubprocessEnv: this.options.scrubSubprocessEnv },
       );
       const settings = JSON.stringify(session.settings);
-      const env = session.env;
+      // The same on every turn, including the repair, so it doesn't change the cached prefix.
+      // This CLI floors the budget at 1024.
+      const env =
+        options.thinkingTokens === undefined
+          ? session.env
+          : { ...session.env, MAX_THINKING_TOKENS: String(options.thinkingTokens) };
       const schema = claudeSchemaFor(options.schema);
       const sessionId = randomUUID();
       const secrets = auth.secrets;
