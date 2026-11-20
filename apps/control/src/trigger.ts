@@ -43,6 +43,8 @@ export function reviewGate(
   job: Pick<WorkflowJob, "kind" | "requested" | "label" | "actor" | "botActor">,
   pr: { labels: readonly string[] },
   reviewedBefore: boolean,
+  /** Succeeded automatic reviews since the last `resume` or requested review. */
+  automaticReviews = 0,
 ): GateDecision {
   if (job.requested === "review" || job.requested === "full_review") return { review: true };
   // A run for replies or an `explain` isn't anyone asking for a code review: the reply judge and
@@ -54,7 +56,7 @@ export function reviewGate(
       ...(job.actor === undefined ? {} : { actor: job.actor }),
       ...(job.botActor === undefined ? {} : { botActor: job.botActor }),
     };
-    return reviewGate(settings, push, pr, reviewedBefore);
+    return reviewGate(settings, push, pr, reviewedBefore, automaticReviews);
   }
   const labelled = pr.labels.some((name) => same(name, settings.label));
   const removeLabel =
@@ -89,6 +91,17 @@ export function reviewGate(
 
   // A trusted bot's push or open counts like anyone's; an untrusted bot's never got here.
   const push = job.kind === "pr_updated";
+  const pausedAfter =
+    push &&
+    settings.auto_pause_after !== undefined &&
+    automaticReviews >= settings.auto_pause_after;
+  if (pausedAfter) {
+    return {
+      review: false,
+      reason: `paused after ${settings.auto_pause_after} reviews`,
+      waiting: true,
+    };
+  }
   const manualAgain = settings.on_push === "manual" && reviewedBefore && push;
   switch (settings.trigger) {
     case "auto":
@@ -112,6 +125,8 @@ export function waitingCheckRun(
   gate: RepoConfig["gate"],
   slug: string | undefined,
   reviewedBefore: boolean,
+  /** Succeeded automatic reviews since the last reset, for the pause message. */
+  automaticReviews = 0,
 ): { conclusion: CheckConclusion; title: string; summary: string } | undefined {
   if (gate.check_run === "off") return undefined;
   const command = `\`@${slug ?? "lgtmoose"} review\``;
@@ -122,11 +137,15 @@ export function waitingCheckRun(
   const what = reviewedBefore
     ? "The commits since the last review haven't been reviewed."
     : "This pull request hasn't been reviewed yet.";
+  const paused =
+    settings.auto_pause_after !== undefined && automaticReviews >= settings.auto_pause_after
+      ? ` Automatic reviews are paused after ${automaticReviews}. Comment ${command}, or \`resume\`, to continue.`
+      : "";
   return {
     // A required check mustn't pass on code nobody reviewed: action_required keeps the PR from
     // merging until it is. An optional one is neutral.
     conclusion: gate.check_run === "required" ? "action_required" : "neutral",
     title: "Waiting for a trigger",
-    summary: `${what} This repository reviews pull requests when asked. ${ways}`,
+    summary: `${what} This repository reviews pull requests when asked. ${ways}${paused}`,
   };
 }

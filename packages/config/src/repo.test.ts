@@ -78,4 +78,15 @@ labels: { pending: "Ready for Review", changes: "Requires Changes", approved: "A
   it("rejects unknown keys", () => {
     expect(() => parseRepoConfigYaml("rulepack: [generic]\n")).toThrow(/rulepack/);
   });
+
+  it("pauses after a set number of automatic reviews, and never when unset", () => {
+    expect(parseRepoConfigYaml("").review.auto_pause_after).toBeUndefined();
+    expect(parseRepoConfigYaml("review:\n  auto_pause_after: 3\n").review.auto_pause_after).toBe(3);
+    expect(() => parseRepoConfigYaml("review:\n  auto_pause_after: 0\n")).toThrow(
+      /auto_pause_after/,
+    );
+    expect(() => parseRepoConfigYaml("review:\n  auto_pause_after: 51\n")).toThrow(
+      /auto_pause_after/,
+    );
+  });
 });

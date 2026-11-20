@@ -49,6 +49,57 @@ async function runRow(runId: string) {
 }
 
 describe("drizzleRunStore", () => {
+  it("counts succeeded automatic reviews since the count was reset", async () => {
+    const automatic = await start("arn:exec:auto-1", 90);
+    const requested = await start("arn:exec:auto-full", 90, "c".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({
+        status: "succeeded",
+        kind: "incremental",
+        startedAt: new Date("2026-01-02T00:00:00Z"),
+      })
+      .where(eq(reviewRuns.id, automatic.runId));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "full", startedAt: new Date("2026-01-03T00:00:00Z") })
+      .where(eq(reviewRuns.id, requested.runId));
+    const failed = await start("arn:exec:auto-failed", 90, "f".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({ status: "failed", kind: "incremental", startedAt: new Date("2026-01-04T00:00:00Z") })
+      .where(eq(reviewRuns.id, failed.runId));
+    expect(await store.automaticReviews("Acme/Shop", 90)).toBe(1);
+    await store.resetAutomaticReviews("Acme/Shop", 90);
+    expect(await store.automaticReviews("acme/shop", 90)).toBe(0);
+    const later = await start("arn:exec:auto-2", 90, "d".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "first", startedAt: new Date("2099-01-01T00:00:00Z") })
+      .where(eq(reviewRuns.id, later.runId));
+    expect(await store.automaticReviews("acme/shop", 90)).toBe(1);
+  });
+
+  it("does not count the run that fulfills a review someone asked for", async () => {
+    const head = "e".repeat(40);
+    await store.armRequestedReview("Acme/Shop", 91, head);
+    expect(await store.requestedReviewHead("acme/shop", 91)).toBe(head);
+    const followUp = await start("arn:exec:auto-asked", 91, head);
+    const other = await start("arn:exec:auto-other", 91, "f".repeat(40));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "incremental" })
+      .where(eq(reviewRuns.id, followUp.runId));
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", kind: "incremental" })
+      .where(eq(reviewRuns.id, other.runId));
+    expect(await store.automaticReviews("acme/shop", 91)).toBe(2);
+    await store.noteRequestedRun("acme/shop", 91, followUp.runId);
+    expect(await store.requestedReviewHead("acme/shop", 91)).toBeUndefined();
+    expect(await store.automaticReviews("acme/shop", 91)).toBe(1);
+  });
+
   it("records a running run with its execution ARN, once per execution", async () => {
     const run = await start("arn:exec:1");
     expect(await start("arn:exec:1")).toEqual(run);

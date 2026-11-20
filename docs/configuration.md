@@ -113,6 +113,7 @@ Optional, at the repository's root. It's read from the PR's base branch, never f
 | `review.trusted_bots` | list of string matching `^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$` | `[]` | Bot logins, such as claude[bot], whose review.label or @lgtmoose review starts a review. They can do nothing else. |
 | `review.wait_for_checks` | any | `"off"` | Wait for CI before a review starts. off: don't wait. required: the base branch's required status checks. A list: the check runs or commit statuses with these names. LGTMoose's own check is never waited for. |
 | `review.wait_timeout_minutes` | integer, 5 to 1440 | `60` | With wait_for_checks: how long to wait for checks that haven't finished before reviewing anyway. A failed check holds the review until it passes; this doesn't. |
+| `review.auto_pause_after` | integer, 1 to 50 |  | After this many automatic reviews of a pull request, later pushes wait. Unset never pauses. @lgtmoose review, full review and resume start the count over. |
 | `labels` | object | `{}` | The three status labels LGTMoose keeps on a PR: pending, changes and approved. |
 | `labels.pending` | string | `"Ready for Review"` | Set when a review holds for a person: it was incomplete, or flagged a prompt-injection attempt. |
 | `labels.changes` | string | `"Requires Changes"` | Set when blocking or should-fix findings are open. |

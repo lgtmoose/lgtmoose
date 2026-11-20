@@ -192,6 +192,12 @@
           "type": "integer",
           "minimum": 5,
           "maximum": 1440
+        },
+        "auto_pause_after": {
+          "description": "After this many automatic reviews of a pull request, later pushes wait. Unset never pauses. @lgtmoose review, full review and resume start the count over.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
         }
       },
       "additionalProperties": false
