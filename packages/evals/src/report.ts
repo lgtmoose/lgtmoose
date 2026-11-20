@@ -207,8 +207,8 @@ export function renderMarkdown(
   if (repeatErrors > 0) {
     const later =
       repeatErrors === 1
-        ? "1 later run had a failure. Recall stays the first run, so it is not a miss."
-        : `${repeatErrors} later runs had failures. Recall stays the first run, so they are not misses.`;
+        ? "A later run reported 1 failure. Recall stays the first run, so it is not a miss."
+        : `Later runs reported ${repeatErrors} failures. Recall stays the first run, so they are not misses.`;
     lines.push("", later);
   }
   if (t.failedRuns > 0) {
@@ -249,6 +249,9 @@ export function renderMarkdown(
     }
     for (const error of score.errors) {
       details.push(`- ${inline(score.name)}: ${inline(error)}`);
+    }
+    for (const error of score.repeatErrors ?? []) {
+      details.push(`- ${inline(score.name)}: a later run failed: ${inline(error)}`);
     }
   }
   if (details.length > 0) lines.push("", "### Details", "", ...details);
