@@ -328,6 +328,12 @@ export class WorkflowStack extends Stack {
           LGTMOOSE_MODEL: modelFor(provider, "standard") ?? "default",
           // Its fast-tier model, for the reply judge.
           LGTMOOSE_FAST_MODEL: modelFor(provider, "fast") ?? "default",
+          ...(provider.thinkingTokens?.standard === undefined
+            ? {}
+            : { LGTMOOSE_THINKING_TOKENS: String(provider.thinkingTokens.standard) }),
+          ...(provider.thinkingTokens?.fast === undefined
+            ? {}
+            : { LGTMOOSE_FAST_THINKING_TOKENS: String(provider.thinkingTokens.fast) }),
           ...providerModelEnv(provider),
         },
         // The execution role reads the secret to start the task; the task's own role can't

@@ -37,6 +37,12 @@ export interface HarnessRunOptions<T> {
    * (see `MODEL_TIERS`). `model` still wins when the harness gets one.
    */
   tier?: ModelTier;
+  /**
+   * Cap on thinking tokens. Claude Code and the Agent SDK send it as `MAX_THINKING_TOKENS`,
+   * which that CLI turns into a fixed budget and raises to 1024 when it's lower. Unset keeps
+   * the model's own thinking. Codex and Cursor ignore it.
+   */
+  thinkingTokens?: number;
 }
 
 /**

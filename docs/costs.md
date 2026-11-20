@@ -146,6 +146,7 @@ The dashboard's Usage page shows this month's spend in your repositories against
 - **`providers[].models`**: the model for each tier. The reviewer runs on `standard`, the reply judge on `fast`.
 - **`maxConcurrency`**: fewer batches at once makes a big PR slower but doesn't change its total model usage.
 - **`batchStaggerSeconds`**: batches after the first wait this long (30 seconds by default) so they can read the first batch's prompt cache. `0` starts them together, and each one pays to write the shared prompt again. The wait adds wall-clock time, about `(batches − 1) × batchStaggerSeconds`, and does not add model tokens.
+- **`providers[].thinkingTokens`**: a cap on thinking tokens for a tier, for Claude Code and the Agent SDK. Unset, the model decides, and on a Sonnet review that is the largest part of the bill. The CLI raises any cap under 1024 to 1024. A lower cap costs less and can miss findings, so check it with the eval suite (`pnpm --filter @lgtmoose/evals run eval --thinking-tokens <n>`) before turning it on. Codex and Cursor ignore it.
 
 ## What a batch sends the model
 

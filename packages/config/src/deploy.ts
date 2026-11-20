@@ -103,6 +103,17 @@ const providerSchema = z
         "Model per tier (fast, standard, deep). Tiers left out use the harness default: haiku, sonnet and opus for Claude Code and the Agent SDK, the CLI's own model for Codex and Cursor.",
       ),
     /**
+     * A cap on thinking tokens per tier. Claude Code reads it as `MAX_THINKING_TOKENS` and
+     * raises anything under 1024 to 1024, its minimum budget. Unset keeps the model's own
+     * thinking. Codex and Cursor ignore it.
+     */
+    thinkingTokens: z
+      .partialRecord(z.enum(TIERS), z.number().int().min(1024).max(128_000))
+      .optional()
+      .describe(
+        "Cap on thinking tokens per tier (fast, standard, deep), at least 1024. Tiers left out keep the model's own thinking. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it.",
+      ),
+    /**
      * Google Cloud settings for `vertex` auth. The service-account key itself is the stored
      * credential (`lgtmoose auth`); its `project_id` is used when `projectId` is left out.
      */

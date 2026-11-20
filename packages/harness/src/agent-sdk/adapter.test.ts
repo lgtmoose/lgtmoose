@@ -80,6 +80,13 @@ const run = (h: AgentSdkHarness, extra: Record<string, unknown> = {}) =>
   h.run({ prompt: "Review this.", cwd: tmp, schema, model: "sonnet", timeoutMs: 5000, ...extra });
 
 describe("AgentSdkHarness", () => {
+  it("passes a thinking cap through MAX_THINKING_TOKENS", async () => {
+    const { query, calls } = fakeQuery([() => [result({ structured_output: { findings: [] } })]]);
+    const { harness: h } = harness(query);
+    await run(h, { thinkingTokens: 2000 });
+    expect(calls[0]?.options.env?.MAX_THINKING_TOKENS).toBe("2000");
+  });
+
   it("runs read-only with the review policy and returns the structured output", async () => {
     const { query, calls } = fakeQuery([
       () => [result({ structured_output: { findings: ["a"] } })],

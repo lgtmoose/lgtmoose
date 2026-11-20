@@ -25,6 +25,10 @@ export interface SandboxEnv {
    * as empty) for the harness's own choice. Undefined when unset.
    */
   fastModel?: string;
+  /** `LGTMOOSE_THINKING_TOKENS`: the standard tier's thinking cap. Undefined when unset. */
+  thinkingTokens?: number;
+  /** `LGTMOOSE_FAST_THINKING_TOKENS`: the fast tier's thinking cap. Undefined when unset. */
+  fastThinkingTokens?: number;
 }
 
 /** `LGTMOOSE_MODEL`'s value for the harness's default model. */
@@ -36,7 +40,10 @@ const VARIABLES = {
   harness: "LGTMOOSE_HARNESS",
   auth: "LGTMOOSE_AUTH",
   batchUrls: "LGTMOOSE_BATCH_URLS",
-} as const satisfies Record<Exclude<keyof SandboxEnv, "model" | "fastModel">, string>;
+} as const satisfies Record<
+  Exclude<keyof SandboxEnv, "model" | "fastModel" | "thinkingTokens" | "fastThinkingTokens">,
+  string
+>;
 
 /** Reads the sandbox task's settings, or says which variables are missing (blank counts). */
 export function readSandboxEnv(
@@ -47,6 +54,14 @@ export function readSandboxEnv(
   const read = (name: string) => env[name]?.trim() ?? "";
   const model = env.LGTMOOSE_MODEL?.trim();
   const fastModel = env.LGTMOOSE_FAST_MODEL?.trim();
+  const cap = (name: string) => {
+    const raw = env[name]?.trim();
+    if (raw === undefined || raw === "") return undefined;
+    const parsed = Number(raw);
+    return Number.isInteger(parsed) && parsed >= 1024 ? parsed : undefined;
+  };
+  const thinkingTokens = cap("LGTMOOSE_THINKING_TOKENS");
+  const fastThinkingTokens = cap("LGTMOOSE_FAST_THINKING_TOKENS");
   return {
     providerId: read(VARIABLES.providerId),
     httpsProxy: read(VARIABLES.httpsProxy),
@@ -57,5 +72,7 @@ export function readSandboxEnv(
     ...(fastModel === undefined || fastModel === ""
       ? {}
       : { fastModel: fastModel === DEFAULT_MODEL ? "" : fastModel }),
+    ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
+    ...(fastThinkingTokens === undefined ? {} : { fastThinkingTokens }),
   };
 }

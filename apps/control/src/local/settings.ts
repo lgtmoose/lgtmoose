@@ -53,6 +53,12 @@ export function localSettings(config: DeployConfig): LocalSettings {
     auth: provider.auth,
     model: modelFor(provider, "standard") ?? "default",
     fastModel: modelFor(provider, "fast") ?? "default",
+    ...(provider.thinkingTokens?.standard === undefined
+      ? {}
+      : { thinkingTokens: provider.thinkingTokens.standard }),
+    ...(provider.thinkingTokens?.fast === undefined
+      ? {}
+      : { fastThinkingTokens: provider.thinkingTokens.fast }),
     ...(providerNeedsSecret(provider)
       ? {
           credential: {

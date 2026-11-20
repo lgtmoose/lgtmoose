@@ -415,6 +415,42 @@ describe("review state machine", () => {
     expect(model("bedrock")).toBe("sonnet");
   });
 
+  it("sets a thinking cap only when the provider configures one", () => {
+    const names = (provider: string) =>
+      (
+        (
+          taskDefinition(provider).ContainerDefinitions as {
+            Environment: { Name: string }[];
+          }[]
+        )[0]?.Environment ?? []
+      ).map((e) => e.Name);
+    expect(names("claude")).not.toContain("LGTMOOSE_THINKING_TOKENS");
+    expect(names("bedrock")).not.toContain("LGTMOOSE_FAST_THINKING_TOKENS");
+
+    const config = parseDeployConfig({
+      allowedOrgs: ["lgtmoose"],
+      providers: [
+        {
+          id: "claude",
+          harness: "claude-code",
+          auth: "oauth-token",
+          thinkingTokens: { standard: 2000, fast: 1024 },
+        },
+      ],
+    });
+    const built = Template.fromStack(buildApp(config, appWithoutBundling()).workflow);
+    const envs = Object.values(built.findResources("AWS::ECS::TaskDefinition")).flatMap(
+      (def) =>
+        (
+          def.Properties.ContainerDefinitions as {
+            Environment?: { Name: string; Value: unknown }[];
+          }[]
+        )[0]?.Environment ?? [],
+    );
+    expect(envs).toContainEqual({ Name: "LGTMOOSE_THINKING_TOKENS", Value: "2000" });
+    expect(envs).toContainEqual({ Name: "LGTMOOSE_FAST_THINKING_TOKENS", Value: "1024" });
+  }, 120_000);
+
   it("passes each step its command and the execution, and the job to prepare", () => {
     const { States } = definition();
     expect(overrides(States.Prepare)).toEqual({

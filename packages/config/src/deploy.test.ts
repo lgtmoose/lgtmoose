@@ -36,6 +36,30 @@ describe("parseDeployConfig", () => {
     ).toMatchObject({ reconcileLookbackHours: 1 });
   });
 
+  it("caps thinking per tier and rejects a budget under the CLI's floor", () => {
+    expect(
+      parseDeployConfig({
+        ...minimal,
+        providers: [
+          {
+            id: "claude",
+            harness: "claude-code",
+            auth: "bedrock",
+            thinkingTokens: { standard: 2000 },
+          },
+        ],
+      }).providers[0],
+    ).toMatchObject({ thinkingTokens: { standard: 2000 } });
+    expect(
+      issuesOf({
+        ...minimal,
+        providers: [
+          { id: "claude", harness: "claude-code", auth: "bedrock", thinkingTokens: { fast: 200 } },
+        ],
+      }),
+    ).toEqual([expect.objectContaining({ path: "providers[0].thinkingTokens.fast" })]);
+  });
+
   it("fills defaults for a minimal config", () => {
     expect(parseDeployConfig(minimal)).toEqual({
       region: "us-east-1",

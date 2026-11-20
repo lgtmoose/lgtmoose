@@ -18,6 +18,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `providers[].harness` (required) | `"claude-code"` or `"codex"` or `"cursor-agent"` or `"agent-sdk"` |  | The agent that runs the review: claude-code, codex, cursor-agent or agent-sdk. |
 | `providers[].auth` (required) | `"oauth-token"` or `"api-key"` or `"bedrock"` or `"vertex"` or `"chatgpt-login"` or `"access-token"` or `"service-account"` |  | How the harness signs in. Each harness accepts only some methods. |
 | `providers[].models` | map of `"fast"` or `"standard"` or `"deep"` to string matching `^[\w.:@/[\]-]{1,128}$` |  | Model per tier (fast, standard, deep). Tiers left out use the harness default: haiku, sonnet and opus for Claude Code and the Agent SDK, the CLI's own model for Codex and Cursor. |
+| `providers[].thinkingTokens` | map of `"fast"` or `"standard"` or `"deep"` to integer, 1024 to 128000 |  | Cap on thinking tokens per tier (fast, standard, deep), at least 1024. Tiers left out keep the model's own thinking. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it. |
 | `providers[].vertex` | object |  | Google Cloud settings, for auth: "vertex" only. |
 | `providers[].vertex.region` | string matching <code>^(global&#124;us&#124;eu&#124;[a-z]+-[a-z]+\d+)$</code> | `"global"` | CLOUD_ML_REGION: global, a multi-region (us, eu) or a region (us-east5). |
 | `providers[].vertex.projectId` | string matching `^[a-z][a-z0-9-]{4,28}[a-z0-9]$` |  | Google Cloud project. Defaults to the stored service-account key's project_id. |
