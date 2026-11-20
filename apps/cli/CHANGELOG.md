@@ -1,5 +1,24 @@
 # lgtmoose
 
+## 0.1.1
+
+### Patch Changes
+
+- a4e23dc: Pause automatic reviews of a pull request after `review.auto_pause_after` of them
+- cfbde51: Cap a provider's thinking tokens per tier, off unless `providers[].thinkingTokens` is set
+- d4beebc: The control task's database client trusts a pinned RDS certificate bundle, so it can verify the database. The bundle is not added to Node's trust store. A review's prepare step failed before it could record the run because the RDS root is not in the public trust store.
+- 7441f2c: Control Lambdas, the egress proxy and the dashboard API can reach the Secrets Manager, ECR and Logs VPC endpoints, so the database migrations no longer time out on the first deploy. `destroy` also turns off deletion protection when an earlier deploy failed to create the Data stack and left it without outputs.
+- e4654c8: The review tasks keep only the three default capabilities Fargate allows them to hold, then the entrypoint clears those too. Adding SETUID is rejected on Fargate, so the previous task definition never updated.
+- 8348226: Imported secrets are read by name. A partial ARN whose name ends in a hyphen and six characters is resolved as a different secret, which made every webhook fail before its signature was checked. A provider id that would produce such a name is refused for the sandbox, which can only be given an ARN.
+- 3ca82fe: List each failure from a later eval run, instead of counting those runs
+- c5c5c54: The lean NAT instance is a t4g.micro with swap, and its boot script retries the iptables install and masquerades with `ip route`. A t4g.nano runs out of memory installing iptables, and Amazon Linux 2023 has no `route` command, so the default script never masquerades. The AWS smoke test looks for the dispatcher forwarding the comment, which is what a comment job does.
+- 2488568: Report how often a repeated eval run finds each seeded bug
+- 6749462: Add up the cost of repeated eval runs, and keep a later failure off the recall gate
+- c3d16fd: A review batch sends only the comments on its own files, and identical convention files once. Claude Code sends the shared context as its own turn and resumes with the diff, and batches after the first wait `batchStaggerSeconds` (30 by default) so they can read the first batch's prompt cache.
+- 950a7fc: Count the public saved-card fixture in the golden set
+- f74a286: A review with one batch sends its shared context in the batch's prompt instead of a separate turn, since no other batch would read the cache. A convention file that copies one already read, with only its own title or a few lines of its own, is sent once.
+- 6c972b6: The review tasks can write their mounted /tmp and /work, then run as uid 10001 with no capabilities. Fargate mounts those volumes owned by root, so prepare failed before it could check out a pull request. The process that runs the review is unprivileged, including the init that reaps its children.
+
 ## 0.1.0
 
 ### Minor Changes
