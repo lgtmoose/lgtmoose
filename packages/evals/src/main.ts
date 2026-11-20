@@ -65,6 +65,8 @@ Options:
   --timeout <minutes>  Time limit for each batch (default: 15)
   --thinking-tokens <n>
                        Cap thinking tokens (at least 1024). Unset keeps the model's own thinking.
+  --repeat <n>         Run each fixture this many times (default: 1). Recall stays the first
+                       run. The report adds how often each expected finding was hit.
   --claude <path>      The claude binary (default: claude on PATH), also for agent-sdk
   --codex <path>       The codex binary (default: codex on PATH)
   --cursor <path>      The Cursor agent binary (default: agent on PATH)
@@ -115,6 +117,7 @@ async function main(argv: readonly string[]): Promise<number> {
       model: { type: "string", multiple: true },
       timeout: { type: "string" },
       "thinking-tokens": { type: "string" },
+      repeat: { type: "string" },
       claude: { type: "string" },
       codex: { type: "string" },
       cursor: { type: "string" },
@@ -130,6 +133,10 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const minutes = Number(values.timeout ?? "15");
   if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("--timeout is minutes per batch.");
+  const repeat = values.repeat === undefined ? 1 : Number(values.repeat);
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    throw new Error("--repeat is how many times to run each fixture, at least 1.");
+  }
   const thinkingTokens =
     values["thinking-tokens"] === undefined ? undefined : Number(values["thinking-tokens"]);
   if (
@@ -222,6 +229,7 @@ async function main(argv: readonly string[]): Promise<number> {
       workRoot,
       progress,
       ...(thinkingTokens === undefined ? {} : { thinkingTokens }),
+      ...(repeat === 1 ? {} : { repeat }),
     });
     let learning: LearningReport | undefined;
     if (scenarios.length > 0) {

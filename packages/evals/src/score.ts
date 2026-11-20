@@ -70,6 +70,21 @@ export interface FixtureScore {
   costUsd: number;
   durationMs: number;
   errors: readonly string[];
+  /**
+   * Set when the fixture ran more than once. One entry per expected finding, in the first run's
+   * order: how many of the runs reported it. The score's own matched and missed stay the first run,
+   * so a baseline still compares one run.
+   */
+  hitRates?: FindingHitRate[];
+}
+
+/** How often one expected finding was reported across repeated runs of one fixture. */
+export interface FindingHitRate {
+  path: string;
+  lines: readonly [number, number];
+  note?: string;
+  hits: number;
+  runs: number;
 }
 
 /**
@@ -186,6 +201,33 @@ export function totals(scores: readonly FixtureScore[]): EvalTotals {
     durationMs: scores.reduce((n, s) => n + s.durationMs, 0),
     failedRuns: scores.filter((s) => s.errors.length > 0).length,
   };
+}
+
+function expectedKey(expected: ExpectedFinding): string {
+  return `${expected.side}:${expected.path}:${expected.lines[0]}-${expected.lines[1]}`;
+}
+
+/**
+ * How often each expected finding of the first run was reported across `runs` (the first run
+ * included). Empty unless there is more than one run.
+ */
+export function findingHitRates(runs: readonly FixtureScore[]): FindingHitRate[] {
+  const first = runs[0];
+  if (first === undefined || runs.length < 2) return [];
+  const expected = [...first.matched.map((match) => match.expected), ...first.missed];
+  return expected.map((item) => {
+    const key = expectedKey(item);
+    const hits = runs.filter((run) =>
+      run.matched.some((match) => expectedKey(match.expected) === key),
+    ).length;
+    return {
+      path: item.path,
+      lines: item.lines,
+      ...(item.note === undefined ? {} : { note: item.note }),
+      hits,
+      runs: runs.length,
+    };
+  });
 }
 
 /** Recall per tag, over the seeded fixtures with that tag, sorted by tag. */
