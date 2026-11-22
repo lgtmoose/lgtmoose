@@ -8,10 +8,8 @@ export default defineConfig({
     // `cdk synth` stages the repository under cdk.out for the image builds; its copies of other
     // packages' tests aren't this package's.
     exclude: [...configDefaults.exclude, "cdk.out/**"],
-    // Synth output and test temp files go in a per-file directory that's cleaned up (NIC-1122).
-    // That needs each test file to run in a fresh process of its own: forked, isolated workers.
-    pool: "forks",
-    isolate: true,
-    setupFiles: ["./test-setup.ts"],
+    // Synth output and test temp files go in one directory that's removed when the run ends
+    // (NIC-1122).
+    globalSetup: ["./global-setup.ts"],
   },
 });
