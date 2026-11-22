@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, vi, type TestContext } from "vitest";
 import { createCdk, deployArgs, destroyArgs } from "./cdk.js";
 
 describe("cdk arguments", () => {
@@ -47,9 +47,10 @@ describe("cdk arguments", () => {
 });
 
 describe("createCdk", () => {
-  function fakeCdkDir() {
+  /** A CDK install to point at, removed when the test that made it finishes. */
+  function fakeCdkDir(test: Pick<TestContext, "onTestFinished">) {
     const dir = mkdtempSync(join(tmpdir(), "cdk-test-"));
-    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    test.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
     mkdirSync(join(dir, "node_modules/aws-cdk/bin"), { recursive: true });
     writeFileSync(join(dir, "node_modules/aws-cdk/bin/cdk"), "");
     return dir;
@@ -64,8 +65,8 @@ describe("createCdk", () => {
     });
   }
 
-  it("runs the CDK with the config and region, and returns the outputs", async () => {
-    const cdkDir = fakeCdkDir();
+  it("runs the CDK with the config and region, and returns the outputs", async (test) => {
+    const cdkDir = fakeCdkDir(test);
     const spawn = fakeSpawn(0, (args) => {
       const file = args[args.indexOf("--outputs-file") + 1] ?? "";
       writeFileSync(file, JSON.stringify({ "Lgtmoose-Api": { GithubWebhookUrl: "https://x" } }));
@@ -91,12 +92,12 @@ describe("createCdk", () => {
     expect(options.env.AWS_REGION).toBe("eu-west-2");
   });
 
-  it("bootstraps the named environment, so the CDK doesn't synthesize the app", async () => {
+  it("bootstraps the named environment, so the CDK doesn't synthesize the app", async (test) => {
     const spawn = fakeSpawn(0);
     const cdk = createCdk({
       configPath: "/c",
       region: "eu-west-2",
-      cdkDir: fakeCdkDir(),
+      cdkDir: fakeCdkDir(test),
       spawn: spawn as never,
     });
     await cdk.bootstrap("123456789012");
@@ -110,11 +111,11 @@ describe("createCdk", () => {
     expect(spawnOptions.cwd).toBe(tmpdir());
   });
 
-  it("fails when the CDK exits non-zero", async () => {
+  it("fails when the CDK exits non-zero", async (test) => {
     const cdk = createCdk({
       configPath: "/c",
       region: "us-east-1",
-      cdkDir: fakeCdkDir(),
+      cdkDir: fakeCdkDir(test),
       spawn: fakeSpawn(1) as never,
     });
     await expect(cdk.bootstrap("1")).rejects.toThrow("cdk bootstrap failed (exit code 1)");
