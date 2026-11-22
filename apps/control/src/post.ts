@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { effectiveCaps, statusLabels } from "@lgtmoose/config";
-import type { Finding, ReviewEvent } from "@lgtmoose/core";
+import type { Finding, ReviewEvent, Verdict } from "@lgtmoose/core";
 import {
   changedPaths,
   diffCommits,
@@ -469,6 +469,47 @@ async function settleRunReplies(
   return { ...settled, saved: false, close };
 }
 
+/**
+ * A full review's carried blocking findings that its recheck leaves open (NIC-1123), each with
+ * why: so a "changes requested" a fix should have cleared can be traced to the finding and the
+ * recheck's reason.
+ */
+async function logStillOpen(
+  deps: Pick<ControlDeps, "log" | "store">,
+  runId: string,
+  job: NonNullable<RunManifest["recheck"]>,
+  fixed: readonly { findingId: string }[],
+  reraised: ReadonlySet<string>,
+  /** Outdated as post reads them, prepare's mark or not. */
+  outdated: ReadonlySet<string>,
+): Promise<void> {
+  const verdicts: readonly Verdict[] = (await readVerdicts(deps.store, runId, job.index)) ?? [];
+  const closed = new Set(fixed.map((fix) => fix.findingId));
+  for (const entry of job.targets) {
+    // An outdated one doesn't count towards the decision: it holds nothing up.
+    if (
+      entry.severity !== "blocking" ||
+      entry.outdated === true ||
+      outdated.has(entry.findingId) ||
+      closed.has(entry.findingId)
+    ) {
+      continue;
+    }
+    const verdict = verdicts.find((candidate) => candidate.id === entry.id);
+    let why: string;
+    if (reraised.has(entry.fingerprint)) why = "this review raised it again";
+    else if (verdict === undefined) why = "the recheck gave no verdict for it";
+    else if (verdict.confirmed) why = "the recheck says the problem is still there";
+    else why = "a fix the recheck saw doesn't count here";
+    deps.log("full review left a carried blocking finding open", {
+      runId,
+      findingId: entry.findingId,
+      why,
+      ...(verdict === undefined ? {} : { reason: verdict.reason.slice(0, 500) }),
+    });
+  }
+}
+
 /** What the recheck came to (NIC-1120): the fixes, and whether they're saved already. */
 interface RecheckPlan {
   writes: RecheckWrites;
@@ -486,6 +527,11 @@ interface RecheckPlan {
  * So does one whose file was renamed since it was raised and wasn't reviewed under its new
  * name: the recheck looked for it under a path head doesn't have. An earlier attempt's saved list
  * stands. Without a recheck, or when its batch gave no verdicts, every finding stays open.
+ *
+ * `outdated` (NIC-1124): the findings whose cited line head doesn't have, outdated by this run
+ * or an earlier one and not reopened. One of those closes by the same rules, and only when this
+ * review read its file under the name it was raised on: with its line gone, there's no place at
+ * head to follow it to. One that isn't closed stays outdated, its thread unresolved.
  */
 async function planRecheck(
   deps: ControlDeps,
@@ -493,6 +539,7 @@ async function planRecheck(
   manifest: RunManifest,
   report: Pick<ReviewReport, "reraised" | "reviewedNow">,
   open: readonly { id: string; finding: { path: string } }[],
+  outdated: ReadonlySet<string> = new Set(),
 ): Promise<RecheckPlan | undefined> {
   const job = manifest.recheck;
   if (job === undefined || deps.findings.closeFixed === undefined) return undefined;
@@ -514,12 +561,26 @@ async function planRecheck(
   );
   // Each finding's file at head, followed from where it was raised (renames included).
   const pathNow = new Map(open.map((entry) => [entry.id, entry.finding.path]));
+  const full = job.mode === "full";
   const fixes = fixedByRecheck(job, verdicts, {
     reraised: new Set(report.reraised),
-    open: new Set(open.map((entry) => entry.id)),
+    open: new Set([...open.map((entry) => entry.id), ...outdated]),
   }).filter((fix) => {
     const path = pathNow.get(fix.entry.findingId);
-    if (path === undefined || unreviewed.has(path)) return false;
+    if (path === undefined) {
+      // Its line is gone (NIC-1124): only a review of its file now says anything about it. Only
+      // when prepare saw the line gone too and told the recheck so: one this step can't place
+      // (its commit is gone) was never checked against the code that replaced its line.
+      return (
+        fix.entry.outdated === true &&
+        outdated.has(fix.entry.findingId) &&
+        reviewed.has(fix.entry.path)
+      );
+    }
+    if (unreviewed.has(path)) return false;
+    // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
+    // or not in the PR's change any more) says nothing about the finding.
+    if (full) return reviewed.has(path);
     // Moved since it was raised: the recheck read it by its old name, which head doesn't
     // have, so only a review of the file under its new name says anything about it.
     return path === fix.entry.path || reviewed.has(path);
@@ -1411,6 +1472,8 @@ export async function post(
   let outdated: string[];
   let reopened: string[];
   let recheckPlan: RecheckPlan | undefined;
+  // Findings whose cited line is gone at head (NIC-1124): they don't count towards the decision.
+  let outdatedNow = new Set<string>();
   // The report before the recheck's fixes were counted closed: for a run that won't close them.
   let reportOpen: ReviewReport | undefined;
   // To make the decision again once the claims are held, should the recheck saved by then
@@ -1582,7 +1645,18 @@ export async function post(
     // again without them. They're closed once the claims are held and the run still counts.
     stillOpen = earlier.open.filter((entry) => !judgedFixed.has(entry.id));
     finishWith = finish;
-    recheckPlan = await planRecheck(deps, runId, manifest, report, stillOpen);
+    // Those whose cited line is gone (NIC-1124): outdated now, or by an earlier run and not
+    // reopened. The recheck can close them too, and resolve their threads.
+    const reopenedIds = new Set(reopened);
+    outdatedNow = new Set(
+      [
+        ...outdated,
+        ...records.flatMap((record) =>
+          record.status === "outdated" && !reopenedIds.has(record.id) ? [record.id] : [],
+        ),
+      ].filter((id) => !judgedFixed.has(id)),
+    );
+    recheckPlan = await planRecheck(deps, runId, manifest, report, stillOpen, outdatedNow);
     reportOpen = report;
     const recheckClosed = new Set(recheckPlan?.writes.fixed.map((fixed) => fixed.findingId));
     if (recheckClosed.size > 0) {
@@ -2148,6 +2222,24 @@ export async function post(
       } else {
         deps.log("the head already has our review; not posting another", { runId, coveredBy });
         progress.coveredBy = coveredBy;
+      }
+      // What a full review's recheck left open (NIC-1123), once the close list is settled (the
+      // saved one, if another attempt saved it) and the run counts: once per run, with the review.
+      // Log only: a failed read here must never fail the post after its review is out.
+      if (progress.coveredBy === undefined && manifest.recheck?.mode === "full") {
+        await logStillOpen(
+          deps,
+          runId,
+          manifest.recheck,
+          recheckPlan?.writes.fixed ?? [],
+          new Set(report.reraised),
+          outdatedNow,
+        ).catch((error: unknown) => {
+          deps.log("couldn't log what the full review's recheck left open", {
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       progress.review = true;
       await save();

@@ -1,0 +1,24 @@
+{
+  "description": "The pilot's full review: adding to the cart sends no add_to_cart event. The later commit doesn't touch the cart context; the store it imports, in another folder, now tracks add_to_cart on every add. The review runs as a full review, so the change is measured from the commit the finding was raised at.",
+  "expect": "fixed",
+  "review": "full",
+  "base": {
+    "src/analytics/track.ts": "export function track(event: string, properties: Record<string, unknown>): void {\n  void fetch(\"/events\", { method: \"POST\", body: JSON.stringify({ event, properties }) });\n}\n",
+    "src/store/cart.ts": "export interface CartItem {\n  id: string;\n  priceCents: number;\n}\n\nconst items: CartItem[] = [];\n\nexport function add(item: CartItem): void {\n  items.push(item);\n}\n"
+  },
+  "raised": {
+    "src/cart/CartContext.ts": "import { add, type CartItem } from \"../store/cart\";\n\nexport function addToCart(item: CartItem): void {\n  // Analytics: every add sends add_to_cart.\n  add(item);\n}\n"
+  },
+  "later": {
+    "src/store/cart.ts": "import { track } from \"../analytics/track\";\n\nexport interface CartItem {\n  id: string;\n  priceCents: number;\n}\n\nconst items: CartItem[] = [];\n\nexport function add(item: CartItem): void {\n  items.push(item);\n  track(\"add_to_cart\", { id: item.id, priceCents: item.priceCents });\n}\n"
+  },
+  "finding": {
+    "rule_category": "correctness",
+    "severity": "should_fix",
+    "path": "src/cart/CartContext.ts",
+    "line": 5,
+    "start_line": 3,
+    "title": "Adding to the cart sends no add_to_cart event",
+    "body": "addToCart() says every add sends add_to_cart, but it only calls the store's add(), which tracks nothing, so the event is never sent."
+  }
+}

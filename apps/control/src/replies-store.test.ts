@@ -171,6 +171,28 @@ describe("finding store, for replies", () => {
     expect(await findingStore.closeFixed?.(theirs, "h2")).toBe("theirs");
   });
 
+  it("closes an outdated finding on the recheck's word (NIC-1124)", async () => {
+    const prId = await pull(92);
+    const id = await finding(prId, 7311);
+    await findingStore.markOutdated([id], "h2");
+    expect((await findingStore.trackedFindings(prId)).find((row) => row.id === id)?.status).toBe(
+      "outdated",
+    );
+    expect(await findingStore.closeFixed?.(id, "h3")).toBe("closed");
+    const [row] = await db.select().from(findings).where(eq(findings.id, id));
+    expect(row?.status).toBe("fixed");
+    const events = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect(events.map((event) => [event.type, event.sha])).toEqual([
+      ["outdated", "h2"],
+      ["fixed", "h3"],
+    ]);
+    // Marking it outdated after the close (post records findings after the recheck) leaves it
+    // fixed: only open ones go outdated.
+    await findingStore.markOutdated([id], "h3");
+    const [after] = await db.select().from(findings).where(eq(findings.id, id));
+    expect(after?.status).toBe("fixed");
+  });
+
   it("reopens a fixed finding the reviewer raises again, and never drops the re-raise", async () => {
     const prId = await pull(75);
     const id = await finding(prId, 7501);

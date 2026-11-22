@@ -16,7 +16,9 @@ const exec = promisify(execFile);
  * Recheck evals (NIC-1120): does the recheck close a carried finding fixed in another file, and
  * keep one that still holds? Each scenario is three commits: a base, the commit a finding was
  * raised at, and a later commit. The later commit either fixes the problem away from the cited
- * line (`fixed`), or changes something nearby and leaves it (`holds`).
+ * line (`fixed`), or changes something nearby and leaves it (`holds`). A scenario with
+ * `review: "full"` runs as a full review (NIC-1123): the change is measured from the commit the
+ * finding was raised at, and it's picked when its file or a related one changed since.
  *
  * The scenario runs the control task's own code: `recheckJob` picks the finding and builds the
  * prompt from a real clone, the recheck runs on the harness, and `fixedByRecheck` decides. The
@@ -40,6 +42,12 @@ export const recheckScenarioSchema = z
     description: z.string().min(1),
     /** `fixed`: the later commit fixes the finding in another file. `holds`: it doesn't. */
     expect: z.enum(["fixed", "holds"]),
+    /**
+     * `full` (NIC-1123): the run is a full review, so the finding is picked wherever the change is,
+     * and the change is measured from the commit it was raised at. Left out: an incremental review
+     * since that commit.
+     */
+    review: z.enum(["incremental", "full"]).optional(),
     base: files,
     /** Laid over the base: the commit the finding was raised at. */
     raised: files,
@@ -212,8 +220,13 @@ export async function runRecheckScenario(
       repo,
       records: [record],
       skip: new Set(),
-      sinceSha: built.raisedSha,
+      // A full review measures from the raised commit itself; an incremental one from the last
+      // review, here the raised commit.
+      ...(scenario.review === "full"
+        ? { mode: "full" as const, sinceSha: undefined }
+        : { sinceSha: built.raisedSha }),
       headSha: built.headSha,
+      baseSha: built.baseSha,
       index: 0,
       log: () => undefined,
     });

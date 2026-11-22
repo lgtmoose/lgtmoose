@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { FindingRecord } from "./ports.js";
 import {
   fixedByRecheck,
+  fullReviewSince,
   isRelated,
   namesRelatedFile,
+  rankRechecks,
   recheckJob,
   recheckReply,
   relativeImports,
@@ -241,5 +243,136 @@ describe("recheckJob", () => {
     expect(job?.changed).toHaveLength(61);
     // The PR's own change is the first diff read, ahead of the merged ones.
     expect(diffs[0]).toBe("src/pay/checkout.ts");
+  });
+});
+
+describe("rankRechecks (NIC-1123)", () => {
+  it("takes open blocking and should-fix findings anywhere, blocking first, oldest first", () => {
+    const old = "b".repeat(40);
+    const records = [
+      record({ id: "s", severity: "should_fix", path: "far/away.ts" }),
+      record({ id: "n", severity: "nit" }),
+      record({ id: "new", raisedAtSha: "a".repeat(40) }),
+      record({ id: "old", raisedAtSha: old, path: "other/place.ts" }),
+      record({ id: "left", side: "LEFT" }),
+    ];
+    const times = new Map([
+      ["a".repeat(40), 200],
+      [old, 100],
+    ]);
+    expect(rankRechecks(records, 10, times).map((row) => row.id)).toEqual(["old", "new", "s"]);
+    expect(rankRechecks(records, 1, times).map((row) => row.id)).toEqual(["old"]);
+  });
+
+  it("puts findings whose cited line is gone after open blocking and should-fix ones (NIC-1124)", () => {
+    const records = [
+      record({ id: "earlier-nit", severity: "nit", status: "outdated" }),
+      record({ id: "gone-nit", severity: "nit" }),
+      record({ id: "gone-blocking" }),
+      record({ id: "nit", severity: "nit" }),
+      record({ id: "earlier-blocking", status: "outdated" }),
+      record({ id: "should", severity: "should_fix" }),
+      record({ id: "blocking" }),
+      record({ id: "gone-should", severity: "should_fix" }),
+    ];
+    const outdating = new Map(
+      ["gone-nit", "gone-blocking", "gone-should"].map((id) => [id, "gone" as const]),
+    );
+    expect(rankRechecks(records, 10, new Map(), outdating).map((row) => row.id)).toEqual([
+      "blocking",
+      "should",
+      "gone-blocking",
+      "gone-should",
+      "gone-nit",
+      "earlier-blocking",
+      "earlier-nit",
+    ]);
+    // The cap keeps open blocking findings ahead of outdated nits.
+    expect(rankRechecks(records, 2, new Map(), outdating).map((row) => row.id)).toEqual([
+      "blocking",
+      "should",
+    ]);
+  });
+
+  it("counts an outdated finding whose cited line is back as open: no nits", () => {
+    const records = [
+      record({ id: "back-nit", severity: "nit", status: "outdated" }),
+      record({ id: "back", status: "outdated" }),
+      record({ id: "gone", severity: "nit", status: "outdated" }),
+    ];
+    const lines = new Map([
+      ["back-nit", "there" as const],
+      ["back", "there" as const],
+      ["gone", "gone" as const],
+    ]);
+    expect(rankRechecks(records, 10, new Map(), lines).map((row) => row.id)).toEqual([
+      "back",
+      "gone",
+    ]);
+  });
+
+  it("takes one whose line is gone only when its own file changed, on an incremental review", () => {
+    const records = [
+      record({ id: "gone", severity: "nit", path: "src/cart/Cart.tsx" }),
+      record({ id: "earlier", status: "outdated", path: "src/cart/Total.tsx" }),
+    ];
+    const outdating = new Map([["gone", "gone" as const]]);
+    // A file next to them changed: not enough for these.
+    expect(
+      selectRechecks(records, ["src/cart/Other.tsx"], new Map(), 10, new Map(), outdating),
+    ).toEqual([]);
+    expect(
+      selectRechecks(
+        records,
+        ["src/cart/Cart.tsx", "src/cart/Total.tsx"],
+        new Map(),
+        10,
+        new Map(),
+        outdating,
+      ).map((row) => row.id),
+    ).toEqual(["gone", "earlier"]);
+  });
+});
+
+describe("fullReviewSince (NIC-1123)", () => {
+  const a = "a".repeat(40);
+  const b = "b".repeat(40);
+  const base = "m".repeat(40);
+  const times = new Map([
+    [a, 200],
+    [b, 100],
+  ]);
+  const repo = (ancestors: readonly string[]) => ({
+    git: async (args: readonly string[]) => {
+      if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
+        if (ancestors.includes(args[2] ?? "")) return "";
+        throw new Error("not an ancestor");
+      }
+      if (args[0] === "merge-base") return `${base}\n`;
+      throw new Error(`unexpected: ${args.join(" ")}`);
+    },
+  });
+  const since = (
+    ancestors: readonly string[],
+    chosen: { raisedAtSha: string }[],
+    baseSha: string | undefined,
+  ) =>
+    fullReviewSince(
+      repo(ancestors) as unknown as Parameters<typeof fullReviewSince>[0],
+      chosen,
+      times,
+      "h".repeat(40),
+      baseSha,
+    );
+
+  it("measures from the oldest raised commit still in head's history", async () => {
+    const chosen = [{ raisedAtSha: a }, { raisedAtSha: b }];
+    expect(await since([a, b], chosen, "c".repeat(40))).toBe(b);
+    expect(await since([a], chosen, "c".repeat(40))).toBe(a);
+  });
+
+  it("falls back to the merge base when no raised commit is reachable", async () => {
+    expect(await since([], [{ raisedAtSha: a }], "c".repeat(40))).toBe(base);
+    expect(await since([], [{ raisedAtSha: a }], undefined)).toBeUndefined();
   });
 });

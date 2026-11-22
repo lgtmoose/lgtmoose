@@ -4,9 +4,10 @@ import { UNTRUSTED_TAG, wrapUntrusted } from "./untrusted.js";
 import type { CodeExcerpt } from "./verifier.js";
 
 /**
- * The recheck (NIC-1120): on an incremental review, our open blocking and should-fix findings
- * that the new commits may have fixed are checked again against the PR's head, one batch per
- * run. It answers in the verifier's shape, with its own descriptions (`recheckOutputSchema`): one
+ * The recheck (NIC-1120): our open blocking and should-fix findings that the new commits may
+ * have fixed (any of them on a full review, NIC-1123), and findings of any severity whose cited
+ * line has since been edited or deleted (NIC-1124), are checked again against the PR's head, one
+ * batch per run. It answers in the verifier's shape, with its own descriptions (`recheckOutputSchema`): one
  * verdict per finding, `confirmed` meaning the problem is still there, or may be.
  *
  * The verifier tries to disprove a new finding, so it rejects one it can't show is real. The
@@ -36,6 +37,16 @@ export interface RecheckTarget {
   raisedAtSha: string;
   /** The code around the cited lines when the finding was raised. */
   excerpt?: CodeExcerpt;
+  /**
+   * The cited line was edited or deleted since it was raised (NIC-1124), such as by a committed
+   * suggestion: the recheck checks the code that replaced it.
+   */
+  citedLineChanged?: boolean;
+  /**
+   * On a full review (NIC-1123): the commit it was raised at isn't in the branch's history any
+   * more (a force-push dropped it), so the diff can't say what came after it.
+   */
+  raisedCommitGone?: boolean;
 }
 
 export interface RecheckPromptInput {
@@ -46,6 +57,17 @@ export interface RecheckPromptInput {
   sinceSha: string;
   /** `git diff <sinceSha> <headSha>` of the files the change touched that may matter. */
   diff: string;
+  /**
+   * A full review (NIC-1123): the diff runs from the oldest finding's commit, so it can hold
+   * changes made before a later finding was raised. The prompt says each one's fix must come
+   * after the commit it was raised at.
+   */
+  fixAfterRaised?: boolean;
+  /**
+   * With `fixAfterRaised`: `sinceSha` is the PR's merge base, as no finding's commit was left in
+   * the branch's history.
+   */
+  sinceIsMergeBase?: boolean;
 }
 
 const OUTPUT_SCHEMA = JSON.stringify(z.toJSONSchema(recheckOutputSchema), null, 2);
@@ -97,6 +119,18 @@ function renderTarget(target: RecheckTarget): string {
     target.body,
   ].join("\n");
   const parts = [`## Finding ${target.id}`, "", wrapUntrusted("finding", fields)];
+  if (target.raisedCommitGone === true) {
+    parts.push(
+      "",
+      "The commit it was raised at is no longer in the branch's history (a force-push dropped it).",
+    );
+  }
+  if (target.citedLineChanged === true) {
+    parts.push(
+      "",
+      "The cited line has been edited or deleted since. Find the code that replaced it at the latest commit, and check whether the problem is still there.",
+    );
+  }
   const { excerpt } = target;
   if (excerpt !== undefined && excerpt.lines.length > 0) {
     const code = excerpt.lines
@@ -110,6 +144,14 @@ function renderTarget(target: RecheckTarget): string {
     );
   }
   return parts.join("\n");
+}
+
+function diffHeading(input: RecheckPromptInput): string {
+  const range = `(${input.sinceSha}..${input.headSha})`;
+  if (input.fixAfterRaised !== true) return `# What changed since the last review ${range}`;
+  return input.sinceIsMergeBase === true
+    ? `# What the pull request changes, from its merge base ${range}`
+    : `# What changed since the oldest finding was raised ${range}`;
 }
 
 /** The recheck's prompt for one batch. Pure and deterministic. */
@@ -129,7 +171,12 @@ export function buildRecheckPrompt(input: RecheckPromptInput): string {
       ...input.targets.map(renderTarget),
     ].join("\n\n"),
     [
-      `# What changed since the last review (${input.sinceSha}..${input.headSha})`,
+      diffHeading(input),
+      ...(input.fixAfterRaised === true
+        ? [
+            "Each finding says the commit it was raised at (`when raised at`). For a finding whose commit is still in the branch's history, only a change made after that commit can be its fix: code that was already there when it was raised, or a change from before, doesn't count. For one marked as no longer in the history, judge only from the code at the latest commit.",
+          ]
+        : []),
       input.diff.trim() === "" ? "No diff is available." : wrapUntrusted("diff", input.diff),
     ].join("\n\n"),
   ].join("\n\n")}\n`;
