@@ -4568,18 +4568,21 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
   });
 
-  it("closes nothing on a retry once the run no longer counts, though its review is out", async () => {
+  it("closes nothing on a retry once the run no longer counts, before the recheck was saved", async () => {
     const setup: Setup = {};
     const { h, writes } = rechecking(setup);
     const prepared = await twoFixed(h);
-    // The first attempt posts the review and dies at the first close.
-    const close = h.findings.closeFixed?.bind(h.findings);
+    // The first attempt posts the review and dies saving the recheck: nothing is closed yet.
+    const createText = h.deps.store.createText.bind(h.deps.store);
     let failing = true;
-    h.findings.closeFixed = async (id, sha) => {
-      if (failing) throw new Error("the database went away");
-      return close?.(id, sha) ?? "theirs";
+    h.deps.store.createText = async (key, body) => {
+      if (failing && key === runKeys(prepared.runId).rechecks) {
+        throw new Error("the store went away");
+      }
+      return createText(key, body);
     };
     await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("went away");
+    expect(h.objects.has(runKeys(prepared.runId).rechecks)).toBe(false);
     failing = false;
     // The PR moves on before the retry: the review stays recorded, nothing is closed.
     setup.head = "f".repeat(40);
@@ -4619,6 +4622,57 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       "resolve PRRT_1",
       "resolve PRRT_2",
     ]);
+  });
+
+  it("still writes the replies on a stale retry once the closes were saved and made", async () => {
+    const setup: Setup = {};
+    const { h, writes, fail } = rechecking(setup);
+    const prepared = await twoFixed(h);
+    // The first attempt saves the recheck, closes both findings, then a reply fails for now.
+    fail.replies.push(new GitHubError(502, "Bad Gateway", "POST", "/replies"));
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+    expect(h.objects.has(runKeys(prepared.runId).rechecks)).toBe(true);
+    // The PR moves on before the retry: the findings are closed, and still owed their notes.
+    setup.head = "f".repeat(40);
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    // The second went out in the first attempt, the first in the retry: each once.
+    expect(replies(writes).map((write) => write.slice(0, 10))).toEqual([
+      "reply 1001",
+      "reply 1000",
+    ]);
+    expect(writes.filter((write) => write.startsWith("resolve ")).sort()).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+  });
+
+  it("never fails the post step's last attempt over a recheck write", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    const step = (n: number) => ({
+      attempt: { id: `a${n}`, taskArn: undefined, number: n, of: 4 },
+    });
+    // Attempts 1 and 2 fail before the recheck's writes: at the first close.
+    const close = h.findings.closeFixed?.bind(h.findings);
+    let closing = 0;
+    h.findings.closeFixed = async (id, sha) => {
+      closing += 1;
+      if (closing <= 2) throw new Error("the database went away");
+      return close?.(id, sha) ?? "theirs";
+    };
+    await expect(post(h.deps, prepared.runId, step(1))).rejects.toThrow("went away");
+    await expect(post(h.deps, prepared.runId, step(2))).rejects.toThrow("went away");
+    // Attempt 3 reaches the writes, and a reply fails for now: the step's retry takes it.
+    const down = () => new GitHubError(502, "Bad Gateway", "POST", "/replies");
+    fail.replies.push(down(), undefined, down());
+    await expect(post(h.deps, prepared.runId, step(3))).rejects.toThrow("retry writes them");
+    // Attempt 4 is the last: the reply fails again, and the step finishes all the same.
+    const posted = await post(h.deps, prepared.runId, step(4));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("recheck replies or resolves given up");
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
   });
 
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {

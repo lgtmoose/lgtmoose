@@ -256,7 +256,11 @@ export async function runCommand(
             ? postBootstrap(deps, command.runId)
             : post(deps, command.runId, {
                 running,
-                attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
+                attempt: {
+                  id: randomUUID(),
+                  taskArn: await deps.taskArn(),
+                  ...(command.attempt === undefined ? {} : command.attempt),
+                },
                 taskStatus: (taskArn) => deps.taskStatus(taskArn),
                 executionStatus: (arn) => deps.executionStatus(arn),
               }),

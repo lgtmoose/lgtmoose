@@ -360,6 +360,13 @@ export class ReviewWorkflow extends Construct {
         { name: "LGTMOOSE_COMMAND", value: "post" },
         { name: "LGTMOOSE_RUN_ID", value: JsonPath.stringAt("$.prepared.runId") },
         { name: "LGTMOOSE_TASK_TOKEN", value: JsonPath.taskToken },
+        // Which attempt of the step this is, and how many there are: the last one finishes
+        // what it can rather than fail the run after its review is out.
+        {
+          name: "LGTMOOSE_POST_RETRY",
+          value: JsonPath.format("{}", JsonPath.stringAt("$$.State.RetryCount")),
+        },
+        { name: "LGTMOOSE_POST_ATTEMPTS", value: String(POST_RETRIES + 1) },
       ],
       // Not `.sync`: stopping the execution (a newer push, the PR closed) would stop the task
       // halfway through posting. With a task token it finishes, and its review, for an older

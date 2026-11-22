@@ -661,6 +661,9 @@ export interface PostAttempt {
   id: string;
   /** The ECS task running it; undefined off ECS. */
   taskArn: string | undefined;
+  /** Which attempt of the post step this is, from 1, of how many; unset when not known. */
+  number?: number;
+  of?: number;
 }
 
 /** What `post` needs besides the control task's dependencies. */
@@ -1860,8 +1863,8 @@ export async function post(
       return;
     }
     // Counted before any write, so an attempt that fails part way still counts.
-    const attempt = (progress.recheckAttempts ?? 0) + 1;
-    progress.recheckAttempts = attempt;
+    const tries = (progress.recheckAttempts ?? 0) + 1;
+    progress.recheckAttempts = tries;
     await save();
     const writer = github.conversation;
     const replied = new Set(progress.rechecksReplied ?? []);
@@ -1952,14 +1955,25 @@ export async function post(
         await mark(resolved, fixed.findingId);
       }
     }
-    if (later > 0 && attempt < RECHECK_WRITE_ATTEMPTS) {
+    // The post step's last attempt never fails here: its review is out, and failing would
+    // mark the run failed over a note on a thread.
+    const lastAttempt =
+      options.attempt?.number !== undefined &&
+      options.attempt.of !== undefined &&
+      options.attempt.number >= options.attempt.of;
+    if (later > 0 && tries < RECHECK_WRITE_ATTEMPTS && !lastAttempt) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,
       );
     }
     if (later > 0) {
       // The findings are closed either way: only the notes on their threads are missing.
-      deps.log("recheck replies or resolves given up", { runId, attempts: attempt, left: later });
+      deps.log("recheck replies or resolves given up", {
+        runId,
+        attempts: tries,
+        left: later,
+        ...(options.attempt?.number === undefined ? {} : { stepAttempt: options.attempt.number }),
+      });
     }
     progress.rechecks = true;
     delete progress.rechecksReplied;
@@ -2018,8 +2032,8 @@ export async function post(
     // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
     // Not when another run's review covers this one: that review is what the PR shows, and it
     // still counts them.
-    // Nor when the run no longer counts: a retry after the review was posted skipped the stale
-    // check above, and the PR may have moved on since.
+    // Nor when the run no longer counts and nothing is saved yet: a retry after the review was
+    // posted skipped the stale check above, and the PR may have moved on since.
     const recheckStale = staleReason(latest, pr.headSha);
     if (
       progress.coveredBy === undefined &&
@@ -2027,7 +2041,9 @@ export async function post(
       recheckPlan.writes.fixed.length > 0 &&
       !progress.rechecks
     ) {
-      if (recheckStale === undefined) {
+      // One already saved is finished whatever: an earlier attempt may have closed its
+      // findings, and they're owed their replies.
+      if (recheckStale === undefined || recheckPlan.saved) {
         recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
       } else {
         deps.log("recheck's fixes not closed: the run no longer counts", {
