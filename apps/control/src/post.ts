@@ -1310,9 +1310,6 @@ export async function post(
   const attempt = options.attempt ?? { id: randomUUID(), taskArn: undefined };
   const taskStatus = options.taskStatus ?? (async () => TASK_MISSING);
   const executionStatus = options.executionStatus ?? (async () => undefined);
-  const run = await deps.runs.getRun(runId);
-  if (run === undefined) throw new Error(`No review run ${runId}.`);
-  const keys = runKeys(runId);
   // This attempt's number, counted before anything can fail: an attempt that dies early still
   // counts, so the last one is known for what it is.
   // Unknown when it can't be counted: then the retry count, or nothing, says which it is.
@@ -1325,6 +1322,9 @@ export async function post(
       });
       return undefined;
     }));
+  const run = await deps.runs.getRun(runId);
+  if (run === undefined) throw new Error(`No review run ${runId}.`);
+  const keys = runKeys(runId);
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
   // Written by this run's own prepare step with the control task's role; still shape-checked.
