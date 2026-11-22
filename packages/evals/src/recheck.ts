@@ -17,8 +17,8 @@ const exec = promisify(execFile);
  * keep one that still holds? Each scenario is three commits: a base, the commit a finding was
  * raised at, and a later commit. The later commit either fixes the problem away from the cited
  * line (`fixed`), or changes something nearby and leaves it (`holds`). A scenario with
- * `review: "full"` runs as a full review (NIC-1123): the finding is picked though the fix is in a
- * file the incremental pick wouldn't relate to it.
+ * `review: "full"` runs as a full review (NIC-1123): the change is measured from the commit the
+ * finding was raised at, and it's picked when its file or a related one changed since.
  *
  * The scenario runs the control task's own code: `recheckJob` picks the finding and builds the
  * prompt from a real clone, the recheck runs on the harness, and `fixedByRecheck` decides. The

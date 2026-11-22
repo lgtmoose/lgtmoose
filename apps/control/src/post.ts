@@ -474,15 +474,15 @@ async function settleRunReplies(
  * why: so a "changes requested" a fix should have cleared can be traced to the finding and the
  * recheck's reason.
  */
-function logStillOpen(
-  deps: Pick<ControlDeps, "log">,
+async function logStillOpen(
+  deps: Pick<ControlDeps, "log" | "store">,
   runId: string,
   job: NonNullable<RunManifest["recheck"]>,
-  verdicts: readonly Verdict[],
-  fixes: readonly { entry: { findingId: string } }[],
+  fixed: readonly { findingId: string }[],
   reraised: ReadonlySet<string>,
-): void {
-  const closed = new Set(fixes.map((fix) => fix.entry.findingId));
+): Promise<void> {
+  const verdicts: readonly Verdict[] = (await readVerdicts(deps.store, runId, job.index)) ?? [];
+  const closed = new Set(fixed.map((fix) => fix.findingId));
   for (const entry of job.targets) {
     // An outdated one doesn't count towards the decision: it holds nothing up.
     if (entry.severity !== "blocking" || entry.outdated === true || closed.has(entry.findingId)) {
@@ -561,8 +561,14 @@ async function planRecheck(
   }).filter((fix) => {
     const path = pathNow.get(fix.entry.findingId);
     if (path === undefined) {
-      // Its line is gone (NIC-1124): only a review of its file now says anything about it.
-      return outdated.has(fix.entry.findingId) && reviewed.has(fix.entry.path);
+      // Its line is gone (NIC-1124): only a review of its file now says anything about it. Only
+      // when prepare saw the line gone too and told the recheck so: one this step can't place
+      // (its commit is gone) was never checked against the code that replaced its line.
+      return (
+        fix.entry.outdated === true &&
+        outdated.has(fix.entry.findingId) &&
+        reviewed.has(fix.entry.path)
+      );
     }
     if (unreviewed.has(path)) return false;
     // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
@@ -572,7 +578,6 @@ async function planRecheck(
     // have, so only a review of the file under its new name says anything about it.
     return path === fix.entry.path || reviewed.has(path);
   });
-  if (full) logStillOpen(deps, runId, job, verdicts, fixes, new Set(report.reraised));
   return {
     writes: {
       version: 1,
@@ -2208,6 +2213,17 @@ export async function post(
       } else {
         deps.log("the head already has our review; not posting another", { runId, coveredBy });
         progress.coveredBy = coveredBy;
+      }
+      // What a full review's recheck left open (NIC-1123), once the close list is settled (the
+      // saved one, if another attempt saved it) and the run counts: once per run, with the review.
+      if (progress.coveredBy === undefined && manifest.recheck?.mode === "full") {
+        await logStillOpen(
+          deps,
+          runId,
+          manifest.recheck,
+          recheckPlan?.writes.fixed ?? [],
+          new Set(report.reraised),
+        );
       }
       progress.review = true;
       await save();

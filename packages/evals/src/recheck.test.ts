@@ -95,7 +95,7 @@ describe("the recheck scenarios", () => {
     expect(renderRecheckMarkdown(scores, "stub")).toContain("False closes: 0.");
   }, 120_000);
 
-  it("picks a finding on a full review though its fix is in an unrelated file (NIC-1123)", async () => {
+  it("closes a finding fixed in another folder on a full review (NIC-1123)", async () => {
     const full = scenarios.filter((s) => s.review === "full");
     expect(full.length).toBeGreaterThanOrEqual(1);
     const harness = stubRecheck((prompt) => /\+.*track\(\W*add_to_cart/.test(prompt), true);
@@ -106,15 +106,19 @@ describe("the recheck scenarios", () => {
       workRoot,
     });
     expect(scores.map((score) => [score.checked, score.closed])).toEqual([[true, true]]);
-    expect(harness.prompts[0]).toContain("+++ b/src/analytics/bus.ts");
+    expect(harness.prompts[0]).toContain("+++ b/src/store/cart.ts");
     expect(harness.prompts[0]).toContain('<untrusted source="code" path="src/cart/CartContext.ts"');
 
-    // Run as an incremental review, the import graph doesn't reach the fix: nothing is picked.
-    const incremental = await runRecheckScenarios(
-      full.map((s) => ({ ...s, review: undefined })),
+    // A change to neither its file nor a related one: nothing could have fixed it, so a full
+    // review doesn't pick it.
+    const unrelated = await runRecheckScenarios(
+      full.map((s) => ({
+        ...s,
+        later: { "src/analytics/track.ts": "export function track(): void {}\n" },
+      })),
       { harness, model: "stub", timeoutMs: 5_000, workRoot },
     );
-    expect(incremental.map((score) => score.checked)).toEqual([false]);
+    expect(unrelated.map((score) => score.checked)).toEqual([false]);
   }, 60_000);
 
   it("keeps a protected finding open on a verdict that doesn't name its fix", async () => {

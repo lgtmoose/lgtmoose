@@ -5199,9 +5199,16 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
   it("measures a full review's recheck from the merge base when the raised commit is gone", async () => {
     const { h } = rechecking();
     await run(h, 1, [finding()]);
-    await fixElsewhere();
-    // As after a force-push: the commit the finding was raised at isn't in head's history.
-    for (const row of h.findings.rows) row.raisedAtSha = "0".repeat(40);
+    // A force-push: the branch starts again from the base, so the commit the finding was raised
+    // at isn't in head's history any more (GitHub still serves it).
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": `${HEAD_TOTAL}// rebased\n`,
+        "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n",
+      },
+      "rebased",
+    );
     const { manifest } = await run(
       h,
       2,
@@ -5213,6 +5220,104 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(manifest.recheck?.changed).toEqual(
       expect.arrayContaining(["src/total.ts", "src/checkout.ts"]),
     );
+  });
+
+  it("leaves out, and never closes, a finding whose raised commit can't be read", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    // Its commit is gone altogether: its line can't be followed, so prepare leaves it out.
+    for (const row of h.findings.rows) row.raisedAtSha = "0".repeat(40);
+    const fixed = [{ id: "F1", confirmed: false, reason: "src/checkout.ts line 1 fixes it." }];
+    const { manifest } = await run(h, 2, [], fixed, FULL_REVIEW);
+    expect(manifest.recheck).toBeUndefined();
+    // Post can't place it either: outdated, as before, never fixed, its thread left alone.
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(writes).toEqual([]);
+  });
+
+  it("doesn't close through the outdated path a finding prepare didn't mark outdated", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    // Prepare follows its line and sends it as open; by the post step its commit is gone, so
+    // post can't place it and takes it as outdated. Without prepare's mark, it isn't closed.
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    expect(manifest.recheck?.targets).toMatchObject([{ findingId: "f0" }]);
+    expect(manifest.recheck?.targets[0]?.outdated).toBeUndefined();
+    for (const batch of prepared.batches) {
+      const key = runKeys(prepared.runId).batchOutput(batch.index);
+      h.objects.set(
+        key,
+        JSON.stringify(
+          batch.index === manifest.recheck?.index
+            ? {
+                version: 1,
+                index: batch.index,
+                verdicts: [{ id: "F1", confirmed: false, reason: "src/checkout.ts fixes it." }],
+                transcriptKeys: [],
+              }
+            : output({ index: batch.index, findings: [] }),
+        ),
+      );
+    }
+    for (const row of h.findings.rows) row.raisedAtSha = "0".repeat(40);
+    await post(h.deps, prepared.runId);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    expect(writes).toEqual([]);
+  });
+
+  it("doesn't recheck on a full review what nothing changed since it was raised", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    const fixed = [{ id: "F1", confirmed: false, reason: "src/total.ts line 3 is fine." }];
+    // Again at the head it was raised at: nothing changed, nothing could have fixed it.
+    const { manifest: same } = await run(h, 2, [], fixed, FULL_REVIEW);
+    expect(same.recheck).toBeUndefined();
+    // A change only in another folder: neither its file nor a related one changed.
+    headSha = await commit({ "docs/notes.md": "Notes.\n" }, "docs");
+    const { manifest: elsewhere } = await run(h, 3, [], fixed, FULL_REVIEW);
+    expect(elsewhere.recheck).toBeUndefined();
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(writes).toEqual([]);
+  });
+
+  it("names a protected finding's related files from when it was raised, on a full review", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    // A policy lands next to the file, then a protected finding is raised on a later commit.
+    await commit({ "src/policy.ts": "export const allowed = () => true;\n" }, "policy");
+    headSha = await commit(
+      { "src/guard.ts": "export const guard = (user: User) => user.id !== '';\n" },
+      "guard",
+    );
+    const authz = finding({
+      rule_category: "authz",
+      path: "src/guard.ts",
+      line: 1,
+      evidence: "export const guard = (user: User) => user.id !== '';",
+      title: "Any signed-in user passes the guard",
+    });
+    await run(h, 2, [authz], [{ id: "F1", confirmed: true, reason: "Still there." }]);
+    expect(h.findings.rows.map((row) => row.ruleCategory)).toEqual(["correctness", "authz"]);
+    await fixElsewhere();
+    const { manifest } = await run(
+      h,
+      3,
+      [],
+      [
+        { id: "F1", confirmed: true, reason: "Still there." },
+        { id: "F2", confirmed: false, reason: "src/policy.ts line 1 checks the caller's role." },
+      ],
+      FULL_REVIEW,
+    );
+    const authzEntry = manifest.recheck?.targets.find((entry) => entry.ruleCategory === "authz");
+    // Measured from the older finding's commit, but the policy came before this one was raised:
+    // it can't be this one's fix.
+    expect(manifest.recheck?.changed).toContain("src/policy.ts");
+    expect(authzEntry?.related).toEqual(["src/checkout.ts"]);
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["open", "open"]);
   });
 
   it("drops a full review's recheck when a spend cap leaves out a review batch", async () => {
@@ -5304,6 +5409,61 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(later.recheck).toMatchObject({ targets: [{ findingId: "f0", outdated: true }] });
     expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
     expect(writes).toEqual([]);
+  });
+
+  it("closes a finding outdated in an earlier run once a later commit fixes it", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL.replace("i++", "i += 1") }, "reword");
+    await run(h, 2, [], [{ id: "F1", confirmed: true, reason: "Still one short." }]);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace(
+          "i < items.length - 1; i++",
+          "i <= items.length - 1; i += 1",
+        ),
+      },
+      "fix the bound",
+    );
+    const { manifest } = await run(
+      h,
+      3,
+      [],
+      [{ id: "F1", confirmed: false, reason: "src/total.ts line 3 now counts every item." }],
+    );
+    expect(manifest.recheck).toMatchObject({ targets: [{ findingId: "f0", outdated: true }] });
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+    expect(writes).toEqual([
+      expect.stringMatching(/^reply 1000: This looks fixed at/),
+      "resolve PRRT_1",
+    ]);
+  });
+
+  it("rechecks one whose cited line is back as open, without the edited-line note", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    headSha = await commit({ "src/total.ts": HEAD_TOTAL.replace("i++", "i += 1") }, "reword");
+    await run(h, 2, [], [{ id: "F1", confirmed: true, reason: "Still one short." }]);
+    expect(h.findings.rows).toMatchObject([{ status: "outdated" }]);
+    // Reverted: the cited line is back, and something next to it changes.
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL, "src/checkout.ts": "export const x = 1;\n" },
+      "revert",
+    );
+    const { prepared, manifest } = await run(
+      h,
+      3,
+      [],
+      [{ id: "F1", confirmed: true, reason: "Still one short." }],
+    );
+    expect(manifest.recheck?.targets).toMatchObject([{ findingId: "f0" }]);
+    expect(manifest.recheck?.targets[0]?.outdated).toBeUndefined();
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
+    ) as Record<string, unknown>;
+    expect(input.prompt).not.toContain("The cited line has been edited or deleted since.");
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
   it("resolves an outdated nit that's fixed, on a full review too", async () => {

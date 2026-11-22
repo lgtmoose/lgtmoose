@@ -275,7 +275,9 @@ describe("rankRechecks (NIC-1123)", () => {
       record({ id: "blocking" }),
       record({ id: "gone-should", severity: "should_fix" }),
     ];
-    const outdating = new Set(["gone-nit", "gone-blocking", "gone-should"]);
+    const outdating = new Map(
+      ["gone-nit", "gone-blocking", "gone-should"].map((id) => [id, "gone" as const]),
+    );
     expect(rankRechecks(records, 10, new Map(), outdating).map((row) => row.id)).toEqual([
       "blocking",
       "should",
@@ -292,12 +294,29 @@ describe("rankRechecks (NIC-1123)", () => {
     ]);
   });
 
+  it("counts an outdated finding whose cited line is back as open: no nits", () => {
+    const records = [
+      record({ id: "back-nit", severity: "nit", status: "outdated" }),
+      record({ id: "back", status: "outdated" }),
+      record({ id: "gone", severity: "nit", status: "outdated" }),
+    ];
+    const lines = new Map([
+      ["back-nit", "there" as const],
+      ["back", "there" as const],
+      ["gone", "gone" as const],
+    ]);
+    expect(rankRechecks(records, 10, new Map(), lines).map((row) => row.id)).toEqual([
+      "back",
+      "gone",
+    ]);
+  });
+
   it("takes one whose line is gone only when its own file changed, on an incremental review", () => {
     const records = [
       record({ id: "gone", severity: "nit", path: "src/cart/Cart.tsx" }),
       record({ id: "earlier", status: "outdated", path: "src/cart/Total.tsx" }),
     ];
-    const outdating = new Set(["gone"]);
+    const outdating = new Map([["gone", "gone" as const]]);
     // A file next to them changed: not enough for these.
     expect(
       selectRechecks(records, ["src/cart/Other.tsx"], new Map(), 10, new Map(), outdating),

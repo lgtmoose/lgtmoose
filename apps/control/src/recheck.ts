@@ -160,54 +160,72 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
  *
  * - 0, 1: open blocking, then open should-fix, with its cited line still there;
  * - 2 to 4 (NIC-1124): open, any severity, nits included, its cited line gone at head
- *   (`outdating`: edited or deleted, a committed suggestion among them), so it goes `outdated`
+ *   (`lines`: edited or deleted, a committed suggestion among them), so it goes `outdated`
  *   in this run: blocking, should-fix, then nit;
- * - 5 to 7: outdated in an earlier run and still unresolved, by severity the same way.
+ * - 5 to 7: outdated in an earlier run and still unresolved, its line still gone, by severity
+ *   the same way.
+ *
+ * One outdated earlier whose cited line is back at head (a fix reverted) counts as open: 0 or 1,
+ * never a nit. `lines` says, by finding ID, whether its cited line is at head (`lineStates`);
+ * without an entry, an open one's is taken to be there and an outdated one's gone.
  */
-function tier(record: FindingRecord, outdating: ReadonlySet<string>): number | undefined {
+function tier(record: FindingRecord, lines: LineStates): number | undefined {
   if (record.side !== "RIGHT") return undefined;
+  if (record.status !== "open" && record.status !== "outdated") return undefined;
   const severity = SEVERITY_RANK[record.severity];
-  if (record.status === "outdated") return 5 + severity;
-  if (record.status !== "open") return undefined;
-  if (outdating.has(record.id)) return 2 + severity;
+  if (lineGone(record, lines)) return (record.status === "outdated" ? 5 : 2) + severity;
   return severity < 2 ? severity : undefined;
 }
 
-/** Whether the finding's cited line is gone at head: outdated, or going outdated now. */
-function lineGone(record: FindingRecord, outdating: ReadonlySet<string>): boolean {
-  return record.status === "outdated" || outdating.has(record.id);
+/** Whether a finding's cited line is at head (`there`) or not (`gone`), by finding ID. */
+export type LineStates = ReadonlyMap<string, "there" | "gone">;
+
+/** Whether the finding's cited line is gone at head: it's outdated, or goes outdated now. */
+function lineGone(record: FindingRecord, lines: LineStates): boolean {
+  return (lines.get(record.id) ?? (record.status === "outdated" ? "gone" : "there")) === "gone";
 }
 
 /**
- * The open new-side findings whose cited line is gone at head (NIC-1124): edited or deleted
- * since the commit each was raised at, renames followed, as the post step tells it. Those post
- * marks `outdated` in this run. One whose lines can't be followed (its commit is gone) isn't
- * counted: the post step marks it outdated without a line to check the fix against.
+ * Whether each open or outdated new-side finding's cited line is at head (NIC-1124): followed
+ * from the commit it was raised at, renames included, as the post step follows it. An open one
+ * whose line is gone goes `outdated` in this run; an outdated one whose line is back is open
+ * again. One whose lines can't be followed (its commit is gone) has no entry: the post step
+ * can't place it either, so the recheck leaves it out.
  */
-async function goneLines(
+async function lineStates(
   repo: Repo,
   records: readonly FindingRecord[],
   headSha: string,
-): Promise<Set<string>> {
-  const gone = new Set<string>();
-  const open = records.filter((record) => record.status === "open" && record.side === "RIGHT");
-  for (const [sha, group] of Map.groupBy(open, (record) => record.raisedAtSha)) {
-    if (sha === headSha) continue;
+): Promise<Map<string, "there" | "gone">> {
+  const states = new Map<string, "there" | "gone">();
+  const tracked = records.filter(
+    (record) =>
+      record.side === "RIGHT" && (record.status === "open" || record.status === "outdated"),
+  );
+  for (const [sha, group] of Map.groupBy(tracked, (record) => record.raisedAtSha)) {
     try {
-      const moved = await trackLines(
-        repo,
-        sha,
-        headSha,
-        group.map((record) => ({ path: record.path, line: record.line })),
-      );
+      const moved =
+        sha === headSha
+          ? group.map((record) => record)
+          : await trackLines(
+              repo,
+              sha,
+              headSha,
+              group.map((record) => ({ path: record.path, line: record.line })),
+            );
       for (const [i, record] of group.entries()) {
-        if (moved[i] === undefined) gone.add(record.id);
+        states.set(record.id, moved[i] === undefined ? "gone" : "there");
       }
     } catch {
-      // Not followed: none of these counts as going outdated.
+      // Not followed: these get no entry, and aren't rechecked.
     }
   }
-  return gone;
+  return states;
+}
+
+/** The paths `git diff --name-only` printed. */
+function names(text: string): string[] {
+  return text.split("\n").filter((name) => name.trim() !== "");
 }
 
 /** A file's text at head, for its imports: undefined when it's missing or too large to read. */
@@ -226,8 +244,8 @@ async function headText(repo: Repo, headSha: string, path: string): Promise<stri
  * The findings an incremental review checks again, in the order they're checked (see
  * `rankRechecks`), at most `limit`. An open blocking or should-fix finding whose line is there
  * counts when its file is related to a changed one (`isRelated`); one whose cited line is gone
- * (NIC-1124: `outdating`, or outdated already) when its own file changed, since only a review of
- * that file can close it. Pure: `imports` has each relevant file's relative imports at head.
+ * (NIC-1124: see `lines`) when its own file changed, since only a review of that file can close
+ * it. Pure: `imports` has each relevant file's relative imports at head.
  */
 export function selectRechecks(
   records: readonly FindingRecord[],
@@ -235,36 +253,36 @@ export function selectRechecks(
   imports: ReadonlyMap<string, ReadonlySet<string>>,
   limit: number = MAX_RECHECKS_PER_RUN,
   raisedAt: ReadonlyMap<string, number> = new Map(),
-  outdating: ReadonlySet<string> = new Set(),
+  lines: LineStates = new Map(),
 ): FindingRecord[] {
   if (changed.length === 0 || limit <= 0) return [];
   const affected = records.filter((record) => {
-    if (tier(record, outdating) === undefined) return false;
-    if (lineGone(record, outdating)) return changed.includes(record.path);
+    if (tier(record, lines) === undefined) return false;
+    if (lineGone(record, lines)) return changed.includes(record.path);
     return changed.some((path) => isRelated(record.path, path, imports));
   });
-  return rankRechecks(affected, limit, raisedAt, outdating);
+  return rankRechecks(affected, limit, raisedAt, lines);
 }
 
 /**
  * Findings in the order they're checked: open blocking, then open should-fix, then those whose
- * cited line this run's head no longer has (NIC-1124, `outdating`: blocking, should-fix, then
+ * cited line this run's head no longer has (NIC-1124, see `lines`: blocking, should-fix, then
  * nit), then those outdated by an earlier run (the same way); within each, oldest first by
  * `raisedAt` (seconds by SHA; a commit without one sorts last), then in the order given, at most
  * `limit`. Others are left out (see `tier`). Pure. A full review (NIC-1123) picks this way from
- * every finding: it read every file, so none needs a changed file next to it.
+ * the findings whose change it can see (see `recheckJob`).
  */
 export function rankRechecks(
   records: readonly FindingRecord[],
   limit: number = MAX_RECHECKS_PER_RUN,
   raisedAt: ReadonlyMap<string, number> = new Map(),
-  outdating: ReadonlySet<string> = new Set(),
+  lines: LineStates = new Map(),
 ): FindingRecord[] {
   if (limit <= 0) return [];
-  const rank = (record: FindingRecord) => tier(record, outdating) ?? Infinity;
+  const rank = (record: FindingRecord) => tier(record, lines) ?? Infinity;
   const when = (record: FindingRecord) => raisedAt.get(record.raisedAtSha) ?? Infinity;
   return records
-    .filter((record) => tier(record, outdating) !== undefined)
+    .filter((record) => tier(record, lines) !== undefined)
     .map((record, order) => ({ record, order }))
     .sort((a, b) => {
       const byRank = rank(a.record) - rank(b.record);
@@ -392,14 +410,68 @@ export async function recheckJob(input: {
   await repo.fetchCommits(trackedShas).catch(() => {
     // An excerpt that can't be read is left out; the recheck opens the file at head.
   });
-  // Open ones whose cited line head no longer has: they go outdated in this run (NIC-1124).
-  const outdating = await goneLines(repo, tracked, headSha);
-  const open = tracked.filter((record) => tier(record, outdating) !== undefined);
+  // Whether each one's cited line is at head (NIC-1124). One that can't be followed (its commit
+  // is gone) is left out: the post step can't place it, so nothing could close it.
+  const lines = await lineStates(repo, tracked, headSha);
+  const open = tracked.filter(
+    (record) => lines.has(record.id) && tier(record, lines) !== undefined,
+  );
   if (open.length === 0) return undefined;
   const raisedAt = await commitTimes(repo, [...new Set(open.map((record) => record.raisedAtSha))]);
-  // A full review picks before it knows the change: every file was read, so none needs one.
-  const picked = mode === "full" ? rankRechecks(open, limit, raisedAt, outdating) : undefined;
-  if (picked !== undefined && picked.length === 0) return undefined;
+  // The PR's own changed files (from its merge base), to put first.
+  const theirs =
+    input.baseSha === undefined
+      ? undefined
+      : await repo
+          .git(["diff", "--name-only", "--no-renames", `${input.baseSha}...${headSha}`])
+          .then((text) => new Set(names(text)))
+          .catch(() => undefined);
+  // The PR's own first; what only a merge of the base brought in after.
+  const ownFirst = (paths: readonly string[]) =>
+    theirs === undefined
+      ? [...paths]
+      : [...paths.filter((path) => theirs.has(path)), ...paths.filter((path) => !theirs.has(path))];
+  const changedSince = async (sha: string) => {
+    await repo.fetchCommits([sha]);
+    return ownFirst(names(await repo.git(["diff", "--name-only", "--no-renames", sha, headSha])));
+  };
+  // Imports at head, read once per file.
+  const imports = new Map<string, Set<string>>();
+  const readImports = async (paths: Iterable<string>) => {
+    for (const path of paths) {
+      if (imports.has(path) || !SOURCE_EXTENSIONS.test(path)) continue;
+      const text = await headText(repo, headSha, path);
+      imports.set(path, text === undefined ? new Set() : relativeImports(path, text));
+    }
+  };
+  // A full review (NIC-1123) picks with no related-file filter, but only findings with a change
+  // to look at: raised before head, with their file or a related one changed since the commit
+  // each was raised at. One with nothing changed since has nothing that could have fixed it.
+  let picked: FindingRecord[] | undefined;
+  const ownChanged = new Map<string, string[]>();
+  if (mode === "full") {
+    const pool = open.filter((record) => record.raisedAtSha !== headSha);
+    for (const sha of new Set(pool.map((record) => record.raisedAtSha))) {
+      try {
+        ownChanged.set(sha, await changedSince(sha));
+      } catch {
+        // Its change can't be read: its findings aren't rechecked.
+      }
+    }
+    await readImports(pool.map((record) => record.path));
+    await readImports([...new Set([...ownChanged.values()].flat())].slice(0, MAX_IMPORT_FILES));
+    picked = rankRechecks(
+      pool.filter((record) =>
+        (ownChanged.get(record.raisedAtSha) ?? []).some((path) =>
+          isRelated(record.path, path, imports),
+        ),
+      ),
+      limit,
+      raisedAt,
+      lines,
+    );
+    if (picked.length === 0) return undefined;
+  }
   const sinceSha =
     picked === undefined
       ? (input.sinceSha as string)
@@ -410,22 +482,7 @@ export async function recheckJob(input: {
   }
   let changed: string[];
   try {
-    await repo.fetchCommits([sinceSha]);
-    const names = await repo.git(["diff", "--name-only", "--no-renames", sinceSha, headSha]);
-    changed = names.split("\n").filter((name) => name.trim() !== "");
-    if (input.baseSha !== undefined) {
-      const theirs = await repo
-        .git(["diff", "--name-only", "--no-renames", `${input.baseSha}...${headSha}`])
-        .then((text) => new Set(text.split("\n").filter((name) => name.trim() !== "")))
-        .catch(() => undefined);
-      if (theirs !== undefined) {
-        // The PR's own first; what only a merge of the base brought in after.
-        changed = [
-          ...changed.filter((path) => theirs.has(path)),
-          ...changed.filter((path) => !theirs.has(path)),
-        ];
-      }
-    }
+    changed = await changedSince(sinceSha);
   } catch (error) {
     input.log("findings not rechecked: the change since the last review is unreadable", {
       mode,
@@ -433,27 +490,26 @@ export async function recheckJob(input: {
     });
     return undefined;
   }
-  // An incremental review rechecks only what the new commits may have fixed. A full review
-  // still asks, with no change: the recheck reads the code at head.
-  if (changed.length === 0 && picked === undefined) return undefined;
+  // Only what the commits may have fixed is rechecked: nothing changed, nothing to recheck.
+  if (changed.length === 0) return undefined;
   // Imports at head, of the findings' files and the changed ones.
-  const paths = [
-    ...new Set([...open.map((record) => record.path), ...changed.slice(0, MAX_IMPORT_FILES)]),
-  ];
-  const imports = new Map<string, Set<string>>();
-  for (const path of paths) {
-    if (!SOURCE_EXTENSIONS.test(path)) continue;
-    const text = await headText(repo, headSha, path);
-    if (text !== undefined) imports.set(path, relativeImports(path, text));
-  }
-  const chosen = picked ?? selectRechecks(open, changed, imports, limit, raisedAt, outdating);
+  await readImports(open.map((record) => record.path));
+  await readImports(changed.slice(0, MAX_IMPORT_FILES));
+  const chosen = picked ?? selectRechecks(open, changed, imports, limit, raisedAt, lines);
   if (chosen.length === 0) return undefined;
+  // The changed files a finding's fix could be in: since the last review on an incremental
+  // review; on a full review, since the commit that finding was raised at, so a protected
+  // finding's fix is never a file changed before it was raised.
+  const relatedOf = (record: FindingRecord) =>
+    (picked === undefined ? changed : (ownChanged.get(record.raisedAtSha) ?? [])).filter((path) =>
+      isRelated(record.path, path, imports),
+    );
   // The diff of the changed files related to a chosen finding: what the fix would be in. On a
   // full review, and for a finding whose cited line is gone (NIC-1124), the finding's own file
   // first, so its change is never cut off.
   const own = new Set(
     chosen
-      .filter((record) => picked !== undefined || lineGone(record, outdating))
+      .filter((record) => picked !== undefined || lineGone(record, lines))
       .map((record) => record.path)
       .filter((path) => changed.includes(path)),
   );
@@ -503,7 +559,7 @@ export async function recheckJob(input: {
       ...(record.startLine === undefined ? {} : { startLine: record.startLine }),
       raisedAtSha: record.raisedAtSha,
       ...(excerpt === undefined ? {} : { excerpt }),
-      ...(lineGone(record, outdating) ? { citedLineChanged: true } : {}),
+      ...(lineGone(record, lines) ? { citedLineChanged: true } : {}),
       entry: {
         id,
         findingId: record.id,
@@ -514,8 +570,8 @@ export async function recheckJob(input: {
         ...(record.githubCommentId === undefined
           ? {}
           : { githubCommentId: record.githubCommentId }),
-        related: changed.filter((path) => isRelated(record.path, path, imports)),
-        ...(lineGone(record, outdating) ? { outdated: true } : {}),
+        related: relatedOf(record),
+        ...(lineGone(record, lines) ? { outdated: true } : {}),
       },
     });
   }

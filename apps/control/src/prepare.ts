@@ -805,7 +805,8 @@ export async function prepare(
     // depend on comments, so only the prompts are taken from the rebuild; if it came out
     // differently after all, there's no recheck (and the first prompts, which hid only the
     // incremental targets, are rebuilt with every comment shown, below).
-    if (canRecheck && rechecking?.mode !== "full" && prepared.kind !== "incremental") {
+    // A full review asked for one already, above: nothing to recheck then means none here too.
+    if (canRecheck && !full && prepared.kind !== "incremental") {
       const fullJob = await recheckFor("full");
       const fullIds = commentsOf(fullJob);
       const rebuilt = fullJob === undefined ? undefined : await review(fullIds);
