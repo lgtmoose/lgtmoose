@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -29,8 +29,9 @@ describe("compareVersions", () => {
 });
 
 describe("localVersion", () => {
-  it("reads the lgtmoose package's version", () => {
+  it("reads the lgtmoose package's version", ({ onTestFinished }) => {
     const root = mkdtempSync(join(tmpdir(), "lgtmoose-version-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, "apps/cli"), { recursive: true });
     writeFileSync(join(root, "apps/cli/package.json"), JSON.stringify({ version: "0.3.1" }));
     expect(localVersion(root)).toBe("0.3.1");
