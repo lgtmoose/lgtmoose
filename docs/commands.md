@@ -20,7 +20,7 @@ People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or
 
 ### Your App's handle
 
-Commands use your App's own handle: for an App called `lgtmoose-acme`, that's `@lgtmoose-acme review`. `lgtmoose setup` prints the handle when it's done, and `help`, every reply and the summary comment's footer show it too.
+Commands use your App's own handle: for an App called `lgtmoose-acme`, that's `@lgtmoose-acme review`. `lgtmoose setup` prints the handle when it's done, and `help`, the wrong-handle hint and the summary comment's footer show it too. When neither the slug nor an alias is known, the footer leaves the pointer out.
 
 To make the `@lgtmoose` these docs use work as well, add it as an alias in `lgtmoose.config.ts` and deploy again:
 
