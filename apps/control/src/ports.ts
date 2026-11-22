@@ -155,9 +155,11 @@ export interface FindingStore {
   ): Promise<boolean>;
   /**
    * Closes an open or outdated finding as fixed on the recheck's word (NIC-1120): our decision,
-   * with no person's reply behind it. False when it was closed already.
+   * with no person's reply behind it. `closed` when this call closed it; `ours` when it was
+   * closed already by our own `fixed` at `sha` (an earlier attempt of this run); `theirs` when
+   * it was closed some other way (a person resolved or declined it, say).
    */
-  closeFixed?(findingId: string, sha: string): Promise<boolean>;
+  closeFixed?(findingId: string, sha: string): Promise<"closed" | "ours" | "theirs">;
   /** Records that we replied on a finding's thread (`replied` or `dispute_answered`). */
   recordReply?(
     findingId: string,

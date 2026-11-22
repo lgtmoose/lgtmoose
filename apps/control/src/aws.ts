@@ -743,7 +743,26 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           .set({ status: "fixed", updatedAt: now() })
           .where(and(eq(findings.id, findingId), inArray(findings.status, ["open", "outdated"])))
           .returning({ id: findings.id, commentId: findings.githubCommentId });
-        if (row === undefined) return false;
+        if (row === undefined) {
+          // Closed already: ours if it's `fixed` by our own event at this commit, the recheck's
+          // (no person's login: a judged fix carries the replier's).
+          const [ours] = await tx
+            .select({ id: findingEvents.id })
+            .from(findingEvents)
+            .innerJoin(findings, eq(findings.id, findingEvents.findingId))
+            .where(
+              and(
+                eq(findingEvents.findingId, findingId),
+                eq(findings.status, "fixed"),
+                eq(findingEvents.type, "fixed"),
+                eq(findingEvents.actor, "self"),
+                eq(findingEvents.sha, sha),
+                isNull(findingEvents.actorLogin),
+              ),
+            )
+            .limit(1);
+          return ours === undefined ? "theirs" : "ours";
+        }
         // Ours, on the recheck's verdict and the checks around it: no person's reply.
         await tx.insert(findingEvents).values({
           findingId,
@@ -752,7 +771,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           sha,
           githubCommentId: row.commentId,
         });
-        return true;
+        return "closed" as const;
       });
     },
     async recordReply(findingId, type, commentId, sha) {

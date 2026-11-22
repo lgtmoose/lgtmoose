@@ -478,8 +478,8 @@ interface RecheckPlan {
  * closed. Worked out in memory: nothing is saved or closed until this attempt holds the claims
  * and the run still counts (`applyRecheck`). `fixedByRecheck` says which: the problem is gone,
  * this run's review didn't raise it again, and a protected-category one names its fix. A
- * finding on a file this run was to review and didn't (its batch failed, timed out or was
- * capped) stays open: "not raised again" says nothing there. An earlier attempt's saved list
+ * finding on a file this review changed and didn't review (its batch failed, timed out or was
+ * capped, or the planner skipped the file) stays open: "not raised again" says nothing there. An earlier attempt's saved list
  * stands. Without a recheck, or when its batch gave no verdicts, every finding stays open.
  */
 async function planRecheck(
@@ -505,7 +505,7 @@ async function planRecheck(
   }
   const reviewed = new Set(report.reviewedNow);
   const unreviewed = new Set(
-    manifest.review.jobs.flatMap((batch) => batch.files.filter((file) => !reviewed.has(file))),
+    manifest.review.files.map((file) => file.path).filter((path) => !reviewed.has(path)),
   );
   const fixes = fixedByRecheck(job, verdicts, {
     reraised: new Set(report.reraised),
@@ -539,7 +539,6 @@ async function applyRecheck(
   runId: string,
   manifest: RunManifest,
   plan: RecheckPlan,
-  pullRequestId: string,
 ): Promise<RecheckWrites> {
   const closeFixed = deps.findings.closeFixed?.bind(deps.findings);
   if (closeFixed === undefined) return { ...plan.writes, fixed: [] };
@@ -551,22 +550,15 @@ async function applyRecheck(
       if (theirs !== undefined) writes = recheckWritesSchema.parse(JSON.parse(theirs));
     }
   }
-  const closedNow = new Set<string>();
+  // One that was closed already is ours when an earlier attempt of this run closed it (our
+  // `fixed` at this head), and someone else's when a person resolved or declined it meanwhile:
+  // only ours gets the reply and the resolve.
+  const ours: RecheckWrites["fixed"] = [];
   for (const fixed of writes.fixed) {
-    if (await closeFixed(fixed.findingId, manifest.review.pr.headSha)) {
-      closedNow.add(fixed.findingId);
+    if ((await closeFixed(fixed.findingId, manifest.review.pr.headSha)) !== "theirs") {
+      ours.push(fixed);
     }
   }
-  // One that was closed already is ours when an earlier attempt of this run closed it (it's
-  // `fixed` now), and someone else's when a person resolved or declined it meanwhile: only ours
-  // gets the reply and the resolve.
-  const theirs =
-    closedNow.size === writes.fixed.length
-      ? new Set<string>()
-      : new Set((await deps.findings.closedFindings(pullRequestId)).map((record) => record.id));
-  const ours = writes.fixed.filter(
-    (fixed) => closedNow.has(fixed.findingId) || !theirs.has(fixed.findingId),
-  );
   deps.log("carried findings rechecked", {
     runId,
     checked: manifest.recheck?.targets.length ?? 0,
@@ -585,9 +577,10 @@ async function applyRecheck(
  */
 function transient(error: unknown): boolean {
   if (error instanceof GraphQlError) return !error.permanent;
-  if (!refused(error)) return true;
-  const { status, rateLimited } = error as GitHubError;
-  return status === 429 || rateLimited;
+  if (!(error instanceof GitHubError)) return true;
+  const { status, rateLimited } = error;
+  if (status === 403) return rateLimited;
+  return status !== 404 && status !== 422;
 }
 
 /**
@@ -1596,12 +1589,7 @@ export async function post(
     };
   }
 
-  // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
   let recheckWrites: RecheckWrites | undefined;
-  if (recheckPlan !== undefined && recheckPlan.writes.fixed.length > 0 && !progress.rechecks) {
-    recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan, run.pullRequestId);
-  }
-
   const { decision } = report;
   const fresh = report.inline.length + report.body.length;
   // Nothing to say when the review on GitHub already says it: same event, same label, and for
@@ -1849,8 +1837,9 @@ export async function post(
       await save();
     };
     // The threads, read again here if the read before the decision failed: a thread is
-    // resolved only by its ID. Still unread (null), the resolve waits for the step's retry;
-    // undefined means the thread is gone.
+    // resolved only by its ID. Undefined means the thread is gone: the list was read in full
+    // and none starts at the comment. Unread, read in part (a page past the limit, threads
+    // GitHub left out) or listed without an ID (null), the resolve waits for the step's retry.
     let known = threads;
     const threadOf = async (root: number): Promise<string | undefined | null> => {
       if (known === undefined) {
@@ -1860,7 +1849,9 @@ export async function post(
           return null;
         }
       }
-      return known.find((entry) => entry.firstCommentId === root)?.id;
+      const thread = known.find((entry) => entry.firstCommentId === root);
+      if (thread !== undefined) return thread.id ?? null;
+      return known.partial === true ? null : undefined;
     };
     let later = 0;
     /** Logs a failed write; true when it failed for now, and the step's retry writes it. */
@@ -1982,6 +1973,17 @@ export async function post(
       progress.review = true;
       await save();
     }
+    // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
+    // Not when another run's review covers this one: that review is what the PR shows, and it
+    // still counts them.
+    if (
+      progress.coveredBy === undefined &&
+      recheckPlan !== undefined &&
+      recheckPlan.writes.fixed.length > 0 &&
+      !progress.rechecks
+    ) {
+      recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
+    }
     // What the judged replies led to, now that this attempt holds the run's claim.
     if (replyWrites !== undefined && !progress.replies) {
       const writer = github.conversation;
@@ -2048,7 +2050,6 @@ export async function post(
     }
     if (progress.coveredBy !== undefined) {
       await cover(progress.coveredBy);
-      await writeRechecks();
       await releaseLogged(headClaim, head.etag);
       deps.log("covered", { runId, coveredBy: progress.coveredBy });
       return {

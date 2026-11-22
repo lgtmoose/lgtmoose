@@ -155,6 +155,22 @@ describe("finding store, for replies", () => {
     expect((await findingStore.closedFindings(prId)).map((row) => row.id)).toEqual([id]);
   });
 
+  it("closes a finding on the recheck's word, and says whose close it was after", async () => {
+    const prId = await pull(91);
+    const ours = await finding(prId, 7301);
+    expect(await findingStore.closeFixed?.(ours, "h2")).toBe("closed");
+    // Asked again by this run's retry: ours, at this commit. At another commit, it isn't.
+    expect(await findingStore.closeFixed?.(ours, "h2")).toBe("ours");
+    expect(await findingStore.closeFixed?.(ours, "h3")).toBe("theirs");
+    const events = await db.select().from(findingEvents).where(eq(findingEvents.findingId, ours));
+    expect(events).toMatchObject([{ type: "fixed", actor: "self", sha: "h2" }]);
+
+    // Closed as fixed on a person's reply, which the judge checked: not the recheck's.
+    const theirs = await finding(prId, 7302);
+    await findingStore.closeForReply?.(theirs, "fixed", { login: "dev", commentId: 8 }, "h2");
+    expect(await findingStore.closeFixed?.(theirs, "h2")).toBe("theirs");
+  });
+
   it("reopens a fixed finding the reviewer raises again, and never drops the re-raise", async () => {
     const prId = await pull(75);
     const id = await finding(prId, 7501);

@@ -39,12 +39,15 @@ describe("graphQlThreadReader", () => {
       calls.push(variables);
       return replies.shift();
     };
-    expect(await graphQlThreadReader(graphql).reviewThreads(TARGET)).toEqual([
+    const threads = await graphQlThreadReader(graphql).reviewThreads(TARGET);
+    expect([...threads]).toEqual([
       { resolved: true, firstCommentId: 3_000_000_011 },
       { resolved: false, firstCommentId: 12 },
       { resolved: true, firstCommentId: undefined },
       { resolved: false, firstCommentId: undefined },
     ]);
+    // A thread GitHub left out (null), and threads without IDs: not the whole list.
+    expect(threads.partial).toBe(true);
     expect(calls).toEqual([
       { owner: "acme", repo: "shop", number: 7, after: null },
       { owner: "acme", repo: "shop", number: 7, after: "cursor-1" },
@@ -61,7 +64,7 @@ describe("graphQlThreadReader", () => {
         { ...thread(false, "33"), resolvedBy: { login: "lead" } },
       ]);
     };
-    expect(await graphQlThreadReader(graphql).reviewThreads(TARGET)).toEqual([
+    expect([...(await graphQlThreadReader(graphql).reviewThreads(TARGET))]).toEqual([
       { resolved: true, firstCommentId: 31, resolvedBy: "lead" },
       { resolved: true, firstCommentId: 32 },
       { resolved: false, firstCommentId: 33 },
@@ -77,11 +80,31 @@ describe("graphQlThreadReader", () => {
       }),
       (messages) => reported.push(messages),
     );
-    expect(await reader.reviewThreads(TARGET)).toEqual([
+    const threads = await reader.reviewThreads(TARGET);
+    expect([...threads]).toEqual([
       { resolved: true, firstCommentId: 21 },
       { resolved: true, firstCommentId: undefined },
     ]);
+    expect(threads.partial).toBe(true);
     expect(reported).toEqual([["Something went wrong reading a thread"]]);
+  });
+
+  it("says the list is whole only when every page was read and every thread has its ID", async () => {
+    const node = (id: string, comment: string) => ({ ...thread(false, comment), id });
+    const whole = await graphQlThreadReader(async () =>
+      page([node("PRRT_1", "1"), node("PRRT_2", "2")]),
+    ).reviewThreads(TARGET);
+    expect(whole.partial).toBeUndefined();
+    expect(whole.map((entry) => entry.id)).toEqual(["PRRT_1", "PRRT_2"]);
+
+    // Every page says there's another: the reader stops at its limit, short of the end.
+    let n = 0;
+    const endless = await graphQlThreadReader(async () => {
+      n += 1;
+      return page([node(`PRRT_${n}`, String(n))], `cursor-${n}`);
+    }).reviewThreads(TARGET);
+    expect(endless.length).toBe(20);
+    expect(endless.partial).toBe(true);
   });
 
   it("fails on GraphQL errors and on a missing pull request", async () => {

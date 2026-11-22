@@ -4033,11 +4033,17 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
      * go through for `undefined`. Once the list is empty, every one goes through.
      */
     const fail = { replies: [] as (Error | undefined)[], resolves: [] as (Error | undefined)[] };
-    h.findings.closeFixed = async (id) => {
+    // Our own closes, by finding and commit: one closed already is ours only when it's one.
+    const closedBy = new Map<string, string>();
+    h.findings.closeFixed = async (id, sha) => {
       const row = h.findings.rows.find((candidate) => candidate.id === id);
-      if (row === undefined || (row.status !== "open" && row.status !== "outdated")) return false;
+      if (row === undefined) return "theirs";
+      if (row.status !== "open" && row.status !== "outdated") {
+        return row.status === "fixed" && closedBy.get(id) === sha ? "ours" : "theirs";
+      }
       row.status = "fixed";
-      return true;
+      closedBy.set(id, sha);
+      return "closed";
     };
     const github = h.deps.github.bind(h.deps);
     h.deps.github = async (installationId) => ({
@@ -4206,7 +4212,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     h.findings.closeFixed = async (id, sha) => {
       calls += 1;
       if (calls === 2) throw new Error("the database went away");
-      return close?.(id, sha) ?? false;
+      return close?.(id, sha) ?? "theirs";
     };
     const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
     const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
@@ -4361,6 +4367,142 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     ]);
   });
 
+  it("leaves the resolve to the retry when the thread list was read only in part", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    // GitHub left a thread out of the list (a null node): one not found may still be there.
+    let partial = true;
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const client = await github(installationId);
+      return {
+        ...client,
+        threads: {
+          reviewThreads: async (target) => {
+            const all = await client.threads.reviewThreads(target);
+            if (!partial) return all;
+            return Object.assign(
+              all.filter((thread) => thread.firstCommentId !== 1001),
+              { partial: true as const },
+            );
+          },
+        },
+      };
+    };
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual(["resolve PRRT_1"]);
+
+    partial = false;
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+  });
+
+  it("treats a thread missing from a whole list as gone, with nothing to resolve", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const client = await github(installationId);
+      return {
+        ...client,
+        threads: {
+          reviewThreads: async (target) =>
+            (await client.threads.reviewThreads(target)).filter(
+              (thread) => thread.firstCommentId !== 1001,
+            ),
+        },
+      };
+    };
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual(["resolve PRRT_1"]);
+  });
+
+  it("closes nothing and replies nowhere when another run's review covers this one", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    // Another run's complete review is on the head, and it finished the head: it covers this
+    // run, and it's what the PR shows. It still counts the findings.
+    const other = "0b6f6d8e-3c1a-4c3e-9a51-6f1f0e0c2a99";
+    await h.deps.store.createText(
+      runKeys(other).posted,
+      JSON.stringify({ attempt: "x", writes: 1, review: true, checkRun: true }),
+    );
+    h.addReview(headSha, reviewMarker(other, true));
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ posted: false, coveredBy: expect.any(String) });
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["open", "open"]);
+    expect(writes).toEqual([]);
+    expect(h.objects.has(runKeys(prepared.runId).rechecks)).toBe(false);
+  });
+
+  it("replies to and resolves only the findings this run itself closed", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    // Before the post, finding 2 is closed as fixed some other way (a person's reply the judge
+    // read): not by this run, so this run doesn't reply on it.
+    const second = h.findings.rows[1];
+    if (second === undefined) throw new Error("no second finding");
+    second.status = "fixed";
+    await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1000: /)]);
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual(["resolve PRRT_1"]);
+  });
+
+  it("retries a reply GitHub refused with a 401 or a 409: only 403, 404 and 422 are for good", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    fail.replies.push(
+      new GitHubError(401, "Bad credentials", "POST", "/replies"),
+      new GitHubError(409, "Conflict", "POST", "/replies"),
+    );
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    expect(replies(writes)).toEqual([]);
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(replies(writes)).toHaveLength(2);
+  });
+
+  it("shows the reviewer our comments again when the recheck doesn't run after all", async () => {
+    const { h } = rechecking({
+      comments: () => [
+        {
+          id: 2000,
+          inReplyTo: 1000,
+          author: "alice",
+          body: "REPLY-IN-OUR-THREAD",
+          path: "src/total.ts",
+          line: 3,
+        },
+      ],
+    });
+    await run(h, 1, [finding()]);
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("  let sum = 0;", "  let sum = 0; // total"),
+        "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n",
+      },
+      "fix in the caller, touch the file",
+    );
+    // A cap that fits the review's batch and nothing more: the recheck is left out.
+    const spend = memorySpend({ averageBatchUsd: 1 });
+    h.deps.spend = {
+      store: spend.store,
+      budgets: budgetsSchema.parse({ perPullRequest: { costPerDayUsd: 1 } }),
+    };
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    expect(manifest.recheck).toBeUndefined();
+    const review = manifest.review.jobs.find((job) => job.files.includes("src/total.ts"));
+    expect(review?.prompt).toContain("REPLY-IN-OUR-THREAD");
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(review?.index ?? -1)) ?? "{}",
+    ) as { prompt?: string };
+    expect(input.prompt).toContain("REPLY-IN-OUR-THREAD");
+  });
+
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {
     const { h, writes } = rechecking();
     const prepared = await twoFixed(h);
@@ -4374,7 +4516,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
         if (row !== undefined) row.status = "declined";
         throw new Error("the database went away");
       }
-      return close?.(id, sha) ?? false;
+      return close?.(id, sha) ?? "theirs";
     };
     await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("went away");
     await post(h.deps, prepared.runId, offEcs("a2"));
@@ -4524,7 +4666,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(prepared.batches).toEqual([]);
   });
 
-  it("keeps a finding open in post when its file was in a capped review batch", async () => {
+  it("keeps a finding open when its file changed but no batch reviewed it", async () => {
     const { h } = rechecking();
     await run(h, 1, [finding()]);
     await fixElsewhere();
@@ -4532,13 +4674,18 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     const key = runKeys(prepared.runId).prepared;
     const manifest = readManifest(h.objects.get(key) ?? "");
     const recheckIndex = manifest.recheck?.index ?? -1;
-    // As a manifest from before prepare dropped such a recheck: the finding's file was in a
-    // review batch the cap kept from running.
-    const job = manifest.review.jobs[0];
-    if (job === undefined) throw new Error("no review batch");
-    job.files = [...job.files, "src/total.ts"];
-    manifest.spendCap = { kind: "pr_cost", batches: [job.index], reason: "capped" };
+    // The finding's file is among the review's changed files, but the planner skipped it (too
+    // large, say): it's in no batch, so nothing read it again.
+    const changed = manifest.review.files[0];
+    if (changed === undefined) throw new Error("no changed file");
+    manifest.review.files.push({ ...changed, path: "src/total.ts" });
     h.objects.set(key, JSON.stringify(manifest));
+    for (const job of manifest.review.jobs) {
+      h.objects.set(
+        runKeys(prepared.runId).batchOutput(job.index),
+        JSON.stringify(output({ index: job.index, findings: [] })),
+      );
+    }
     h.objects.set(
       runKeys(prepared.runId).batchOutput(recheckIndex),
       JSON.stringify({

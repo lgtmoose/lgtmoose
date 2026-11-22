@@ -697,7 +697,9 @@ export async function prepare(
     // review, which is what carries findings over. A reply the judge reads this run already
     // covers its finding. Chosen before the review is prepared, so the reviewer isn't shown
     // their comments (`hiddenThreads`, as for a claimed fix): "not raised again" then means it
-    // looked at the code afresh. Numbered after the other batches, below.
+    // looked at the code afresh. Numbered after the other batches, below. Should the recheck
+    // not run after all (the review isn't incremental, or the caps leave it out), the review's
+    // prompts are built again with those comments in.
     const rechecking =
       conversationOnly ||
       full ||
@@ -713,36 +715,41 @@ export async function prepare(
             index: 0,
             log: (message, fields) => deps.log(message, fields),
           });
-    const planned = await prepareReview(
-      {
-        github: github.reader,
-        progress: (line) => deps.log(line),
-        // A conversation-only run builds no reviewer prompts, so it ranks no learnings.
-        ...(learnings === undefined || conversationOnly
-          ? {}
-          : {
-              learnings: (batch) =>
-                learnings({ org: target.owner, repo: `${target.owner}/${target.repo}`, ...batch }),
-            }),
-      },
-      target,
-      repo,
-      pr,
-      {
-        reviewed,
-        resumed,
-        hiddenThreads: new Set([
-          ...repliedThreads(taken),
-          ...((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []),
-          ...(rechecking?.targets.flatMap((target) =>
-            target.githubCommentId === undefined ? [] : [target.githubCommentId],
-          ) ?? []),
-        ]),
-      },
-    );
+    const fixedIds = (await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? [];
+    const recheckIds =
+      rechecking?.targets.flatMap((target) =>
+        target.githubCommentId === undefined ? [] : [target.githubCommentId],
+      ) ?? [];
+    const review = (hidden: readonly number[]) =>
+      prepareReview(
+        {
+          github: github.reader,
+          progress: (line) => deps.log(line),
+          // A conversation-only run builds no reviewer prompts, so it ranks no learnings.
+          ...(learnings === undefined || conversationOnly
+            ? {}
+            : {
+                learnings: (batch) =>
+                  learnings({
+                    org: target.owner,
+                    repo: `${target.owner}/${target.repo}`,
+                    ...batch,
+                  }),
+              }),
+        },
+        target,
+        repo,
+        pr,
+        {
+          reviewed,
+          resumed,
+          hiddenThreads: new Set([...repliedThreads(taken), ...fixedIds, ...hidden]),
+        },
+      );
+    const planned = await review(recheckIds);
     // A conversation-only run keeps the plan (the post step reads the PR from it) but reviews
     // none of it: no review batches.
-    const prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
+    let prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
     const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     // Linked tickets, read here with the provider's credential; their text goes to the sandbox
@@ -874,6 +881,36 @@ export async function prepare(
             }),
           };
     const cappedReview = notRun.filter((batch) => batch.kind === "review").map((b) => b.index);
+    // The recheck closes a finding the review didn't raise again, which says nothing about a
+    // file a capped review batch didn't read: with any review batch left out, no recheck.
+    const keptRecheck =
+      recheck !== undefined && spent.runs(recheck.index) && cappedReview.length === 0
+        ? recheck
+        : undefined;
+    // Its findings' comments were hidden from the reviewer for nothing: shown again. The plan
+    // is the same (comments don't change it), so only the prompts are taken from the rebuild.
+    if (keptRecheck === undefined && recheckIds.length > 0 && !conversationOnly) {
+      const shown = await review([]);
+      const same =
+        shown.jobs.length === prepared.jobs.length &&
+        shown.jobs.every(
+          (job, i) =>
+            job.index === prepared.jobs[i]?.index &&
+            job.files.join("\n") === prepared.jobs[i]?.files.join("\n"),
+        );
+      if (same) {
+        prepared = {
+          ...prepared,
+          jobs: shown.jobs,
+          ...(shown.reviewerSystem === undefined ? {} : { reviewerSystem: shown.reviewerSystem }),
+          ...(shown.reviewerShared === undefined ? {} : { reviewerShared: shown.reviewerShared }),
+        };
+      } else {
+        deps.log("review prompts not rebuilt: the plan came out differently", {
+          runId: run.runId,
+        });
+      }
+    }
 
     await sealCheckout(repo, planned);
     const archive = join(work.dir, "checkout.tar.gz");
@@ -940,14 +977,6 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(explain.index), JSON.stringify(input));
       batches.push({ index: explain.index });
     }
-    // The recheck closes a finding the review didn't raise again, which says nothing about a
-    // file a capped review batch didn't read: with any review batch left out, no recheck.
-    const keptRecheck =
-      recheck !== undefined &&
-      spent.runs(recheck.index) &&
-      !notRun.some((batch) => batch.kind === "review")
-        ? recheck
-        : undefined;
     if (keptRecheck !== undefined) {
       const input: BatchInput = batchInputSchema.parse({
         version: 1,

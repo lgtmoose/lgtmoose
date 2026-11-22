@@ -15,9 +15,16 @@ export interface ReviewThread {
   id?: string;
 }
 
+/**
+ * A PR's review threads. `partial` when some may be missing: GitHub left some out (errors with
+ * data), one came without its ID, or there were more pages than are read. Unset, the list is
+ * the PR's every thread, so one not in it is gone.
+ */
+export type ReviewThreadList = ReviewThread[] & { partial?: true };
+
 /** Reads a PR's review threads. GraphQL only: REST doesn't say whether a thread is resolved. */
 export interface ReviewThreadReader {
-  reviewThreads(target: PullTarget): Promise<ReviewThread[]>;
+  reviewThreads(target: PullTarget): Promise<ReviewThreadList>;
 }
 
 /** One authenticated GitHub GraphQL request, resolving to the JSON body (`data` and `errors`). */
@@ -98,8 +105,10 @@ export function graphQlThreadReader(
 ): ReviewThreadReader {
   return {
     async reviewThreads(target) {
-      const threads: ReviewThread[] = [];
+      const threads: ReviewThreadList = [];
+      let partial = false;
       let after: string | null = null;
+      let more = false;
       for (let page = 0; page < MAX_PAGES; page++) {
         const reply = replySchema.parse(
           await graphql(QUERY, {
@@ -118,9 +127,16 @@ export function graphQlThreadReader(
               : "GitHub GraphQL: no such pull request.",
           );
         }
-        if (errors.length > 0) onErrors(errors);
+        if (errors.length > 0) {
+          onErrors(errors);
+          partial = true;
+        }
         for (const node of list.nodes) {
-          if (node === null) continue;
+          if (node === null) {
+            partial = true;
+            continue;
+          }
+          if (node.id === undefined) partial = true;
           const resolvedBy = node.resolvedBy?.login;
           threads.push({
             resolved: node.isResolved,
@@ -129,9 +145,12 @@ export function graphQlThreadReader(
             ...(node.id === undefined ? {} : { id: node.id }),
           });
         }
-        if (!list.pageInfo.hasNextPage || list.pageInfo.endCursor === null) break;
+        more = list.pageInfo.hasNextPage;
+        if (!more || list.pageInfo.endCursor === null) break;
         after = list.pageInfo.endCursor;
       }
+      // Past the last page read, or a next page with no cursor to it: not every thread.
+      if (partial || more) threads.partial = true;
       return threads;
     },
   };
