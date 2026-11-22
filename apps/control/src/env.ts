@@ -1,3 +1,4 @@
+import { GITHUB_LOGIN } from "@lgtmoose/config";
 import { DEFAULT_ACCEPTANCE_THRESHOLD, DEFAULT_MIN_SAMPLES } from "@lgtmoose/core";
 import { DEFAULT_MAX_FEEDBACK_COMMENTS } from "./feedback.js";
 import { DEFAULT_MAX_EXPLANATIONS } from "./explain.js";
@@ -229,8 +230,13 @@ export function readMaxExplanations(env: Env): number {
   return limit;
 }
 
-/** A GitHub login: letters, digits and single hyphens, at most 39 characters. */
-const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+/**
+ * `LGTMOOSE_COMMAND_HINT` (`commandHint`, NIC-1119): whether a comment using `@lgtmoose` where
+ * the App is called something else gets the one-time hint. On unless it's "false".
+ */
+export function readCommandHint(env: Env): boolean {
+  return env.LGTMOOSE_COMMAND_HINT?.trim() !== "false";
+}
 
 /**
  * `LGTMOOSE_COMMAND_ALIASES` (`commandAliases`, NIC-1119): other handles `@`-commands may use
@@ -245,7 +251,7 @@ export function readCommandAliases(env: Env): string[] {
     .map((alias) => alias.trim())
     .filter((alias) => alias !== "");
   for (const alias of aliases) {
-    if (!LOGIN.test(alias)) {
+    if (!GITHUB_LOGIN.test(alias)) {
       throw new Error("LGTMOOSE_COMMAND_ALIASES must be comma-separated GitHub logins.");
     }
   }

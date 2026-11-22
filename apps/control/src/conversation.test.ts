@@ -1037,7 +1037,7 @@ describe("command handles (NIC-1119)", () => {
   it("hints the real handle once per PR when @lgtmoose isn't an alias", async () => {
     const f = fakeDeps(from("dev", "@lgtmoose full review"), { slug: SLUG });
     withHintStore(f);
-    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "deferred" });
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
     expect(f.queued).toEqual([]);
     expect(f.replies).toHaveLength(1);
     expect(f.replies[0]?.body).toContain(`Commands here use \`@${SLUG}\``);
@@ -1062,6 +1062,68 @@ describe("command handles (NIC-1119)", () => {
       await handleConversation(f.deps, job());
       expect(f.replies.filter((reply) => reply.body.includes("Commands here use"))).toEqual([]);
     }
+  });
+
+  /** A wrong-handle command in one of our findings' threads, with a reply store to watch. */
+  function inThread(body: string) {
+    const f = fakeDeps(from("dev", body, { threadRootId: 100 }), {
+      slug: SLUG,
+      findings: new Map([[100, finding()]]),
+    });
+    const added: string[] = [];
+    f.deps.replies = {
+      add: async (input) => {
+        added.push(input.body);
+        return true;
+      },
+      take: async () => [],
+      finish: async () => {},
+      failed: async () => {},
+    };
+    return { ...f, added };
+  }
+  const threadReply = job({ kind: "review_comment", commentId: 501 });
+
+  it("doesn't send a wrong-handle command to the reply judge: it was meant as a command", async () => {
+    const f = inThread("@lgtmoose ignore");
+    withHintStore(f);
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "ignored" });
+    expect(f.added).toEqual([]);
+    expect(f.queued).toEqual([]);
+    expect(f.declined).toEqual([]);
+    expect(f.replies[0]?.body).toContain("Commands here use");
+  });
+
+  it("with commandHint off, gives no hint and treats the comment as before", async () => {
+    const f = inThread("@lgtmoose ignore, it's fine");
+    f.deps.commandHint = false;
+    withHintStore(f);
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(f.added).toEqual(["@lgtmoose ignore, it's fine"]);
+    expect(f.replies).toEqual([]);
+  });
+
+  it("logs a hint that fails to post, and gives the PR's claim back", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    const claimed = withHintStore(f);
+    const released: string[] = [];
+    f.deps.store.releaseHandleHint = async (repo, number) => {
+      released.push(`${repo}#${number}`);
+      claimed.delete(`${repo}#${number}`);
+    };
+    const github = await f.deps.github(7);
+    f.deps.github = async () => ({
+      ...github,
+      reply: async () => {
+        throw new Error("HTTP 403: conversation locked");
+      },
+    });
+    // The job carries on: nothing is thrown.
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(released).toEqual(["acme/shop#12"]);
+    expect(f.logs.map((entry) => entry.message)).toContain("handle hint not posted");
+    // A later comment can still get it.
+    expect(claimed.size).toBe(0);
   });
 
   it("gives no hint when the App is itself called lgtmoose", async () => {

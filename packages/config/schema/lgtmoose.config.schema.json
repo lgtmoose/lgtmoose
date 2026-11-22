@@ -458,13 +458,18 @@
     },
     "commandAliases": {
       "default": [],
-      "description": "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5.",
+      "description": "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5 GitHub logins.",
       "maxItems": 5,
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$"
+        "description": "A GitHub login: letters, digits and single hyphens, at most 39 characters."
       }
+    },
+    "commandHint": {
+      "default": true,
+      "description": "Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
+      "type": "boolean"
     },
     "reviewDebounceSeconds": {
       "default": 60,

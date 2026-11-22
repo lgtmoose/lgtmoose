@@ -6,6 +6,7 @@ import { describeStatus, errorName, isDeadToken, sendHeartbeat } from "./sfn.js"
 import {
   readBootstrapMaxCost,
   readCommand,
+  readCommandAliases,
   readControlEnv,
   readEmbeddingsSettings,
   readMaxPendingLearnings,
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
     embeddings: readEmbeddingsSettings(process.env),
     tickets: readTicketSettings(process.env),
     budgets: readBudgets(process.env),
+    commandAliases: readCommandAliases(process.env),
     ...maxPending(),
   });
   const ecs = new ECSClient({});

@@ -14,7 +14,9 @@ commandAliases: ["lgtmoose"],
 
 Up to five aliases are allowed, each shaped like a GitHub login. A handle never changes what a command may do: that depends on who wrote the comment, as GitHub reports it. An alias is also a GitHub login, so GitHub notifies whoever owns it, and the `lgtmoose` organization owns `@lgtmoose`.
 
-Without that alias, a comment that starts with `@lgtmoose` followed by a command word gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`." It's posted once per PR, carries the reply marker so nothing reads it as a command, and is only logged in shadow mode. The comment itself runs nothing.
+Without that alias, a comment that mentions `@lgtmoose` followed by a command word gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`." It's posted once per PR, carries the reply marker so nothing reads it as a command, and is only logged in shadow mode. If posting fails, the PR can still get it from a later comment. The comment itself runs nothing, and because it was meant as a command, it doesn't go to the reply judge either, even in a finding's thread.
+
+The hint assumes that no other App called `lgtmoose` answers on your repositories. If one does, turn it off with `commandHint: false`. A comment like that is then handled as before, so in a finding's thread it goes to the reply judge.
 
 People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command go to the reply judge, below.
 

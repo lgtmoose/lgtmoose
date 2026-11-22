@@ -13,6 +13,9 @@ export const HARNESS_AUTH = {
 export type Harness = keyof typeof HARNESS_AUTH;
 export type AuthMethod = (typeof HARNESS_AUTH)[Harness][number];
 
+/** A GitHub login: letters, digits and single hyphens, not at either end, at most 39 characters. */
+export const GITHUB_LOGIN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
+
 const HARNESSES = Object.keys(HARNESS_AUTH) as [Harness, ...Harness[]];
 const AUTH_METHODS = [...new Set(Object.values(HARNESS_AUTH).flat())] as [
   AuthMethod,
@@ -464,15 +467,28 @@ export const deployConfigSchema = z
       .array(
         z
           .string()
-          .regex(
-            /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/,
+          .refine(
+            (alias) => GITHUB_LOGIN.test(alias),
             "aliases are GitHub logins: letters, digits and single hyphens, at most 39 characters",
-          ),
+          )
+          .describe("A GitHub login: letters, digits and single hyphens, at most 39 characters."),
       )
       .max(5)
       .default([])
       .describe(
-        "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5.",
+        "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5 GitHub logins.",
+      ),
+    /**
+     * Whether a comment that mentions `@lgtmoose` with a command word, where the App is called
+     * something else and `lgtmoose` isn't an alias, gets one reply per PR naming the handle that
+     * works (NIC-1119). It assumes no other App called `lgtmoose` answers on these repositories;
+     * turn it off if one does.
+     */
+    commandHint: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
       ),
     /**
      * How long a push's review waits for the next push before it starts (NIC-1077): a newer

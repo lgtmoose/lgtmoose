@@ -171,5 +171,8 @@ describe("drizzleConversationStore", () => {
       .where(eq(pullRequestDispatches.number, 53));
     expect(row?.lastEventAt.toISOString()).toBe(T1.toISOString());
     expect(row?.handleHintAt).toBeInstanceOf(Date);
+    // Given back after a failed post, it can be claimed again.
+    await store.releaseHandleHint?.("Acme/Shop", 53);
+    expect(await claim("Acme/Shop", 53)).toBe(true);
   });
 });

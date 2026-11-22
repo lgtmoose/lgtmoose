@@ -145,7 +145,8 @@ export function waitingForChecksRun(
   checks: ChecksState,
 ): { conclusion: CheckConclusion; title: string; summary: string } | undefined {
   if (gate.check_run === "off") return undefined;
-  const command = `\`@${slug ?? "lgtmoose"} review\``;
+  // The handle that works here (NIC-1119); without one, name the command, not a guessed handle.
+  const command = slug === undefined ? "the App's `review` command" : `\`@${slug} review\``;
   const now = `Someone with write access can start it now with ${command}.`;
   const summary =
     checks.state === "failed"

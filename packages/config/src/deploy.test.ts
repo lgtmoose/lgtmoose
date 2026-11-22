@@ -74,6 +74,7 @@ describe("parseDeployConfig", () => {
       maxReplyJudgements: 10,
       maxExplanations: 5,
       commandAliases: [],
+      commandHint: true,
       reviewDebounceSeconds: 60,
       feedback: { acceptanceThreshold: 0.5, minSamples: 3, maxCommentsPerRun: 100 },
       alarms: {},

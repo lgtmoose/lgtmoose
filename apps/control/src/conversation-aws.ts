@@ -298,6 +298,17 @@ export function drizzleConversationStore(
         .returning({ repo: pullRequestDispatches.repo });
       return rows.length > 0;
     },
+    async releaseHandleHint(repo, number) {
+      await db
+        .update(pullRequestDispatches)
+        .set({ handleHintAt: null, updatedAt: now() })
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, lower(repo)),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+    },
   };
 }
 

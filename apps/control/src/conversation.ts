@@ -154,6 +154,8 @@ export interface ConversationStore {
    * first time, false once it has had one, so the hint is never posted twice on a PR.
    */
   claimHandleHint?(repo: string, number: number): Promise<boolean>;
+  /** Gives the PR's hint back after it failed to post, so a later comment can still get it. */
+  releaseHandleHint?(repo: string, number: number): Promise<void>;
 }
 
 export interface ConversationDeps {
@@ -177,6 +179,12 @@ export interface ConversationDeps {
    * `lgtmoose` for an App called `lgtmoose-<org>`. Left out: only the App's own handle.
    */
   commandAliases?: readonly string[];
+  /**
+   * Whether a comment using `@lgtmoose` where the App is called something else gets the one-time
+   * hint with the real handle (`commandHint`, NIC-1119). It assumes no other App called
+   * `lgtmoose` answers on the repository. Left out: on.
+   */
+  commandHint?: boolean;
   /**
    * Outcome learning (NIC-1081): a finding `ignore` declined may complete a repeated rejection.
    * Left out, an `ignore` teaches nothing. Failures are logged, never thrown.
@@ -228,11 +236,21 @@ const handles = (deps: Pick<ConversationDeps, "commandAliases">, slug: string): 
 ];
 
 /**
+ * Whether a comment with no command for this App gets the handle hint (NIC-1119): it mentions
+ * `@lgtmoose` with a command word, `lgtmoose` isn't this App's slug or an alias, and the
+ * deployment hasn't turned the hint off (`commandHint`).
+ */
+function wantsHint(deps: ConversationDeps, body: string, slug: string): boolean {
+  return deps.commandHint !== false && addressesDocsHandle(body, handles(deps, slug));
+}
+
+/**
  * The one-time hint (NIC-1119) for a comment that used `@lgtmoose` where this App is called
- * something else: posted once per PR, carrying the reply marker so nothing reads it as a
- * command. The PR is claimed before the hint is posted, so a retry never posts it twice; one
- * that fails to post is lost, which is the safer side. Logged, not posted or claimed, in shadow
- * mode. Without a store that records it, there's no hint at all.
+ * something else. It's posted once per PR and carries the reply marker, so nothing reads it as a
+ * command. The PR is claimed before the hint is posted, so a retry never posts it twice. When the
+ * post fails (a 502, a locked conversation), the claim is released so a later comment can still
+ * get the hint, and the failure is logged, not thrown: the comment's job carries on. In shadow
+ * mode it's logged, and not posted or claimed. Without a store that records it, there's no hint.
  */
 async function hintHandle(
   deps: ConversationDeps,
@@ -242,14 +260,26 @@ async function hintHandle(
 ): Promise<void> {
   const { store } = deps;
   if (store.claimHandleHint === undefined) return;
-  const body = `${handleHint(slug)}\n\n${REPLY_MARKER}`;
+  const where = { repo: job.repo, prNumber: job.prNumber };
   if (deps.shadow) {
-    deps.log("shadow: handle hint not posted", { repo: job.repo, prNumber: job.prNumber });
+    deps.log("shadow: handle hint not posted", where);
     return;
   }
   if (!(await store.claimHandleHint(job.repo, job.prNumber))) return;
-  await post(body);
-  deps.log("handle hint posted", { repo: job.repo, prNumber: job.prNumber });
+  try {
+    await post(`${handleHint(slug)}\n\n${REPLY_MARKER}`);
+    deps.log("handle hint posted", where);
+  } catch (error) {
+    deps.log("handle hint not posted", {
+      ...where,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      await store.releaseHandleHint?.(job.repo, job.prNumber);
+    } catch {
+      // Kept claimed: this PR gets no hint, which is the quieter side.
+    }
+  }
 }
 
 interface Context {
@@ -760,10 +790,13 @@ export async function handleConversation(
   const commands = parseCommands(comment.body, handles(deps, slug));
   // Not a command: a reply for the judge, if it's on one of our findings' threads.
   if (commands.length === 0) {
-    if (addressesDocsHandle(comment.body, handles(deps, slug))) {
+    // Meant as a command, with the docs' handle: the hint, and not a reply for the judge either.
+    if (wantsHint(deps, comment.body, slug)) {
       await hintHandle(deps, job, slug, (body) =>
         github.reply(kind, job.repo, job.prNumber, commentId, body),
       );
+      await handled();
+      return { action: "ignored", reason: "a command for @lgtmoose, not this App's handle" };
     }
     const result = await recordReply(deps, github, { ...job, commentId }, kind, comment);
     await handled();
@@ -858,7 +891,7 @@ async function handleReview(deps: ConversationDeps, job: ReviewJob): Promise<Con
   const slug = await github.slug();
   const commands = parseCommands(review.body, handles(deps, slug));
   if (commands.length === 0) {
-    if (addressesDocsHandle(review.body, handles(deps, slug))) {
+    if (wantsHint(deps, review.body, slug)) {
       await hintHandle(deps, job, slug, (body) =>
         github.reply("review", job.repo, job.prNumber, reviewId, `@${review.author}: ${body}`),
       );

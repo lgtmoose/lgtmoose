@@ -389,6 +389,24 @@ type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
  *
  * Without a way to read the config (the CLI), every run reviews.
  */
+/**
+ * The handle a check run names when it says how to ask for a review (NIC-1119): the App's slug,
+ * or the deployment's first alias when the slug can't be read. Undefined when there's neither,
+ * and then the check run names no handle rather than guess `@lgtmoose`.
+ */
+async function commandHandle(
+  deps: Pick<ControlDeps, "commandAliases">,
+  github: { slug?: () => Promise<string> },
+): Promise<string | undefined> {
+  try {
+    const slug = await github.slug?.();
+    if (slug !== undefined) return slug;
+  } catch {
+    // Falls back below.
+  }
+  return deps.commandAliases?.[0];
+}
+
 async function triggered(
   deps: ControlDeps,
   github: RunGitHub,
@@ -471,7 +489,7 @@ async function triggered(
   const check = waitingCheckRun(
     config.review,
     config.gate,
-    await github.slug?.(),
+    await commandHandle(deps, github),
     reviewedBefore,
     automaticReviews,
   );
@@ -564,7 +582,7 @@ async function waitForChecks(
   const check = waitingForChecksRun(
     config.review,
     config.gate,
-    await github.slug?.(),
+    await commandHandle(deps, github),
     decision.checks,
   );
   if (check !== undefined) {
