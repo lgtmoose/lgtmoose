@@ -73,6 +73,8 @@ describe("parseDeployConfig", () => {
       reconcileLookbackHours: 24,
       maxReplyJudgements: 10,
       maxExplanations: 5,
+      commandAliases: [],
+      commandHint: true,
       reviewDebounceSeconds: 60,
       feedback: { acceptanceThreshold: 0.5, minSamples: 3, maxCommentsPerRun: 100 },
       alarms: {},
@@ -132,6 +134,22 @@ describe("parseDeployConfig", () => {
     expect(issuesOf({ ...minimal, learnings: { maxPendingPerAuthor: 0 } })).toEqual([
       expect.objectContaining({ path: "learnings.maxPendingPerAuthor" }),
     ]);
+  });
+
+  it("takes up to 5 command aliases that look like GitHub logins (NIC-1119)", () => {
+    expect(parseDeployConfig({ ...minimal, commandAliases: ["lgtmoose"] }).commandAliases).toEqual([
+      "lgtmoose",
+    ]);
+    for (const commandAliases of [
+      ["@lgtmoose"],
+      ["has space"],
+      ["-leading"],
+      ["double--hyphen"],
+      ["x".repeat(40)],
+      ["a", "b", "c", "d", "e", "f"],
+    ]) {
+      expect(() => parseDeployConfig({ ...minimal, commandAliases })).toThrow();
+    }
   });
 
   it("takes a repeat threshold of at least 2 PRs for learnings from rejections", () => {

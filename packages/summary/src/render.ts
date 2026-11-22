@@ -97,6 +97,21 @@ export interface SummaryInput {
    * Written in plain code but may name checks from the repository; escaped as text.
    */
   notices?: readonly string[];
+  /**
+   * The handle that works here, for the footer's pointer to the commands (NIC-1119): the App's
+   * slug, else the deployment's first alias. It may not be the `@lgtmoose` the docs show. Left
+   * out: no pointer.
+   */
+  commandHandle?: string;
+}
+
+/** A GitHub App slug: what `commandHandle` must look like to be shown as code. */
+const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/i;
+
+/** The footer's pointer to the commands, with the App's real handle. */
+function renderCommandHandle(slug: string | undefined): string | undefined {
+  if (slug === undefined || !SLUG.test(slug)) return undefined;
+  return `_Commands: \`@${slug} help\` lists them._`;
 }
 
 /** The most learning IDs listed in the summary; the rest are counted. */
@@ -535,6 +550,8 @@ function renderAt(
   if (learnings !== undefined) sections.push(learnings);
   const usage = renderUsage(input.usage ?? []);
   if (usage !== undefined) sections.push(usage);
+  const handle = renderCommandHandle(input.commandHandle);
+  if (handle !== undefined) sections.push(handle);
   if (cut.length > 0) {
     sections.push(`_Left out to stay under GitHub's comment size limit: ${cut.join(", ")}._`);
   }

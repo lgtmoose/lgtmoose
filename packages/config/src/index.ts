@@ -24,6 +24,7 @@ export {
   TIERS,
   credentialConcurrency,
   defineConfig,
+  GITHUB_LOGIN,
   RELEASE_IMAGES,
   imagesSchema,
   isGitHubHost,

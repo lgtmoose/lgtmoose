@@ -394,6 +394,11 @@ export interface ControlDeps {
    * (tests, the CLI), no run waits for CI.
    */
   checksWaits?: ChecksWaitStore;
+  /**
+   * `commandAliases` (NIC-1119). A check run that says how to ask for a review names the App's
+   * slug, or the first alias when the slug can't be read, or no handle at all.
+   */
+  commandAliases?: readonly string[];
 }
 
 /** A PR waiting for its CI: the head, since when, and what its check run last said. */

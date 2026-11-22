@@ -10,6 +10,8 @@ import { drizzleReplyStore } from "./replies-aws.js";
 import { databasePool, parseSecret, readSecret } from "./database.js";
 import { parseQueuedJob, type DispatchJob, type QueueRecord } from "./dispatch.js";
 import {
+  readCommandAliases,
+  readCommandHint,
   readConversationEnv,
   readMaxExplanations,
   readMaxPendingLearnings,
@@ -121,6 +123,8 @@ function conversationDeps(): Promise<ConversationDeps> {
       }),
       replies: drizzleReplyStore(db),
       maxExplanations: readMaxExplanations(process.env),
+      commandAliases: readCommandAliases(process.env),
+      commandHint: readCommandHint(process.env),
       queue: sqsJobQueue(new SQSClient({}), env.jobQueueUrl),
       shadow: env.shadow,
       log,

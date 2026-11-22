@@ -280,6 +280,27 @@ Next steps:
   4. Optional: let it learn your team's conventions from past code reviews, so its first
      reviews are less noisy. It proposes learnings for you to approve on the dashboard:
      ${CLI} learnings bootstrap --repo <owner/name>
+${handleNote(slug)}`;
+}
+
+/**
+ * How people address the App in PR comments (NIC-1119): its own handle, which the docs write as
+ * `@lgtmoose`. When the App is called something else, say how to make `@lgtmoose` work too.
+ */
+function handleNote(slug: string | undefined): string {
+  if (slug === undefined) {
+    return `
+Commands in PR comments use the App's handle, @<its name>, such as @<its name> review.
+`;
+  }
+  const alias =
+    slug.toLowerCase() === "lgtmoose"
+      ? ""
+      : `
+The docs write commands as @lgtmoose. To make that work here too, add
+commandAliases: ["lgtmoose"] to lgtmoose.config.ts and deploy again.`;
+  return `
+Commands in PR comments use the App's handle: @${slug}, such as @${slug} review.${alias}
 `;
 }
 

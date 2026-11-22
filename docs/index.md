@@ -45,7 +45,7 @@ pnpm lgtmoose auth bedrock
 pnpm lgtmoose deploy
 ```
 
-1. **`setup`** creates the GitHub App through GitHub's manifest flow, stores its keys in AWS Secrets Manager and writes `lgtmoose.config.ts`. It starts you on Amazon Bedrock, which needs no stored key.
+1. **`setup`** creates the GitHub App through GitHub's manifest flow, stores its keys in AWS Secrets Manager and writes `lgtmoose.config.ts`. It starts you on Amazon Bedrock, which needs no stored key. It ends by printing the App's handle, such as `@lgtmoose-acme`, which is what commands in PR comments use. To make the docs' `@lgtmoose` work too, add `commandAliases: ["lgtmoose"]` (see [Your App's handle](commands.md#your-apps-handle)).
 2. **`auth`** stores or checks a model provider's credential: `bedrock`, `claude`, `codex`, `cursor`, `api-key` or `vertex`. See [Providers and auth](credentials.md).
 3. **`deploy`** bootstraps the AWS CDK the first time, deploys every stack, points the App's webhook at the gateway and prints the App's install link.
 

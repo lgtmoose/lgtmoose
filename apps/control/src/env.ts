@@ -1,3 +1,4 @@
+import { GITHUB_LOGIN } from "@lgtmoose/config";
 import { DEFAULT_ACCEPTANCE_THRESHOLD, DEFAULT_MIN_SAMPLES } from "@lgtmoose/core";
 import { DEFAULT_MAX_FEEDBACK_COMMENTS } from "./feedback.js";
 import { DEFAULT_MAX_EXPLANATIONS } from "./explain.js";
@@ -227,6 +228,40 @@ export function readMaxExplanations(env: Env): number {
     throw new Error("LGTMOOSE_MAX_EXPLANATIONS must be a whole number.");
   }
   return limit;
+}
+
+/**
+ * `LGTMOOSE_COMMAND_HINT` (`commandHint`, NIC-1119): whether a comment using `@lgtmoose` where
+ * the App is called something else gets the one-time hint. `true` or `false`, in any case; unset
+ * or empty is the default, on. Anything else fails the Lambda at start rather than being guessed.
+ */
+export function readCommandHint(env: Env): boolean {
+  const value = env.LGTMOOSE_COMMAND_HINT?.trim().toLowerCase() ?? "";
+  if (value === "") return true;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error("LGTMOOSE_COMMAND_HINT must be true or false.");
+}
+
+/**
+ * `LGTMOOSE_COMMAND_ALIASES` (`commandAliases`, NIC-1119): other handles `@`-commands may use
+ * besides the App's own, comma-separated. Unset or empty: none. A value that isn't a login fails
+ * the Lambda at start rather than being ignored.
+ */
+export function readCommandAliases(env: Env): string[] {
+  const value = env.LGTMOOSE_COMMAND_ALIASES?.trim() ?? "";
+  if (value === "") return [];
+  const aliases = value
+    .split(",")
+    .map((alias) => alias.trim())
+    .filter((alias) => alias !== "");
+  for (const alias of aliases) {
+    if (!GITHUB_LOGIN.test(alias)) {
+      throw new Error("LGTMOOSE_COMMAND_ALIASES must be comma-separated GitHub logins.");
+    }
+  }
+  if (aliases.length > 5) throw new Error("LGTMOOSE_COMMAND_ALIASES takes at most 5 aliases.");
+  return aliases;
 }
 
 export function readReviewSettings(env: Env): ReviewSettings {

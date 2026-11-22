@@ -132,4 +132,11 @@ describe("waitingForChecksRun", () => {
       waitingForChecksRun({ wait_timeout_minutes: 5 }, off, undefined, pending),
     ).toBeUndefined();
   });
+
+  it("names no guessed handle when the App's isn't known (NIC-1119)", () => {
+    const pending = { state: "pending" as const, failed: [], pending: ["test"] };
+    const check = waitingForChecksRun({ wait_timeout_minutes: 5 }, gate, undefined, pending);
+    expect(check?.summary).toContain("start it now with the App's `review` command.");
+    expect(check?.summary).not.toContain("@lgtmoose");
+  });
 });
