@@ -623,9 +623,19 @@ export async function countAttempt(
 ): Promise<number> {
   const key = runKeys(runId).postAttempts;
   const text = await deps.store.getText(key);
+  // Bad JSON counts as none, as a missing file does.
   const parsed = z
-    .object({ attempts: z.number().int().nonnegative() })
-    .safeParse(text === undefined ? undefined : JSON.parse(text));
+    .string()
+    .transform((body, context) => {
+      try {
+        return JSON.parse(body) as unknown;
+      } catch {
+        context.addIssue({ code: "custom", message: "not JSON" });
+        return z.NEVER;
+      }
+    })
+    .pipe(z.object({ attempts: z.number().int().nonnegative() }))
+    .safeParse(text);
   const number = (parsed.success ? parsed.data.attempts : 0) + 1;
   await deps.store.putText(key, JSON.stringify({ attempts: number }));
   return number;
@@ -1305,7 +1315,16 @@ export async function post(
   const keys = runKeys(runId);
   // This attempt's number, counted before anything can fail: an attempt that dies early still
   // counts, so the last one is known for what it is.
-  const attemptNumber = attempt.number ?? (await countAttempt(deps, runId));
+  // Unknown when it can't be counted: then the retry count, or nothing, says which it is.
+  const attemptNumber =
+    attempt.number ??
+    (await countAttempt(deps, runId).catch((error: unknown) => {
+      deps.log("post attempt not counted", {
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }));
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
   // Written by this run's own prepare step with the control task's role; still shape-checked.
@@ -1955,6 +1974,16 @@ export async function post(
     if (recheckWrites === undefined || recheckWrites.fixed.length === 0 || progress.rechecks) {
       return;
     }
+    // Whether this is the post step's last attempt. Either count saying so is enough: losing a
+    // note on a thread is cheaper than failing a run whose review is out. The own count misses
+    // an attempt that died before counting (and carries over into a redriven execution); the
+    // retry count includes tasks that never ran. With no total known, or neither count, any
+    // attempt may be the last.
+    const lastAttempt =
+      attempt.of === undefined ||
+      (attemptNumber === undefined && attempt.retry === undefined) ||
+      (attemptNumber !== undefined && attemptNumber >= attempt.of) ||
+      (attempt.retry !== undefined && attempt.retry + 1 >= attempt.of);
     // Counted before any write, so an attempt that fails part way still counts.
     const tries = (progress.recheckAttempts ?? 0) + 1;
     progress.recheckAttempts = tries;
@@ -2025,8 +2054,9 @@ export async function post(
             );
             sent = true;
           } catch (error) {
-            // Failed for good, the thread is still resolved: the finding is closed.
-            if (await failed(fixed.findingId, "reply", error)) continue;
+            // Failed for good, the thread is still resolved: the finding is closed. Failed for
+            // now, the step's retry writes both, unless there's none: then resolve it anyway.
+            if ((await failed(fixed.findingId, "reply", error)) && !lastAttempt) continue;
           }
           // Saved straight after it went out, outside the catch: a reply on GitHub is never
           // taken for one that failed.
@@ -2054,14 +2084,6 @@ export async function post(
     }
     // The post step's last attempt never fails here: its review is out, and failing would
     // mark the run failed over a note on a thread.
-    // Either count saying so is enough: losing a note on a thread is cheaper than failing a
-    // run whose review is out. The own count misses an attempt that died before counting (and
-    // carries over into a redriven execution); the retry count includes tasks that never ran.
-    // With no total known, any attempt may be the last: it never fails over them either.
-    const lastAttempt =
-      attempt.of === undefined ||
-      attemptNumber >= attempt.of ||
-      (attempt.retry !== undefined && attempt.retry + 1 >= attempt.of);
     if (later > 0 && tries < RECHECK_WRITE_ATTEMPTS && !lastAttempt) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,
@@ -2073,7 +2095,7 @@ export async function post(
         runId,
         attempts: tries,
         left: later,
-        stepAttempt: attemptNumber,
+        ...(attemptNumber === undefined ? {} : { stepAttempt: attemptNumber }),
       });
     }
     progress.rechecks = true;

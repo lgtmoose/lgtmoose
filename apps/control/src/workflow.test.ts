@@ -33,6 +33,7 @@ import type {
 import {
   OFF_ECS_CLAIM_TTL_MS,
   SUMMARY_MARKER,
+  countAttempt,
   coveringReviews,
   markerRun,
   post,
@@ -4845,6 +4846,41 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(posted).toMatchObject({ event: "APPROVE", posted: true });
     expect(h.logs).toContain("recheck replies or resolves given up");
     expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
+  });
+
+  it("still resolves the thread on the last attempt when its reply fails for now", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    fail.replies.push(new GitHubError(502, "Bad Gateway", "POST", "/replies"));
+    // The step's only attempt: there's no retry to leave the resolve to.
+    const posted = await post(h.deps, prepared.runId, {
+      attempt: { id: "a1", taskArn: undefined, number: 1, of: 1 },
+    });
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
+    expect(writes.filter((write) => write.startsWith("resolve ")).sort()).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+  });
+
+  it("counts a bad attempts file as none, and posts when the count can't be kept", async () => {
+    const { h } = rechecking();
+    const prepared = await twoFixed(h);
+    const key = runKeys(prepared.runId).postAttempts;
+    h.objects.set(key, "not json");
+    // The store can't keep the count: post goes on, the number unknown.
+    const putText = h.deps.store.putText.bind(h.deps.store);
+    h.deps.store.putText = async (name, body) => {
+      if (name === key) throw new Error("the store went away");
+      return putText(name, body);
+    };
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("post attempt not counted");
+    // Readable again, the bad file counts as none.
+    h.deps.store.putText = putText;
+    expect(await countAttempt(h.deps, prepared.runId)).toBe(1);
   });
 
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {
