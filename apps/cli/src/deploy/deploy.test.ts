@@ -305,7 +305,7 @@ describe("lgtmoose deploy", () => {
                 new BedrockNotFound("The specified resource ARN was not found."),
               );
             }
-            return Promise.resolve({ status: "ACTIVE", modelIds: [] });
+            return Promise.resolve({ status: "ACTIVE" });
           },
           foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
           availability: () =>
@@ -315,7 +315,7 @@ describe("lgtmoose deploy", () => {
               agreement: "AVAILABLE",
             }),
         },
-        get: (url) => Promise.resolve(url.endsWith("/claude-sonnet-9") ? 404 : 200),
+        get: (url) => Promise.resolve({ status: url.endsWith("/claude-sonnet-9") ? 404 : 200 }),
       };
     };
     const result = await run(runDeploy, [], h);
@@ -407,7 +407,7 @@ describe("lgtmoose deploy", () => {
     });
     h.deps.models = () => ({
       bedrock: {
-        inferenceProfile: () => Promise.resolve({ status: "ACTIVE", modelIds: [] }),
+        inferenceProfile: () => Promise.resolve({ status: "ACTIVE" }),
         foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
         availability: () =>
           Promise.resolve({

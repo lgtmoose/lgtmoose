@@ -18,7 +18,7 @@ function api(missing: readonly string[] = [], failing: readonly string[] = []): 
         throw error;
       }
       if (missing.includes(id)) throw new BedrockNotFound();
-      return { status: "ACTIVE", modelIds: [] };
+      return { status: "ACTIVE" };
     },
     foundationModel: async () => ({ inferenceTypes: ["ON_DEMAND"] }),
     availability: async () => ({
@@ -104,6 +104,22 @@ describe("checkModels", () => {
     expect(throttled.logs[0]?.[0]).toBe("model not checked");
   });
 
+  it("clears the alarm when the rest pass, though one model is always unknown", async () => {
+    // Otherwise one model that can never be read keeps the alarm up after a fix, forever.
+    const out = recorder();
+    await checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+        bedrock("us.anthropic.claude-sonnet-4-6", ["standard", "deep"]),
+      ],
+      region: "us-east-2",
+      bedrock: api([], ["us.anthropic.claude-haiku-4-5-20251001-v1:0"]),
+      report: out.report,
+      log: out.log,
+    });
+    expect(out.reports).toEqual([["bedrock", 0, undefined]]);
+  });
+
   it("checks API-key models only where a key can be read, and never reports the key", async () => {
     const out = recorder();
     const asked: Record<string, string>[] = [];
@@ -122,7 +138,7 @@ describe("checkModels", () => {
       api: {
         get: async (url, headers) => {
           asked.push(headers);
-          return url.endsWith("claude-sonnet-9") ? 404 : 200;
+          return { status: url.endsWith("claude-sonnet-9") ? 404 : 200 };
         },
         key: async (providerId) => {
           if (providerId === "nokey") return undefined;

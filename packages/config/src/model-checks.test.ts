@@ -106,7 +106,7 @@ function fakeBedrock(overrides: Partial<BedrockModelApi> = {}): BedrockModelApi 
     calls,
     inferenceProfile: async (id) => {
       calls.push(`profile ${id}`);
-      return { status: "ACTIVE", modelIds: [] };
+      return { status: "ACTIVE" };
     },
     foundationModel: async (id) => {
       calls.push(`model ${id}`);
@@ -239,6 +239,28 @@ describe("checkBedrockModel", () => {
     expect(result.fix).toContain("pnpm lgtmoose auth bedrock --id bedrock");
   });
 
+  it("suggests no base model for a provisioned-only base model", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({ foundationModel: async () => ({ inferenceTypes: ["PROVISIONED"] }) }),
+      bedrockCheck("anthropic.claude-sonnet-4-6-v1:0"),
+      "us-east-2",
+    );
+    expect(result.fix).toBe(
+      "pin a model that takes on-demand calls: pnpm lgtmoose auth bedrock --id bedrock lists them",
+    );
+  });
+
+  it("suggests profiles for a variant's base model, not the variant", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({ foundationModel: async () => ({ inferenceTypes: ["INFERENCE_PROFILE"] }) }),
+      bedrockCheck("anthropic.claude-sonnet-4-6-v1:0:200k"),
+      "us-east-2",
+    );
+    expect(result.fix).toBe(
+      "pin a profile ID instead, such as us.anthropic.claude-sonnet-4-6-v1:0 or global.anthropic.claude-sonnet-4-6-v1:0",
+    );
+  });
+
   it("reports a failed call as unknown, not unavailable", async () => {
     const result = await checkBedrockModel(
       fakeBedrock({
@@ -268,19 +290,27 @@ describe("checkBedrockModel", () => {
 });
 
 describe("checkBedrockModel through a profile", () => {
-  it("accepts a global profile whose model isn't offered in the source region", async () => {
-    const result = await checkBedrockModel(
-      fakeBedrock({
-        availability: async () => ({
-          region: "NOT_AVAILABLE",
-          entitlement: "AVAILABLE",
-          agreement: "AVAILABLE",
+  it("never calls a working profile unavailable when the source region doesn't offer its model", async () => {
+    // Bedrock reports access as NOT_AVAILABLE wherever the region doesn't offer the model, so
+    // it says nothing about what the profile can do: unknown, which leaves the alarm alone.
+    for (const entitlement of ["NOT_AVAILABLE", "AVAILABLE"]) {
+      const result = await checkBedrockModel(
+        fakeBedrock({
+          availability: async () => ({
+            region: "NOT_AVAILABLE",
+            entitlement,
+            agreement: "AVAILABLE",
+          }),
         }),
-      }),
-      bedrockCheck("global.anthropic.claude-opus-4-8"),
-      "eu-north-1",
-    );
-    expect(result.status).toBe("ok");
+        bedrockCheck("global.anthropic.claude-opus-4-8"),
+        "eu-north-1",
+      );
+      expect(result).toMatchObject({
+        status: "unknown",
+        problem:
+          "model access to anthropic.claude-opus-4-8 couldn't be read in eu-north-1, which doesn't offer it itself",
+      });
+    }
   });
 
   it("can't tell model access for an active profile whose model the region doesn't know", async () => {
@@ -294,26 +324,43 @@ describe("checkBedrockModel through a profile", () => {
       "eu-north-1",
     );
     // Unknown, so the health check neither raises nor clears the alarm.
-    expect(result).toMatchObject({
-      status: "unknown",
-      problem: "model access to anthropic.claude-opus-4-8 couldn't be read in eu-north-1",
-    });
+    expect(result.status).toBe("unknown");
   });
 
-  it("still needs model access and the agreement for a profile", async () => {
+  it("still needs model access and the agreement for a profile where the model is offered", async () => {
     const result = await checkBedrockModel(
       fakeBedrock({
         availability: async () => ({
-          region: "NOT_AVAILABLE",
+          region: "AVAILABLE",
           entitlement: "NOT_AVAILABLE",
           agreement: "AVAILABLE",
         }),
       }),
       bedrockCheck("global.anthropic.claude-opus-4-8"),
-      "eu-north-1",
+      "eu-west-1",
     );
     expect(result.status).toBe("unavailable");
     expect(result.problem).toMatch(/model access/);
+  });
+
+  it("names a failed agreement with Bedrock's reason, and ends the fix on its URL", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        availability: async () => ({
+          region: "AVAILABLE",
+          entitlement: "AVAILABLE",
+          agreement: "ERROR",
+          agreementError: "Payment instrument\ndeclined",
+        }),
+      }),
+      bedrockCheck("anthropic.claude-opus-4-8"),
+      "us-east-2",
+    );
+    expect(result.problem).toBe(
+      "the agreement for anthropic.claude-opus-4-8 failed in us-east-2: Payment instrument declined",
+    );
+    const line = describeModelProblem(result);
+    expect(line.endsWith("#/modelaccess")).toBe(true);
   });
 });
 
@@ -434,7 +481,7 @@ describe("checkApiModel", () => {
     const seen: { url: string; headers: Record<string, string> }[] = [];
     const get = async (url: string, headers: Record<string, string>) => {
       seen.push({ url, headers });
-      return 200;
+      return { status: 200 };
     };
     expect((await checkApiModel(get, anthropic, " sk-ant-secret \n")).status).toBe("ok");
     expect((await checkApiModel(get, openai, "sk-openai")).status).toBe("ok");
@@ -451,19 +498,44 @@ describe("checkApiModel", () => {
   });
 
   it("tells a missing model from a refused key, and never repeats the key", async () => {
-    const missing = await checkApiModel(async () => 404, anthropic, "sk-ant-secret");
+    const missing = await checkApiModel(async () => ({ status: 404 }), anthropic, "sk-ant-secret");
     expect(missing).toMatchObject({ status: "unavailable" });
     expect(missing.problem).toMatch(/no model claude-sonnet-4-6/);
-    const refused = await checkApiModel(async () => 401, openai, "sk-openai");
+    const refused = await checkApiModel(
+      async () => ({
+        status: 401,
+        body: JSON.stringify({
+          error: {
+            message: "Incorrect API key provided: sk-op***nai.",
+            type: "invalid_request_error",
+            code: "invalid_api_key",
+          },
+        }),
+      }),
+      openai,
+      "sk-openai",
+    );
     expect(refused.problem).toBe("the OpenAI API refused the stored key (HTTP 401)");
     expect(refused.fix).toBe(
       "store a working key with pnpm lgtmoose auth api-key --provider openai --id openai",
     );
-    // A restricted key with model reads turned off gets 403, and still works for reviews.
-    const restricted = await checkApiModel(async () => 403, openai, "sk-openai");
+    const anthropicRefused = await checkApiModel(
+      async () => ({
+        status: 401,
+        body: JSON.stringify({
+          type: "error",
+          error: { type: "authentication_error", message: "invalid x-api-key" },
+        }),
+      }),
+      anthropic,
+      "sk-ant-secret",
+    );
+    expect(anthropicRefused.status).toBe("unavailable");
+    // A restricted key without model reads still works for reviews, so it's only unknown.
+    const restricted = await checkApiModel(async () => ({ status: 403 }), openai, "sk-openai");
     expect(restricted.status).toBe("unknown");
     expect(restricted.problem).toMatch(/may lack only the permission to read models/);
-    const odd = await checkApiModel(async () => 503, openai, "sk-openai");
+    const odd = await checkApiModel(async () => ({ status: 503 }), openai, "sk-openai");
     expect(odd.status).toBe("unknown");
     const failed = await checkApiModel(
       async () => {
@@ -473,8 +545,34 @@ describe("checkApiModel", () => {
       "sk-openai",
     );
     expect(failed.status).toBe("unknown");
-    for (const result of [missing, refused, odd, failed]) {
+    for (const result of [missing, refused, anthropicRefused, restricted, odd, failed]) {
       expect(JSON.stringify(result)).not.toMatch(/sk-ant-secret|sk-openai/);
     }
+  });
+
+  it("takes OpenAI's 401 for a key that only lacks model reads as unknown", async () => {
+    const scoped = await checkApiModel(
+      async () => ({
+        status: 401,
+        body: JSON.stringify({
+          error: {
+            message:
+              "You have insufficient permissions for this operation. Missing scopes: api.model.read.",
+            type: "invalid_request_error",
+            code: null,
+          },
+        }),
+      }),
+      openai,
+      "sk-openai",
+    );
+    expect(scoped.status).toBe("unknown");
+    // No body to read, or one that isn't JSON: nothing says the key is bad.
+    expect((await checkApiModel(async () => ({ status: 401 }), openai, "k")).status).toBe(
+      "unknown",
+    );
+    expect(
+      (await checkApiModel(async () => ({ status: 401, body: "<html>" }), openai, "k")).status,
+    ).toBe("unknown");
   });
 });

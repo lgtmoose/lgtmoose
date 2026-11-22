@@ -4,7 +4,7 @@ import {
   GetFoundationModelCommand,
   GetInferenceProfileCommand,
 } from "@aws-sdk/client-bedrock";
-import { bedrockModelApi, fetchStatus } from "@lgtmoose/config";
+import { bedrockClientOptions, bedrockModelApi, fetchStatus } from "@lgtmoose/config";
 import { configPath, nodeFiles } from "../paths.js";
 import { createAwsSecretStore } from "../setup/aws-secret-store.js";
 import { createInquirerPrompter } from "../setup/prompter.js";
@@ -36,7 +36,7 @@ export async function defaultDeployDeps(): Promise<DeployDeps> {
     out: (text) => process.stdout.write(text),
     models: (region) => ({
       bedrock: bedrockModelApi({
-        client: new BedrockClient({ region }),
+        client: new BedrockClient(bedrockClientOptions(region)),
         GetInferenceProfileCommand,
         GetFoundationModelCommand,
         GetFoundationModelAvailabilityCommand,

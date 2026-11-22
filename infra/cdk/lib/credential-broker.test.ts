@@ -231,6 +231,8 @@ describe("credential broker", () => {
     // A Bedrock-only deployment has no stored credential, and still gets the check.
     const health = pinned.health();
     expect(health).toBeDefined();
+    // Room for every pinned model's calls, each with retries and its own limit.
+    expect(health?.fn.Properties.Timeout).toBe(300);
     expect(JSON.parse(envText(health?.env.LGTMOOSE_CREDENTIALS))).toEqual({});
     expect(JSON.parse(envText(health?.env.LGTMOOSE_MODEL_CHECKS))).toEqual([
       {

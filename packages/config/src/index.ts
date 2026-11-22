@@ -66,11 +66,13 @@ export { jsonSchemas, serializeSchema } from "./json-schema.js";
 export {
   BedrockNotFound,
   CLI_COMMAND,
+  bedrockClientOptions,
   bedrockModelAccessUrl,
   bedrockModelApi,
   checkApiModel,
   checkBedrockModel,
   checkDetail,
+  badKey,
   isBedrockNotFound,
   fetchStatus,
   describeModelProblem,

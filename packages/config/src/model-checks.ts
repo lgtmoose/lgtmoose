@@ -162,8 +162,8 @@ export class BedrockNotFound extends Error {
  * the ID doesn't exist here, and anything else when the call itself failed.
  */
 export interface BedrockModelApi {
-  /** GetInferenceProfile: its status and the foundation models it routes to. */
-  inferenceProfile(id: string): Promise<{ status: string | undefined; modelIds: string[] }>;
+  /** GetInferenceProfile: its status. */
+  inferenceProfile(id: string): Promise<{ status: string | undefined }>;
   /** GetFoundationModel: how it can be called (`ON_DEMAND`, `INFERENCE_PROFILE`). */
   foundationModel(id: string): Promise<{ inferenceTypes: string[] | undefined }>;
   /** GetFoundationModelAvailability: what the account may do with it in this region. */
@@ -171,6 +171,8 @@ export interface BedrockModelApi {
     region: string | undefined;
     entitlement: string | undefined;
     agreement: string | undefined;
+    /** Bedrock's reason, when the agreement is in ERROR. */
+    agreementError?: string | undefined;
   }>;
 }
 
@@ -252,7 +254,7 @@ export async function checkBedrockModel(
         return result(
           "unavailable",
           `Bedrock has no model ${check.model} in ${region}`,
-          `check the ID, or use an inference profile ID such as ${profileSuggestion(check.model, region)}`,
+          `check the ID, or use an inference profile ID such as ${profileSuggestion(foundation, region)}`,
         );
       }
       const types = model.inferenceTypes ?? [];
@@ -261,31 +263,40 @@ export async function checkBedrockModel(
           return result(
             "unavailable",
             `${check.model} can only be called through an inference profile in ${region}`,
-            `pin a profile ID instead, such as ${profileSuggestion(check.model, region)}`,
+            `pin a profile ID instead, such as ${profileSuggestion(foundation, region)}`,
           );
         }
         return result(
           "unavailable",
           `${check.model} can only be called with provisioned throughput in ${region}, which LGTMoose doesn't use`,
-          `pin a model ID that takes on-demand calls, such as the base model ${foundation}, or ${listProfiles} to see which do`,
+          foundation === configured
+            ? `pin a model that takes on-demand calls: ${listProfiles} lists them`
+            : `pin the base model ${foundation} if it takes on-demand calls: ${listProfiles} lists those that do`,
         );
       }
     }
     // A profile routes to other regions, so its model needn't be offered (or even known) in this
     // one: an ACTIVE profile settles that, and only the account's access and agreement are read.
+    // Where this region doesn't offer the model, Bedrock reports its access as NOT_AVAILABLE
+    // whatever the account has, so it can't be read here: nothing is known, and the alarm is
+    // left as it is.
     const profile = match[1] !== undefined;
+    const unreadable = () =>
+      result(
+        "unknown",
+        `model access to ${foundation} couldn't be read in ${region}, which doesn't offer it itself`,
+      );
     let availability;
     try {
       availability = await api.availability(foundation);
     } catch (error) {
       if (!(error instanceof BedrockNotFound)) throw error;
-      // The profile is active, but whether the account may use its model can't be read here:
-      // nothing is known, so the alarm is left as it is.
-      if (profile)
-        return result("unknown", `model access to ${foundation} couldn't be read in ${region}`);
+      if (profile) return unreadable();
       return result("unavailable", `Bedrock has no model ${foundation} in ${region}`, access);
     }
-    if (!profile && availability.region !== undefined && availability.region !== "AVAILABLE") {
+    const offeredHere = availability.region === undefined || availability.region === "AVAILABLE";
+    if (profile && !offeredHere) return unreadable();
+    if (!offeredHere) {
       return result(
         "unavailable",
         `${foundation} isn't offered in ${region}`,
@@ -297,6 +308,14 @@ export async function checkBedrockModel(
         "unavailable",
         `model access to ${foundation} isn't granted in ${region}`,
         `request access in the Bedrock console: ${access}`,
+      );
+    }
+    if (availability.agreement === "ERROR") {
+      const why = availability.agreementError?.trim();
+      return result(
+        "unavailable",
+        `the agreement for ${foundation} failed in ${region}${why === undefined || why === "" ? "" : `: ${checkDetail(why)}`}`,
+        `accept it again in the Bedrock console, ${access}`,
       );
     }
     if (availability.agreement !== undefined && availability.agreement !== "AVAILABLE") {
@@ -315,8 +334,38 @@ export async function checkBedrockModel(
   }
 }
 
-/** A GET with headers, answering only the status: an API-key check never reads a body. */
-export type StatusGet = (url: string, headers: Record<string, string>) => Promise<number>;
+/**
+ * A GET with headers, answering the status, and the body only for a 401: the one answer whose
+ * meaning depends on it (a bad key, or a restricted key without model reads).
+ */
+export type StatusGet = (
+  url: string,
+  headers: Record<string, string>,
+) => Promise<{ status: number; body?: string }>;
+
+/**
+ * Whether a 401's body says the key itself is bad: OpenAI's `invalid_api_key` or "Incorrect API
+ * key", Anthropic's `authentication_error` ("invalid x-api-key"). A 401 for missing scopes, as
+ * OpenAI gives a restricted key without `api.model.read`, isn't: that key may work for reviews.
+ */
+export function badKey(body: string | undefined): boolean {
+  if (body === undefined) return false;
+  let error: { code?: unknown; type?: unknown; message?: unknown } | undefined;
+  try {
+    const parsed = JSON.parse(body) as { error?: typeof error };
+    error = parsed.error;
+  } catch {
+    return false;
+  }
+  if (error === undefined || error === null) return false;
+  const message = typeof error.message === "string" ? error.message : "";
+  if (/insufficient permissions|missing scopes?/i.test(message)) return false;
+  return (
+    error.code === "invalid_api_key" ||
+    error.type === "authentication_error" ||
+    /\b(?:invalid|incorrect) (?:x-)?api[ -]key\b|api key (?:is )?invalid/i.test(message)
+  );
+}
 
 /**
  * Whether an API key can use a model: one authenticated `GET /v1/models/<model>`, which is free
@@ -342,8 +391,9 @@ export async function checkApiModel(
     ...(fix === undefined ? {} : { fix }),
   });
   let status: number;
+  let body: string | undefined;
   try {
-    status = await get(url, headers);
+    ({ status, body } = await get(url, headers));
   } catch (error) {
     return result("unknown", `couldn't check: ${checkDetail(error)}`);
   }
@@ -355,18 +405,18 @@ export async function checkApiModel(
       "check the model name in lgtmoose.config.ts",
     );
   }
-  if (status === 401) {
+  if (status === 401 && badKey(body)) {
     return result(
       "unavailable",
       `the ${vendor} API refused the stored key (HTTP 401)`,
       `store a working key with ${CLI_COMMAND} auth api-key --provider ${anthropic ? "anthropic" : "openai"} --id ${check.providerId}`,
     );
   }
-  if (status === 403) {
-    // A restricted key with model reads turned off gets 403 here, and still works for reviews.
+  if (status === 401 || status === 403) {
+    // A restricted key without model reads gets this here, and may still work for reviews.
     return result(
       "unknown",
-      `couldn't check: the ${vendor} API answered HTTP 403, so the key may lack only the permission to read models`,
+      `couldn't check: the ${vendor} API answered HTTP ${status} without calling the key invalid, so it may lack only the permission to read models`,
     );
   }
   return result("unknown", `couldn't check: the ${vendor} API answered HTTP ${status}`);
@@ -375,7 +425,9 @@ export async function checkApiModel(
 /** A failed check as one line for a person: provider, tiers, model, where, why and the fix. */
 export function describeModelProblem(result: ModelCheckResult): string {
   const tiers = result.tiers.join(", ");
-  const fix = result.fix === undefined ? "" : ` Fix: ${result.fix}.`;
+  // No full stop straight after a URL: it would be copied with it.
+  const end = result.fix !== undefined && /https?:\/\/\S+$/.test(result.fix) ? "" : ".";
+  const fix = result.fix === undefined ? "" : ` Fix: ${result.fix}${end}`;
   return `${result.providerId} (${tiers}): ${result.model}: ${result.problem ?? result.status}.${fix}`;
 }
 
@@ -408,6 +460,18 @@ export interface BedrockSdk {
   GetFoundationModelAvailabilityCommand: new (input: { modelId: string }) => unknown;
 }
 
+/**
+ * Options for the checks' `BedrockClient`: a few retries for throttling, and limits so a call
+ * that hangs can't use up the health check's run.
+ */
+export function bedrockClientOptions(region: string) {
+  return {
+    region,
+    maxAttempts: 3,
+    requestHandler: { connectionTimeout: 5_000, requestTimeout: 10_000 },
+  };
+}
+
 /** A `BedrockModelApi` on the AWS SDK's Bedrock client. */
 export function bedrockModelApi(sdk: BedrockSdk): BedrockModelApi {
   const send = async <T>(command: unknown): Promise<T> => {
@@ -422,17 +486,10 @@ export function bedrockModelApi(sdk: BedrockSdk): BedrockModelApi {
   };
   return {
     async inferenceProfile(id) {
-      const reply = await send<{
-        status?: string;
-        models?: { modelArn?: string }[];
-      }>(new sdk.GetInferenceProfileCommand({ inferenceProfileIdentifier: id }));
-      return {
-        status: reply.status,
-        modelIds: (reply.models ?? []).flatMap((model) => {
-          const id = /foundation-model\/(.+)$/.exec(model.modelArn ?? "")?.[1];
-          return id === undefined ? [] : [id];
-        }),
-      };
+      const reply = await send<{ status?: string }>(
+        new sdk.GetInferenceProfileCommand({ inferenceProfileIdentifier: id }),
+      );
+      return { status: reply.status };
     },
     async foundationModel(id) {
       const reply = await send<{ modelDetails?: { inferenceTypesSupported?: string[] } }>(
@@ -444,20 +501,28 @@ export function bedrockModelApi(sdk: BedrockSdk): BedrockModelApi {
       const reply = await send<{
         regionAvailability?: string;
         entitlementAvailability?: string;
-        agreementAvailability?: { status?: string };
+        agreementAvailability?: { status?: string; errorMessage?: string };
       }>(new sdk.GetFoundationModelAvailabilityCommand({ modelId: id }));
       return {
         region: reply.regionAvailability,
         entitlement: reply.entitlementAvailability,
         agreement: reply.agreementAvailability?.status,
+        agreementError: reply.agreementAvailability?.errorMessage,
       };
     },
   };
 }
 
-/** A `StatusGet` on `fetch`, which reads no body and gives up after 10 s. */
+/** The most of a 401's body read: enough for an API's error object. */
+const MAX_ERROR_BODY = 4096;
+
+/** A `StatusGet` on `fetch`: a 401's body (cut short) and no other, giving up after 10 s. */
 export const fetchStatus: StatusGet = async (url, headers) => {
   const reply = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
-  await reply.body?.cancel();
-  return reply.status;
+  if (reply.status !== 401) {
+    await reply.body?.cancel();
+    return { status: reply.status };
+  }
+  const body = (await reply.text()).slice(0, MAX_ERROR_BODY);
+  return { status: reply.status, body };
 };

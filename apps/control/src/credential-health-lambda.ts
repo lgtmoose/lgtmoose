@@ -1,5 +1,5 @@
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { bedrockModelApi, type BedrockModelApi } from "@lgtmoose/config";
+import { bedrockClientOptions, bedrockModelApi, type BedrockModelApi } from "@lgtmoose/config";
 import { checkCredentials } from "./credentials.js";
 import {
   credentialsFromEnv,
@@ -34,7 +34,7 @@ async function loadBedrock(region: string): Promise<BedrockModelApi> {
     if (typeof command !== "function") throw new Error(`@aws-sdk/client-bedrock has no ${name}.`);
   }
   return bedrockModelApi({
-    client: new BedrockClient({ region }),
+    client: new BedrockClient(bedrockClientOptions(region)),
     GetInferenceProfileCommand,
     GetFoundationModelCommand,
     GetFoundationModelAvailabilityCommand,

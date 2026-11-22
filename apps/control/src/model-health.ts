@@ -102,9 +102,11 @@ export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResu
   }
   for (const [providerId, found] of byProvider) {
     const unavailable = found.filter((result) => result.status === "unavailable");
+    // 0 needs at least one model that passed: a provider whose every check couldn't run reports
+    // nothing, and one model that's always unknown can't keep the alarm up once the rest pass.
     if (unavailable.length > 0) {
       deps.report(providerId, 1, unavailable.map(describeModelProblem));
-    } else if (found.every((result) => result.status === "ok")) {
+    } else if (found.some((result) => result.status === "ok")) {
       deps.report(providerId, 0);
     }
   }
