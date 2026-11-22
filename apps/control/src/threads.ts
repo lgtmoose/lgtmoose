@@ -142,12 +142,34 @@ const RESOLVE = `mutation ($threadId: ID!) {
 }`;
 
 const resolveReply = z.object({
-  errors: z.array(z.object({ message: z.string() })).optional(),
+  errors: z
+    .array(z.object({ message: z.string(), type: z.string().optional() }).passthrough())
+    .optional(),
 });
 
-/** Resolves one review thread through GitHub GraphQL. Throws on a GraphQL error. */
+/** GraphQL error types that mean the request will never succeed as it is. */
+const PERMANENT_TYPES = new Set(["NOT_FOUND", "FORBIDDEN", "UNPROCESSABLE"]);
+
+/**
+ * A GraphQL request GitHub answered with errors (HTTP 200). `permanent` when it failed for good
+ * (the thread is gone, the App may not resolve it), so retrying would fail the same way.
+ */
+export class GraphQlError extends Error {
+  readonly permanent: boolean;
+  constructor(errors: readonly { message: string; type?: string | undefined }[]) {
+    super(`GitHub GraphQL: ${errors.map((error) => error.message).join("; ")}`);
+    this.name = "GraphQlError";
+    this.permanent = errors.some(
+      (error) =>
+        (error.type !== undefined && PERMANENT_TYPES.has(error.type)) ||
+        /resource not accessible|could not resolve to a node/i.test(error.message),
+    );
+  }
+}
+
+/** Resolves one review thread through GitHub GraphQL. Throws a `GraphQlError` on an error. */
 export async function resolveReviewThread(graphql: GraphQl, threadId: string): Promise<void> {
   const reply = resolveReply.parse(await graphql(RESOLVE, { threadId }));
-  const errors = (reply.errors ?? []).map((error) => error.message);
-  if (errors.length > 0) throw new Error(`GitHub GraphQL: ${errors.join("; ")}`);
+  const errors = reply.errors ?? [];
+  if (errors.length > 0) throw new GraphQlError(errors);
 }

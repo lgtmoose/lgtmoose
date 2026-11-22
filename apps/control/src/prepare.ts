@@ -693,6 +693,26 @@ export async function prepare(
     });
     const { learnings } = deps;
     const taken = await takeReplies(deps, run.pullRequestId, settings);
+    // Carried findings the new commits may have fixed (NIC-1120): only on an incremental
+    // review, which is what carries findings over. A reply the judge reads this run already
+    // covers its finding. Chosen before the review is prepared, so the reviewer isn't shown
+    // their comments (`hiddenThreads`, as for a claimed fix): "not raised again" then means it
+    // looked at the code afresh. Numbered after the other batches, below.
+    const rechecking =
+      conversationOnly ||
+      full ||
+      lastReviewed === undefined ||
+      deps.findings.closeFixed === undefined
+        ? undefined
+        : await recheckJob({
+            repo,
+            records: await deps.findings.trackedFindings(run.pullRequestId),
+            skip: new Set(taken.pending.map((reply) => reply.findingId)),
+            sinceSha: lastReviewed,
+            headSha: pr.headSha,
+            index: 0,
+            log: (message, fields) => deps.log(message, fields),
+          });
     const planned = await prepareReview(
       {
         github: github.reader,
@@ -714,6 +734,9 @@ export async function prepare(
         hiddenThreads: new Set([
           ...repliedThreads(taken),
           ...((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []),
+          ...(rechecking?.targets.flatMap((target) =>
+            target.githubCommentId === undefined ? [] : [target.githubCommentId],
+          ) ?? []),
         ]),
       },
     );
@@ -753,18 +776,12 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
-    // Carried findings the new commits may have fixed (NIC-1120), checked again after the
-    // explains: only on an incremental review, which is what carries findings over. A reply the
-    // judge reads this run already covers its finding.
+    // The recheck, after the explains (none unless the review came out incremental).
     const recheck =
-      conversationOnly || prepared.kind !== "incremental" || deps.findings.closeFixed === undefined
+      rechecking === undefined || prepared.kind !== "incremental"
         ? undefined
-        : await recheckJob({
-            repo,
-            records: await deps.findings.trackedFindings(run.pullRequestId),
-            skip: new Set(taken.pending.map((reply) => reply.findingId)),
-            sinceSha: lastReviewed,
-            headSha: pr.headSha,
+        : {
+            ...rechecking,
             index:
               Math.max(
                 -1,
@@ -775,8 +792,7 @@ export async function prepare(
                   explain.index === undefined ? [] : [explain.index],
                 ),
               ) + 1,
-            log: (message, fields) => deps.log(message, fields),
-          });
+          };
     // What the caps let run, reserved before anything is dispatched: people's replies and
     // explains first, then tickets, then the review's batches in plan order (riskiest first),
     // then the recheck last (NIC-1120): near a cap, it's what's dropped, never a review batch.
@@ -827,9 +843,12 @@ export async function prepare(
       deps.log("recheck left out by a spend cap", { runId: run.runId, cap: spent.cap?.kind });
     }
     const cap = recheckOnly ? undefined : spent.cap;
+    // Counted without the recheck: a cheap recheck that still fit doesn't make a run that
+    // reviews nothing a new one.
+    const notRunBatches = notRun.filter((batch) => batch.kind !== "recheck").length;
     if (cap !== undefined && deps.spend !== undefined) {
       if (
-        notRun.length === wanted.length &&
+        notRunBatches === wanted.filter((batch) => batch.kind !== "recheck").length &&
         (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, cap))
       ) {
         await deps.runs.supersedeRun(run.runId);
@@ -964,7 +983,7 @@ export async function prepare(
             spendCap: {
               kind: cap.kind,
               batches: cappedReview,
-              reason: capReason(cap, notRun.length),
+              reason: capReason(cap, notRunBatches),
             },
           }),
       ...(conversationOnly ? { conversationOnly: true as const } : {}),

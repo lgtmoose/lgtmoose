@@ -266,7 +266,8 @@ export function recheckTotals(scores: readonly RecheckScore[]): RecheckTotals {
   return {
     scenarios: scores.length,
     correct: scores.filter(
-      (score) => !score.falseClose && !score.missedFix && score.error === undefined,
+      (score) =>
+        score.checked && !score.falseClose && !score.missedFix && score.error === undefined,
     ).length,
     falseCloses: scores.filter((score) => score.falseClose).length,
     missedFixes: scores.filter((score) => score.missedFix).length,
@@ -278,6 +279,8 @@ export function recheckTotals(scores: readonly RecheckScore[]): RecheckTotals {
 function resultOf(score: RecheckScore): string {
   if (score.error !== undefined) return `failed: ${score.error.split("\n")[0] ?? ""}`;
   if (score.falseClose) return "**closed, but it still holds**";
+  // Not picked for the recheck at all: the scenario tested nothing.
+  if (!score.checked) return "not picked";
   if (score.missedFix) return "kept open, though fixed";
   return score.closed ? "closed" : "kept open";
 }

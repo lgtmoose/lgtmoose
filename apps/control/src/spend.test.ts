@@ -60,6 +60,21 @@ describe("planSpend", () => {
     });
   });
 
+  it("drops the recheck, reserving nothing for it, when a review batch is cut", () => {
+    const recheck: PlannedBatch = { index: 9, kind: "recheck", tier: "fast" };
+    const plan = planSpend({
+      caps: { prCostPerDayUsd: 1.5 },
+      snapshot: nothingSpent,
+      override: false,
+      wanted: [review(0), review(1), recheck],
+      prices,
+      now: NOW,
+    });
+    expect([...plan.keep]).toEqual([0]);
+    expect(plan.dropped.map((batch) => batch.index)).toEqual([1, 9]);
+    expect(plan.reserveUsd).toBe(1);
+  });
+
   it("stops a PR at its runs per day", () => {
     const plan = planSpend({
       caps: { runsPerPrPerDay: 3 },

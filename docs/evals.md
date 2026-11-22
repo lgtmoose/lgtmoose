@@ -155,6 +155,7 @@ Each scenario runs the control task's own code: `recheckJob` picks the finding a
 
 - **False close:** a finding that still holds, closed as fixed. Any one fails the run, and such a run never becomes the baseline.
 - **Missed fix:** a fixed finding kept open. It's reported, not gated: it's noise, not harm.
+- **Not picked:** the finding wasn't chosen for the recheck at all, so the scenario tested nothing. It never counts as right.
 
 Without a model, the normal test job runs the scenarios with a stub that answers from the diff, so CI checks the plumbing:
 

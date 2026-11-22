@@ -131,4 +131,18 @@ describe("the recheck scenarios", () => {
     expect(recheckTotals(scores)).toMatchObject({ falseCloses: 1 });
     expect(renderRecheckMarkdown(scores, "stub")).toContain("**closed, but it still holds**");
   }, 60_000);
+
+  it("doesn't count a scenario whose finding wasn't picked as right", () => {
+    const unpicked = {
+      name: "unpicked",
+      expect: "holds" as const,
+      protected: false,
+      checked: false,
+      closed: false,
+      falseClose: false,
+      missedFix: false,
+    };
+    expect(recheckTotals([unpicked])).toMatchObject({ scenarios: 1, correct: 0 });
+    expect(renderRecheckMarkdown([unpicked], "stub")).toContain("not picked");
+  });
 });

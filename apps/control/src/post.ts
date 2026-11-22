@@ -60,6 +60,7 @@ import { ticketReview } from "./tickets.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
 import { readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
+import { GraphQlError } from "./threads.js";
 
 /** The App's slug, for the `remember` offer; none when it can't be read (no offer then). */
 async function slugOf(github: { slug?: () => Promise<string> }): Promise<{ slug?: string }> {
@@ -465,53 +466,53 @@ async function settleRunReplies(
   return { ...settled, saved: false, close };
 }
 
+/** What the recheck came to (NIC-1120): the fixes, and whether they're saved already. */
+interface RecheckPlan {
+  writes: RecheckWrites;
+  /** Read from `rechecks.json`, saved by an earlier attempt of this run. */
+  saved: boolean;
+}
+
 /**
- * Closes the carried findings the run's recheck showed are fixed (NIC-1120), before the
- * decision, so it counts them closed. `fixedByRecheck` says which: the problem is gone, this
- * run's review didn't raise it again, and a protected-category one names its fix. What it
- * means to do is saved first (`rechecks.json`, once: an attempt racing this one decided the
- * same, and its file stands), then applied. So an attempt that dies part way through leaves the
- * whole list, and its retry closes the rest and writes every reply; closing a finding already
- * closed changes nothing. Without a recheck, or when its batch gave no verdicts, every finding
- * stays open.
+ * The carried findings the run's recheck showed are fixed (NIC-1120), for the decision to count
+ * closed. Worked out in memory: nothing is saved or closed until this attempt holds the claims
+ * and the run still counts (`applyRecheck`). `fixedByRecheck` says which: the problem is gone,
+ * this run's review didn't raise it again, and a protected-category one names its fix. A
+ * finding on a file this run was to review and didn't (its batch failed, timed out or was
+ * capped) stays open: "not raised again" says nothing there. An earlier attempt's saved list
+ * stands. Without a recheck, or when its batch gave no verdicts, every finding stays open.
  */
-async function settleRecheck(
+async function planRecheck(
   deps: ControlDeps,
   runId: string,
   manifest: RunManifest,
-  report: Pick<ReviewReport, "reraised">,
+  report: Pick<ReviewReport, "reraised" | "reviewedNow">,
   open: readonly { id: string }[],
-  pullRequestId: string,
-): Promise<{ closed: Set<string>; writes?: RecheckWrites }> {
+): Promise<RecheckPlan | undefined> {
   const job = manifest.recheck;
-  const closeFixed = deps.findings.closeFixed?.bind(deps.findings);
-  if (job === undefined || closeFixed === undefined) return { closed: new Set() };
-  const key = runKeys(runId).rechecks;
-  let writes: RecheckWrites;
-  const saved = await deps.store.getText(key);
+  if (job === undefined || deps.findings.closeFixed === undefined) return undefined;
+  const saved = await deps.store.getText(runKeys(runId).rechecks);
   if (saved !== undefined) {
-    writes = recheckWritesSchema.parse(JSON.parse(saved));
-  } else {
-    const verdicts = await readVerdicts(deps.store, runId, job.index);
-    if (verdicts === undefined) {
-      deps.log("recheck gave no verdicts; the findings stay open", {
-        runId,
-        count: job.targets.length,
-      });
-      return { closed: new Set() };
-    }
-    // A file in a review batch a spend cap kept from running wasn't reviewed again, so "not
-    // raised again" says nothing about it: its findings stay open. (The prepare step drops the
-    // recheck when any review batch is capped; this holds even for a manifest that didn't.)
-    const capped = new Set(manifest.spendCap?.batches ?? []);
-    const unreviewed = new Set(
-      manifest.review.jobs.flatMap((batch) => (capped.has(batch.index) ? batch.files : [])),
-    );
-    const fixes = fixedByRecheck(job, verdicts, {
-      reraised: new Set(report.reraised),
-      open: new Set(open.map((entry) => entry.id)),
-    }).filter((fix) => !unreviewed.has(fix.entry.path));
-    const intended: RecheckWrites = {
+    return { writes: recheckWritesSchema.parse(JSON.parse(saved)), saved: true };
+  }
+  const verdicts = await readVerdicts(deps.store, runId, job.index);
+  if (verdicts === undefined) {
+    deps.log("recheck gave no verdicts; the findings stay open", {
+      runId,
+      count: job.targets.length,
+    });
+    return undefined;
+  }
+  const reviewed = new Set(report.reviewedNow);
+  const unreviewed = new Set(
+    manifest.review.jobs.flatMap((batch) => batch.files.filter((file) => !reviewed.has(file))),
+  );
+  const fixes = fixedByRecheck(job, verdicts, {
+    reraised: new Set(report.reraised),
+    open: new Set(open.map((entry) => entry.id)),
+  }).filter((fix) => !unreviewed.has(fix.entry.path));
+  return {
+    writes: {
       version: 1,
       fixed: fixes.map((fix) => ({
         findingId: fix.entry.findingId,
@@ -520,12 +521,34 @@ async function settleRecheck(
           : { githubCommentId: fix.entry.githubCommentId }),
         reason: fix.reason,
       })),
-    };
-    if ((await deps.store.createText(key, JSON.stringify(intended))) !== undefined) {
-      writes = intended;
-    } else {
+    },
+    saved: false,
+  };
+}
+
+/**
+ * Closes the recheck's fixes, once this attempt holds the claims and the run still counts (a
+ * stale run closes nothing). What it means to do is saved first (`rechecks.json`, once: an
+ * attempt racing this one decided the same, and its file stands), then applied. So an attempt
+ * that dies part way through leaves the whole list, and its retry closes the rest and writes
+ * every reply; closing a finding already closed changes nothing. Returns those that are ours to
+ * reply to and resolve.
+ */
+async function applyRecheck(
+  deps: ControlDeps,
+  runId: string,
+  manifest: RunManifest,
+  plan: RecheckPlan,
+  pullRequestId: string,
+): Promise<RecheckWrites> {
+  const closeFixed = deps.findings.closeFixed?.bind(deps.findings);
+  if (closeFixed === undefined) return { ...plan.writes, fixed: [] };
+  let { writes } = plan;
+  if (!plan.saved) {
+    const key = runKeys(runId).rechecks;
+    if ((await deps.store.createText(key, JSON.stringify(writes))) === undefined) {
       const theirs = await deps.store.getText(key);
-      writes = theirs === undefined ? intended : recheckWritesSchema.parse(JSON.parse(theirs));
+      if (theirs !== undefined) writes = recheckWritesSchema.parse(JSON.parse(theirs));
     }
   }
   const closedNow = new Set<string>();
@@ -546,16 +569,13 @@ async function settleRecheck(
   );
   deps.log("carried findings rechecked", {
     runId,
-    checked: job.targets.length,
+    checked: manifest.recheck?.targets.length ?? 0,
     closed: ours.length,
     ...(ours.length < writes.fixed.length
       ? { closedOtherwise: writes.fixed.length - ours.length }
       : {}),
   });
-  return {
-    closed: new Set(ours.map((fixed) => fixed.findingId)),
-    writes: { ...writes, fixed: ours },
-  };
+  return { ...writes, fixed: ours };
 }
 
 /**
@@ -564,6 +584,7 @@ async function settleRecheck(
  * good is never retried: it would fail the same way every time.
  */
 function transient(error: unknown): boolean {
+  if (error instanceof GraphQlError) return !error.permanent;
   if (!refused(error)) return true;
   const { status, rateLimited } = error as GitHubError;
   return status === 429 || rateLimited;
@@ -1314,7 +1335,7 @@ export async function post(
   let latest: Awaited<ReturnType<typeof github.reader.pull>>;
   let outdated: string[];
   let reopened: string[];
-  let recheckWrites: RecheckWrites | undefined;
+  let recheckPlan: RecheckPlan | undefined;
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -1472,20 +1493,13 @@ export async function post(
       if (fixed.size > 0)
         report = await finish(earlier.open.filter((entry) => !fixed.has(entry.id)));
     }
-    // Carried findings the recheck showed are fixed elsewhere (NIC-1120): closed, and the
-    // decision made again without them.
+    // Carried findings the recheck showed are fixed elsewhere (NIC-1120): the decision is made
+    // again without them. They're closed once the claims are held and the run still counts.
     const stillOpen = earlier.open.filter((entry) => !judgedFixed.has(entry.id));
-    const rechecked = await settleRecheck(
-      deps,
-      runId,
-      manifest,
-      report,
-      stillOpen,
-      run.pullRequestId,
-    );
-    recheckWrites = rechecked.writes;
-    if (rechecked.closed.size > 0) {
-      report = await finish(stillOpen.filter((entry) => !rechecked.closed.has(entry.id)));
+    recheckPlan = await planRecheck(deps, runId, manifest, report, stillOpen);
+    const recheckClosed = new Set(recheckPlan?.writes.fixed.map((fixed) => fixed.findingId));
+    if (recheckClosed.size > 0) {
+      report = await finish(stillOpen.filter((entry) => !recheckClosed.has(entry.id)));
     }
     if (report.others > 0 || report.misses.length > 0) {
       deps.log("other reviewers' findings", {
@@ -1580,6 +1594,12 @@ export async function post(
       findings,
       reviewed: false,
     };
+  }
+
+  // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
+  let recheckWrites: RecheckWrites | undefined;
+  if (recheckPlan !== undefined && recheckPlan.writes.fixed.length > 0 && !progress.rechecks) {
+    recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan, run.pullRequestId);
   }
 
   const { decision } = report;
@@ -1808,6 +1828,112 @@ export async function post(
     }
     await deps.runs.coverRun(runId, coveredResult(progress));
   };
+  /**
+   * The recheck's fixes (NIC-1120): a reply in each finding's thread saying where it was fixed,
+   * and the thread resolved, as for a fix the judge saw. Written after the review, check run,
+   * summary and label, so a write that keeps failing never holds those up. Each one written is
+   * saved; the step is done only when all are, so a failed one is written by the step's retry.
+   */
+  const writeRechecks = async () => {
+    if (recheckWrites === undefined || recheckWrites.fixed.length === 0 || progress.rechecks) {
+      return;
+    }
+    const writer = github.conversation;
+    const replied = new Set(progress.rechecksReplied ?? []);
+    const resolved = new Set(progress.rechecksResolved ?? []);
+    // Saved after each write, so an attempt that dies part way never writes one twice.
+    const mark = async (set: Set<string>, findingId: string) => {
+      set.add(findingId);
+      progress.rechecksReplied = [...replied];
+      progress.rechecksResolved = [...resolved];
+      await save();
+    };
+    // The threads, read again here if the read before the decision failed: a thread is
+    // resolved only by its ID. Still unread (null), the resolve waits for the step's retry;
+    // undefined means the thread is gone.
+    let known = threads;
+    const threadOf = async (root: number): Promise<string | undefined | null> => {
+      if (known === undefined) {
+        try {
+          known = await github.threads.reviewThreads(target);
+        } catch {
+          return null;
+        }
+      }
+      return known.find((entry) => entry.firstCommentId === root)?.id;
+    };
+    let later = 0;
+    /** Logs a failed write; true when it failed for now, and the step's retry writes it. */
+    const failed = async (findingId: string, what: string, error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (transient(error)) {
+        later += 1;
+        deps.log(`recheck ${what} not written; the retry writes it`, {
+          runId,
+          findingId,
+          error: message,
+        });
+        return true;
+      }
+      // For good (the comment is gone, the conversation locked, the thread deleted): the
+      // finding is closed either way, and trying again would only fail again.
+      deps.log(`recheck ${what} can't be written`, { runId, findingId, error: message });
+      await mark(what === "reply" ? replied : resolved, findingId);
+      return false;
+    };
+    if (writer !== undefined) {
+      for (const fixed of recheckWrites.fixed) {
+        const root = fixed.githubCommentId;
+        if (root === undefined) continue;
+        if (!replied.has(fixed.findingId)) {
+          // A reply that failed for now (a timeout, a 5xx) may have reached GitHub all the
+          // same; its retry then posts it again. Rare, and harmless: the same note twice.
+          let sent = false;
+          try {
+            await writer.reply(
+              target,
+              root,
+              `${recheckReply(pr.headSha, fixed.reason)}\n\n${JUDGE_REPLY_MARKER}`,
+            );
+            sent = true;
+          } catch (error) {
+            // Failed for good, the thread is still resolved: the finding is closed.
+            if (await failed(fixed.findingId, "reply", error)) continue;
+          }
+          // Saved straight after it went out, outside the catch: a reply on GitHub is never
+          // taken for one that failed.
+          if (sent) await mark(replied, fixed.findingId);
+        }
+        if (resolved.has(fixed.findingId)) continue;
+        const threadId = await threadOf(root);
+        if (threadId === null) {
+          later += 1;
+          continue;
+        }
+        if (threadId === undefined) {
+          // No thread to resolve (its comment is gone): nothing more to do.
+          await mark(resolved, fixed.findingId);
+          continue;
+        }
+        try {
+          await writer.resolveThread(threadId);
+        } catch (error) {
+          await failed(fixed.findingId, "resolve", error);
+          continue;
+        }
+        await mark(resolved, fixed.findingId);
+      }
+    }
+    if (later > 0) {
+      throw new Error(
+        `${later} recheck replies or resolves weren't written; the retry writes them.`,
+      );
+    }
+    progress.rechecks = true;
+    delete progress.rechecksReplied;
+    delete progress.rechecksResolved;
+    await save();
+  };
   try {
     if (!progress.review) {
       // Our review on the head covers this run when it's complete, or when this run wouldn't
@@ -1920,102 +2046,9 @@ export async function post(
       progress.explanations = true;
       await save();
     }
-    // The recheck's fixes (NIC-1120): a reply in each finding's thread saying where it was
-    // fixed, and the thread resolved, as for a fix the judge saw. Each one written is saved; the
-    // step is done only when all are, so a failed one is written by the step's retry.
-    if (recheckWrites !== undefined && recheckWrites.fixed.length > 0 && !progress.rechecks) {
-      const writer = github.conversation;
-      const replied = new Set(progress.rechecksReplied ?? []);
-      const resolved = new Set(progress.rechecksResolved ?? []);
-      // Saved after each write, so an attempt that dies part way never writes one twice.
-      const mark = async (set: Set<string>, findingId: string) => {
-        set.add(findingId);
-        progress.rechecksReplied = [...replied];
-        progress.rechecksResolved = [...resolved];
-        await save();
-      };
-      // The threads, read again here if the read before the decision failed: a thread is
-      // resolved only by its ID. Still unread (null), the resolve waits for the step's retry;
-      // undefined means the thread is gone.
-      let known = threads;
-      const threadOf = async (root: number): Promise<string | undefined | null> => {
-        if (known === undefined) {
-          try {
-            known = await github.threads.reviewThreads(target);
-          } catch {
-            return null;
-          }
-        }
-        return known.find((entry) => entry.firstCommentId === root)?.id;
-      };
-      let later = 0;
-      const failed = async (findingId: string, what: string, error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        if (transient(error)) {
-          later += 1;
-          deps.log(`recheck ${what} not written; the retry writes it`, {
-            runId,
-            findingId,
-            error: message,
-          });
-          return;
-        }
-        // For good (the comment is gone, the conversation locked): the finding is closed
-        // either way, and trying again would only fail again.
-        deps.log(`recheck ${what} can't be written`, { runId, findingId, error: message });
-        await mark(what === "reply" ? replied : resolved, findingId);
-      };
-      if (writer !== undefined) {
-        for (const fixed of recheckWrites.fixed) {
-          const root = fixed.githubCommentId;
-          if (root === undefined) continue;
-          if (!replied.has(fixed.findingId)) {
-            try {
-              await writer.reply(
-                target,
-                root,
-                `${recheckReply(pr.headSha, fixed.reason)}\n\n${JUDGE_REPLY_MARKER}`,
-              );
-            } catch (error) {
-              await failed(fixed.findingId, "reply", error);
-              continue;
-            }
-            // Saved straight after it went out, outside the catch: a reply on GitHub is never
-            // taken for one that failed.
-            await mark(replied, fixed.findingId);
-          }
-          if (resolved.has(fixed.findingId)) continue;
-          const threadId = await threadOf(root);
-          if (threadId === null) {
-            later += 1;
-            continue;
-          }
-          if (threadId === undefined) {
-            // No thread to resolve (its comment is gone): nothing more to do.
-            await mark(resolved, fixed.findingId);
-            continue;
-          }
-          try {
-            await writer.resolveThread(threadId);
-          } catch (error) {
-            await failed(fixed.findingId, "resolve", error);
-            continue;
-          }
-          await mark(resolved, fixed.findingId);
-        }
-      }
-      if (later > 0) {
-        throw new Error(
-          `${later} recheck replies or resolves weren't written; the retry writes them.`,
-        );
-      }
-      progress.rechecks = true;
-      delete progress.rechecksReplied;
-      delete progress.rechecksResolved;
-      await save();
-    }
     if (progress.coveredBy !== undefined) {
       await cover(progress.coveredBy);
+      await writeRechecks();
       await releaseLogged(headClaim, head.etag);
       deps.log("covered", { runId, coveredBy: progress.coveredBy });
       return {
@@ -2038,6 +2071,7 @@ export async function post(
     if (decision.label !== undefined && !progress.label && !(await deps.runs.newerRunPosted(run))) {
       await writeLabel(decision.label);
     }
+    await writeRechecks();
   } catch (error) {
     // The review is on GitHub: record the run, with the summary comment if it got that far, so
     // a later run edits that comment and doesn't review the head again. Covered, it records

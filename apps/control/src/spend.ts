@@ -192,7 +192,10 @@ export function planSpend(input: {
   for (const batch of wanted) {
     const estimate = batchEstimate(batch, prices, snapshot.averageBatchUsd);
     const fits = binding === undefined || reserveUsd + estimate <= binding.left;
-    if (!fits || stopped.has(batch.kind)) {
+    // The recheck relies on the review having read every file it was to (NIC-1120): with a
+    // review batch cut, it's dropped too, and nothing is reserved for it.
+    const orphaned = batch.kind === "recheck" && stopped.has("review");
+    if (!fits || orphaned || stopped.has(batch.kind)) {
       stopped.add(batch.kind);
       dropped.push(batch);
       continue;

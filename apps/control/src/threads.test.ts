@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { graphQlThreadReader, type GraphQl } from "./threads.js";
+import { GraphQlError, graphQlThreadReader, resolveReviewThread, type GraphQl } from "./threads.js";
 
 const TARGET = { owner: "acme", repo: "shop", number: 7 };
 
@@ -94,5 +94,41 @@ describe("graphQlThreadReader", () => {
     );
     const missing = graphQlThreadReader(async () => ({ data: { repository: null } }));
     await expect(missing.reviewThreads(TARGET)).rejects.toThrow("no such pull request");
+  });
+});
+
+describe("resolveReviewThread", () => {
+  const failing =
+    (errors: unknown[]): GraphQl =>
+    async () => ({ data: null, errors });
+
+  it("resolves when GitHub answers without errors", async () => {
+    await expect(
+      resolveReviewThread(async () => ({ data: { resolveReviewThread: {} } }), "PRRT_1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws a permanent error for a deleted thread or a forbidden one", async () => {
+    for (const errors of [
+      [{ type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'x'" }],
+      [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }],
+      [{ type: "UNPROCESSABLE", message: "Thread is locked" }],
+      [{ message: "Resource not accessible by integration" }],
+    ]) {
+      const error: unknown = await resolveReviewThread(failing(errors), "PRRT_1").catch(
+        (thrown: unknown) => thrown,
+      );
+      expect(error).toBeInstanceOf(GraphQlError);
+      expect((error as GraphQlError).permanent).toBe(true);
+    }
+  });
+
+  it("throws a transient error for anything else", async () => {
+    const error: unknown = await resolveReviewThread(
+      failing([{ type: "INTERNAL", message: "Something went wrong" }]),
+      "PRRT_1",
+    ).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(GraphQlError);
+    expect((error as GraphQlError).permanent).toBe(false);
   });
 });

@@ -19,7 +19,7 @@ import {
 import { GitHubError, ShadowPoster, type MarkedReview, type Poster } from "@lgtmoose/poster";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tarArchive } from "./aws.js";
-import type { ReviewThread } from "./threads.js";
+import { GraphQlError, type ReviewThread } from "./threads.js";
 import type {
   ArtifactStore,
   ChecksWait,
@@ -4017,14 +4017,16 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
   const exec = (n: number) => `${EXECUTION}-${n}`;
 
   /** A harness whose store can close findings on the recheck's word, and GitHub writes kept. */
-  function rechecking() {
-    const h = harness({
-      commentIds: true,
-      threads: () => [
-        { resolved: false, firstCommentId: 1000, id: "PRRT_1" },
-        { resolved: false, firstCommentId: 1001, id: "PRRT_2" },
-      ],
-    });
+  function rechecking(setup: Setup = {}) {
+    const h = harness(
+      Object.assign(setup, {
+        commentIds: true,
+        threads: () => [
+          { resolved: false, firstCommentId: 1000, id: "PRRT_1" },
+          { resolved: false, firstCommentId: 1001, id: "PRRT_2" },
+        ],
+      }),
+    );
     const writes: string[] = [];
     /**
      * What the next replies and resolves do, in order: fail with the error, as GitHub would, or
@@ -4301,7 +4303,12 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     fail.replies.push(new GitHubError(404, "Not Found", "POST", "/replies"));
     const posted = await post(h.deps, prepared.runId, offEcs("a1"));
     expect(posted).toMatchObject({ event: "APPROVE", posted: true });
-    expect(writes).toEqual([expect.stringMatching(/^reply 1001: /), "resolve PRRT_2"]);
+    // Its thread is resolved all the same: the finding is closed.
+    expect(writes).toEqual([
+      "resolve PRRT_1",
+      expect.stringMatching(/^reply 1001: /),
+      "resolve PRRT_2",
+    ]);
     expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
     expect(h.logs).toContain("recheck reply can't be written");
   });
@@ -4373,6 +4380,130 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     await post(h.deps, prepared.runId, offEcs("a2"));
     expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "declined"]);
     expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1000: /)]);
+  });
+
+  it("treats a GraphQL refusal to resolve as for good, after the review, summary and label", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    // GitHub answers the resolve with HTTP 200 and a GraphQL error: the thread was deleted,
+    // or the App may not resolve it. Neither ever succeeds; the post goes on.
+    fail.resolves.push(
+      new GraphQlError([{ type: "NOT_FOUND", message: "Could not resolve to a node" }]),
+      new GraphQlError([{ message: "Resource not accessible by integration" }]),
+    );
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(replies(writes)).toHaveLength(2);
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([]);
+    expect(h.logs).toContain("recheck resolve can't be written");
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+  });
+
+  it("writes the review, check run, summary and label before a reply that fails for now", async () => {
+    const { h, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    fail.replies.push(new GitHubError(502, "Bad Gateway", "POST", "/replies"));
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    const progress = JSON.parse(h.objects.get(runKeys(prepared.runId).posted) ?? "{}") as Record<
+      string,
+      unknown
+    >;
+    expect(progress).toMatchObject({ review: true, findings: true, summary: true, label: true });
+    expect(progress.rechecks).toBeUndefined();
+  });
+
+  it("closes nothing and saves no recheck when the run turns out stale", async () => {
+    const setup: Setup = {};
+    const { h, writes } = rechecking(setup);
+    const prepared = await twoFixed(h);
+    // The PR moved on before the post: the run no longer counts.
+    setup.head = "f".repeat(40);
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ posted: false });
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["open", "open"]);
+    expect(h.objects.has(runKeys(prepared.runId).rechecks)).toBe(false);
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps a finding open when the review batch for its file failed", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    // The finding's own file changes too, so this run's review was to read it again.
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("  let sum = 0;", "  let sum = 0; // total"),
+        "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n",
+      },
+      "fix in the caller, touch the file",
+    );
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    const recheckIndex = manifest.recheck?.index ?? -1;
+    expect(manifest.review.jobs.some((job) => job.files.includes("src/total.ts"))).toBe(true);
+    // The review batches write nothing (they timed out); the recheck says it's fixed.
+    h.objects.set(
+      runKeys(prepared.runId).batchOutput(recheckIndex),
+      JSON.stringify({
+        version: 1,
+        index: recheckIndex,
+        verdicts: [{ id: "F1", confirmed: false, reason: "src/checkout.ts adds it." }],
+        transcriptKeys: [],
+      }),
+    );
+    await post(h.deps, prepared.runId);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("doesn't show the reviewer our comment on a finding it rechecks", async () => {
+    const { h } = rechecking({
+      comments: () => [
+        {
+          id: 2000,
+          inReplyTo: 1000,
+          author: "alice",
+          body: "REPLY-IN-OUR-THREAD",
+          path: "src/total.ts",
+          line: 3,
+        },
+        { id: 7, author: "bob", body: "SOME-OTHER-NOTE", path: "src/total.ts", line: 4 },
+      ],
+    });
+    await run(h, 1, [finding()]);
+    headSha = await commit(
+      {
+        "src/total.ts": HEAD_TOTAL.replace("  let sum = 0;", "  let sum = 0; // total"),
+        "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n",
+      },
+      "fix in the caller, touch the file",
+    );
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    expect(manifest.recheck?.targets.map((target) => target.githubCommentId)).toEqual([1000]);
+    const review = manifest.review.jobs.find((job) => job.files.includes("src/total.ts"));
+    expect(review?.prompt).toContain("SOME-OTHER-NOTE");
+    expect(review?.prompt).not.toContain("REPLY-IN-OUR-THREAD");
+  });
+
+  it("posts nothing new when a cap stops every review batch, though the recheck would fit", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    // The head's last run was stopped by this cap already. The probe sees nothing spent (the
+    // ledger moved on since), so only the plan finds the review doesn't fit; the recheck would.
+    const spend = memorySpend({ averageBatchUsd: 10 }, "pr_cost");
+    spend.store.snapshot = async () => ({
+      prDayRuns: 0,
+      prDayUsd: 0,
+      repoMonthUsd: 0,
+      monthUsd: 0,
+      averageBatchUsd: 1,
+    });
+    h.deps.spend = {
+      store: spend.store,
+      budgets: budgetsSchema.parse({ perPullRequest: { costPerDayUsd: 5 } }),
+    };
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    expect(prepared).toMatchObject({ superseded: true, batches: [] });
   });
 
   it("runs no recheck when a cap leaves out a review batch", async () => {
