@@ -192,6 +192,34 @@ describe("runSandboxBatch", () => {
     expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
   });
 
+  it("runs a recheck batch on the fast model, and writes its verdicts", async () => {
+    const s = setup({
+      input: {
+        version: 1,
+        runId: RUN_ID,
+        index: 7,
+        prompt: "Check these findings again",
+        role: "recheck",
+        tier: "fast",
+        model: "sonnet",
+        timeoutMs: 60_000,
+      },
+      output: {
+        verdicts: [
+          { id: "F1", confirmed: false, reason: "src/pay.ts line 9 maps the saved card." },
+        ],
+      },
+    });
+    s.deps.model = "sonnet";
+    s.deps.fastModel = "haiku";
+    const output = await runSandboxBatch(s.deps, `${BASE}/urls.json?X-Amz-Signature=s`);
+    expect(s.runs[0]).toMatchObject({ model: "haiku", tier: "fast" });
+    expect(s.runs[0]?.system).toBeUndefined();
+    expect(output).toMatchObject({ index: 7, verdicts: [{ id: "F1", confirmed: false }] });
+    expect(output.findings).toBeUndefined();
+    expect(JSON.parse(s.puts.get("/runs/output.json") ?? "")).toEqual(output);
+  });
+
   it("runs a ticket batch on the fast model with no system, and writes its checklist", async () => {
     const s = setup({
       input: {

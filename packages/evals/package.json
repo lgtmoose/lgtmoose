@@ -18,7 +18,8 @@
     "dist",
     "fixtures",
     "baseline.json",
-    "learning"
+    "learning",
+    "recheck"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

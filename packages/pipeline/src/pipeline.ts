@@ -10,6 +10,7 @@ import {
   fingerprint,
   fingerprintParts,
   judgementSchema,
+  recheckOutputSchema,
   reviewerOutputSchema,
   severityRank,
   MAX_TICKET_GAPS,
@@ -21,6 +22,7 @@ import {
   type Finding,
   type HoldReason,
   type Judgement,
+  type Verdict,
   type TicketCoverageResult,
   type FingerprintParts,
   type KnownFinding,
@@ -41,6 +43,7 @@ import {
 import {
   BOOTSTRAPPER_TIER,
   EXPLAINER_TIER,
+  RECHECK_TIER,
   REPLY_JUDGE_TIER,
   TICKET_CHECKER_TIER,
   buildReviewerParts,
@@ -1034,6 +1037,48 @@ export async function runJudge(
     return {
       index: job.index,
       judgement: result.output,
+      transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+  } catch (error) {
+    const keys = error instanceof HarnessError ? [...error.transcriptKeys] : [];
+    return { index: job.index, error: errorText(error), transcriptKeys: keys };
+  }
+}
+
+/** What the recheck's run came to (NIC-1120): its verdicts, or why it failed. */
+export interface RecheckOutcome {
+  index: number;
+  verdicts?: Verdict[];
+  error?: string;
+  transcriptKeys: string[];
+  usage?: HarnessUsage;
+}
+
+/**
+ * Runs the recheck on our open findings the new commits may have fixed (its prompt from
+ * `buildRecheckPrompt`), on the fast tier. A failed run is an outcome with `error`, never a
+ * throw.
+ */
+export async function runRecheck(
+  harness: Harness,
+  job: { index: number; prompt: string },
+  options: Omit<RunBatchOptions, "system">,
+): Promise<RecheckOutcome> {
+  try {
+    const result = await harness.run({
+      prompt: job.prompt,
+      cwd: options.cwd,
+      schema: recheckOutputSchema,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      runId: options.runId,
+      ...(options.thinkingTokens === undefined ? {} : { thinkingTokens: options.thinkingTokens }),
+      tier: RECHECK_TIER,
+    });
+    return {
+      index: job.index,
+      verdicts: result.output.verdicts,
       transcriptKeys: result.transcriptKeys ?? [result.transcriptKey],
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };

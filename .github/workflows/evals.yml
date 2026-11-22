@@ -5,7 +5,8 @@ name: Evals
 # (packages/harness), the pipeline itself, learning, or the evals. It posts the report on the PR
 # (one comment, edited on each run) and fails when recall drops below packages/evals/baseline.json,
 # or the learning-speed scenarios (on the fast tier) show collateral, an untrusted learning in a
-# prompt, or a repeat rate above the baseline's.
+# prompt, or a repeat rate above the baseline's, or the recheck closes a carried finding that
+# still holds (a recheck scenario that errored or gave no verdict fails it too).
 #
 # Model runs cost money and need a credential: set the ANTHROPIC_API_KEY or
 # CLAUDE_CODE_OAUTH_TOKEN repository secret to turn the job on. Without one (and on PRs from
@@ -24,6 +25,8 @@ on:
       - packages/learnings/**
       - apps/control/src/commands.ts
       - apps/control/src/outcome-learning.ts
+      # What the recheck scenarios exercise: picking carried findings and closing fixed ones.
+      - apps/control/src/recheck.ts
       - packages/evals/**
       - .github/workflows/evals.yml
 

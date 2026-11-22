@@ -5,7 +5,7 @@ import type { ControlCommand, ReviewSettings } from "./env.js";
 import { fail } from "./fail.js";
 import { parseJob } from "./job.js";
 import type { ControlDeps } from "./ports.js";
-import { post } from "./post.js";
+import { countAttempt, post } from "./post.js";
 import { prepare } from "./prepare.js";
 import { isDeadToken } from "./sfn.js";
 
@@ -248,6 +248,11 @@ export async function runCommand(
     }
     case "post": {
       let failure: unknown;
+      // Counted first, before anything that could fail: the last attempt knows it's the last.
+      const counted = await countAttempt(deps, command.runId).catch((error: unknown) => {
+        deps.log("post attempt not counted", { executionArn, error: causeOf(error) });
+        return undefined;
+      });
       try {
         const running = async () => (await deps.executionStatus(executionArn)) === "RUNNING";
         const bootstrap = (await deps.bootstrap?.store.get(command.runId)) !== undefined;
@@ -256,7 +261,13 @@ export async function runCommand(
             ? postBootstrap(deps, command.runId)
             : post(deps, command.runId, {
                 running,
-                attempt: { id: randomUUID(), taskArn: await deps.taskArn() },
+                attempt: {
+                  id: randomUUID(),
+                  taskArn: await deps.taskArn(),
+                  ...(command.attempts === undefined ? {} : { of: command.attempts }),
+                  ...(command.retry === undefined ? {} : { retry: command.retry }),
+                  ...(counted === undefined ? {} : { number: counted }),
+                },
                 taskStatus: (taskArn) => deps.taskStatus(taskArn),
                 executionStatus: (arn) => deps.executionStatus(arn),
               }),

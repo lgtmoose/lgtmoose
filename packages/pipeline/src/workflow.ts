@@ -5,6 +5,7 @@ import {
   findingSchema,
   judgementSchema,
   ticketCoverageSchema,
+  verifierOutputSchema,
 } from "@lgtmoose/core";
 import { MODEL_TIERS, transcriptKey } from "@lgtmoose/harness";
 import { z } from "zod";
@@ -60,6 +61,16 @@ export function runKeys(runId: string) {
      * is acted on, so a retried attempt writes the same replies rather than deciding again.
      */
     replies: `${root}replies.json`,
+    /**
+     * What the post step decided about the run's recheck (NIC-1120): the findings it closed as
+     * fixed, written once so a retried attempt writes the same thread replies.
+     */
+    rechecks: `${root}rechecks.json`,
+    /**
+     * How many times the post step has started for the run: its attempt number, counted by the
+     * attempts themselves (the workflow's retry count also counts tasks that never started).
+     */
+    postAttempts: `${root}post-attempts.json`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,
@@ -161,9 +172,11 @@ export const batchInputSchema = z
      * the ticket checker on one ticket (`buildTicketCoveragePrompt`), whose output is a
      * `coverage`, the explainer on one finding (`buildExplainPrompt`), whose output is an
      * `explanation`, or the bootstrapper on a batch of a repository's past review comments
-     * (`buildBootstrapPrompt`, NIC-1080), whose output is `candidates`.
+     * (`buildBootstrapPrompt`, NIC-1080), whose output is `candidates`, or the recheck on our
+     * open findings the new commits may have fixed (`buildRecheckPrompt`, NIC-1120), whose
+     * output is `verdicts`.
      */
-    role: z.enum(["reviewer", "judge", "ticket", "explain", "bootstrap"]).optional(),
+    role: z.enum(["reviewer", "judge", "ticket", "explain", "bootstrap", "recheck"]).optional(),
     /**
      * The model tier: the judge runs on `fast`. The sandbox then runs its provider's fast model
      * (`LGTMOOSE_FAST_MODEL`) instead of `model`.
@@ -232,6 +245,11 @@ export const batchOutputSchema = z
      * output: proposals only, which the post step checks and stores as pending.
      */
     candidates: bootstrapOutputSchema.shape.candidates.optional(),
+    /**
+     * The recheck's verdicts, for a recheck batch (`BatchInput.role`, NIC-1120): `confirmed`
+     * means the finding still holds. Model output: plain code decides what closes.
+     */
+    verdicts: verifierOutputSchema.shape.verdicts.optional(),
     error: z.string().max(4000).optional(),
     transcriptKeys: z.array(z.string().max(300)).max(TRANSCRIPT_ATTEMPTS),
     usage: usageSchema.optional(),
@@ -245,11 +263,12 @@ export const batchOutputSchema = z
         output.coverage,
         output.explanation,
         output.candidates,
+        output.verdicts,
         output.error,
       ].filter((part) => part !== undefined).length === 1,
     {
       message:
-        "a batch output has exactly one of findings, a judgement, a coverage, an explanation, candidates or an error",
+        "a batch output has exactly one of findings, a judgement, a coverage, an explanation, candidates, verdicts or an error",
     },
   )
   .refine((output) => output.notes === undefined || output.findings !== undefined, {

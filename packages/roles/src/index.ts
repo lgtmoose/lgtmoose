@@ -57,6 +57,13 @@ export {
 } from "./reply-judge.js";
 export { EXPLAINER_TIER, buildExplainPrompt, type ExplainInput } from "./explainer.js";
 export {
+  MAX_RECHECK_FINDINGS,
+  RECHECK_TIER,
+  buildRecheckPrompt,
+  type RecheckPromptInput,
+  type RecheckTarget,
+} from "./recheck.js";
+export {
   BOOTSTRAPPER_TIER,
   buildBootstrapPrompt,
   type BootstrapComment,

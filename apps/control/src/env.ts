@@ -404,7 +404,16 @@ export function readTicketSettings(env: Env): TicketSettings {
  */
 export type ControlCommand =
   | { command: "prepare"; executionArn: string; job: string; taskToken: string }
-  | { command: "post"; executionArn: string; runId: string; taskToken: string }
+  | {
+      command: "post";
+      executionArn: string;
+      runId: string;
+      taskToken: string;
+      /** How many attempts the post step has: unset when not told. */
+      attempts?: number;
+      /** The state's retry count for this attempt (from 0): unset when not told. */
+      retry?: number;
+    }
   | { command: "fail"; executionArn: string; error: string };
 
 export function readCommand(env: Env): ControlCommand {
@@ -423,13 +432,22 @@ export function readCommand(env: Env): ControlCommand {
         job: need("LGTMOOSE_JOB"),
         taskToken: need("LGTMOOSE_TASK_TOKEN"),
       };
-    case "post":
+    case "post": {
+      const count = (name: string) => {
+        const value = env[name]?.trim();
+        return value !== undefined && /^\d{1,4}$/.test(value) ? Number(value) : undefined;
+      };
+      const of = count("LGTMOOSE_POST_ATTEMPTS");
+      const retry = count("LGTMOOSE_POST_RETRY");
       return {
         command,
         executionArn,
         runId: need("LGTMOOSE_RUN_ID"),
         taskToken: need("LGTMOOSE_TASK_TOKEN"),
+        ...(of === undefined || of === 0 ? {} : { attempts: of }),
+        ...(retry === undefined ? {} : { retry }),
       };
+    }
     case "fail":
       return { command, executionArn, error: env.LGTMOOSE_ERROR?.trim() || "unknown error" };
     default:

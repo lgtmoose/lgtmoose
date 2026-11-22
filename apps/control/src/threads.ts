@@ -15,9 +15,16 @@ export interface ReviewThread {
   id?: string;
 }
 
+/**
+ * A PR's review threads. `partial` when some may be missing: GitHub left some out (errors with
+ * data), one came without its ID, or there were more pages than are read. Unset, the list is
+ * the PR's every thread, so one not in it is gone.
+ */
+export type ReviewThreadList = ReviewThread[] & { partial?: true };
+
 /** Reads a PR's review threads. GraphQL only: REST doesn't say whether a thread is resolved. */
 export interface ReviewThreadReader {
-  reviewThreads(target: PullTarget): Promise<ReviewThread[]>;
+  reviewThreads(target: PullTarget): Promise<ReviewThreadList>;
 }
 
 /** One authenticated GitHub GraphQL request, resolving to the JSON body (`data` and `errors`). */
@@ -98,8 +105,10 @@ export function graphQlThreadReader(
 ): ReviewThreadReader {
   return {
     async reviewThreads(target) {
-      const threads: ReviewThread[] = [];
+      const threads: ReviewThreadList = [];
+      let partial = false;
       let after: string | null = null;
+      let more = false;
       for (let page = 0; page < MAX_PAGES; page++) {
         const reply = replySchema.parse(
           await graphql(QUERY, {
@@ -118,20 +127,33 @@ export function graphQlThreadReader(
               : "GitHub GraphQL: no such pull request.",
           );
         }
-        if (errors.length > 0) onErrors(errors);
+        if (errors.length > 0) {
+          onErrors(errors);
+          partial = true;
+        }
         for (const node of list.nodes) {
-          if (node === null) continue;
+          if (node === null) {
+            partial = true;
+            continue;
+          }
+          // Without its ID, or its first comment's, it can't be found by either.
+          if (node.id === undefined) partial = true;
           const resolvedBy = node.resolvedBy?.login;
+          const firstCommentId = commentId(node.comments.nodes[0]?.fullDatabaseId);
+          if (firstCommentId === undefined) partial = true;
           threads.push({
             resolved: node.isResolved,
-            firstCommentId: commentId(node.comments.nodes[0]?.fullDatabaseId),
+            firstCommentId,
             ...(node.isResolved && resolvedBy !== undefined ? { resolvedBy } : {}),
             ...(node.id === undefined ? {} : { id: node.id }),
           });
         }
-        if (!list.pageInfo.hasNextPage || list.pageInfo.endCursor === null) break;
+        more = list.pageInfo.hasNextPage;
+        if (!more || list.pageInfo.endCursor === null) break;
         after = list.pageInfo.endCursor;
       }
+      // Past the last page read, or a next page with no cursor to it: not every thread.
+      if (partial || more) threads.partial = true;
       return threads;
     },
   };
@@ -142,12 +164,34 @@ const RESOLVE = `mutation ($threadId: ID!) {
 }`;
 
 const resolveReply = z.object({
-  errors: z.array(z.object({ message: z.string() })).optional(),
+  errors: z
+    .array(z.object({ message: z.string(), type: z.string().optional() }).passthrough())
+    .optional(),
 });
 
-/** Resolves one review thread through GitHub GraphQL. Throws on a GraphQL error. */
+/** GraphQL error types that mean the request will never succeed as it is. */
+const PERMANENT_TYPES = new Set(["NOT_FOUND", "FORBIDDEN", "UNPROCESSABLE"]);
+
+/**
+ * A GraphQL request GitHub answered with errors (HTTP 200). `permanent` when it failed for good
+ * (the thread is gone, the App may not resolve it), so retrying would fail the same way.
+ */
+export class GraphQlError extends Error {
+  readonly permanent: boolean;
+  constructor(errors: readonly { message: string; type?: string | undefined }[]) {
+    super(`GitHub GraphQL: ${errors.map((error) => error.message).join("; ")}`);
+    this.name = "GraphQlError";
+    this.permanent = errors.some(
+      (error) =>
+        (error.type !== undefined && PERMANENT_TYPES.has(error.type)) ||
+        /resource not accessible|could not resolve to a node/i.test(error.message),
+    );
+  }
+}
+
+/** Resolves one review thread through GitHub GraphQL. Throws a `GraphQlError` on an error. */
 export async function resolveReviewThread(graphql: GraphQl, threadId: string): Promise<void> {
   const reply = resolveReply.parse(await graphql(RESOLVE, { threadId }));
-  const errors = (reply.errors ?? []).map((error) => error.message);
-  if (errors.length > 0) throw new Error(`GitHub GraphQL: ${errors.join("; ")}`);
+  const errors = reply.errors ?? [];
+  if (errors.length > 0) throw new GraphQlError(errors);
 }

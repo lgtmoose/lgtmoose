@@ -13,11 +13,13 @@ import {
 } from "@lgtmoose/pipeline";
 import {
   EXPLAINER_TIER,
+  RECHECK_TIER,
   REPLY_JUDGE_TIER,
   TICKET_CHECKER_TIER,
   buildReplyJudgePrompt,
 } from "@lgtmoose/roles";
 import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
+import { RECHECK_TIMEOUT_MS, recheckJob, type RecheckJob } from "./recheck.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { reviewGate, waitingCheckRun } from "./trigger.js";
@@ -86,6 +88,11 @@ export interface RunManifest {
   tickets?: TicketsManifest;
   /** The `explain`s this run answers (NIC-1053); their batches follow the tickets'. */
   explanations?: ExplainJob[];
+  /**
+   * Our open findings the new commits may have fixed, checked again in one batch after the
+   * explains' (NIC-1120). The post step closes the ones it shows are fixed.
+   */
+  recheck?: RecheckJob;
   /**
    * The spend cap that kept batches from running (NIC-1079): which, the review batches it kept
    * (not dispatched), and what the summary says.
@@ -704,33 +711,64 @@ export async function prepare(
     });
     const { learnings } = deps;
     const taken = await takeReplies(deps, run.pullRequestId, settings);
-    const planned = await prepareReview(
-      {
-        github: github.reader,
-        progress: (line) => deps.log(line),
-        // A conversation-only run builds no reviewer prompts, so it ranks no learnings.
-        ...(learnings === undefined || conversationOnly
-          ? {}
-          : {
-              learnings: (batch) =>
-                learnings({ org: target.owner, repo: `${target.owner}/${target.repo}`, ...batch }),
-            }),
-      },
-      target,
-      repo,
-      pr,
-      {
-        reviewed,
-        resumed,
-        hiddenThreads: new Set([
-          ...repliedThreads(taken),
-          ...((await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? []),
-        ]),
-      },
-    );
+    // Carried findings the new commits may have fixed (NIC-1120): only on an incremental
+    // review, which is what carries findings over. A reply the judge reads this run already
+    // covers its finding. Chosen before the review is prepared, so the reviewer isn't shown
+    // their comments (`hiddenThreads`, as for a claimed fix): "not raised again" then means it
+    // looked at the code afresh. Numbered after the other batches, below. Should the recheck
+    // not run after all (the review isn't incremental, or the caps leave it out), the review's
+    // prompts are built again with those comments in.
+    const rechecking =
+      conversationOnly ||
+      full ||
+      lastReviewed === undefined ||
+      deps.findings.closeFixed === undefined
+        ? undefined
+        : await recheckJob({
+            repo,
+            records: await deps.findings.trackedFindings(run.pullRequestId),
+            skip: new Set(taken.pending.map((reply) => reply.findingId)),
+            sinceSha: lastReviewed,
+            headSha: pr.headSha,
+            baseSha: pr.baseSha,
+            index: 0,
+            log: (message, fields) => deps.log(message, fields),
+          });
+    const fixedIds = (await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? [];
+    const recheckIds =
+      rechecking?.targets.flatMap((target) =>
+        target.githubCommentId === undefined ? [] : [target.githubCommentId],
+      ) ?? [];
+    const review = (hidden: readonly number[]) =>
+      prepareReview(
+        {
+          github: github.reader,
+          progress: (line) => deps.log(line),
+          // A conversation-only run builds no reviewer prompts, so it ranks no learnings.
+          ...(learnings === undefined || conversationOnly
+            ? {}
+            : {
+                learnings: (batch) =>
+                  learnings({
+                    org: target.owner,
+                    repo: `${target.owner}/${target.repo}`,
+                    ...batch,
+                  }),
+              }),
+        },
+        target,
+        repo,
+        pr,
+        {
+          reviewed,
+          resumed,
+          hiddenThreads: new Set([...repliedThreads(taken), ...fixedIds, ...hidden]),
+        },
+      );
+    const planned = await review(recheckIds);
     // A conversation-only run keeps the plan (the post step reads the PR from it) but reviews
     // none of it: no review batches.
-    const prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
+    let prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
     const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     // Linked tickets, read here with the provider's credential; their text goes to the sandbox
@@ -764,8 +802,26 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
+    // The recheck, after the explains (none unless the review came out incremental).
+    const recheck =
+      rechecking === undefined || prepared.kind !== "incremental"
+        ? undefined
+        : {
+            ...rechecking,
+            index:
+              Math.max(
+                -1,
+                ...prepared.jobs.map((batch) => batch.index),
+                ...judges.map((j) => j.index),
+                ...tickets.batches.map((ticket) => ticket.index),
+                ...explains.flatMap((explain) =>
+                  explain.index === undefined ? [] : [explain.index],
+                ),
+              ) + 1,
+          };
     // What the caps let run, reserved before anything is dispatched: people's replies and
-    // explains first, then tickets, then the review's batches in plan order (riskiest first).
+    // explains first, then tickets, then the review's batches in plan order (riskiest first),
+    // then the recheck last (NIC-1120): near a cap, it's what's dropped, never a review batch.
     const wanted: PlannedBatch[] = [
       ...judges.map((judge) => ({
         index: judge.index,
@@ -787,6 +843,9 @@ export async function prepare(
           ? []
           : [{ index: batch.index, kind: "review" as const, tier: "standard" as Tier }],
       ),
+      ...(recheck === undefined
+        ? []
+        : [{ index: recheck.index, kind: "recheck" as const, tier: RECHECK_TIER as Tier }]),
     ];
     const spent =
       deps.spend === undefined
@@ -803,16 +862,26 @@ export async function prepare(
             (message, fields) => deps.log(message, fields),
           );
     const notRun = wanted.filter((batch) => !spent.runs(batch.index));
-    if (spent.cap !== undefined && deps.spend !== undefined) {
+    // A cap that left out only the recheck (NIC-1120) doesn't make the review a capped one: its
+    // carried findings stay open, as before the recheck, and the review says nothing about it.
+    const recheckOnly = notRun.length > 0 && notRun.every((batch) => batch.kind === "recheck");
+    if (recheckOnly) {
+      deps.log("recheck left out by a spend cap", { runId: run.runId, cap: spent.cap?.kind });
+    }
+    const cap = recheckOnly ? undefined : spent.cap;
+    // Counted without the recheck: a cheap recheck that still fit doesn't make a run that
+    // reviews nothing a new one.
+    const notRunBatches = notRun.filter((batch) => batch.kind !== "recheck").length;
+    if (cap !== undefined && deps.spend !== undefined) {
       if (
-        notRun.length === wanted.length &&
-        (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, spent.cap))
+        notRunBatches === wanted.filter((batch) => batch.kind !== "recheck").length &&
+        (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, cap))
       ) {
         await deps.runs.supersedeRun(run.runId);
-        deps.log("spend capped, nothing new to post", { runId: run.runId, cap: spent.cap.kind });
+        deps.log("spend capped, nothing new to post", { runId: run.runId, cap: cap.kind });
         return { runId: run.runId, superseded: true, batches: [] };
       }
-      await deps.spend.store.markCapped(run.runId, spent.cap.kind);
+      await deps.spend.store.markCapped(run.runId, cap.kind);
     }
     const keptJudges = judges.filter((judge) => spent.runs(judge.index));
     const keptExplains = explains.filter(
@@ -831,6 +900,36 @@ export async function prepare(
             }),
           };
     const cappedReview = notRun.filter((batch) => batch.kind === "review").map((b) => b.index);
+    // The recheck closes a finding the review didn't raise again, which says nothing about a
+    // file a capped review batch didn't read: with any review batch left out, no recheck.
+    const keptRecheck =
+      recheck !== undefined && spent.runs(recheck.index) && cappedReview.length === 0
+        ? recheck
+        : undefined;
+    // Its findings' comments were hidden from the reviewer for nothing: shown again. The plan
+    // is the same (comments don't change it), so only the prompts are taken from the rebuild.
+    if (keptRecheck === undefined && recheckIds.length > 0 && !conversationOnly) {
+      const shown = await review([]);
+      const same =
+        shown.jobs.length === prepared.jobs.length &&
+        shown.jobs.every(
+          (job, i) =>
+            job.index === prepared.jobs[i]?.index &&
+            job.files.join("\n") === prepared.jobs[i]?.files.join("\n"),
+        );
+      if (same) {
+        prepared = {
+          ...prepared,
+          jobs: shown.jobs,
+          ...(shown.reviewerSystem === undefined ? {} : { reviewerSystem: shown.reviewerSystem }),
+          ...(shown.reviewerShared === undefined ? {} : { reviewerShared: shown.reviewerShared }),
+        };
+      } else {
+        deps.log("review prompts not rebuilt: the plan came out differently", {
+          runId: run.runId,
+        });
+      }
+    }
 
     await sealCheckout(repo, planned);
     const archive = join(work.dir, "checkout.tar.gz");
@@ -897,6 +996,20 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(explain.index), JSON.stringify(input));
       batches.push({ index: explain.index });
     }
+    if (keptRecheck !== undefined) {
+      const input: BatchInput = batchInputSchema.parse({
+        version: 1,
+        runId: run.runId,
+        index: keptRecheck.index,
+        prompt: keptRecheck.prompt,
+        role: "recheck",
+        tier: RECHECK_TIER,
+        model: settings.model,
+        timeoutMs: Math.min(settings.batchTimeoutMs, RECHECK_TIMEOUT_MS),
+      });
+      await deps.store.putText(keys.batchInput(keptRecheck.index), JSON.stringify(input));
+      batches.push({ index: keptRecheck.index });
+    }
     const manifest: RunManifest = {
       version: MANIFEST_VERSION,
       installationId: job.installationId,
@@ -909,13 +1022,16 @@ export async function prepare(
       ...(keptExplains.length === 0
         ? {}
         : { explanations: keptExplains.map(({ prompt: _, ...rest }) => rest) }),
-      ...(spent.cap === undefined
+      ...(keptRecheck === undefined
+        ? {}
+        : { recheck: (({ prompt: _, ...rest }) => rest)(keptRecheck) }),
+      ...(cap === undefined
         ? {}
         : {
             spendCap: {
-              kind: spent.cap.kind,
+              kind: cap.kind,
               batches: cappedReview,
-              reason: capReason(spent.cap, notRun.length),
+              reason: capReason(cap, notRunBatches),
             },
           }),
       ...(conversationOnly ? { conversationOnly: true as const } : {}),
