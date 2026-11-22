@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,13 +19,12 @@ import { join } from "node:path";
  *
  * - **the teardown,** when the run ends. It puts TMPDIR, TEMP and TMP back first. This also covers
  *   a test file that failed to collect, a worker that was killed, and a test that never removed
- *   what it made;
- * - **an `exit` listener,** when Vitest exits without running the teardown. On SIGINT and SIGTERM
- *   (Ctrl+C, a cancelled CI job), Vitest's own handler calls `process.exit()`, which fires `exit`;
- * - **the next run's setup,** for a run whose main process was killed outright (SIGKILL, a crash).
- *   Each directory holds its owner's PID in `.owner`. Setup removes the `lgtmoose-cdk-test-*`
- *   directories that belong to this user and whose owner process is gone, in one attempt, and says
- *   nothing if that fails. On a platform without `process.getuid`, it sweeps nothing.
+ *   what it made. If the removal fails, the `exit` listener below stays registered to try again;
+ * - **an `exit` listener,** when Vitest exits without a successful teardown. On SIGINT and SIGTERM
+ *   (Ctrl+C, a cancelled CI job), Vitest's own handler calls `process.exit()`, which fires `exit`.
+ *
+ * A run whose main process is killed outright (SIGKILL, a crash) runs neither, and leaves its one
+ * `lgtmoose-cdk-test-*` directory behind for the system's temp cleanup or a person to remove.
  *
  * Nothing is removed while the run is going: a test or a file-level hook can count on its
  * temporary files existing until the run ends, and shouldn't count on them being gone before then.
@@ -33,77 +32,38 @@ import { join } from "node:path";
  * fine for a dev loop.
  */
 const ENV_NAMES = ["TMPDIR", "TEMP", "TMP"] as const;
-const PREFIX = "lgtmoose-cdk-test-";
-const OWNER_FILE = ".owner";
 
-function removeQuietly(path: string): void {
-  try {
-    rmSync(path, { recursive: true, force: true });
-  } catch {
-    // Best effort: a later run, or the system's own temp cleanup, gets it.
-  }
-}
-
-/** Whether a process with this PID still exists. */
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM: it exists, but belongs to someone else.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-/** Removes the directories in `parent` left by this user's runs whose process is gone. */
-function sweepOrphans(parent: string): void {
-  const uid = process.getuid?.();
-  if (uid === undefined) return;
-  let names: string[];
-  try {
-    names = readdirSync(parent);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (!name.startsWith(PREFIX)) continue;
-    const path = join(parent, name);
-    try {
-      if (statSync(path).uid !== uid) continue;
-      const pid = Number.parseInt(readFileSync(join(path, OWNER_FILE), "utf8"), 10);
-      if (!Number.isInteger(pid) || pid <= 0 || alive(pid)) continue;
-    } catch {
-      // No owner file, or not ours to read: leave it.
-      continue;
-    }
-    removeQuietly(path);
-  }
+function removeRoot(root: string): void {
+  rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 }
 
 export default function setup(): () => void {
-  const parent = tmpdir();
-  sweepOrphans(parent);
-
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
-  const root = mkdtempSync(join(parent, PREFIX));
-  writeFileSync(join(root, OWNER_FILE), String(process.pid));
+  const root = mkdtempSync(join(tmpdir(), "lgtmoose-cdk-test-"));
   for (const name of ENV_NAMES) process.env[name] = root;
 
-  const onExit = () => removeQuietly(root);
+  const onExit = () => {
+    try {
+      removeRoot(root);
+    } catch {
+      // Nothing more to do while the process exits.
+    }
+  };
   process.once("exit", onExit);
 
   return () => {
-    process.off("exit", onExit);
     for (const name of ENV_NAMES) {
       const value = original[name];
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
     try {
-      rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+      removeRoot(root);
+      process.off("exit", onExit);
     } catch (error) {
+      // The exit listener stays registered, so the removal is tried again after the pool closes.
       process.emitWarning(
-        `infra/cdk global-setup: couldn't remove ${root}: ${error instanceof Error ? error.message : String(error)}`,
+        `infra/cdk global-setup: couldn't remove ${root} yet, trying again on exit: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
