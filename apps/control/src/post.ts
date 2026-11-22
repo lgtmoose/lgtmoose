@@ -679,7 +679,10 @@ export interface PostAttempt {
   id: string;
   /** The ECS task running it; undefined off ECS. */
   taskArn: string | undefined;
-  /** How many attempts the post step has (its retries and the first); unset when not known. */
+  /**
+   * How many attempts the post step has (its retries and the first). Unset when not known: then
+   * any attempt may be the last, and none fails the step over the recheck's notes.
+   */
   of?: number;
   /** Its number, from 1, as the run's own count has it (`countAttempt`); counted here if unset. */
   number?: number;
@@ -2054,10 +2057,11 @@ export async function post(
     // Either count saying so is enough: losing a note on a thread is cheaper than failing a
     // run whose review is out. The own count misses an attempt that died before counting (and
     // carries over into a redriven execution); the retry count includes tasks that never ran.
+    // With no total known, any attempt may be the last: it never fails over them either.
     const lastAttempt =
-      attempt.of !== undefined &&
-      (attemptNumber >= attempt.of ||
-        (attempt.retry !== undefined && attempt.retry + 1 >= attempt.of));
+      attempt.of === undefined ||
+      attemptNumber >= attempt.of ||
+      (attempt.retry !== undefined && attempt.retry + 1 >= attempt.of);
     if (later > 0 && tries < RECHECK_WRITE_ATTEMPTS && !lastAttempt) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,

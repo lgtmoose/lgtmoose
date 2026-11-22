@@ -9,6 +9,29 @@ import { prepare, type PrepareSettings } from "../prepare.js";
 import { POST_FAILED, PREPARE_FAILED } from "../run.js";
 
 /**
+ * Post attempts running in this process, by the name they claim under (`<runner>#<attempt>`).
+ * An earlier attempt of a run, retried in the same process, has ended when it's not here: its
+ * claim can be taken over, as a stopped ECS task's can.
+ */
+const livePosts = new Set<string>();
+
+/**
+ * A review claim's holder, as `taskStatus` reports one: one of this process's post attempts is
+ * running while it's live; another runner's stands while that runner is alive. A claim named by
+ * this runner alone (from before attempts were named) is taken to be running, as before.
+ */
+async function holderStatus(
+  holder: string,
+  owner: string,
+  runnerAlive: (runnerId: string) => Promise<boolean>,
+): Promise<string> {
+  const mark = holder.lastIndexOf("#");
+  const runner = mark === -1 ? holder : holder.slice(0, mark);
+  if (runner === owner) return mark === -1 || livePosts.has(holder) ? "RUNNING" : "STOPPED";
+  return (await runnerAlive(runner)) ? "RUNNING" : "STOPPED";
+}
+
+/**
  * The review workflow without Step Functions, for docker compose (NIC-843): the state machine in
  * infra/cdk/lib/review-workflow.ts, run in the runner's process. It calls the same steps the
  * control task runs (`prepare`, `post`, `fail`): only the orchestration around them is new.
@@ -105,11 +128,11 @@ export async function runExecution(
     }
     await deps.executions.finish(arn, "FAILED", `${error}: ${cause}`);
   };
-  /** Tries `step` up to `attempts` times, waiting longer each time. */
-  const retried = async <T>(name: string, step: () => Promise<T>): Promise<T> => {
+  /** Tries `step` up to `attempts` times, waiting longer each time; it's told which try it is. */
+  const retried = async <T>(name: string, step: (attempt: number) => Promise<T>): Promise<T> => {
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await step();
+        return await step(attempt);
       } catch (error) {
         control.log(`${name} failed`, { executionArn: arn, attempt, error: message(error) });
         if (attempt >= attempts) throw error;
@@ -200,15 +223,25 @@ export async function runExecution(
   // A stopped execution's post still runs, as on AWS (post waits for its task token, so a stop
   // doesn't cut it short): it sees the execution isn't running and marks the run superseded.
   try {
-    await retried("post", () =>
-      post(control, prepared.runId, {
-        running,
-        attempt: { id: randomUUID(), taskArn: deps.owner },
-        taskStatus: async (holder) =>
-          holder === deps.owner || (await deps.runnerAlive(holder)) ? "RUNNING" : "STOPPED",
-        executionStatus: (executionArn) => deps.executions.status(executionArn),
-      }),
-    );
+    await retried("post", async (attempt) => {
+      // Named apart, so the next try can take over this one's claim once it has ended.
+      const id = randomUUID();
+      const task = `${deps.owner}#${id}`;
+      livePosts.add(task);
+      try {
+        return await post(control, prepared.runId, {
+          running,
+          // Which try this is, of how many, as on AWS: the last one never fails the run over a
+          // note on a thread once its review is out.
+          attempt: { id, taskArn: task, number: attempt, of: attempts },
+          taskStatus: (holder) =>
+            holderStatus(holder, deps.owner, (runner) => deps.runnerAlive(runner)),
+          executionStatus: (executionArn) => deps.executions.status(executionArn),
+        });
+      } finally {
+        livePosts.delete(task);
+      }
+    });
   } catch (error) {
     await failRun(POST_FAILED, message(error));
     return;

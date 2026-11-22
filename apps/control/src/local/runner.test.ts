@@ -17,8 +17,9 @@ import {
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { cloneAtSha } from "@lgtmoose/git";
 import { runKeys, type BatchOutput, type PullRequest } from "@lgtmoose/pipeline";
-import { ShadowPoster } from "@lgtmoose/poster";
+import { GitHubError, ShadowPoster } from "@lgtmoose/poster";
 import { eq } from "drizzle-orm";
+import { findings as findingRows } from "@lgtmoose/db";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -110,7 +111,16 @@ const store = postgresArtifactStore(db);
 /** Each test gets its own PR number, so runs in the shared database don't meet. */
 let nextPr = 100;
 
-function setup(options: { runBatch?: BatchRunner } = {}) {
+function setup(
+  options: {
+    runBatch?: BatchRunner;
+    attempts?: number;
+    /** GitHub as the recheck's writes need it: comment IDs, threads and a conversation writer. */
+    github?: Partial<Awaited<ReturnType<ControlDeps["github"]>>>;
+    /** Wraps the finding store, to make its writes fail. */
+    findings?: (store: ControlDeps["findings"]) => ControlDeps["findings"];
+  } = {},
+) {
   const prNumber = nextPr++;
   const logs: { message: string; fields?: Record<string, unknown> }[] = [];
   const log = (message: string, fields?: Record<string, unknown>) => {
@@ -129,7 +139,7 @@ function setup(options: { runBatch?: BatchRunner } = {}) {
   const control: ControlDeps = {
     store,
     runs: drizzleRunStore(db),
-    findings: drizzleFindingStore(db),
+    findings: (options.findings ?? ((store) => store))(drizzleFindingStore(db)),
     // Prepare and post report back to Step Functions only on AWS.
     tokens: { succeed: async () => undefined, fail: async () => undefined },
     async github() {
@@ -139,6 +149,7 @@ function setup(options: { runBatch?: BatchRunner } = {}) {
         token: async () => "",
         poster: (runId) =>
           new ShadowPoster({ store: { put: (key, body) => store.putText(key, body) }, runId }),
+        ...options.github,
       };
     },
     clone: cloneAtSha,
@@ -185,7 +196,7 @@ function setup(options: { runBatch?: BatchRunner } = {}) {
       runBatch: options.runBatch ?? reviewer,
       settings: { model: "", batchTimeoutMs: 60_000 },
       maxConcurrency: 2,
-      attempts: 1,
+      attempts: options.attempts ?? 1,
       sleep: async () => undefined,
       runnerAlive: async () => false,
     },
@@ -345,4 +356,110 @@ describe("the compose runner", () => {
     const execution = await t.executions.get(t.executions.arnOf(name));
     expect(execution).toMatchObject({ status: "RUNNING", owner: "a-live-runner" });
   }, 60_000);
+
+  it("ends a posted run posted on its last post attempt, though a recheck reply keeps failing", async () => {
+    // Each inline comment gets an ID, as on GitHub, so the recheck has a thread to reply on.
+    let nextComment = 7000;
+    const writes: string[] = [];
+    let closes = 0;
+    const t = setup({
+      attempts: 3,
+      github: {
+        threads: {
+          reviewThreads: async () => [{ resolved: false, firstCommentId: 7000, id: "PRRT_1" }],
+        },
+        conversation: {
+          reply: async () => {
+            throw new GitHubError(502, "Bad Gateway", "POST", "/replies");
+          },
+          comment: async () => undefined,
+          resolveThread: async (id) => {
+            writes.push(`resolve ${id}`);
+          },
+        },
+        poster: (runId) => {
+          const shadow = new ShadowPoster({
+            store: { put: (key, body) => store.putText(key, body) },
+            runId,
+          });
+          const submit = shadow.submitReview.bind(shadow);
+          shadow.submitReview = async (...args) => {
+            const review = await submit(...args);
+            return { ...review, commentIds: review.payload.comments.map(() => nextComment++) };
+          };
+          return shadow;
+        },
+      },
+      // The first post attempt that closes a finding fails there, before the recheck's writes.
+      findings: (inner) => ({
+        ...inner,
+        closeFixed: async (id, sha) => {
+          closes += 1;
+          if (closes === 1) throw new Error("the database went away");
+          return (await inner.closeFixed?.(id, sha)) ?? "theirs";
+        },
+      }),
+      runBatch: async ({ runId, index }) => {
+        const input = JSON.parse(
+          (await store.getText(runKeys(runId).batchInput(index))) ?? "{}",
+        ) as {
+          role?: string;
+        };
+        const output: BatchOutput =
+          input.role === "recheck"
+            ? {
+                version: 1,
+                index,
+                verdicts: [
+                  { id: "F1", confirmed: false, reason: "src/checkout.ts line 1 adds the item." },
+                ],
+                transcriptKeys: [],
+              }
+            : {
+                version: 1,
+                index,
+                findings:
+                  closes === 0 && nextComment === 7000
+                    ? [
+                        {
+                          rule_category: "correctness",
+                          severity: "blocking",
+                          path: "src/total.ts",
+                          line: 3,
+                          side: "RIGHT",
+                          title: "Loop skips the last item",
+                          body: "The bound drops the last item from the total.",
+                          evidence: "for (let i = 0; i < items.length - 1; i++) {",
+                        },
+                      ]
+                    : [],
+                transcriptKeys: [],
+              };
+        await store.putText(runKeys(runId).batchOutput(index), JSON.stringify(output));
+      },
+    });
+    // The first review raises the finding.
+    await t.deliver(t.job());
+    await t.drain();
+    expect(nextComment).toBe(7001);
+    // The fix lands in another file: the next review's recheck closes it, and every reply to
+    // its thread fails for now. Post attempt 1 fails before the writes, 2 leaves the reply to
+    // the next, and 3 is the last: it gives the reply up and the run ends posted.
+    headSha = await commit(
+      { "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n" },
+      "fix in the caller",
+    );
+    await t.deliver(t.job({ kind: "pr_updated", headSha }));
+    await t.drain();
+    const arn = t.executions.arnOf(executionNameFor(t.prNumber));
+    expect(await t.executions.status(arn)).toBe("SUCCEEDED");
+    const messages = t.logs.map((entry) => entry.message);
+    expect(messages.filter((message) => message === "post failed")).toHaveLength(2);
+    expect(messages).toContain("recheck replies or resolves given up");
+    const [row] = await db
+      .select({ status: findingRows.status })
+      .from(findingRows)
+      .where(eq(findingRows.githubCommentId, 7000));
+    expect(row?.status).toBe("fixed");
+  }, 120_000);
 });

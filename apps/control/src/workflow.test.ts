@@ -4245,7 +4245,8 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
         ),
       );
     }
-    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+    // Off ECS, one of many attempts: a recheck write that fails for now is left to the next.
+    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined, of: 10 } });
 
     await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow(
       "the database went away",
@@ -4290,7 +4291,8 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     }
     return prepared;
   }
-  const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+  // Off ECS, one of many attempts: a recheck write that fails for now is left to the next.
+  const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined, of: 10 } });
   const replies = (writes: string[]) => writes.filter((write) => write.startsWith("reply "));
 
   it("writes a reply that failed for now on the retry, and each one once", async () => {
@@ -4830,6 +4832,19 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "open"]);
     expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
     expect(replies(writes).map((write) => write.slice(0, 10))).toEqual(["reply 1000"]);
+  });
+
+  it("never fails over a recheck write when the step's attempts aren't known", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    fail.replies.push(new GitHubError(502, "Bad Gateway", "POST", "/replies"));
+    // No total of attempts: any of them may be the last, so what's left is only logged.
+    const posted = await post(h.deps, prepared.runId, {
+      attempt: { id: "a1", taskArn: undefined },
+    });
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("recheck replies or resolves given up");
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
   });
 
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {
