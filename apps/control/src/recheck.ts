@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import { isProtectedCategory, type Verdict } from "@lgtmoose/core";
-import { type Repo, trackLines } from "@lgtmoose/git";
+import { type LineRef, type Repo, trackLines } from "@lgtmoose/git";
 import { batchOutputSchema, runKeys } from "@lgtmoose/pipeline";
 import {
   MAX_RECHECK_FINDINGS,
@@ -196,28 +196,45 @@ async function lineStates(
   repo: Repo,
   records: readonly FindingRecord[],
   headSha: string,
+  /**
+   * The files the PR changes that head has (from its merge base, deleted ones left out), as the
+   * post step reads them: one whose file isn't among them can't be reviewed, so post marks it
+   * outdated and never closes it. It gets no entry. Undefined: not read, every file counts.
+   */
+  prFiles: ReadonlySet<string> | undefined,
+  log: (message: string, fields?: Record<string, unknown>) => void,
 ): Promise<Map<string, "there" | "gone">> {
   const states = new Map<string, "there" | "gone">();
   const tracked = records.filter(
     (record) =>
       record.side === "RIGHT" && (record.status === "open" || record.status === "outdated"),
   );
+  const inPr = (path: string) => prFiles === undefined || prFiles.has(path);
   for (const [sha, group] of Map.groupBy(tracked, (record) => record.raisedAtSha)) {
+    let moved: (LineRef | undefined)[];
     try {
-      const moved =
+      moved =
         sha === headSha
-          ? group.map((record) => record)
+          ? group.map((record) => ({ path: record.path, line: record.line }))
           : await trackLines(
               repo,
               sha,
               headSha,
               group.map((record) => ({ path: record.path, line: record.line })),
             );
-      for (const [i, record] of group.entries()) {
-        states.set(record.id, moved[i] === undefined ? "gone" : "there");
-      }
-    } catch {
+    } catch (error) {
       // Not followed: these get no entry, and aren't rechecked.
+      log("findings not rechecked: their lines can't be followed", {
+        sha,
+        dropped: group.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    for (const [i, record] of group.entries()) {
+      const place = moved[i];
+      if (!inPr(place?.path ?? record.path)) continue;
+      states.set(record.id, place === undefined ? "gone" : "there");
     }
   }
   return states;
@@ -410,22 +427,28 @@ export async function recheckJob(input: {
   await repo.fetchCommits(trackedShas).catch(() => {
     // An excerpt that can't be read is left out; the recheck opens the file at head.
   });
-  // Whether each one's cited line is at head (NIC-1124). One that can't be followed (its commit
-  // is gone) is left out: the post step can't place it, so nothing could close it.
-  const lines = await lineStates(repo, tracked, headSha);
+  // The PR's own changed files (from its merge base): to put first, and those head has, which
+  // are the only ones a review reads.
+  const prDiff = (...flags: string[]) =>
+    input.baseSha === undefined
+      ? Promise.resolve(undefined)
+      : repo
+          .git(["diff", "--name-only", "--no-renames", ...flags, `${input.baseSha}...${headSha}`])
+          .then((text) => new Set(names(text)))
+          .catch(() => undefined);
+  const theirs = await prDiff();
+  const prFiles = await prDiff("--diff-filter=d");
+  // Whether each one's cited line is at head (NIC-1124), on a file the PR still changes. One
+  // that can't be followed (its commit is gone), or whose file the PR no longer changes, is left
+  // out: the post step can't place it or review its file, so nothing could close it.
+  const lines = await lineStates(repo, tracked, headSha, prFiles, (message, fields) =>
+    input.log(message, fields),
+  );
   const open = tracked.filter(
     (record) => lines.has(record.id) && tier(record, lines) !== undefined,
   );
   if (open.length === 0) return undefined;
   const raisedAt = await commitTimes(repo, [...new Set(open.map((record) => record.raisedAtSha))]);
-  // The PR's own changed files (from its merge base), to put first.
-  const theirs =
-    input.baseSha === undefined
-      ? undefined
-      : await repo
-          .git(["diff", "--name-only", "--no-renames", `${input.baseSha}...${headSha}`])
-          .then((text) => new Set(names(text)))
-          .catch(() => undefined);
   // The PR's own first; what only a merge of the base brought in after.
   const ownFirst = (paths: readonly string[]) =>
     theirs === undefined
@@ -497,13 +520,38 @@ export async function recheckJob(input: {
   await readImports(changed.slice(0, MAX_IMPORT_FILES));
   const chosen = picked ?? selectRechecks(open, changed, imports, limit, raisedAt, lines);
   if (chosen.length === 0) return undefined;
+  // On a full review, whether each chosen finding's commit is in head's history. One that isn't
+  // (force-pushed away) diffs against head with whatever a rebase brought in from the base.
+  const inHistory = new Map<string, boolean>();
+  if (picked !== undefined) {
+    for (const sha of new Set(chosen.map((record) => record.raisedAtSha))) {
+      inHistory.set(
+        sha,
+        await repo.git(["merge-base", "--is-ancestor", sha, headSha]).then(
+          () => true,
+          () => false,
+        ),
+      );
+    }
+  }
   // The changed files a finding's fix could be in: since the last review on an incremental
   // review; on a full review, since the commit that finding was raised at, so a protected
-  // finding's fix is never a file changed before it was raised.
-  const relatedOf = (record: FindingRecord) =>
-    (picked === undefined ? changed : (ownChanged.get(record.raisedAtSha) ?? [])).filter((path) =>
-      isRelated(record.path, path, imports),
-    );
+  // finding's fix is never a file changed before it was raised. When that commit isn't in
+  // head's history, its diff to head holds the base's changes too: a protected finding gets
+  // none (so it can't close on this run), any other the change since `sinceSha`.
+  const relatedOf = (record: FindingRecord) => {
+    let from: readonly string[] = changed;
+    if (picked !== undefined && inHistory.get(record.raisedAtSha) === true) {
+      from = ownChanged.get(record.raisedAtSha) ?? [];
+    } else if (picked !== undefined && isProtectedCategory(record.ruleCategory)) {
+      input.log("protected finding can't close on this run: its commit isn't in head's history", {
+        findingId: record.id,
+        raisedAtSha: record.raisedAtSha,
+      });
+      return [];
+    }
+    return from.filter((path) => isRelated(record.path, path, imports));
+  };
   // The diff of the changed files related to a chosen finding: what the fix would be in. On a
   // full review, and for a finding whose cited line is gone (NIC-1124), the finding's own file
   // first, so its change is never cut off.
@@ -592,6 +640,7 @@ export async function recheckJob(input: {
       headSha,
       sinceSha,
       diff,
+      ...(picked === undefined ? {} : { fixAfterRaised: true }),
     }),
   };
 }

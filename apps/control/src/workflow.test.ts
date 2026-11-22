@@ -5488,6 +5488,78 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     ]);
   });
 
+  it("doesn't recheck a finding on a file the PR no longer changes", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    // The base takes the PR's change and the PR merges it: the PR no longer changes the file,
+    // though the cited line is still there. Nothing reviews the file, so nothing could close it.
+    await git(work, "checkout", "--quiet", "main");
+    baseSha = await commit({ "src/total.ts": HEAD_TOTAL }, "take the fix on main");
+    await git(work, "checkout", "--quiet", "feature");
+    await git(work, "merge", "--quiet", "--no-edit", "main");
+    headSha = await commit(
+      { "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n" },
+      "caller",
+    );
+    const { manifest } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: false, reason: "src/checkout.ts line 1 fixes it." }],
+    );
+    expect(manifest.review.files.map((file) => file.path)).not.toContain("src/total.ts");
+    expect(manifest.recheck).toBeUndefined();
+    expect(h.findings.rows[0]?.status).not.toBe("fixed");
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps a protected finding open on a full review after a force-push dropped its commit", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [
+      finding({ rule_category: "authz", title: "Total is computed for any caller" }),
+    ]);
+    // Rebased onto the base again: the commit it was raised at isn't in head's history, so its
+    // diff to head would hold whatever the rebase brought in.
+    await git(work, "reset", "--quiet", "--hard", baseSha);
+    headSha = await commit(
+      {
+        "src/total.ts": `${HEAD_TOTAL}// rebased\n`,
+        "src/checkout.ts": "export const guarded = (user: User) => user.admin;\n",
+      },
+      "rebased",
+    );
+    const { manifest } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: false, reason: "src/checkout.ts line 1 checks the caller." }],
+      FULL_REVIEW,
+    );
+    expect(manifest.recheck).toMatchObject({ mode: "full", targets: [{ related: [] }] });
+    expect(h.logs).toContain(
+      "protected finding can't close on this run: its commit isn't in head's history",
+    );
+    expect(h.findings.rows[0]?.status).not.toBe("fixed");
+    expect(writes).toEqual([]);
+  });
+
+  it("tells a full review's recheck that a fix must come after each finding's commit", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    const { prepared, manifest } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: true, reason: "Still there." }],
+      FULL_REVIEW,
+    );
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
+    ) as Record<string, unknown>;
+    expect(input.prompt).toContain("Only a change made after that commit can be its fix");
+  });
+
   it("doesn't recheck without the store's support", async () => {
     const plain = harness({ commentIds: true });
     await run(plain, 1, [finding()]);

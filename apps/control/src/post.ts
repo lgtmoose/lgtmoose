@@ -2216,6 +2216,7 @@ export async function post(
       }
       // What a full review's recheck left open (NIC-1123), once the close list is settled (the
       // saved one, if another attempt saved it) and the run counts: once per run, with the review.
+      // Log only: a failed read here must never fail the post after its review is out.
       if (progress.coveredBy === undefined && manifest.recheck?.mode === "full") {
         await logStillOpen(
           deps,
@@ -2223,7 +2224,12 @@ export async function post(
           manifest.recheck,
           recheckPlan?.writes.fixed ?? [],
           new Set(report.reraised),
-        );
+        ).catch((error: unknown) => {
+          deps.log("couldn't log what the full review's recheck left open", {
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       progress.review = true;
       await save();

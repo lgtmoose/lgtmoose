@@ -52,6 +52,12 @@ export interface RecheckPromptInput {
   sinceSha: string;
   /** `git diff <sinceSha> <headSha>` of the files the change touched that may matter. */
   diff: string;
+  /**
+   * A full review (NIC-1123): the diff runs from the oldest finding's commit, so it can hold
+   * changes made before a later finding was raised. The prompt says each one's fix must come
+   * after the commit it was raised at.
+   */
+  fixAfterRaised?: boolean;
 }
 
 const OUTPUT_SCHEMA = JSON.stringify(z.toJSONSchema(recheckOutputSchema), null, 2);
@@ -141,7 +147,14 @@ export function buildRecheckPrompt(input: RecheckPromptInput): string {
       ...input.targets.map(renderTarget),
     ].join("\n\n"),
     [
-      `# What changed since the last review (${input.sinceSha}..${input.headSha})`,
+      input.fixAfterRaised === true
+        ? `# What changed since the oldest finding was raised (${input.sinceSha}..${input.headSha})`
+        : `# What changed since the last review (${input.sinceSha}..${input.headSha})`,
+      ...(input.fixAfterRaised === true
+        ? [
+            "Each finding says the commit it was raised at (`when raised at`). Only a change made after that commit can be its fix: code that was already there when it was raised, or a change from before, doesn't count.",
+          ]
+        : []),
       input.diff.trim() === "" ? "No diff is available." : wrapUntrusted("diff", input.diff),
     ].join("\n\n"),
   ].join("\n\n")}\n`;
