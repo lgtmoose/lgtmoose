@@ -190,6 +190,11 @@ export function drizzleConversationStore(
   now: () => Date = () => new Date(),
 ): ConversationStore {
   const dispatch = drizzleDispatchStore(db, now);
+  // The handle-hint claims this store made, by PR and claimant, and when (NIC-1119): a release
+  // clears only the claim it made, never a later one.
+  const claims = new Map<string, Date>();
+  const claimKey = (repo: string, number: number, claimant: string) =>
+    `${lower(repo)}#${number}#${claimant}`;
   const ofPull = (repo: string, number: number) =>
     and(sql`lower(${pullRequests.repo}) = ${lower(repo)}`, eq(pullRequests.number, number));
   return {
@@ -326,21 +331,28 @@ export function drizzleConversationStore(
             handleHintClaimant: claimant,
             updatedAt: at,
           },
-          setWhere: sql`${d.handleHintAt} is null or (not ${d.handleHintPosted} and (${d.handleHintAt} < ${stale} or (${d.handleHintClaimant} = ${claimant} and ${d.handleHintAt} < ${retry})))`,
+          setWhere: sql`(${d.handleHintAt} is null and not ${d.handleHintPosted}) or (not ${d.handleHintPosted} and (${d.handleHintAt} < ${stale} or (${d.handleHintClaimant} = ${claimant} and ${d.handleHintAt} < ${retry})))`,
         })
         .returning({ repo: d.repo });
-      if (rows.length > 0) return "claimed";
-      // Not ours to post now: say whether this claimant holds it, posted (a retry after a later
-      // step failed) or still being posted (an overlapping delivery), so it isn't told it did
-      // nothing.
+      if (rows.length > 0) {
+        // What a failed post gives back: this claim, and no later one.
+        claims.set(claimKey(repo, number, claimant), at);
+        return "claimed";
+      }
+      // Not ours to post now: say whose it is and whether it was posted, so this comment is
+      // never told it did nothing when it, or another comment still posting, has the hint.
       const [held] = await db
         .select({ posted: d.handleHintPosted, claimant: d.handleHintClaimant })
         .from(d)
         .where(and(eq(d.repo, lower(repo)), eq(d.number, number)));
-      if (held?.claimant !== claimant) return "other";
-      return held.posted ? "mine-posted" : "mine-pending";
+      const posted = held?.posted === true;
+      if (held?.claimant === claimant) return posted ? "mine-posted" : "mine-pending";
+      return posted ? "other-posted" : "other-pending";
     },
     async handleHintPosted(repo, number) {
+      // Posted: nothing of this PR's is released any more.
+      const prefix = `${lower(repo)}#${number}#`;
+      for (const key of claims.keys()) if (key.startsWith(prefix)) claims.delete(key);
       await db
         .update(pullRequestDispatches)
         .set({ handleHintPosted: true, updatedAt: now() })
@@ -352,7 +364,12 @@ export function drizzleConversationStore(
         );
     },
     async releaseHandleHint(repo, number, claimant) {
-      // Only this claimant's own, unposted claim: never one another comment has taken since.
+      // Only the claim this store made for this claimant, still unposted: never one another
+      // comment, or a later attempt of the same one, has taken since.
+      const key = claimKey(repo, number, claimant);
+      const at = claims.get(key);
+      if (at === undefined) return;
+      claims.delete(key);
       await db
         .update(pullRequestDispatches)
         .set({
@@ -366,6 +383,7 @@ export function drizzleConversationStore(
             eq(pullRequestDispatches.repo, lower(repo)),
             eq(pullRequestDispatches.number, number),
             eq(pullRequestDispatches.handleHintClaimant, claimant),
+            eq(pullRequestDispatches.handleHintAt, at),
             eq(pullRequestDispatches.handleHintPosted, false),
           ),
         );

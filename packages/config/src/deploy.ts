@@ -483,7 +483,7 @@ export const deployConfigSchema = z
         "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5 GitHub logins.",
       ),
     /**
-     * Whether a comment that mentions `@lgtmoose` with a command word, where the App is called
+     * Whether a comment that mentions `@lgtmoose` followed by a whole command, where the App is called
      * something else and `lgtmoose` isn't an alias, gets one reply per PR naming the handle that
      * works (NIC-1119). It assumes no other App called `lgtmoose` answers on these repositories;
      * turn it off if one does.
@@ -492,7 +492,7 @@ export const deployConfigSchema = z
       .boolean()
       .default(true)
       .describe(
-        "Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
+        "Reply once per PR when a comment mentions @lgtmoose followed by a whole command where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
       ),
     /**
      * How long a push's review waits for the next push before it starts (NIC-1077): a newer

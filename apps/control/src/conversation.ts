@@ -125,9 +125,11 @@ export interface StoredFinding {
  * - `claimed`: this comment may post it now;
  * - `mine-posted`: this comment already posted it (a retry after a later step failed);
  * - `mine-pending`: this comment holds an unposted claim that may still be posting;
- * - `other`: another comment holds it or posted it.
+ * - `other-posted`: another comment posted it;
+ * - `other-pending`: another comment holds an unposted claim on it.
  */
-export type HintClaim = "claimed" | "mine-posted" | "mine-pending" | "other";
+export type HintClaim =
+  "claimed" | "mine-posted" | "mine-pending" | "other-posted" | "other-pending";
 
 /** The database, as the conversation handler uses it. `repo` is passed as the job has it. */
 export interface ConversationStore {
@@ -160,17 +162,19 @@ export interface ConversationStore {
   commentsThrough?(repo: string, number: number, at: Date): Promise<void>;
   /**
    * Claims the PR's one-time hint with the App's real handle (NIC-1119), for `claimant`: the
-   * comment's ID, or `review-<id>` for a submitted review. True when it may post the hint: the
-   * PR has had none, or an earlier claim was never posted and is either the same claimant's (a
-   * retry) or stale (its Lambda died). False once another claimant holds it or it's posted, so
-   * the hint is never posted twice.
+   * comment's ID, or `review-<id>` for a submitted review. `claimed` when it may post the hint:
+   * the PR has had none; or an earlier claim was never posted and is either this claimant's own
+   * and over two minutes old (a retry, with no attempt still posting) or anyone's and over 15
+   * minutes old (its Lambda died). Otherwise it says whose the claim is and whether it was
+   * posted (`HintClaim`).
    */
   claimHandleHint?(repo: string, number: number, claimant: string): Promise<HintClaim>;
   /** Records that the claimed hint was posted, so the claim never goes stale. */
   handleHintPosted?(repo: string, number: number): Promise<void>;
   /**
    * Gives `claimant`'s unposted claim back after its post failed, so a later comment can still
-   * get the hint. A claim another comment holds, or a posted one, is left alone.
+   * get the hint. Only the claim this claimant made last: one taken since by another comment, or
+   * by a later attempt of the same one, or a posted one, is left alone.
    */
   releaseHandleHint?(repo: string, number: number, claimant: string): Promise<void>;
 }
@@ -254,7 +258,7 @@ const handles = (deps: Pick<ConversationDeps, "commandAliases">, slug: string): 
 
 /**
  * Whether a comment with no command for this App gets the handle hint (NIC-1119): it mentions
- * `@lgtmoose` with a command word, `lgtmoose` isn't this App's slug or an alias, and the
+ * `@lgtmoose` followed by a whole command, `lgtmoose` isn't this App's slug or an alias, and the
  * deployment hasn't turned the hint off (`commandHint`). Without a store that can record the
  * hint, no comment is treated this way: it goes down the normal path instead.
  */
@@ -266,32 +270,47 @@ function wantsHint(deps: ConversationDeps, body: string, slug: string): boolean 
   );
 }
 
-/** Whether a comment is a reply in one of our findings' threads, which the reply judge reads. */
-async function onFindingThread(
+/**
+ * Whether the reply judge would read this comment: a reply, not the root, in the thread of one
+ * of our findings that's still open or outdated, with the judge on. The same conditions as
+ * `recordReply`, so a wrong-handle comment on a resolved finding gets the 😕 like any other.
+ */
+async function judgeReads(
   deps: ConversationDeps,
-  job: ReviewJob,
+  job: ReviewJob & { commentId: number },
   kind: ReactableKind,
   comment: CommentInfo,
 ): Promise<boolean> {
-  if (kind !== "review_comment" || comment.threadRootId === undefined) return false;
-  const finding = await deps.store.findingByComment(job.repo, job.prNumber, comment.threadRootId);
-  return finding !== undefined;
+  const root = comment.threadRootId;
+  if (kind !== "review_comment" || root === undefined || root === job.commentId) return false;
+  if (deps.replies === undefined) return false;
+  const finding = await deps.store.findingByComment(job.repo, job.prNumber, root);
+  return finding !== undefined && (finding.status === "open" || finding.status === "outdated");
 }
 
 /**
- * What became of a hint: posted now; this comment's own, posted before or being posted by an
- * overlapping delivery; not posted because another comment has it; not posted because posting
- * failed; or only logged, in shadow mode. Only `already` earns the 😕.
+ * What became of a hint:
+ * - `posted`: posted now;
+ * - `mine`: this comment's own, posted before or being posted by an overlapping delivery;
+ * - `already`: another comment posted it;
+ * - `pending`: another comment's claim on it may still be posting;
+ * - `failed`: posting failed;
+ * - `shadow`: only logged, in shadow mode.
+ *
+ * Only `already` earns the 😕: the PR has the hint, and this comment did nothing.
  */
-type HintOutcome = "posted" | "mine" | "already" | "failed" | "shadow";
+type HintOutcome = "posted" | "mine" | "already" | "pending" | "failed" | "shadow";
 
 /**
  * The one-time hint (NIC-1119) for a comment that used `@lgtmoose` where this App is called
  * something else. It's posted once per PR and carries the reply marker, so nothing reads it as a
  * command.
  *
- * - **Claimed before it's posted:** a retry never posts it twice. Once posted, that's recorded.
- *   A claim left unposted by a Lambda that died goes stale and can be claimed again.
+ * - **Claimed before it's posted:** once posted, that's recorded. A claim left unposted by a
+ *   Lambda that died can be claimed again: by the same comment's retry after two minutes, or by
+ *   any comment after 15. Rarely, that posts the hint twice: an attempt that posted it but died
+ *   before recording so is retried and posts it again. That's accepted, as the hint is a
+ *   courtesy.
  * - **When the post fails** (a 502, a locked conversation): the claim is given back, so a later
  *   comment can still get the hint, and the failure is logged, not thrown. The comment's job
  *   carries on.
@@ -311,11 +330,13 @@ async function hintHandle(
     deps.log("shadow: handle hint not posted", where);
     return "shadow";
   }
-  if (store.claimHandleHint === undefined) return "already";
+  if (store.claimHandleHint === undefined) return "pending";
   const claim = await store.claimHandleHint(job.repo, job.prNumber, claimant);
   // This comment has the hint already, posted or being posted: nothing more, and no 😕.
   if (claim === "mine-posted" || claim === "mine-pending") return "mine";
-  if (claim === "other") return "already";
+  if (claim === "other-posted") return "already";
+  // Another comment is posting it, or died doing so: say nothing, as the hint may come yet.
+  if (claim === "other-pending") return "pending";
   try {
     await post(`${handleHint(slug)}\n\n${REPLY_MARKER}`);
   } catch (error) {
@@ -853,7 +874,7 @@ export async function handleConversation(
       );
       // In one of our findings' threads, the reply judge still reads it, whatever it meant:
       // a person may be answering the finding. The hint is only a pointer.
-      if (!(await onFindingThread(deps, job, kind, comment))) {
+      if (!(await judgeReads(deps, { ...job, commentId }, kind, comment))) {
         // The PR has had its hint: a 😕 says this comment did nothing, without a second hint.
         if (outcome === "already" && !deps.shadow) {
           try {

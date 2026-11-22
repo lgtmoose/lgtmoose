@@ -159,7 +159,7 @@ describe("drizzleConversationStore", () => {
     // Two comments at once: one of them claims it.
     const both = await Promise.all([claim("Acme/Shop", 51, "a"), claim("acme/shop", 51, "b")]);
     expect(both.filter((result) => result === "claimed")).toHaveLength(1);
-    expect(await claim("Acme/Shop", 51, "c")).toBe("other");
+    expect(await claim("Acme/Shop", 51, "c")).toBe("other-pending");
     // Another PR has its own.
     expect(await claim("Acme/Shop", 52)).toBe("claimed");
     // A PR the dispatcher already tracks keeps its event time.
@@ -173,13 +173,33 @@ describe("drizzleConversationStore", () => {
     expect(row?.handleHintAt).toBeInstanceOf(Date);
     // Only its own claimant gives it back, after a failed post; then it can be claimed again.
     await store.releaseHandleHint?.("Acme/Shop", 53, "someone-else");
-    expect(await claim("Acme/Shop", 53, "c2")).toBe("other");
+    expect(await claim("Acme/Shop", 53, "c2")).toBe("other-pending");
     await store.releaseHandleHint?.("Acme/Shop", 53, "c1");
     expect(await claim("Acme/Shop", 53, "c2")).toBe("claimed");
     // A posted hint is never given back.
     await store.handleHintPosted?.("Acme/Shop", 53);
     await store.releaseHandleHint?.("Acme/Shop", 53, "c2");
-    expect(await claim("Acme/Shop", 53, "c3")).toBe("other");
+    expect(await claim("Acme/Shop", 53, "c3")).toBe("other-posted");
+  });
+
+  it("releases only the claim it made, never a later one by the same claimant (NIC-1119)", async () => {
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 22, 14, 0, seconds));
+    let clock = at(0);
+    // Two attempts of comment 500, in two Lambdas: each has its own store.
+    const first = drizzleConversationStore(db, () => clock);
+    const second = drizzleConversationStore(db, () => clock);
+    expect(await first.claimHandleHint?.("Acme/Shop", 81, "500")).toBe("claimed");
+    // The first attempt stalls; after two minutes the second claims it again and is posting.
+    clock = at(150);
+    expect(await second.claimHandleHint?.("Acme/Shop", 81, "500")).toBe("claimed");
+    // The first attempt's post then fails: its release leaves the second's claim alone.
+    await first.releaseHandleHint?.("Acme/Shop", 81, "500");
+    expect(await first.claimHandleHint?.("Acme/Shop", 81, "600")).toBe("other-pending");
+    const [row] = await db
+      .select()
+      .from(pullRequestDispatches)
+      .where(eq(pullRequestDispatches.number, 81));
+    expect(row?.handleHintAt?.toISOString()).toBe(at(150).toISOString());
   });
 
   it("lets a stale unposted hint claim be taken again, never a posted one (NIC-1119)", async () => {
@@ -194,7 +214,7 @@ describe("drizzleConversationStore", () => {
     // another comment.
     expect(await claim(61, "1")).toBe("claimed");
     clock = at(10);
-    expect(await claim(61, "2")).toBe("other");
+    expect(await claim(61, "2")).toBe("other-pending");
     // Past the stale time, another comment may post it.
     clock = at(16);
     expect(await claim(61, "2")).toBe("claimed");
@@ -202,7 +222,7 @@ describe("drizzleConversationStore", () => {
     expect(await claim(62, "1")).toBe("claimed");
     await timed.handleHintPosted?.("Acme/Shop", 62);
     clock = at(59);
-    expect(await claim(62, "2")).toBe("other");
+    expect(await claim(62, "2")).toBe("other-posted");
     expect(await claim(62, "1")).toBe("mine-posted");
   });
 
@@ -220,7 +240,7 @@ describe("drizzleConversationStore", () => {
     // take it either.
     clock = at(30);
     expect(await claim("500")).toBe("mine-pending");
-    expect(await claim("501")).toBe("other");
+    expect(await claim("501")).toBe("other-pending");
     // Past two minutes, comment 500's retry claims it, and posts it.
     clock = at(150);
     expect(await claim("500")).toBe("claimed");

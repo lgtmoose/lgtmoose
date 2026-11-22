@@ -1001,8 +1001,8 @@ describe("command handles (NIC-1119)", () => {
       const held = claimed.get(key);
       if (held !== undefined) {
         const mine = held.claimant === claimant;
-        if (held.posted) return mine ? "mine-posted" : "other";
-        if (!mine) return "other";
+        if (held.posted) return mine ? "mine-posted" : "other-posted";
+        if (!mine) return "other-pending";
         if (clock - held.at < 2 * 60_000) return "mine-pending";
       }
       claimed.set(key, { claimant, posted: false, at: clock });
@@ -1150,19 +1150,22 @@ describe("command handles (NIC-1119)", () => {
     const store = withHintStore(f);
     // An earlier delivery of comment 500 claimed it, then its Lambda died before posting.
     expect(await f.deps.store.claimHandleHint?.("acme/shop", 12, "500")).toBe("claimed");
-    // Another comment can't take it meanwhile, and gets a 😕.
+    // Another comment can't take it meanwhile; as the hint may come yet, it hears nothing.
     await handleConversation(f.deps, job({ commentId: 600, deliveryId: "d-6" }));
     expect(f.replies).toEqual([]);
-    expect(f.reactions).toEqual(["600:confused"]);
+    expect(f.reactions).toEqual([]);
     // An overlapping delivery of comment 500 waits for the first: no hint, and no 😕.
     await handleConversation(f.deps, job());
     expect(f.replies).toEqual([]);
-    expect(f.reactions).toEqual(["600:confused"]);
+    expect(f.reactions).toEqual([]);
     // Once no attempt can still be posting, the retry of comment 500 posts it.
     store.advance(3 * 60_000);
     await handleConversation(f.deps, job());
     expect(f.replies).toHaveLength(1);
     expect(f.replies[0]).toMatchObject({ commentId: 500 });
+    // A comment after that gets the 😕: the PR has its hint.
+    await handleConversation(f.deps, job({ commentId: 700, deliveryId: "d-7" }));
+    expect(f.reactions).toEqual(["700:confused"]);
   });
 
   it("gives no 😕 to a retry of the comment that got the hint, after a later step failed", async () => {
@@ -1193,6 +1196,7 @@ describe("command handles (NIC-1119)", () => {
       through.push(at);
     };
     await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
     const github = await f.deps.github(7);
     f.deps.github = async () => ({
       ...github,
@@ -1259,10 +1263,50 @@ describe("command handles (NIC-1119)", () => {
   });
 
   it("gives no hint when the App is itself called lgtmoose", async () => {
-    const f = fakeDeps(from("dev", "Thanks @lgtmoose-fan"));
+    // The default slug is `lgtmoose`: `@lgtmoose review` is a real command here.
+    const f = fakeDeps(from("author", "@lgtmoose review"));
+    const claimed = withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({ commands: ["review"] });
+    expect(f.queued).toHaveLength(1);
+    expect(f.replies.filter((reply) => reply.body.includes("Commands here use"))).toEqual([]);
+    expect(claimed.size).toBe(0);
+  });
+
+  it("says nothing to a comment while another comment's hint may still be posting", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:04.000Z" }), {
+      slug: SLUG,
+    });
     withHintStore(f);
-    await handleConversation(f.deps, job());
+    // Comment 999 holds an unposted claim.
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    const through: Date[] = [];
+    f.deps.store.commentsThrough = async (_repo, _number, at) => {
+      through.push(at);
+    };
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
     expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
+    expect(through).toHaveLength(1);
+  });
+
+  it("gives the 😕 to a wrong-handle comment on a resolved finding's thread", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose ignore", { threadRootId: 100 }), {
+      slug: SLUG,
+      findings: new Map([[100, finding({ status: "fixed" })]]),
+    });
+    f.deps.replies = {
+      add: async () => true,
+      take: async () => [],
+      finish: async () => {},
+      failed: async () => {},
+    };
+    withHintStore(f);
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
+    expect(
+      await handleConversation(f.deps, job({ kind: "review_comment", commentId: 501 })),
+    ).toMatchObject({ action: "ignored" });
+    expect(f.reactions).toEqual(["501:confused"]);
   });
 
   it("logs the hint in shadow mode, without posting or using it up", async () => {

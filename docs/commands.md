@@ -48,7 +48,7 @@ Rarely, a PR gets the hint twice: an attempt posts it but stops before recording
 
 The comment itself runs nothing. What else happens to it depends on where it is:
 
-- **In one of LGTMoose's findings' threads:** it still goes to the reply judge, since the person may be answering the finding.
+- **As a reply in the thread of one of LGTMoose's findings that's still open or outdated:** it still goes to the reply judge, since the person may be answering the finding. On a finding that's fixed, declined or resolved, it's treated as anywhere else.
 - **Anywhere else:** it isn't sent anywhere. After the PR has had its hint, later ones get a 😕. A submitted review's body gets no 😕, because GitHub reviews take no reactions, so that one is only logged.
 
 The hint assumes that no other App called `lgtmoose` answers on your repositories. If one does, turn it off with `commandHint: false`. A comment like that is then handled as before, so in a finding's thread it goes to the reply judge.

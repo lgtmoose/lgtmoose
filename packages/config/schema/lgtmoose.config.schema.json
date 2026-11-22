@@ -469,7 +469,7 @@
     },
     "commandHint": {
       "default": true,
-      "description": "Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
+      "description": "Reply once per PR when a comment mentions @lgtmoose followed by a whole command where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
       "type": "boolean"
     },
     "reviewDebounceSeconds": {

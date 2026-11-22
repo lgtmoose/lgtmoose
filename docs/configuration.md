@@ -68,7 +68,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `maxExplanations` | integer, 0 to 20 | `5` | Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply. |
 | `commandAliases` | list of string matching `^(?!-)(?!.*--)(?!.*-$)[A-Za-z0-9-]{1,39}$` | `[]` | Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-&lt;org&gt;. Up to 5 GitHub logins. |
-| `commandHint` | boolean | `true` | Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories. |
+| `commandHint` | boolean | `true` | Reply once per PR when a comment mentions @lgtmoose followed by a whole command where the App is called something else. Turn off if another App called lgtmoose answers on these repositories. |
 | `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |
 | `extraEgressHosts` | list of string matching `^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$` | `[]` | Extra hosts sandbox tasks may reach through the egress proxy, on top of the providers' model APIs. Exact hostnames only. |
