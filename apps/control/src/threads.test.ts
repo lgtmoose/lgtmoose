@@ -97,6 +97,12 @@ describe("graphQlThreadReader", () => {
     expect(whole.partial).toBeUndefined();
     expect(whole.map((entry) => entry.id)).toEqual(["PRRT_1", "PRRT_2"]);
 
+    // A thread whose first comment's ID is missing can't be matched to its comment.
+    const noComment = await graphQlThreadReader(async () =>
+      page([node("PRRT_1", "1"), { ...thread(false, null), id: "PRRT_2" }]),
+    ).reviewThreads(TARGET);
+    expect(noComment.partial).toBe(true);
+
     // Every page says there's another: the reader stops at its limit, short of the end.
     let n = 0;
     const endless = await graphQlThreadReader(async () => {

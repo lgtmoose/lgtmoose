@@ -409,8 +409,8 @@ export type ControlCommand =
       executionArn: string;
       runId: string;
       taskToken: string;
-      /** Which attempt of the post step this is, of how many: unset when not told. */
-      attempt?: { number: number; of: number };
+      /** How many attempts the post step has: unset when not told. */
+      attempts?: number;
     }
   | { command: "fail"; executionArn: string; error: string };
 
@@ -435,16 +435,13 @@ export function readCommand(env: Env): ControlCommand {
         const value = env[name]?.trim();
         return value !== undefined && /^\d{1,4}$/.test(value) ? Number(value) : undefined;
       };
-      const retry = count("LGTMOOSE_POST_RETRY");
       const of = count("LGTMOOSE_POST_ATTEMPTS");
       return {
         command,
         executionArn,
         runId: need("LGTMOOSE_RUN_ID"),
         taskToken: need("LGTMOOSE_TASK_TOKEN"),
-        ...(retry === undefined || of === undefined || of === 0
-          ? {}
-          : { attempt: { number: retry + 1, of } }),
+        ...(of === undefined || of === 0 ? {} : { attempts: of }),
       };
     }
     case "fail":

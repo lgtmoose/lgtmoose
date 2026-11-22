@@ -4,6 +4,7 @@ import {
   fixedByRecheck,
   isRelated,
   namesRelatedFile,
+  recheckJob,
   recheckReply,
   relativeImports,
   selectRechecks,
@@ -196,5 +197,49 @@ describe("recheckReply", () => {
     expect(reply).toMatch(/^This looks fixed at 0123456,/);
     expect(reply).not.toContain("@dev");
     expect(reply).not.toContain("](https://");
+  });
+});
+
+describe("recheckJob", () => {
+  it("puts the PR's own changed files before those a base merge brought in", async () => {
+    // Since the last review: the PR's own fix in src/pay/checkout.ts, and many files a merge
+    // of the base branch brought in, all in the same folder as the finding.
+    const merged = Array.from(
+      { length: 60 },
+      (_, i) => `src/pay/aa${String(i).padStart(2, "0")}.ts`,
+    );
+    const diffs: string[] = [];
+    const repo = {
+      fetchCommits: async () => {},
+      git: async (args: string[]) => {
+        if (args[0] === "diff" && args.includes("--name-only")) {
+          return args.some((arg) => arg.includes("..."))
+            ? "src/pay/checkout.ts\nsrc/pay/TeeTimePayment.tsx\n"
+            : [...merged, "src/pay/checkout.ts"].join("\n");
+        }
+        if (args[0] === "diff") {
+          const path = args.at(-1) ?? "";
+          diffs.push(path);
+          return `diff --git a/${path} b/${path}\n`;
+        }
+        if (args[0] === "cat-file") return "10";
+        if (args[0] === "show" && args[1] === "-s") return "1700000000";
+        return "export const x = 1;\n";
+      },
+    };
+    const job = await recheckJob({
+      repo: repo as unknown as Parameters<typeof recheckJob>[0]["repo"],
+      records: [record()],
+      skip: new Set(),
+      sinceSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      baseSha: "c".repeat(40),
+      index: 0,
+      log: () => {},
+    });
+    expect(job?.changed[0]).toBe("src/pay/checkout.ts");
+    expect(job?.changed).toHaveLength(61);
+    // The PR's own change is the first diff read, ahead of the merged ones.
+    expect(diffs[0]).toBe("src/pay/checkout.ts");
   });
 });

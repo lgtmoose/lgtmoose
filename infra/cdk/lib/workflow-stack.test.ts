@@ -462,8 +462,7 @@ describe("review state machine", () => {
     expect(overrides(States.Post)).toMatchObject({
       LGTMOOSE_COMMAND: "post",
       LGTMOOSE_RUN_ID: "$:$.prepared.runId",
-      // The step's attempt, from its retry count, out of its retries and the first try.
-      LGTMOOSE_POST_RETRY: "$:States.Format('{}', $$.State.RetryCount)",
+      // How many attempts the step has: its retries and the first try.
       LGTMOOSE_POST_ATTEMPTS: "4",
     });
     expect(overrides(States.MarkFailed)).toMatchObject({

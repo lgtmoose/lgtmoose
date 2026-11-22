@@ -259,7 +259,7 @@ export async function runCommand(
                 attempt: {
                   id: randomUUID(),
                   taskArn: await deps.taskArn(),
-                  ...(command.attempt === undefined ? {} : command.attempt),
+                  ...(command.attempts === undefined ? {} : { of: command.attempts }),
                 },
                 taskStatus: (taskArn) => deps.taskStatus(taskArn),
                 executionStatus: (arn) => deps.executionStatus(arn),

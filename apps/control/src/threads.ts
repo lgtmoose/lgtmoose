@@ -136,11 +136,14 @@ export function graphQlThreadReader(
             partial = true;
             continue;
           }
+          // Without its ID, or its first comment's, it can't be found by either.
           if (node.id === undefined) partial = true;
           const resolvedBy = node.resolvedBy?.login;
+          const firstCommentId = commentId(node.comments.nodes[0]?.fullDatabaseId);
+          if (firstCommentId === undefined) partial = true;
           threads.push({
             resolved: node.isResolved,
-            firstCommentId: commentId(node.comments.nodes[0]?.fullDatabaseId),
+            firstCommentId,
             ...(node.isResolved && resolvedBy !== undefined ? { resolvedBy } : {}),
             ...(node.id === undefined ? {} : { id: node.id }),
           });

@@ -730,6 +730,7 @@ export async function prepare(
             skip: new Set(taken.pending.map((reply) => reply.findingId)),
             sinceSha: lastReviewed,
             headSha: pr.headSha,
+            baseSha: pr.baseSha,
             index: 0,
             log: (message, fields) => deps.log(message, fields),
           });

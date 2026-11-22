@@ -134,27 +134,25 @@ describe("readCommand", () => {
         LGTMOOSE_TASK_TOKEN: "t",
       }),
     ).toEqual({ command: "post", executionArn: "arn:exec", runId: "r", taskToken: "t" });
-    // The step's retry count, from 0, makes its attempt number, from 1.
+    // How many attempts the post step has.
     expect(
       readCommand({
         ...base,
         LGTMOOSE_COMMAND: "post",
         LGTMOOSE_RUN_ID: "r",
         LGTMOOSE_TASK_TOKEN: "t",
-        LGTMOOSE_POST_RETRY: "3",
         LGTMOOSE_POST_ATTEMPTS: "4",
       }),
-    ).toMatchObject({ attempt: { number: 4, of: 4 } });
+    ).toMatchObject({ attempts: 4 });
     expect(
       readCommand({
         ...base,
         LGTMOOSE_COMMAND: "post",
         LGTMOOSE_RUN_ID: "r",
         LGTMOOSE_TASK_TOKEN: "t",
-        LGTMOOSE_POST_RETRY: "not a number",
-        LGTMOOSE_POST_ATTEMPTS: "4",
+        LGTMOOSE_POST_ATTEMPTS: "not a number",
       }),
-    ).not.toHaveProperty("attempt");
+    ).not.toHaveProperty("attempts");
     expect(readCommand({ ...base, LGTMOOSE_COMMAND: "fail" })).toEqual({
       command: "fail",
       executionArn: "arn:exec",

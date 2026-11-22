@@ -226,6 +226,11 @@ export async function recheckJob(input: {
   skip: ReadonlySet<string>;
   sinceSha: string | undefined;
   headSha: string;
+  /**
+   * The PR's base: files the PR itself changes (from the merge base to head) come first, so a
+   * merge of the base branch can't crowd them out of the imports read and the diff.
+   */
+  baseSha?: string;
   index: number;
   limit?: number;
   log(message: string, fields?: Record<string, unknown>): void;
@@ -239,6 +244,19 @@ export async function recheckJob(input: {
     await repo.fetchCommits([sinceSha]);
     const names = await repo.git(["diff", "--name-only", "--no-renames", sinceSha, headSha]);
     changed = names.split("\n").filter((name) => name.trim() !== "");
+    if (input.baseSha !== undefined) {
+      const theirs = await repo
+        .git(["diff", "--name-only", "--no-renames", `${input.baseSha}...${headSha}`])
+        .then((text) => new Set(text.split("\n").filter((name) => name.trim() !== "")))
+        .catch(() => undefined);
+      if (theirs !== undefined) {
+        // The PR's own first; what only a merge of the base brought in after.
+        changed = [
+          ...changed.filter((path) => theirs.has(path)),
+          ...changed.filter((path) => !theirs.has(path)),
+        ];
+      }
+    }
   } catch (error) {
     input.log("findings not rechecked: the change since the last review is unreadable", {
       error: error instanceof Error ? error.message : String(error),
@@ -273,19 +291,23 @@ export async function recheckJob(input: {
   const relevant = changed.filter((path) =>
     chosen.some((record) => isRelated(record.path, path, imports)),
   );
+  // In `changed`'s order (the PR's own files first), which git's own path order wouldn't keep.
   let diff = "";
-  try {
-    diff = await repo.git([
-      "diff",
-      "--no-color",
-      "--no-ext-diff",
-      sinceSha,
-      headSha,
-      "--",
-      ...relevant,
-    ]);
-  } catch {
-    diff = "";
+  for (const path of relevant) {
+    if (diff.length > MAX_DIFF_CHARS) break;
+    try {
+      diff += await repo.git([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        sinceSha,
+        headSha,
+        "--",
+        path,
+      ]);
+    } catch {
+      // A file whose diff can't be read is left out; the recheck can open it.
+    }
   }
   if (diff.length > MAX_DIFF_CHARS) {
     diff = `${diff.slice(0, MAX_DIFF_CHARS)}\n… (the rest of the diff is left out: open the files to read it)`;

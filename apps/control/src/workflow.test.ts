@@ -4590,6 +4590,16 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(h.findings.rows.map((row) => row.status)).toEqual(["open", "open"]);
     expect(replies(writes)).toEqual([]);
     expect(h.logs).toContain("recheck's fixes not closed: the run no longer counts");
+    // What it writes from here counts them open, as the store has them: changes requested.
+    const progress = JSON.parse(h.objects.get(runKeys(prepared.runId).posted) ?? "{}") as {
+      summaryBody?: string;
+      labelTarget?: string;
+    };
+    expect(progress.summaryBody).toContain("Loop skips the last item");
+    expect(h.runs.runs.get(prepared.runId)?.result).toMatchObject({
+      statusLabel: progress.labelTarget,
+    });
+    expect(h.runs.runs.get(prepared.runId)?.result).not.toMatchObject({ statusLabel: "Approved" });
   });
 
   it("gives up a reply that keeps failing after three attempts, and finishes the post", async () => {
@@ -4651,7 +4661,8 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     const { h, writes, fail } = rechecking();
     const prepared = await twoFixed(h);
     const step = (n: number) => ({
-      attempt: { id: `a${n}`, taskArn: undefined, number: n, of: 4 },
+      // The step has 4 attempts; post counts which one it's on itself.
+      attempt: { id: `a${n}`, taskArn: undefined, of: 4 },
     });
     // Attempts 1 and 2 fail before the recheck's writes: at the first close.
     const close = h.findings.closeFixed?.bind(h.findings);
@@ -4673,6 +4684,66 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(h.logs).toContain("recheck replies or resolves given up");
     expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
     expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+  });
+
+  it("finishes a recheck another attempt saved while this one waited for the claim", async () => {
+    const setup: Setup = {};
+    const { h, writes, fail } = rechecking(setup);
+    const prepared = await twoFixed(h);
+    // The PR moves on before this attempt starts: it's a retry that no longer counts.
+    setup.head = "f".repeat(40);
+    const getText = h.deps.store.getText.bind(h.deps.store);
+    let interleaved = false;
+    h.deps.store.getText = async (key) => {
+      if (key !== runKeys(prepared.runId).rechecks || interleaved) return getText(key);
+      interleaved = true;
+      // This attempt has planned without a saved recheck. Before it holds the claims, an
+      // earlier attempt (at the old head) posts the review, saves the recheck, closes both
+      // findings, and stops on a reply that failed for now.
+      const before = await getText(key);
+      delete setup.head;
+      fail.replies.push(new GitHubError(502, "Bad Gateway", "POST", "/replies"));
+      await expect(post(h.deps, prepared.runId, offEcs("a0"))).rejects.toThrow("retry writes them");
+      setup.head = "f".repeat(40);
+      return before;
+    };
+    await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(interleaved).toBe(true);
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+    // The closed findings get their notes: one from the earlier attempt, one from this one.
+    expect(
+      replies(writes)
+        .map((write) => write.slice(0, 10))
+        .sort(),
+    ).toEqual(["reply 1000", "reply 1001"]);
+    expect(writes.filter((write) => write.startsWith("resolve ")).sort()).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+    expect(h.logs).not.toContain("recheck's fixes not closed: the run no longer counts");
+  });
+
+  it("reads the threads at most once more in an attempt after a failed read", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    let reads = 0;
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const client = await github(installationId);
+      return {
+        ...client,
+        threads: {
+          reviewThreads: async () => {
+            reads += 1;
+            throw new GitHubError(502, "Bad Gateway", "POST", "/graphql");
+          },
+        },
+      };
+    };
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    // Once before the decision, once for the resolves: not again for the second finding.
+    expect(reads).toBe(2);
+    expect(replies(writes)).toHaveLength(2);
   });
 
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {

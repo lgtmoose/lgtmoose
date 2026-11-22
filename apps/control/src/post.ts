@@ -613,6 +613,21 @@ function networkFailure(error: unknown): boolean {
   return typeof code === "string" && /^(?:E[A-Z]+|UND_ERR_[A-Z_]+)$/.test(code);
 }
 
+/**
+ * Counts this start of the post step in the run's objects and returns its number, from 1. Not
+ * conditional: two attempts at once are a race the claims settle, and either count is close.
+ */
+async function countAttempt(deps: ControlDeps, runId: string): Promise<number> {
+  const key = runKeys(runId).postAttempts;
+  const text = await deps.store.getText(key);
+  const parsed = z
+    .object({ attempts: z.number().int().nonnegative() })
+    .safeParse(text === undefined ? undefined : JSON.parse(text));
+  const number = (parsed.success ? parsed.data.attempts : 0) + 1;
+  await deps.store.putText(key, JSON.stringify({ attempts: number }));
+  return number;
+}
+
 /** Attempts at the recheck's writes before what's left is given up, so none blocks for ever. */
 const RECHECK_WRITE_ATTEMPTS = 3;
 
@@ -661,8 +676,7 @@ export interface PostAttempt {
   id: string;
   /** The ECS task running it; undefined off ECS. */
   taskArn: string | undefined;
-  /** Which attempt of the post step this is, from 1, of how many; unset when not known. */
-  number?: number;
+  /** How many attempts the post step has (its retries and the first); unset when not known. */
   of?: number;
 }
 
@@ -1279,6 +1293,9 @@ export async function post(
   const run = await deps.runs.getRun(runId);
   if (run === undefined) throw new Error(`No review run ${runId}.`);
   const keys = runKeys(runId);
+  // This attempt's number, counted before anything can fail: an attempt that dies early still
+  // counts, so the last one is known for what it is.
+  const attemptNumber = await countAttempt(deps, runId);
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
   // Written by this run's own prepare step with the control task's role; still shape-checked.
@@ -1365,6 +1382,8 @@ export async function post(
   let outdated: string[];
   let reopened: string[];
   let recheckPlan: RecheckPlan | undefined;
+  // The report before the recheck's fixes were counted closed: for a run that won't close them.
+  let reportOpen: ReviewReport | undefined;
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -1529,6 +1548,7 @@ export async function post(
     // again without them. They're closed once the claims are held and the run still counts.
     const stillOpen = earlier.open.filter((entry) => !judgedFixed.has(entry.id));
     recheckPlan = await planRecheck(deps, runId, manifest, report, stillOpen);
+    reportOpen = report;
     const recheckClosed = new Set(recheckPlan?.writes.fixed.map((fixed) => fixed.findingId));
     if (recheckClosed.size > 0) {
       report = await finish(stillOpen.filter((entry) => !recheckClosed.has(entry.id)));
@@ -1629,6 +1649,32 @@ export async function post(
   }
 
   let recheckWrites: RecheckWrites | undefined;
+  // What the recheck saved, read again now the claims are held: an attempt that held them
+  // while this one waited may have saved it and closed its findings since this one planned.
+  if (recheckPlan !== undefined && !recheckPlan.saved) {
+    const saved = await deps.store.getText(keys.rechecks);
+    if (saved !== undefined) {
+      recheckPlan = { writes: recheckWritesSchema.parse(JSON.parse(saved)), saved: true };
+    }
+  }
+  // A run that no longer counts closes nothing it hasn't saved: a retry after the review was
+  // posted skipped the stale check above, and the PR may have moved on since. Its summary,
+  // check run, label and record then count those findings open, as the store still has them.
+  // One already saved is finished whatever: its findings may be closed, and are owed notes.
+  const recheckStale = staleReason(latest, pr.headSha);
+  if (
+    recheckPlan !== undefined &&
+    !recheckPlan.saved &&
+    recheckPlan.writes.fixed.length > 0 &&
+    recheckStale !== undefined
+  ) {
+    deps.log("recheck's fixes not closed: the run no longer counts", {
+      runId,
+      reason: recheckStale,
+    });
+    recheckPlan = undefined;
+    if (reportOpen !== undefined) report = reportOpen;
+  }
   const { decision } = report;
   const fresh = report.inline.length + report.body.length;
   // Nothing to say when the review on GitHub already says it: same event, same label, and for
@@ -1884,11 +1930,15 @@ export async function post(
     // and none starts at the comment. Unread, read in part (a page past the limit, threads
     // GitHub left out) or listed without an ID (null), the resolve waits for the step's retry.
     let known = threads;
+    // A read that failed isn't tried again in this attempt: the retry reads them.
+    let unreadable = false;
     const threadOf = async (root: number): Promise<string | undefined | null> => {
       if (known === undefined) {
+        if (unreadable) return null;
         try {
           known = await github.threads.reviewThreads(target);
         } catch {
+          unreadable = true;
           return null;
         }
       }
@@ -1960,10 +2010,7 @@ export async function post(
     }
     // The post step's last attempt never fails here: its review is out, and failing would
     // mark the run failed over a note on a thread.
-    const lastAttempt =
-      options.attempt?.number !== undefined &&
-      options.attempt.of !== undefined &&
-      options.attempt.number >= options.attempt.of;
+    const lastAttempt = attempt.of !== undefined && attemptNumber >= attempt.of;
     if (later > 0 && tries < RECHECK_WRITE_ATTEMPTS && !lastAttempt) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,
@@ -1975,7 +2022,7 @@ export async function post(
         runId,
         attempts: tries,
         left: later,
-        ...(options.attempt?.number === undefined ? {} : { stepAttempt: options.attempt.number }),
+        stepAttempt: attemptNumber,
       });
     }
     progress.rechecks = true;
@@ -2032,28 +2079,16 @@ export async function post(
       progress.review = true;
       await save();
     }
-    // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
-    // Not when another run's review covers this one: that review is what the PR shows, and it
-    // still counts them.
-    // Nor when the run no longer counts and nothing is saved yet: a retry after the review was
-    // posted skipped the stale check above, and the PR may have moved on since.
-    const recheckStale = staleReason(latest, pr.headSha);
+    // The recheck's fixes, closed now that this attempt holds the claims (and the run counts,
+    // or they were saved already: see above). Not when another run's review covers this one:
+    // that review is what the PR shows, and it still counts them.
     if (
       progress.coveredBy === undefined &&
       recheckPlan !== undefined &&
       recheckPlan.writes.fixed.length > 0 &&
       !progress.rechecks
     ) {
-      // One already saved is finished whatever: an earlier attempt may have closed its
-      // findings, and they're owed their replies.
-      if (recheckStale === undefined || recheckPlan.saved) {
-        recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
-      } else {
-        deps.log("recheck's fixes not closed: the run no longer counts", {
-          runId,
-          reason: recheckStale,
-        });
-      }
+      recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
     }
     // What the judged replies led to, now that this attempt holds the run's claim.
     if (replyWrites !== undefined && !progress.replies) {

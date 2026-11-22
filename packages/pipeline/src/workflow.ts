@@ -66,6 +66,11 @@ export function runKeys(runId: string) {
      * fixed, written once so a retried attempt writes the same thread replies.
      */
     rechecks: `${root}rechecks.json`,
+    /**
+     * How many times the post step has started for the run: its attempt number, counted by the
+     * attempts themselves (the workflow's retry count also counts tasks that never started).
+     */
+    postAttempts: `${root}post-attempts.json`,
     batchInput: (index: number) => `${batch(index)}input.json`,
     batchUrls: (index: number) => `${batch(index)}urls.json`,
     batchOutput: (index: number) => `${batch(index)}output.json`,
