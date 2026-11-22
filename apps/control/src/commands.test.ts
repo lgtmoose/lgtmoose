@@ -141,6 +141,19 @@ describe("addressesDocsHandle (NIC-1119)", () => {
     for (const text of ["", "!", "help me", "review it", "full", "approve", "explain why", "hi"]) {
       expect(isWholeCommand(text)).toBe(false);
     }
+    // Punctuation after a space still ends the command.
+    expect(isWholeCommand("review !")).toBe(true);
+    expect(addressesDocsHandle("@lgtmoose review !", ["lgtmoose-acme"])).toBe(true);
+  });
+
+  it("takes learn only in its learn: form, with text", () => {
+    // parseCommand reads "learn from this" as a learn command too; a sentence isn't one here.
+    expect(parseCommand("learn from this")).toEqual({ name: "learn", text: "from this" });
+    expect(isWholeCommand("learn from this")).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose learn from this", ["lgtmoose-acme"])).toBe(false);
+    expect(isWholeCommand("learn: ")).toBe(false);
+    expect(isWholeCommand("learn : use the builder")).toBe(true);
+    expect(isWholeCommand("Learn: use the builder")).toBe(true);
   });
 
   it("is false for a plain mention, an unknown word, code, or a handle that already works", () => {

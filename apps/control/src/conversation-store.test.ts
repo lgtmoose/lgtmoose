@@ -158,22 +158,28 @@ describe("drizzleConversationStore", () => {
     };
     // Two comments at once: one of them claims it.
     const both = await Promise.all([claim("Acme/Shop", 51, "a"), claim("acme/shop", 51, "b")]);
-    expect(both.filter(Boolean)).toHaveLength(1);
-    expect(await claim("Acme/Shop", 51, "c")).toBe(false);
+    expect(both.filter((result) => result === "claimed")).toHaveLength(1);
+    expect(await claim("Acme/Shop", 51, "c")).toBe("other");
     // Another PR has its own.
-    expect(await claim("Acme/Shop", 52)).toBe(true);
+    expect(await claim("Acme/Shop", 52)).toBe("claimed");
     // A PR the dispatcher already tracks keeps its event time.
     await dispatch.advance("Acme/Shop", 53, T1, false);
-    expect(await claim("Acme/Shop", 53)).toBe(true);
+    expect(await claim("Acme/Shop", 53)).toBe("claimed");
     const [row] = await db
       .select()
       .from(pullRequestDispatches)
       .where(eq(pullRequestDispatches.number, 53));
     expect(row?.lastEventAt.toISOString()).toBe(T1.toISOString());
     expect(row?.handleHintAt).toBeInstanceOf(Date);
-    // Given back after a failed post, it can be claimed again.
-    await store.releaseHandleHint?.("Acme/Shop", 53);
-    expect(await claim("Acme/Shop", 53)).toBe(true);
+    // Only its own claimant gives it back, after a failed post; then it can be claimed again.
+    await store.releaseHandleHint?.("Acme/Shop", 53, "someone-else");
+    expect(await claim("Acme/Shop", 53, "c2")).toBe("other");
+    await store.releaseHandleHint?.("Acme/Shop", 53, "c1");
+    expect(await claim("Acme/Shop", 53, "c2")).toBe("claimed");
+    // A posted hint is never given back.
+    await store.handleHintPosted?.("Acme/Shop", 53);
+    await store.releaseHandleHint?.("Acme/Shop", 53, "c2");
+    expect(await claim("Acme/Shop", 53, "c3")).toBe("other");
   });
 
   it("lets a stale unposted hint claim be taken again, never a posted one (NIC-1119)", async () => {
@@ -186,32 +192,40 @@ describe("drizzleConversationStore", () => {
     };
     // Claimed by comment 1, then its Lambda died before posting: a fresh claim holds against
     // another comment.
-    expect(await claim(61, "1")).toBe(true);
+    expect(await claim(61, "1")).toBe("claimed");
     clock = at(10);
-    expect(await claim(61, "2")).toBe(false);
+    expect(await claim(61, "2")).toBe("other");
     // Past the stale time, another comment may post it.
     clock = at(16);
-    expect(await claim(61, "2")).toBe(true);
-    // Once posted, it's never claimed again, by anyone.
-    expect(await claim(62, "1")).toBe(true);
+    expect(await claim(61, "2")).toBe("claimed");
+    // Once posted, it's never claimed again, by anyone; its claimant hears it's theirs.
+    expect(await claim(62, "1")).toBe("claimed");
     await timed.handleHintPosted?.("Acme/Shop", 62);
     clock = at(59);
-    expect(await claim(62, "2")).toBe(false);
-    expect(await claim(62, "1")).toBe(false);
+    expect(await claim(62, "2")).toBe("other");
+    expect(await claim(62, "1")).toBe("mine-posted");
   });
 
-  it("lets the claimant's retry claim an unposted hint again at once (NIC-1119)", async () => {
+  it("lets the claimant's retry claim an unposted hint again after two minutes (NIC-1119)", async () => {
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 22, 13, 0, seconds));
+    let clock = at(0);
+    const timed = drizzleConversationStore(db, () => clock);
     const claim = (claimant: string) => {
-      if (store.claimHandleHint === undefined) throw new Error("no claimHandleHint");
-      return store.claimHandleHint("Acme/Shop", 71, claimant);
+      if (timed.claimHandleHint === undefined) throw new Error("no claimHandleHint");
+      return timed.claimHandleHint("Acme/Shop", 71, claimant);
     };
     // Comment 500 claims it; the post is never made.
-    expect(await claim("500")).toBe(true);
-    // Another comment can't take it, but comment 500's retry can, and posts it.
-    expect(await claim("501")).toBe(false);
-    expect(await claim("500")).toBe(true);
-    await store.handleHintPosted?.("Acme/Shop", 71);
-    expect(await claim("500")).toBe(false);
+    expect(await claim("500")).toBe("claimed");
+    // An overlapping delivery of 500 may still be posting: it waits. Another comment can't
+    // take it either.
+    clock = at(30);
+    expect(await claim("500")).toBe("mine-pending");
+    expect(await claim("501")).toBe("other");
+    // Past two minutes, comment 500's retry claims it, and posts it.
+    clock = at(150);
+    expect(await claim("500")).toBe("claimed");
+    await timed.handleHintPosted?.("Acme/Shop", 71);
+    expect(await claim("500")).toBe("mine-posted");
     const [row] = await db
       .select()
       .from(pullRequestDispatches)

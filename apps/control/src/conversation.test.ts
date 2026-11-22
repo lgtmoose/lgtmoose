@@ -990,22 +990,33 @@ describe("command handles (NIC-1119)", () => {
   const SLUG = "lgtmoose-acme";
   /**
    * A store that records the hint once per PR, as the drizzle store does: a claim holds until
-   * it's posted, and its own claimant's retry may claim it again while it isn't.
+   * it's posted, and its own claimant's retry may claim it again once the claim is two minutes
+   * old. `advance` moves its clock. (Stale claims, after 15 minutes, are the PGlite tests'.)
    */
   function withHintStore(f: ReturnType<typeof fakeDeps>) {
-    const claimed = new Map<string, { claimant: string; posted: boolean }>();
+    let clock = 0;
+    const claimed = new Map<string, { claimant: string; posted: boolean; at: number }>();
     f.deps.store.claimHandleHint = async (repo, number, claimant) => {
       const key = `${repo}#${number}`;
       const held = claimed.get(key);
-      if (held !== undefined && (held.posted || held.claimant !== claimant)) return false;
-      claimed.set(key, { claimant, posted: false });
-      return true;
+      if (held !== undefined) {
+        const mine = held.claimant === claimant;
+        if (held.posted) return mine ? "mine-posted" : "other";
+        if (!mine) return "other";
+        if (clock - held.at < 2 * 60_000) return "mine-pending";
+      }
+      claimed.set(key, { claimant, posted: false, at: clock });
+      return "claimed";
     };
     f.deps.store.handleHintPosted = async (repo, number) => {
       const held = claimed.get(`${repo}#${number}`);
       if (held !== undefined) held.posted = true;
     };
-    return claimed;
+    return Object.assign(claimed, {
+      advance(ms: number) {
+        clock += ms;
+      },
+    });
   }
 
   it("runs a command addressed to the App's own handle", async () => {
@@ -1136,20 +1147,40 @@ describe("command handles (NIC-1119)", () => {
 
   it("posts the hint on a retry of the comment whose claim was never posted", async () => {
     const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
-    withHintStore(f);
+    const store = withHintStore(f);
     // An earlier delivery of comment 500 claimed it, then its Lambda died before posting.
-    expect(await f.deps.store.claimHandleHint?.("acme/shop", 12, "500")).toBe(true);
+    expect(await f.deps.store.claimHandleHint?.("acme/shop", 12, "500")).toBe("claimed");
     // Another comment can't take it meanwhile, and gets a 😕.
     await handleConversation(f.deps, job({ commentId: 600, deliveryId: "d-6" }));
     expect(f.replies).toEqual([]);
     expect(f.reactions).toEqual(["600:confused"]);
-    // The retry of comment 500 posts it.
+    // An overlapping delivery of comment 500 waits for the first: no hint, and no 😕.
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual(["600:confused"]);
+    // Once no attempt can still be posting, the retry of comment 500 posts it.
+    store.advance(3 * 60_000);
     await handleConversation(f.deps, job());
     expect(f.replies).toHaveLength(1);
     expect(f.replies[0]).toMatchObject({ commentId: 500 });
-    // Once posted, not even comment 500 posts it again.
-    await handleConversation(f.deps, job());
+  });
+
+  it("gives no 😕 to a retry of the comment that got the hint, after a later step failed", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:03.000Z" }), {
+      slug: SLUG,
+    });
+    withHintStore(f);
+    let fail = true;
+    f.deps.store.commentsThrough = async () => {
+      if (fail) throw new Error("database gone");
+    };
+    // The hint is posted, then marking the comment handled throws: the job is retried.
+    await expect(handleConversation(f.deps, job())).rejects.toThrow("database gone");
     expect(f.replies).toHaveLength(1);
+    fail = false;
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.replies).toHaveLength(1);
+    expect(f.reactions).toEqual([]);
   });
 
   it("logs a 😕 that can't be posted, and still marks the comment handled", async () => {

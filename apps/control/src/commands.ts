@@ -192,18 +192,21 @@ export function addressesDocsHandle(body: string, handles: readonly string[]): b
 /**
  * Whether the text after a mention is a whole command, as `parseCommand` reads it, with nothing
  * else on the line: "review", "full review", "approve <id>", "explain src/a.ts:3", "learn: <text>".
- * One trailing `.`, `!` or `?` is allowed. "Thanks @lgtmoose!" (nothing), "@lgtmoose help me see
- * why…" and "cc @lgtmoose: review of this is in #12" (more words than the command takes) aren't.
+ * One trailing `.`, `!` or `?` is allowed, also after a space. "Thanks @lgtmoose!" (nothing),
+ * "@lgtmoose help me see why…" and "cc @lgtmoose: review of this is in #12" (more words than the
+ * command takes) aren't. Nor is "learn from this": `parseCommand` reads `learn` with a space as
+ * the command too, but in a sentence only the `learn:` form says it's one.
  */
 export function isWholeCommand(text: string): boolean {
   const trimmed = text
     .trim()
     .replace(/^[,:]\s*/, "")
-    .replace(/[.!?]$/, "");
+    .replace(/[.!?]$/, "")
+    .trim();
   if (trimmed === "") return false;
   const command = parseCommand(trimmed);
-  // `learn:` takes the rest of the line as its text.
-  if (command.name === "learn") return true;
+  // `learn:` takes the rest of the line as its text; it needs the colon and some text.
+  if (command.name === "learn") return /^learn\s*:\s*\S/i.test(trimmed);
   const words = trimmed.split(/\s+/);
   switch (command.name) {
     case "unknown":

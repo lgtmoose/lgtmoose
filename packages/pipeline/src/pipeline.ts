@@ -246,7 +246,10 @@ export interface FinishOptions {
   spendCap?: { batches: readonly number[]; reason: string };
   /** Notes for the summary about how the run started (`SummaryInput.notices`), such as CI. */
   notices?: readonly string[];
-  /** The App's slug, for the summary's pointer to its commands (`SummaryInput.commandHandle`). */
+  /**
+   * The handle that works here, for the summary's pointer to the commands: the App's slug, else
+   * the deployment's first alias (`SummaryInput.commandHandle`).
+   */
   commandHandle?: string;
 }
 

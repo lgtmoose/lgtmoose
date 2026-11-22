@@ -149,6 +149,15 @@ const lower = (repo: string) => repo.toLowerCase();
  */
 export const HANDLE_HINT_CLAIM_MS = 15 * 60_000;
 
+/**
+ * How old a claimant's own unposted claim must be before its retry may claim it again: longer
+ * than a post takes, so no attempt of it is still posting. Rarely, a hint is posted twice: an
+ * attempt posts it but dies before recording that, and its retry after this window posts it
+ * again. Or two overlapping deliveries of one comment straddle the window. That's accepted, as
+ * the hint is only a courtesy.
+ */
+export const HANDLE_HINT_RETRY_MS = 2 * 60_000;
+
 const findingColumns = {
   id: findings.id,
   severity: findings.severity,
@@ -294,10 +303,12 @@ export function drizzleConversationStore(
     async claimHandleHint(repo, number, claimant) {
       const at = now();
       const stale = new Date(at.getTime() - HANDLE_HINT_CLAIM_MS);
+      const retry = new Date(at.getTime() - HANDLE_HINT_RETRY_MS);
       const d = pullRequestDispatches;
       // One statement: two comments handled at once can't both claim it. A claim whose hint was
-      // never posted is taken again by the same comment's retry at once, or by any comment once
-      // it's stale (the Lambda died in between). A posted hint is never claimed again.
+      // never posted is taken again by the same comment's retry once no attempt can still be
+      // posting (`HANDLE_HINT_RETRY_MS`), or by any comment once it's stale (the Lambda died in
+      // between). A posted hint is never claimed again.
       const rows = await db
         .insert(d)
         .values({
@@ -315,10 +326,19 @@ export function drizzleConversationStore(
             handleHintClaimant: claimant,
             updatedAt: at,
           },
-          setWhere: sql`${d.handleHintAt} is null or (not ${d.handleHintPosted} and (${d.handleHintAt} < ${stale} or ${d.handleHintClaimant} = ${claimant}))`,
+          setWhere: sql`${d.handleHintAt} is null or (not ${d.handleHintPosted} and (${d.handleHintAt} < ${stale} or (${d.handleHintClaimant} = ${claimant} and ${d.handleHintAt} < ${retry})))`,
         })
-        .returning({ repo: pullRequestDispatches.repo });
-      return rows.length > 0;
+        .returning({ repo: d.repo });
+      if (rows.length > 0) return "claimed";
+      // Not ours to post now: say whether this claimant holds it, posted (a retry after a later
+      // step failed) or still being posted (an overlapping delivery), so it isn't told it did
+      // nothing.
+      const [held] = await db
+        .select({ posted: d.handleHintPosted, claimant: d.handleHintClaimant })
+        .from(d)
+        .where(and(eq(d.repo, lower(repo)), eq(d.number, number)));
+      if (held?.claimant !== claimant) return "other";
+      return held.posted ? "mine-posted" : "mine-pending";
     },
     async handleHintPosted(repo, number) {
       await db
@@ -331,7 +351,8 @@ export function drizzleConversationStore(
           ),
         );
     },
-    async releaseHandleHint(repo, number) {
+    async releaseHandleHint(repo, number, claimant) {
+      // Only this claimant's own, unposted claim: never one another comment has taken since.
       await db
         .update(pullRequestDispatches)
         .set({
@@ -344,6 +365,8 @@ export function drizzleConversationStore(
           and(
             eq(pullRequestDispatches.repo, lower(repo)),
             eq(pullRequestDispatches.number, number),
+            eq(pullRequestDispatches.handleHintClaimant, claimant),
+            eq(pullRequestDispatches.handleHintPosted, false),
           ),
         );
     },

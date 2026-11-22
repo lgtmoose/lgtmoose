@@ -120,6 +120,15 @@ export interface StoredFinding {
   raisedAtSha: string;
 }
 
+/**
+ * What claiming the PR's handle hint came to (NIC-1119):
+ * - `claimed`: this comment may post it now;
+ * - `mine-posted`: this comment already posted it (a retry after a later step failed);
+ * - `mine-pending`: this comment holds an unposted claim that may still be posting;
+ * - `other`: another comment holds it or posted it.
+ */
+export type HintClaim = "claimed" | "mine-posted" | "mine-pending" | "other";
+
 /** The database, as the conversation handler uses it. `repo` is passed as the job has it. */
 export interface ConversationStore {
   /** Pauses automatic reviews of the PR (`by` a login), or resumes them (`undefined`). */
@@ -156,11 +165,14 @@ export interface ConversationStore {
    * retry) or stale (its Lambda died). False once another claimant holds it or it's posted, so
    * the hint is never posted twice.
    */
-  claimHandleHint?(repo: string, number: number, claimant: string): Promise<boolean>;
+  claimHandleHint?(repo: string, number: number, claimant: string): Promise<HintClaim>;
   /** Records that the claimed hint was posted, so the claim never goes stale. */
   handleHintPosted?(repo: string, number: number): Promise<void>;
-  /** Gives the PR's hint back after it failed to post, so a later comment can still get it. */
-  releaseHandleHint?(repo: string, number: number): Promise<void>;
+  /**
+   * Gives `claimant`'s unposted claim back after its post failed, so a later comment can still
+   * get the hint. A claim another comment holds, or a posted one, is left alone.
+   */
+  releaseHandleHint?(repo: string, number: number, claimant: string): Promise<void>;
 }
 
 export interface ConversationDeps {
@@ -267,10 +279,11 @@ async function onFindingThread(
 }
 
 /**
- * What became of a hint: posted now; not posted because the PR already has one (or a live claim
- * on one); not posted because posting failed; or only logged, in shadow mode.
+ * What became of a hint: posted now; this comment's own, posted before or being posted by an
+ * overlapping delivery; not posted because another comment has it; not posted because posting
+ * failed; or only logged, in shadow mode. Only `already` earns the 😕.
  */
-type HintOutcome = "posted" | "already" | "failed" | "shadow";
+type HintOutcome = "posted" | "mine" | "already" | "failed" | "shadow";
 
 /**
  * The one-time hint (NIC-1119) for a comment that used `@lgtmoose` where this App is called
@@ -299,7 +312,10 @@ async function hintHandle(
     return "shadow";
   }
   if (store.claimHandleHint === undefined) return "already";
-  if (!(await store.claimHandleHint(job.repo, job.prNumber, claimant))) return "already";
+  const claim = await store.claimHandleHint(job.repo, job.prNumber, claimant);
+  // This comment has the hint already, posted or being posted: nothing more, and no 😕.
+  if (claim === "mine-posted" || claim === "mine-pending") return "mine";
+  if (claim === "other") return "already";
   try {
     await post(`${handleHint(slug)}\n\n${REPLY_MARKER}`);
   } catch (error) {
@@ -308,7 +324,7 @@ async function hintHandle(
       error: error instanceof Error ? error.message : String(error),
     });
     try {
-      await store.releaseHandleHint?.(job.repo, job.prNumber);
+      await store.releaseHandleHint?.(job.repo, job.prNumber, claimant);
     } catch {
       // Left claimed: it goes stale, and a later comment can claim it then.
     }

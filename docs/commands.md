@@ -42,7 +42,9 @@ The reply:
 - is posted once per PR;
 - carries the reply marker, so nothing reads it as a command;
 - is only logged in shadow mode;
-- can still come from a later comment if posting it fails, or from a retry of the same comment if the Lambda stopped before posting it.
+- can still come from a later comment if posting it fails, or from a retry of the same comment, after two minutes, if the Lambda stopped before posting it.
+
+Rarely, a PR gets the hint twice: an attempt posts it but stops before recording that, and its retry posts it again. That's accepted, as the hint is only a courtesy. The comment that got the hint is never given a 😕.
 
 The comment itself runs nothing. What else happens to it depends on where it is:
 

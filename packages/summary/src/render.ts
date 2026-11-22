@@ -98,8 +98,9 @@ export interface SummaryInput {
    */
   notices?: readonly string[];
   /**
-   * The App's slug, for the footer's pointer to its commands (NIC-1119): the handle that works
-   * here, which may not be the `@lgtmoose` the docs show. Left out: no pointer.
+   * The handle that works here, for the footer's pointer to the commands (NIC-1119): the App's
+   * slug, else the deployment's first alias. It may not be the `@lgtmoose` the docs show. Left
+   * out: no pointer.
    */
   commandHandle?: string;
 }
