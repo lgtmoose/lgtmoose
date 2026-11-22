@@ -22,6 +22,9 @@ import { join } from "node:path";
  *   what it made. If the removal fails, the `exit` listener below stays registered to try again;
  * - **an `exit` listener,** when Vitest exits without a successful teardown. On SIGINT and SIGTERM
  *   (Ctrl+C, a cancelled CI job), Vitest's own handler calls `process.exit()`, which fires `exit`.
+ *   That removal is best effort: forked workers may still be writing, so a partial directory can
+ *   be left behind. The listener says on stderr that it's removing the directory, and names it if
+ *   the removal fails, so it can be removed by hand.
  *
  * A run whose main process is killed outright (SIGKILL, a crash) runs neither, and leaves its one
  * `lgtmoose-cdk-test-*` directory behind for the system's temp cleanup or a person to remove.
@@ -43,10 +46,13 @@ export default function setup(): () => void {
   for (const name of ENV_NAMES) process.env[name] = root;
 
   const onExit = () => {
+    process.stderr.write(`infra/cdk: removing CDK test temp files in ${root}…\n`);
     try {
       removeRoot(root);
-    } catch {
-      // Nothing more to do while the process exits.
+    } catch (error) {
+      process.stderr.write(
+        `infra/cdk: couldn't remove ${root}, remove it by hand: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
     }
   };
   process.once("exit", onExit);
