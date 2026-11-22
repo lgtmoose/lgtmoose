@@ -778,7 +778,8 @@ export async function prepare(
             log: (message, fields) => deps.log(message, fields),
           });
     // What the caps let run, reserved before anything is dispatched: people's replies and
-    // explains first, then tickets, then the review's batches in plan order (riskiest first).
+    // explains first, then tickets, then the review's batches in plan order (riskiest first),
+    // then the recheck last (NIC-1120): near a cap, it's what's dropped, never a review batch.
     const wanted: PlannedBatch[] = [
       ...judges.map((judge) => ({
         index: judge.index,
@@ -795,14 +796,14 @@ export async function prepare(
         kind: "ticket" as const,
         tier: TICKET_CHECKER_TIER as Tier,
       })),
-      ...(recheck === undefined
-        ? []
-        : [{ index: recheck.index, kind: "recheck" as const, tier: RECHECK_TIER as Tier }]),
       ...prepared.jobs.flatMap((batch) =>
         batch.prompt === undefined
           ? []
           : [{ index: batch.index, kind: "review" as const, tier: "standard" as Tier }],
       ),
+      ...(recheck === undefined
+        ? []
+        : [{ index: recheck.index, kind: "recheck" as const, tier: RECHECK_TIER as Tier }]),
     ];
     const spent =
       deps.spend === undefined
@@ -819,16 +820,23 @@ export async function prepare(
             (message, fields) => deps.log(message, fields),
           );
     const notRun = wanted.filter((batch) => !spent.runs(batch.index));
-    if (spent.cap !== undefined && deps.spend !== undefined) {
+    // A cap that left out only the recheck (NIC-1120) doesn't make the review a capped one: its
+    // carried findings stay open, as before the recheck, and the review says nothing about it.
+    const recheckOnly = notRun.length > 0 && notRun.every((batch) => batch.kind === "recheck");
+    if (recheckOnly) {
+      deps.log("recheck left out by a spend cap", { runId: run.runId, cap: spent.cap?.kind });
+    }
+    const cap = recheckOnly ? undefined : spent.cap;
+    if (cap !== undefined && deps.spend !== undefined) {
       if (
         notRun.length === wanted.length &&
-        (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, spent.cap))
+        (await quietlyCapped(deps.spend.store, run, job.requested, pr.headSha, cap))
       ) {
         await deps.runs.supersedeRun(run.runId);
-        deps.log("spend capped, nothing new to post", { runId: run.runId, cap: spent.cap.kind });
+        deps.log("spend capped, nothing new to post", { runId: run.runId, cap: cap.kind });
         return { runId: run.runId, superseded: true, batches: [] };
       }
-      await deps.spend.store.markCapped(run.runId, spent.cap.kind);
+      await deps.spend.store.markCapped(run.runId, cap.kind);
     }
     const keptJudges = judges.filter((judge) => spent.runs(judge.index));
     const keptExplains = explains.filter(
@@ -943,13 +951,13 @@ export async function prepare(
       ...(keptRecheck === undefined
         ? {}
         : { recheck: (({ prompt: _, ...rest }) => rest)(keptRecheck) }),
-      ...(spent.cap === undefined
+      ...(cap === undefined
         ? {}
         : {
             spendCap: {
-              kind: spent.cap.kind,
+              kind: cap.kind,
               batches: cappedReview,
-              reason: capReason(spent.cap, notRun.length),
+              reason: capReason(cap, notRun.length),
             },
           }),
       ...(conversationOnly ? { conversationOnly: true as const } : {}),

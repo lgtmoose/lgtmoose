@@ -44,11 +44,11 @@ The post step closes a finding as fixed only when all of these hold:
 
 - the recheck's verdict says the problem is gone;
 - this run's review didn't raise it again;
-- in a protected category (`authz`, `tenant_scoping`, `money`, `secrets`), the verdict names one of the changed files as where the fix is.
+- in a protected category (`authz`, `tenant_scoping`, `money`, `secrets`), the verdict names, by its full repository path, one of the changed files related to the finding as where the fix is. A file name alone (`index.ts`), or a path inside a longer one, doesn't count.
 
 A failed batch, a missing verdict or any doubt keeps the finding open. The decision is then made again without it. Its thread gets a reply saying the commit it was fixed at, with the recheck's reason, escaped, and the thread is resolved. The event is recorded as `fixed`, by LGTMoose, at that commit.
 
-There's no recheck on a full review, on a run that only judges replies or answers explains while the code waits for a trigger, or for a finding whose reply the judge reads in the same run. The recheck batch counts towards the spend caps like any batch. In shadow mode the reply and the resolve are logged instead of written.
+There's no recheck on a full review, on a run that only judges replies or answers explains while the code waits for a trigger, or for a finding whose reply the judge reads in the same run. The recheck batch counts towards the spend caps like any batch. It's reserved last, so near a cap it's the batch left out, never a review batch, and a run that loses only the recheck isn't a capped review. The post step saves what it will close before it closes anything, so a retry after a crash closes the rest and writes every reply. A reply that fails is written by the step's retry, once. In shadow mode the reply and the resolve are logged instead of written.
 
 Other reviewers' unresolved inline comments count too. Those from other bots (CodeRabbit, say), or from people who are owners, members or collaborators, that are marked Critical (blocking), Major or a bug (should fix), on files the review covers and still on the current diff, count towards the decision as open findings. The summary lists them with who raised them. They're never posted again, never stored as LGTMoose's own, and their text never reaches a model or the summary: only its opening words are read, for the severity. When one is on a file LGTMoose reviewed and none of its own findings is within a few lines, the run writes it to `misses.json` (path, line, severity and source, no text) for the evals.
 

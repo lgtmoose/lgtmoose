@@ -3,6 +3,7 @@ import type { FindingRecord } from "./ports.js";
 import {
   fixedByRecheck,
   isRelated,
+  namesRelatedFile,
   recheckReply,
   relativeImports,
   selectRechecks,
@@ -101,15 +102,51 @@ describe("selectRechecks", () => {
     ).toEqual(["b1", "b2", "s1"]);
     expect(selectRechecks(records, [], new Map())).toEqual([]);
   });
+
+  it("orders each severity by when the commit it was raised at was made, not input order", () => {
+    const records = [
+      record({ id: "late", raisedAtSha: "c".repeat(40) }),
+      record({ id: "early", raisedAtSha: "b".repeat(40) }),
+      record({ id: "unknown", raisedAtSha: "d".repeat(40) }),
+      record({ id: "fix-early", severity: "should_fix", raisedAtSha: "b".repeat(40) }),
+    ];
+    const raisedAt = new Map([
+      ["b".repeat(40), 100],
+      ["c".repeat(40), 200],
+    ]);
+    expect(
+      selectRechecks(records, ["src/pay/x.ts"], new Map(), 10, raisedAt).map((row) => row.id),
+    ).toEqual(["early", "late", "unknown", "fix-early"]);
+  });
+});
+
+describe("namesRelatedFile", () => {
+  it("matches a related file's full path standing on its own", () => {
+    expect(namesRelatedFile("src/pay/Section.tsx line 4 maps it.", ["src/pay/Section.tsx"])).toBe(
+      true,
+    );
+    expect(namesRelatedFile("Fixed in `src/db.ts`.", ["src/db.ts"])).toBe(true);
+    expect(namesRelatedFile("See src/db.ts: line 2", ["src/db.ts"])).toBe(true);
+  });
+
+  it("doesn't match a file name alone, or a path inside a longer one", () => {
+    // Another directory's index.ts isn't this one.
+    expect(namesRelatedFile("src/web/index.ts guards it.", ["src/api/index.ts"])).toBe(false);
+    expect(namesRelatedFile("index.ts guards it.", ["src/api/index.ts"])).toBe(false);
+    // mydb.ts isn't db.ts, nor is a longer path that ends in it.
+    expect(namesRelatedFile("src/mydb.ts line 3 checks it.", ["src/db.ts"])).toBe(false);
+    expect(namesRelatedFile("lib/src/db.ts checks it.", ["src/db.ts"])).toBe(false);
+    expect(namesRelatedFile("src/db.tsx checks it.", ["src/db.ts"])).toBe(false);
+    expect(namesRelatedFile("src/db.ts.bak checks it.", ["src/db.ts"])).toBe(false);
+  });
 });
 
 describe("fixedByRecheck", () => {
-  const changed = ["src/pay/PaymentSection.tsx"];
+  const related = ["src/pay/PaymentSection.tsx"];
   const context = { reraised: new Set<string>(), open: new Set(["f1", "f2"]) };
 
   it("closes only what a verdict says is gone, the first verdict for an id counting", () => {
     const job = {
-      changed,
       targets: [entry(), entry({ id: "F2", findingId: "f2", fingerprint: "fp2" })],
     };
     const fixes = fixedByRecheck(
@@ -126,25 +163,30 @@ describe("fixedByRecheck", () => {
   });
 
   it("keeps one raised again, one no longer open, and one with no verdict", () => {
-    const job = { changed, targets: [entry()] };
+    const job = { targets: [entry()] };
     const gone = [{ id: "F1", confirmed: false, reason: "fixed" }];
     expect(fixedByRecheck(job, gone, { ...context, reraised: new Set(["fp1"]) })).toEqual([]);
     expect(fixedByRecheck(job, gone, { ...context, open: new Set() })).toEqual([]);
     expect(fixedByRecheck(job, [], context)).toEqual([]);
   });
 
-  it("needs a protected-category verdict to name a changed file as the fix", () => {
-    const job = { changed, targets: [entry({ ruleCategory: "authz" })] };
+  it("needs a protected-category verdict to name a related changed file by its path", () => {
+    const job = { targets: [entry({ ruleCategory: "authz", related })] };
+    const verdict = (reason: string) => [{ id: "F1", confirmed: false, reason }];
+    expect(fixedByRecheck(job, verdict("Looks handled."), context)).toEqual([]);
+    // Its file name alone, or a changed file that isn't related to the finding, isn't enough.
+    expect(fixedByRecheck(job, verdict("PaymentSection.tsx line 4 checks it."), context)).toEqual(
+      [],
+    );
+    expect(fixedByRecheck(job, verdict("src/cart/Unrelated.tsx checks it."), context)).toEqual([]);
     expect(
-      fixedByRecheck(job, [{ id: "F1", confirmed: false, reason: "Looks handled." }], context),
-    ).toEqual([]);
-    expect(
-      fixedByRecheck(
-        job,
-        [{ id: "F1", confirmed: false, reason: "src/pay/PaymentSection.tsx line 4 checks it." }],
-        context,
-      ),
+      fixedByRecheck(job, verdict("src/pay/PaymentSection.tsx line 4 checks it."), context),
     ).toHaveLength(1);
+    // A manifest from before `related` was kept: no path counts.
+    const old = { targets: [entry({ ruleCategory: "authz" })] };
+    expect(
+      fixedByRecheck(old, verdict("src/pay/PaymentSection.tsx line 4 checks it."), context),
+    ).toEqual([]);
   });
 });
 

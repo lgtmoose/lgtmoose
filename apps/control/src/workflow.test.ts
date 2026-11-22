@@ -4023,6 +4023,8 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
     });
     const writes: string[] = [];
+    /** How many of the next replies fail, as GitHub refusing them would. */
+    const failReplies = { count: 0 };
     h.findings.closeFixed = async (id) => {
       const row = h.findings.rows.find((candidate) => candidate.id === id);
       if (row === undefined || (row.status !== "open" && row.status !== "outdated")) return false;
@@ -4034,6 +4036,10 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       ...(await github(installationId)),
       conversation: {
         reply: async (_target, root, body) => {
+          if (failReplies.count > 0) {
+            failReplies.count -= 1;
+            throw new Error("GitHub 502");
+          }
           writes.push(`reply ${root}: ${body}`);
         },
         comment: async (_target, body) => {
@@ -4044,7 +4050,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
         },
       },
     });
-    return { h, writes };
+    return { h, writes, failReplies };
   }
 
   /**
@@ -4142,7 +4148,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
-  it("closes a protected-category finding only when the verdict names the fix", async () => {
+  it("closes a protected-category finding only when the verdict names the fix by its path", async () => {
     const authz = finding({ rule_category: "authz", title: "Total is computed for any caller" });
     const { h } = rechecking();
     await run(h, 1, [authz]);
@@ -4150,14 +4156,135 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     await run(h, 2, [], [{ id: "F1", confirmed: false, reason: "This looks handled now." }]);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
 
-    headSha = await commit({ "src/checkout.ts": "export const guarded = true;\n" }, "guard");
+    // The file's name alone isn't its path.
+    headSha = await commit({ "src/checkout.ts": "export const guarded = 1;\n" }, "guard");
     await run(
       h,
       3,
       [],
       [{ id: "F1", confirmed: false, reason: "checkout.ts line 1 now checks the caller first." }],
     );
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+
+    headSha = await commit({ "src/checkout.ts": "export const guarded = 2;\n" }, "guard again");
+    const { manifest } = await run(
+      h,
+      4,
+      [],
+      [
+        {
+          id: "F1",
+          confirmed: false,
+          reason: "src/checkout.ts line 1 now checks the caller first.",
+        },
+      ],
+    );
+    expect(manifest.recheck?.targets[0]?.related).toEqual(["src/checkout.ts"]);
     expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+  });
+
+  it("finishes the closes and writes every reply after an attempt dies part way", async () => {
+    const { h, writes } = rechecking();
+    const second = finding({
+      line: 4,
+      title: "Total adds the price before the discount",
+      evidence: "sum += items[i].price;",
+    });
+    await run(h, 1, [finding(), second]);
+    expect(h.findings.rows.map((row) => row.githubCommentId)).toEqual([1000, 1001]);
+    await fixElsewhere();
+    const close = h.findings.closeFixed?.bind(h.findings);
+    let calls = 0;
+    h.findings.closeFixed = async (id, sha) => {
+      calls += 1;
+      if (calls === 2) throw new Error("the database went away");
+      return close?.(id, sha) ?? false;
+    };
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    const reason = "src/checkout.ts line 1 adds the item.";
+    for (const batch of prepared.batches) {
+      const verdicts = [
+        { id: "F1", confirmed: false, reason },
+        { id: "F2", confirmed: false, reason },
+      ];
+      h.objects.set(
+        runKeys(prepared.runId).batchOutput(batch.index),
+        JSON.stringify(
+          batch.index === manifest.recheck?.index
+            ? { version: 1, index: batch.index, verdicts, transcriptKeys: [] }
+            : output({ index: batch.index, findings: [] }),
+        ),
+      );
+    }
+    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow(
+      "the database went away",
+    );
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "open"]);
+
+    const posted = await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+    expect(posted).toMatchObject({ event: "APPROVE" });
+    expect(writes.filter((write) => write.startsWith("reply "))).toEqual([
+      expect.stringMatching(/^reply 1000: This looks fixed/),
+      expect.stringMatching(/^reply 1001: This looks fixed/),
+    ]);
+  });
+
+  it("writes a failed recheck reply on the retry, and each one once", async () => {
+    const { h, writes, failReplies } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    failReplies.count = 1;
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    for (const batch of prepared.batches) {
+      h.objects.set(
+        runKeys(prepared.runId).batchOutput(batch.index),
+        JSON.stringify(
+          batch.index === manifest.recheck?.index
+            ? {
+                version: 1,
+                index: batch.index,
+                verdicts: [{ id: "F1", confirmed: false, reason: "src/checkout.ts adds it." }],
+                transcriptKeys: [],
+              }
+            : output({ index: batch.index, findings: [] }),
+        ),
+      );
+    }
+    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow(
+      "recheck replies weren't written",
+    );
+    expect(writes).toEqual([]);
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(writes).toEqual([expect.stringMatching(/^reply 1000: /), "resolve PRRT_1"]);
+    // A third attempt finds the step done.
+    await post(h.deps, prepared.runId, offEcs("a3"));
+    expect(writes).toHaveLength(2);
+  });
+
+  it("drops the recheck, never a review batch, when a cap fits only the review", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    const spend = memorySpend({ averageBatchUsd: 1 });
+    h.deps.spend = {
+      store: spend.store,
+      budgets: budgetsSchema.parse({ perPullRequest: { costPerDayUsd: 1 } }),
+    };
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    // The review's one batch runs; the recheck was the batch the cap left out.
+    expect(manifest.review.jobs.filter((job) => job.prompt !== undefined)).toHaveLength(1);
+    expect(prepared.batches).toEqual([{ index: manifest.review.jobs[0]?.index ?? -1 }]);
+    expect(manifest.recheck).toBeUndefined();
+    // Only the recheck was left out: the review isn't a capped one.
+    expect(manifest.spendCap).toBeUndefined();
+    expect(spend.capped.size).toBe(0);
   });
 
   it("keeps a finding this run's review raised again, whatever the recheck says", async () => {

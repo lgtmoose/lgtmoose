@@ -54,15 +54,15 @@ finding fixed in another file should close, one that still holds should stay ope
 recall falls below the baseline or the learning gate fails (any collateral in a protected
 category, any untrusted learning in a prompt, or a repeat rate above the baseline's) or a
 recheck closes a finding that still holds, and 2 when
-the evals couldn't run (bad fixtures or options, or every fixture run failed, as without a model
-credential).
+the evals couldn't run (bad fixtures or options, every fixture run failed, as without a model
+credential, or a recheck scenario errored or never picked its finding).
 
 Options:
   --fixtures <dir>     Another fixture directory, run with this package's fixtures/
                        (repeatable). LGTMOOSE_EVAL_FIXTURES adds more, separated by "${delimiter}".
                        For private fixtures kept outside this repository.
   --no-public          Leave out this package's fixtures/ and run only the extra ones
-  --only <name>        Run only this fixture or learning scenario (repeatable); the baseline
+  --only <name>        Run only this fixture, learning or recheck scenario (repeatable); the baseline
                        isn't checked (collateral still fails the run)
   --no-learning        Leave out the learning-speed scenarios
   --no-recheck         Leave out the recheck scenarios
@@ -213,7 +213,7 @@ async function main(argv: readonly string[]): Promise<number> {
         !rechecks.some((r) => r.name === name),
     );
     if (missing.length > 0) {
-      throw new Error(`No fixture or learning scenario named ${missing.join(", ")}.`);
+      throw new Error(`No fixture, learning or recheck scenario named ${missing.join(", ")}.`);
     }
   }
 
@@ -281,6 +281,12 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     const recheckFalseCloses =
       rechecked === undefined ? 0 : recheckTotals(rechecked.scores).falseCloses;
+    // A recheck scenario that errored, or whose finding was never picked, says nothing about the
+    // recheck: the plumbing failed, like a fixture run that failed.
+    const recheckBroken =
+      rechecked === undefined
+        ? 0
+        : rechecked.scores.filter((score) => score.error !== undefined || !score.checked).length;
     const report: EvalReport = {
       ...buildReport(scores, model, startedAt),
       ...(learning === undefined ? {} : { learning }),
@@ -325,7 +331,9 @@ async function main(argv: readonly string[]): Promise<number> {
     ].join("\n");
     await writeFile(join(out, "report.md"), markdown);
     let recheckMessage = "";
-    if (rechecked !== undefined) {
+    if (rechecked !== undefined && recheckBroken > 0) {
+      recheckMessage = `${recheckBroken} of ${rechecked.scores.length} recheck scenarios didn't run (an error, or the finding wasn't picked).\n`;
+    } else if (rechecked !== undefined) {
       recheckMessage =
         recheckFalseCloses > 0
           ? `The recheck closed ${recheckFalseCloses} finding${recheckFalseCloses === 1 ? "" : "s"} that still hold.\n`
@@ -338,6 +346,8 @@ async function main(argv: readonly string[]): Promise<number> {
     if (learning !== undefined && learning.totals.failedRuns === learning.scenarios.length) {
       return 2;
     }
+    // A recheck that couldn't run is a run that didn't happen: never a pass, never the baseline.
+    if (recheckBroken > 0) return 2;
     // A run with collateral never becomes the baseline.
     if (values["update-baseline"] && learningGate?.ok !== false && recheckFalseCloses === 0) {
       await writeFile(baselinePath, `${JSON.stringify(baselineFrom(report), null, 2)}\n`);

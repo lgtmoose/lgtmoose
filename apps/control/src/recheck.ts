@@ -26,9 +26,9 @@ import type { ArtifactStore, FindingRecord } from "./ports.js";
  * - **Post** (`fixedByRecheck`) closes a finding as fixed only when the recheck's verdict says
  *   the problem is gone (`confirmed: false`), this run's review didn't raise it again, and, in a
  *   protected category (authz, tenant_scoping, money, secrets), the verdict names a changed file
- *   as where the fix is. No verdict, a failed batch, or any doubt: it stays open. Then the
- *   decision is made again without it, its thread gets a reply saying where it was fixed, and
- *   the thread is resolved.
+ *   related to the finding, by its full path, as where the fix is. No verdict, a failed batch,
+ *   or any doubt: it stays open. Then the decision is made again without it, its thread gets a
+ *   reply saying where it was fixed, and the thread is resolved.
  *
  * The recheck only judges given findings against the code; plain code decides what closes. A
  * learning never closes a finding: the recheck's prompt has none.
@@ -60,6 +60,11 @@ export const recheckEntrySchema = z.object({
   severity: z.enum(["blocking", "should_fix", "nit"]),
   /** Our inline comment: the thread a "fixed" reply goes in. */
   githubCommentId: z.number().int().positive().optional(),
+  /**
+   * The changed files related to this finding (`isRelated`): where a fix the verdict names must
+   * be, for a protected-category finding. Left out by runs before it: then none counts.
+   */
+  related: z.array(z.string()).optional(),
 });
 
 export type RecheckEntry = z.infer<typeof recheckEntrySchema>;
@@ -131,10 +136,13 @@ function candidate(record: FindingRecord): boolean {
   );
 }
 
+/** A file's text at head, for its imports: undefined when it's missing or too large to read. */
 async function headText(repo: Repo, headSha: string, path: string): Promise<string | undefined> {
   try {
-    const text = await repo.git(["show", `${headSha}:${path}`]);
-    return text.length > MAX_IMPORT_BYTES ? undefined : text;
+    // The blob's size in bytes first, so a large file is never read.
+    const size = Number((await repo.git(["cat-file", "-s", `${headSha}:${path}`])).trim());
+    if (!Number.isFinite(size) || size > MAX_IMPORT_BYTES) return undefined;
+    return await repo.git(["show", `${headSha}:${path}`]);
   } catch {
     return undefined;
   }
@@ -142,25 +150,53 @@ async function headText(repo: Repo, headSha: string, path: string): Promise<stri
 
 /**
  * The findings this run checks again, in the order they're checked: blocking first, then
- * should-fix, each oldest first, at most `limit`. Pure: `imports` has each relevant file's
- * relative imports at head.
+ * should-fix, each oldest first by the time of the commit it was raised at (`raisedAt`, seconds
+ * by SHA; a commit without one sorts last), then in the order given, at most `limit`. Pure:
+ * `imports` has each relevant file's relative imports at head.
  */
 export function selectRechecks(
   records: readonly FindingRecord[],
   changed: readonly string[],
   imports: ReadonlyMap<string, ReadonlySet<string>>,
   limit: number = MAX_RECHECKS_PER_RUN,
+  raisedAt: ReadonlyMap<string, number> = new Map(),
 ): FindingRecord[] {
   if (changed.length === 0 || limit <= 0) return [];
   const affected = records.filter(
     (record) => candidate(record) && changed.some((path) => isRelated(record.path, path, imports)),
   );
   const rank = (record: FindingRecord) => (record.severity === "blocking" ? 0 : 1);
+  const when = (record: FindingRecord) => raisedAt.get(record.raisedAtSha) ?? Infinity;
   return affected
     .map((record, order) => ({ record, order }))
-    .sort((a, b) => rank(a.record) - rank(b.record) || a.order - b.order)
+    .sort((a, b) => {
+      const byRank = rank(a.record) - rank(b.record);
+      if (byRank !== 0) return byRank;
+      const at = when(a.record);
+      const bt = when(b.record);
+      if (at !== bt) return at < bt ? -1 : 1;
+      return a.order - b.order;
+    })
     .slice(0, limit)
     .map(({ record }) => record);
+}
+
+/** When each commit was made, in seconds, by SHA: the ones git can't read are left out. */
+async function commitTimes(repo: Repo, shas: readonly string[]): Promise<Map<string, number>> {
+  const times = new Map<string, number>();
+  if (shas.length === 0) return times;
+  try {
+    const out = await repo.git(["show", "-s", "--format=%H %ct", ...shas]);
+    for (const line of out.split("\n")) {
+      const [sha, seconds] = line.trim().split(" ");
+      if (sha !== undefined && seconds !== undefined && Number.isFinite(Number(seconds))) {
+        times.set(sha, Number(seconds));
+      }
+    }
+  } catch {
+    // Unread, the findings keep the order they came in.
+  }
+  return times;
 }
 
 async function excerptAt(repo: Repo, record: FindingRecord) {
@@ -221,7 +257,18 @@ export async function recheckJob(input: {
     const text = await headText(repo, headSha, path);
     if (text !== undefined) imports.set(path, relativeImports(path, text));
   }
-  const chosen = selectRechecks(open, changed, imports, input.limit ?? MAX_RECHECKS_PER_RUN);
+  // The commits the findings were raised at: for their order, and the code they cited.
+  const raisedShas = [...new Set(open.map((record) => record.raisedAtSha))];
+  await repo.fetchCommits(raisedShas).catch(() => {
+    // An excerpt that can't be read is left out; the recheck opens the file at head.
+  });
+  const chosen = selectRechecks(
+    open,
+    changed,
+    imports,
+    input.limit ?? MAX_RECHECKS_PER_RUN,
+    await commitTimes(repo, raisedShas),
+  );
   if (chosen.length === 0) return undefined;
   // The diff of the changed files related to a chosen finding: what the fix would be in.
   const relevant = changed.filter((path) =>
@@ -244,9 +291,6 @@ export async function recheckJob(input: {
   if (diff.length > MAX_DIFF_CHARS) {
     diff = `${diff.slice(0, MAX_DIFF_CHARS)}\n… (the rest of the diff is left out: open the files to read it)`;
   }
-  await repo.fetchCommits([...new Set(chosen.map((record) => record.raisedAtSha))]).catch(() => {
-    // An excerpt that can't be read is left out; the recheck opens the file at head.
-  });
   const targets: (RecheckTarget & { entry: RecheckEntry })[] = [];
   for (const [i, record] of chosen.entries()) {
     const id = `F${i + 1}`;
@@ -272,6 +316,7 @@ export async function recheckJob(input: {
         ...(record.githubCommentId === undefined
           ? {}
           : { githubCommentId: record.githubCommentId }),
+        related: changed.filter((path) => isRelated(record.path, path, imports)),
       },
     });
   }
@@ -315,9 +360,17 @@ export interface RecheckFix {
   reason: string;
 }
 
-/** Whether a verdict's reason names one of the changed files, by path or by file name. */
-function namesChangedFile(reason: string, changed: readonly string[]): boolean {
-  return changed.some((path) => reason.includes(path) || reason.includes(posix.basename(path)));
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Whether a verdict's reason names one of `related` by its full repository path, standing on
+ * its own: not inside a longer path or name (`src/web/index.ts` doesn't name `src/index.ts`, and
+ * `mydb.ts` doesn't name `db.ts`). A trailing full stop or colon may follow it.
+ */
+export function namesRelatedFile(reason: string, related: readonly string[]): boolean {
+  return related.some((path) =>
+    new RegExp(`(?<![\\w./-])${escapeRegExp(path)}(?![\\w/-]|\\.[\\w/])`).test(reason),
+  );
 }
 
 /**
@@ -325,10 +378,11 @@ function namesChangedFile(reason: string, changed: readonly string[]): boolean {
  * the problem is gone counts; the first verdict for an id wins and unknown ids are ignored. A
  * finding this run's review raised again (`reraised`, by fingerprint) or that isn't open any
  * more (`open`, by ID) stays as it is. A protected-category finding also needs the verdict to
- * name a changed file as where the fix is: "the problem is gone" alone isn't enough there.
+ * name, by its full path, one of the changed files related to it (`RecheckEntry.related`) as
+ * where the fix is: "the problem is gone" alone isn't enough there.
  */
 export function fixedByRecheck(
-  job: Pick<RecheckJob, "targets" | "changed">,
+  job: Pick<RecheckJob, "targets">,
   verdicts: readonly Verdict[],
   context: { reraised: ReadonlySet<string>; open: ReadonlySet<string> },
 ): RecheckFix[] {
@@ -339,7 +393,10 @@ export function fixedByRecheck(
     const verdict = byId.get(entry.id);
     if (verdict === undefined || verdict.confirmed) continue;
     if (context.reraised.has(entry.fingerprint) || !context.open.has(entry.findingId)) continue;
-    if (isProtectedCategory(entry.ruleCategory) && !namesChangedFile(verdict.reason, job.changed)) {
+    if (
+      isProtectedCategory(entry.ruleCategory) &&
+      !namesRelatedFile(verdict.reason, entry.related ?? [])
+    ) {
       continue;
     }
     fixes.push({ entry, reason: verdict.reason });
