@@ -561,15 +561,18 @@ export async function recheckJob(input: {
       .map((record) => record.path)
       .filter((path) => changed.includes(path)),
   );
-  // A full review takes every changed file after those: it picked with no related-file filter,
-  // so a fix may be anywhere the change is.
+  // Then the changed files related to a chosen finding, where a fix usually is. A full review
+  // takes the unrelated ones last, so on a large PR they can never crowd a fix out of the budget.
+  const related = changed.filter(
+    (path) => !own.has(path) && chosen.some((record) => isRelated(record.path, path, imports)),
+  );
+  const relatedSet = new Set(related);
   const relevant = [
     ...own,
-    ...changed.filter(
-      (path) =>
-        !own.has(path) &&
-        (picked !== undefined || chosen.some((record) => isRelated(record.path, path, imports))),
-    ),
+    ...related,
+    ...(picked === undefined
+      ? []
+      : changed.filter((path) => !own.has(path) && !relatedSet.has(path))),
   ];
   // In `changed`'s order (the PR's own files first), which git's own path order wouldn't keep.
   let diff = "";
@@ -608,6 +611,7 @@ export async function recheckJob(input: {
       raisedAtSha: record.raisedAtSha,
       ...(excerpt === undefined ? {} : { excerpt }),
       ...(lineGone(record, lines) ? { citedLineChanged: true } : {}),
+      ...(inHistory.get(record.raisedAtSha) === false ? { raisedCommitGone: true } : {}),
       entry: {
         id,
         findingId: record.id,
@@ -640,7 +644,15 @@ export async function recheckJob(input: {
       headSha,
       sinceSha,
       diff,
-      ...(picked === undefined ? {} : { fixAfterRaised: true }),
+      ...(picked === undefined
+        ? {}
+        : {
+            fixAfterRaised: true,
+            // `fullReviewSince` fell back to the merge base: no chosen finding's commit is it.
+            ...(picked.some((record) => record.raisedAtSha === sinceSha)
+              ? {}
+              : { sinceIsMergeBase: true }),
+          }),
     }),
   };
 }

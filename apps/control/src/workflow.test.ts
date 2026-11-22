@@ -5209,7 +5209,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       },
       "rebased",
     );
-    const { manifest } = await run(
+    const { prepared, manifest } = await run(
       h,
       2,
       [],
@@ -5220,6 +5220,12 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(manifest.recheck?.changed).toEqual(
       expect.arrayContaining(["src/total.ts", "src/checkout.ts"]),
     );
+    // The prompt says the diff is from the merge base, and that the finding's commit is gone.
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
+    ) as Record<string, unknown>;
+    expect(input.prompt).toContain("# What the pull request changes, from its merge base");
+    expect(input.prompt).toContain("is no longer in the branch's history");
   });
 
   it("leaves out, and never closes, a finding whose raised commit can't be read", async () => {
@@ -5543,6 +5549,36 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(writes).toEqual([]);
   });
 
+  it("keeps a full review's fix in the recheck's diff ahead of many unrelated files", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    // About 100 unrelated files that sort ahead of the fix, far more diff than the budget.
+    const filler = "export const filler = [\n" + '  "0123456789abcdef",\n'.repeat(60) + "];\n";
+    const unrelated = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [`lib/a${String(i).padStart(3, "0")}.ts`, filler]),
+    );
+    headSha = await commit(
+      {
+        ...unrelated,
+        "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n",
+      },
+      "a big change and the fix",
+    );
+    const { prepared, manifest } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: true, reason: "Still there." }],
+      FULL_REVIEW,
+    );
+    expect(manifest.recheck?.changed[0]).toMatch(/^lib\//);
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
+    ) as Record<string, unknown>;
+    expect(input.prompt).toContain("+++ b/src/checkout.ts");
+    expect(input.prompt).toContain("the rest of the diff is left out");
+  });
+
   it("tells a full review's recheck that a fix must come after each finding's commit", async () => {
     const { h } = rechecking();
     await run(h, 1, [finding()]);
@@ -5557,7 +5593,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     const input = JSON.parse(
       h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
     ) as Record<string, unknown>;
-    expect(input.prompt).toContain("Only a change made after that commit can be its fix");
+    expect(input.prompt).toContain("only a change made after that commit can be its fix");
   });
 
   it("doesn't recheck without the store's support", async () => {

@@ -480,12 +480,19 @@ async function logStillOpen(
   job: NonNullable<RunManifest["recheck"]>,
   fixed: readonly { findingId: string }[],
   reraised: ReadonlySet<string>,
+  /** Outdated as post reads them, prepare's mark or not. */
+  outdated: ReadonlySet<string>,
 ): Promise<void> {
   const verdicts: readonly Verdict[] = (await readVerdicts(deps.store, runId, job.index)) ?? [];
   const closed = new Set(fixed.map((fix) => fix.findingId));
   for (const entry of job.targets) {
     // An outdated one doesn't count towards the decision: it holds nothing up.
-    if (entry.severity !== "blocking" || entry.outdated === true || closed.has(entry.findingId)) {
+    if (
+      entry.severity !== "blocking" ||
+      entry.outdated === true ||
+      outdated.has(entry.findingId) ||
+      closed.has(entry.findingId)
+    ) {
       continue;
     }
     const verdict = verdicts.find((candidate) => candidate.id === entry.id);
@@ -1465,6 +1472,8 @@ export async function post(
   let outdated: string[];
   let reopened: string[];
   let recheckPlan: RecheckPlan | undefined;
+  // Findings whose cited line is gone at head (NIC-1124): they don't count towards the decision.
+  let outdatedNow = new Set<string>();
   // The report before the recheck's fixes were counted closed: for a run that won't close them.
   let reportOpen: ReviewReport | undefined;
   // To make the decision again once the claims are held, should the recheck saved by then
@@ -1639,7 +1648,7 @@ export async function post(
     // Those whose cited line is gone (NIC-1124): outdated now, or by an earlier run and not
     // reopened. The recheck can close them too, and resolve their threads.
     const reopenedIds = new Set(reopened);
-    const outdatedNow = new Set(
+    outdatedNow = new Set(
       [
         ...outdated,
         ...records.flatMap((record) =>
@@ -2224,6 +2233,7 @@ export async function post(
           manifest.recheck,
           recheckPlan?.writes.fixed ?? [],
           new Set(report.reraised),
+          outdatedNow,
         ).catch((error: unknown) => {
           deps.log("couldn't log what the full review's recheck left open", {
             runId,
