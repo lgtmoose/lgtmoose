@@ -121,6 +121,15 @@ describe("the recheck scenarios", () => {
     );
     expect(scores[0]).toMatchObject({ closed: false, error: "the recheck gave no verdict for F1" });
     expect(recheckTotals(scores)).toMatchObject({ correct: 0, failed: 1 });
+
+    // A fixed scenario that errored isn't a missed fix: nothing was decided.
+    const fixed = await runRecheckScenarios(
+      scenarios.filter((s) => s.name === "saved-card-fixed-by-caller"),
+      { harness: silent, model: "stub", timeoutMs: 5_000, workRoot },
+    );
+    expect(fixed[0]).toMatchObject({ missedFix: false });
+    expect(fixed[0]?.error).toBeDefined();
+    expect(recheckTotals(fixed)).toMatchObject({ missedFixes: 0, failed: 1 });
   }, 60_000);
 
   it("counts a finding closed though it still holds as a false close", async () => {

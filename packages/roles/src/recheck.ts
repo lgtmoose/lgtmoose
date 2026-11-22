@@ -1,4 +1,4 @@
-import { MAX_FINDINGS_PER_VERIFIER_RUN, verifierOutputSchema, type Severity } from "@lgtmoose/core";
+import { MAX_FINDINGS_PER_VERIFIER_RUN, recheckOutputSchema, type Severity } from "@lgtmoose/core";
 import { z } from "zod";
 import { UNTRUSTED_TAG, wrapUntrusted } from "./untrusted.js";
 import type { CodeExcerpt } from "./verifier.js";
@@ -6,8 +6,8 @@ import type { CodeExcerpt } from "./verifier.js";
 /**
  * The recheck (NIC-1120): on an incremental review, our open blocking and should-fix findings
  * that the new commits may have fixed are checked again against the PR's head, one batch per
- * run. It answers with the verifier's output (`verifierOutputSchema`): one verdict per finding,
- * `confirmed` meaning the problem is still there.
+ * run. It answers in the verifier's shape, with its own descriptions (`recheckOutputSchema`): one
+ * verdict per finding, `confirmed` meaning the problem is still there, or may be.
  *
  * The verifier tries to disprove a new finding, so it rejects one it can't show is real. The
  * recheck has the burden the other way round: a finding a person hasn't closed stays open unless
@@ -48,7 +48,7 @@ export interface RecheckPromptInput {
   diff: string;
 }
 
-const OUTPUT_SCHEMA = JSON.stringify(z.toJSONSchema(verifierOutputSchema), null, 2);
+const OUTPUT_SCHEMA = JSON.stringify(z.toJSONSchema(recheckOutputSchema), null, 2);
 
 const ROLE = `# Role
 

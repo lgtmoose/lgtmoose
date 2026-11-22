@@ -174,8 +174,13 @@ export async function runRecheckScenario(
     checked: true,
     closed,
     falseClose: closed && scenario.expect === "holds",
-    missedFix: !closed && scenario.expect === "fixed",
     ...extra,
+    // Only a scenario that ran and picked its finding can have missed the fix.
+    missedFix:
+      (extra.checked ?? true) &&
+      extra.error === undefined &&
+      !closed &&
+      scenario.expect === "fixed",
   });
   try {
     const built = await buildRepo(scenario, root);

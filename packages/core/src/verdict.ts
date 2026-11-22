@@ -48,3 +48,32 @@ export const verifierOutputSchema = z.object({
 });
 
 export type VerifierOutput = z.infer<typeof verifierOutputSchema>;
+
+/**
+ * The recheck's answer for one carried finding (NIC-1120): the verifier's shape, so it's read
+ * the same way, with the burden the other way round. The verifier rejects what it can't show is
+ * real; the recheck keeps open what it can't show is fixed, and its descriptions say so.
+ */
+export const recheckVerdictSchema = verdictSchema.extend({
+  confirmed: z
+    .boolean()
+    .describe(
+      "true unless the code at the latest commit clearly fixes the problem. true when you're unsure or can't tell. false only when you found the code that makes the problem impossible.",
+    ),
+  reason: z
+    .string()
+    .min(1)
+    .max(2000)
+    .describe(
+      "In a few plain sentences: for false, the file and line at the latest commit that fix the problem and how; for true, what still triggers it, or why you can't tell.",
+    ),
+  adjusted_severity: z.enum(SEVERITIES).optional().describe("Leave this out."),
+});
+
+/** What a recheck run returns: one verdict per carried finding it was given. */
+export const recheckOutputSchema = z.object({
+  verdicts: z
+    .array(recheckVerdictSchema)
+    .max(MAX_FINDINGS_PER_VERIFIER_RUN)
+    .describe("One verdict for each finding in the prompt, in any order."),
+});

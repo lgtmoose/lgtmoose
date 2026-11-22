@@ -97,6 +97,8 @@ export {
 } from "./ticket-coverage.js";
 export {
   MAX_FINDINGS_PER_VERIFIER_RUN,
+  recheckOutputSchema,
+  recheckVerdictSchema,
   verdictSchema,
   verifierOutputSchema,
   type Verdict,

@@ -10,7 +10,7 @@ import {
   fingerprint,
   fingerprintParts,
   judgementSchema,
-  verifierOutputSchema,
+  recheckOutputSchema,
   reviewerOutputSchema,
   severityRank,
   MAX_TICKET_GAPS,
@@ -1064,7 +1064,7 @@ export async function runRecheck(
     const result = await harness.run({
       prompt: job.prompt,
       cwd: options.cwd,
-      schema: verifierOutputSchema,
+      schema: recheckOutputSchema,
       model: options.model,
       timeoutMs: options.timeoutMs,
       runId: options.runId,

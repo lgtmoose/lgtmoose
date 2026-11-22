@@ -4503,6 +4503,124 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(input.prompt).toContain("REPLY-IN-OUR-THREAD");
   });
 
+  it("keeps a finding open whose file was only renamed, and not reviewed under its new name", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    // A pure move of the finding's file, with a fix elsewhere: the move has no change to
+    // review, and the recheck reads the finding under a name head doesn't have.
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit(
+      { "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n" },
+      "move total, fix in the caller",
+    );
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const key = runKeys(prepared.runId).prepared;
+    const manifest = readManifest(h.objects.get(key) ?? "");
+    // The recheck is told the finding's file by the name it was raised under.
+    expect(manifest.recheck?.targets).toMatchObject([{ path: "src/total.ts" }]);
+    // The planner leaves the pure move out, as a file with nothing new to review: it's in no
+    // batch, and not among the changed files to review.
+    manifest.review.files = manifest.review.files.filter((file) => file.path !== "src/sum.ts");
+    for (const job of manifest.review.jobs) {
+      job.files = job.files.filter((path) => path !== "src/sum.ts");
+    }
+    const kept = (planned: { file: { path: string } }) => planned.file.path !== "src/sum.ts";
+    manifest.review.plan.files = manifest.review.plan.files.filter(kept);
+    for (const batch of manifest.review.plan.batches) batch.files = batch.files.filter(kept);
+    h.objects.set(key, JSON.stringify(manifest));
+    const recheckIndex = manifest.recheck?.index ?? -1;
+    for (const batch of prepared.batches) {
+      h.objects.set(
+        runKeys(prepared.runId).batchOutput(batch.index),
+        JSON.stringify(
+          batch.index === recheckIndex
+            ? {
+                version: 1,
+                index: batch.index,
+                verdicts: [
+                  { id: "F1", confirmed: false, reason: "src/checkout.ts line 1 adds the item." },
+                ],
+                transcriptKeys: [],
+              }
+            : output({ index: batch.index, findings: [] }),
+        ),
+      );
+    }
+    await post(h.deps, prepared.runId);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("closes a renamed finding's fix when the review read the file under its new name", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await git(work, "mv", "src/total.ts", "src/sum.ts");
+    headSha = await commit(
+      { "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n" },
+      "move total, fix in the caller",
+    );
+    const { manifest } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: false, reason: "src/checkout.ts line 1 adds the item." }],
+    );
+    expect(manifest.review.jobs.some((job) => job.files.includes("src/sum.ts"))).toBe(true);
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+  });
+
+  it("closes nothing on a retry once the run no longer counts, though its review is out", async () => {
+    const setup: Setup = {};
+    const { h, writes } = rechecking(setup);
+    const prepared = await twoFixed(h);
+    // The first attempt posts the review and dies at the first close.
+    const close = h.findings.closeFixed?.bind(h.findings);
+    let failing = true;
+    h.findings.closeFixed = async (id, sha) => {
+      if (failing) throw new Error("the database went away");
+      return close?.(id, sha) ?? "theirs";
+    };
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("went away");
+    failing = false;
+    // The PR moves on before the retry: the review stays recorded, nothing is closed.
+    setup.head = "f".repeat(40);
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["open", "open"]);
+    expect(replies(writes)).toEqual([]);
+    expect(h.logs).toContain("recheck's fixes not closed: the run no longer counts");
+  });
+
+  it("gives up a reply that keeps failing after three attempts, and finishes the post", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    const down = () => new GitHubError(502, "Bad Gateway", "POST", "/replies");
+    // The first finding's reply fails every time; the second goes through on the first try.
+    fail.replies.push(down(), undefined, down(), down());
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    await expect(post(h.deps, prepared.runId, offEcs("a2"))).rejects.toThrow("retry writes them");
+    const posted = await post(h.deps, prepared.runId, offEcs("a3"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("recheck replies or resolves given up");
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
+    // Done: a fourth attempt writes nothing more.
+    await post(h.deps, prepared.runId, offEcs("a4"));
+    expect(replies(writes)).toHaveLength(1);
+  });
+
+  it("doesn't retry a write that failed with something other than GitHub or the network", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    // A reply that came back in a shape we can't read: it would fail the same way again.
+    fail.replies.push(new TypeError("Cannot read properties of undefined (reading 'id')"));
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("recheck reply can't be written");
+    // Its thread is still resolved; the other finding gets both.
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+  });
+
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {
     const { h, writes } = rechecking();
     const prepared = await twoFixed(h);

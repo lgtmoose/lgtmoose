@@ -315,6 +315,8 @@ interface PostProgress {
   rechecksReplied?: string[];
   /** The recheck's fixed findings whose thread is resolved (or has none to resolve). */
   rechecksResolved?: string[];
+  /** How many attempts have tried the recheck's writes: after a few, the rest are given up. */
+  recheckAttempts?: number;
 }
 
 const postProgressSchema = z.object({
@@ -339,6 +341,7 @@ const postProgressSchema = z.object({
   rechecks: z.boolean().optional(),
   rechecksReplied: z.array(z.string()).optional(),
   rechecksResolved: z.array(z.string()).optional(),
+  recheckAttempts: z.number().int().nonnegative().optional(),
 });
 
 /**
@@ -479,7 +482,9 @@ interface RecheckPlan {
  * and the run still counts (`applyRecheck`). `fixedByRecheck` says which: the problem is gone,
  * this run's review didn't raise it again, and a protected-category one names its fix. A
  * finding on a file this review changed and didn't review (its batch failed, timed out or was
- * capped, or the planner skipped the file) stays open: "not raised again" says nothing there. An earlier attempt's saved list
+ * capped, or the planner skipped the file) stays open: "not raised again" says nothing there.
+ * So does one whose file was renamed since it was raised and wasn't reviewed under its new
+ * name: the recheck looked for it under a path head doesn't have. An earlier attempt's saved list
  * stands. Without a recheck, or when its batch gave no verdicts, every finding stays open.
  */
 async function planRecheck(
@@ -487,7 +492,7 @@ async function planRecheck(
   runId: string,
   manifest: RunManifest,
   report: Pick<ReviewReport, "reraised" | "reviewedNow">,
-  open: readonly { id: string }[],
+  open: readonly { id: string; finding: { path: string } }[],
 ): Promise<RecheckPlan | undefined> {
   const job = manifest.recheck;
   if (job === undefined || deps.findings.closeFixed === undefined) return undefined;
@@ -507,10 +512,18 @@ async function planRecheck(
   const unreviewed = new Set(
     manifest.review.files.map((file) => file.path).filter((path) => !reviewed.has(path)),
   );
+  // Each finding's file at head, followed from where it was raised (renames included).
+  const pathNow = new Map(open.map((entry) => [entry.id, entry.finding.path]));
   const fixes = fixedByRecheck(job, verdicts, {
     reraised: new Set(report.reraised),
     open: new Set(open.map((entry) => entry.id)),
-  }).filter((fix) => !unreviewed.has(fix.entry.path));
+  }).filter((fix) => {
+    const path = pathNow.get(fix.entry.findingId);
+    if (path === undefined || unreviewed.has(path)) return false;
+    // Moved since it was raised: the recheck read it by its old name, which head doesn't
+    // have, so only a review of the file under its new name says anything about it.
+    return path === fix.entry.path || reviewed.has(path);
+  });
   return {
     writes: {
       version: 1,
@@ -577,11 +590,31 @@ async function applyRecheck(
  */
 function transient(error: unknown): boolean {
   if (error instanceof GraphQlError) return !error.permanent;
-  if (!(error instanceof GitHubError)) return true;
-  const { status, rateLimited } = error;
-  if (status === 403) return rateLimited;
-  return status !== 404 && status !== 422;
+  if (error instanceof GitHubError) {
+    const { status, rateLimited } = error;
+    if (rateLimited || status < 400 || status >= 500) return true;
+    return RETRIED_STATUSES.has(status);
+  }
+  return networkFailure(error);
 }
+
+/** 4xx answers worth trying again: bad credentials (a token refreshed), a timeout, a conflict. */
+const RETRIED_STATUSES = new Set([401, 408, 409, 429]);
+
+/**
+ * Whether an error that isn't GitHub's answer is the network failing (fetch's TypeError, a
+ * timeout, a reset connection). Anything else (a parse error, a bug) fails the same way again.
+ */
+function networkFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  if (error instanceof TypeError && error.message === "fetch failed") return true;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && /^(?:E[A-Z]+|UND_ERR_[A-Z_]+)$/.test(code);
+}
+
+/** Attempts at the recheck's writes before what's left is given up, so none blocks for ever. */
+const RECHECK_WRITE_ATTEMPTS = 3;
 
 /**
  * Saves what the judged replies led to, once: an attempt racing this one decided the same
@@ -1826,6 +1859,10 @@ export async function post(
     if (recheckWrites === undefined || recheckWrites.fixed.length === 0 || progress.rechecks) {
       return;
     }
+    // Counted before any write, so an attempt that fails part way still counts.
+    const attempt = (progress.recheckAttempts ?? 0) + 1;
+    progress.recheckAttempts = attempt;
+    await save();
     const writer = github.conversation;
     const replied = new Set(progress.rechecksReplied ?? []);
     const resolved = new Set(progress.rechecksResolved ?? []);
@@ -1915,14 +1952,19 @@ export async function post(
         await mark(resolved, fixed.findingId);
       }
     }
-    if (later > 0) {
+    if (later > 0 && attempt < RECHECK_WRITE_ATTEMPTS) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,
       );
     }
+    if (later > 0) {
+      // The findings are closed either way: only the notes on their threads are missing.
+      deps.log("recheck replies or resolves given up", { runId, attempts: attempt, left: later });
+    }
     progress.rechecks = true;
     delete progress.rechecksReplied;
     delete progress.rechecksResolved;
+    delete progress.recheckAttempts;
     await save();
   };
   try {
@@ -1976,13 +2018,23 @@ export async function post(
     // The recheck's fixes, closed now that this attempt holds the claims and the run counts.
     // Not when another run's review covers this one: that review is what the PR shows, and it
     // still counts them.
+    // Nor when the run no longer counts: a retry after the review was posted skipped the stale
+    // check above, and the PR may have moved on since.
+    const recheckStale = staleReason(latest, pr.headSha);
     if (
       progress.coveredBy === undefined &&
       recheckPlan !== undefined &&
       recheckPlan.writes.fixed.length > 0 &&
       !progress.rechecks
     ) {
-      recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
+      if (recheckStale === undefined) {
+        recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
+      } else {
+        deps.log("recheck's fixes not closed: the run no longer counts", {
+          runId,
+          reason: recheckStale,
+        });
+      }
     }
     // What the judged replies led to, now that this attempt holds the run's claim.
     if (replyWrites !== undefined && !progress.replies) {
