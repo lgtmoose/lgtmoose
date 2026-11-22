@@ -213,6 +213,65 @@ describe("credential broker", () => {
     });
   });
 
+  it("checks pinned Bedrock models with a role that may describe them, never call them", () => {
+    const pinned = synth([
+      {
+        id: "bedrock",
+        harness: "claude-code",
+        auth: "bedrock",
+        models: {
+          fast: "anthropic.claude-haiku-4-5-20251001-v1:0",
+          standard: "us.anthropic.claude-sonnet-4-6",
+          deep: "us.anthropic.claude-sonnet-4-6",
+        },
+      },
+    ]);
+    // A Bedrock-only deployment has no stored credential, and still gets the check.
+    const health = pinned.health();
+    expect(health).toBeDefined();
+    expect(JSON.parse(envText(health?.env.LGTMOOSE_CREDENTIALS))).toEqual({});
+    expect(JSON.parse(envText(health?.env.LGTMOOSE_MODEL_CHECKS))).toEqual([
+      {
+        providerId: "bedrock",
+        kind: "bedrock",
+        model: "anthropic.claude-haiku-4-5-20251001-v1:0",
+        tiers: ["fast"],
+      },
+      {
+        providerId: "bedrock",
+        kind: "bedrock",
+        model: "us.anthropic.claude-sonnet-4-6",
+        tiers: ["standard", "deep"],
+      },
+    ]);
+    const granted = pinned.statements(health!.fn);
+    expect(actions(granted).sort()).toEqual([
+      "bedrock:GetFoundationModel",
+      "bedrock:GetFoundationModelAvailability",
+      "bedrock:GetInferenceProfile",
+    ]);
+    const resources = (action: string) =>
+      JSON.stringify(granted.filter((s) => actions([s]).includes(action)).map((s) => s.Resource));
+    expect(resources("bedrock:GetInferenceProfile")).toContain(
+      ":inference-profile/us.anthropic.claude-sonnet-4-6",
+    );
+    expect(resources("bedrock:GetFoundationModel")).toContain(
+      "::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    );
+    expect(resources("bedrock:GetFoundationModel")).not.toContain("*");
+    const alarms = Object.values(pinned.resources).filter(
+      (r) => r.Type === "AWS::CloudWatch::Alarm" && r.Properties.MetricName === "ModelUnavailable",
+    );
+    expect(alarms.map((alarm) => alarm.Properties.Dimensions)).toEqual([
+      [{ Name: "Provider", Value: "bedrock" }],
+    ]);
+  }, 120_000);
+
+  it("has no health check for a deployment with nothing to check", () => {
+    const none = synth([{ id: "bedrock", harness: "claude-code", auth: "bedrock" }]);
+    expect(none.health()).toBeUndefined();
+  }, 120_000);
+
   describe("with a ChatGPT sign-in reviewing", () => {
     let codex: ReturnType<typeof synth>;
     beforeAll(() => {

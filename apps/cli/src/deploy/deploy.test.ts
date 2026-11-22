@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { CDK_CONTEXT, SECRET_NAMES, STACK_NAMES } from "@lgtmoose/config";
+import { BedrockNotFound, CDK_CONTEXT, SECRET_NAMES, STACK_NAMES } from "@lgtmoose/config";
 import { describe, expect, it, vi } from "vitest";
 import { PLACEHOLDER_WEBHOOK_URL } from "../setup/manifest.js";
 import type { Prompter } from "../setup/prompter.js";
@@ -264,6 +264,114 @@ describe("lgtmoose deploy", () => {
     expect(result.all).toContain("v0.2.0 is out");
     expect(result.all.indexOf("v0.2.0 is out")).toBeLessThan(result.all.indexOf("Bootstrapping"));
     expect(h.calls).toEqual(["bootstrap:123456789012", "deploy", "webhook", "protect"]);
+  });
+
+  it("warns about a model that can't be called, names the fix, and still deploys", async () => {
+    const h = harness({
+      config: {
+        ...bedrockConfig,
+        region: "us-east-2",
+        providers: [
+          {
+            id: "claude",
+            harness: "claude-code",
+            auth: "bedrock",
+            models: {
+              fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+              standard: "us.anthropic.claude-sonnet-4-6",
+              deep: "us.anthropic.claude-sonnet-4-6",
+            },
+          },
+          {
+            id: "anthropic",
+            harness: "agent-sdk",
+            auth: "api-key",
+            models: { standard: "claude-sonnet-9" },
+          },
+        ],
+      },
+      secrets: { ...goodSecrets, [SECRET_NAMES.provider("anthropic")]: "sk-ant-STORED-KEY" },
+    });
+    const asked: string[] = [];
+    const regions: string[] = [];
+    h.deps.models = (region) => {
+      regions.push(region);
+      return {
+        bedrock: {
+          inferenceProfile: (id) => {
+            asked.push(id);
+            if (id === "us.anthropic.claude-sonnet-4-6") {
+              return Promise.reject(
+                new BedrockNotFound("The specified resource ARN was not found."),
+              );
+            }
+            return Promise.resolve({ status: "ACTIVE", modelIds: [] });
+          },
+          foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
+          availability: () =>
+            Promise.resolve({
+              region: "AVAILABLE",
+              entitlement: "AVAILABLE",
+              agreement: "AVAILABLE",
+            }),
+        },
+        get: (url) => Promise.resolve(url.endsWith("/claude-sonnet-9") ? 404 : 200),
+      };
+    };
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(regions).toEqual(["us-east-2"]);
+    expect(asked).toEqual([
+      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "us.anthropic.claude-sonnet-4-6",
+    ]);
+    expect(result.all).toContain("Warning: reviews on these models will fail until they're fixed:");
+    expect(result.all).toContain(
+      "claude (standard, deep): us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2.",
+    );
+    expect(result.all).toContain(
+      "anthropic (standard): claude-sonnet-9: the Anthropic API has no model claude-sonnet-9 for this key.",
+    );
+    expect(result.all).not.toContain("claude (fast)");
+    expect(result.all).not.toContain("sk-ant-STORED-KEY");
+    // Before anything is deployed, and the deploy still runs.
+    expect(result.all.indexOf("Warning: reviews")).toBeLessThan(
+      result.all.indexOf("Bootstrapping"),
+    );
+    expect(h.calls).toEqual(["bootstrap:123456789012", "deploy", "webhook", "protect"]);
+  });
+
+  it("says nothing more when every model can be called", async () => {
+    const h = harness({
+      config: {
+        ...bedrockConfig,
+        providers: [
+          {
+            id: "claude",
+            harness: "claude-code",
+            auth: "bedrock",
+            models: { standard: "us.anthropic.claude-sonnet-4-6" },
+          },
+        ],
+      },
+    });
+    h.deps.models = () => ({
+      bedrock: {
+        inferenceProfile: () => Promise.resolve({ status: "ACTIVE", modelIds: [] }),
+        foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
+        availability: () =>
+          Promise.resolve({
+            region: "AVAILABLE",
+            entitlement: "AVAILABLE",
+            agreement: "AVAILABLE",
+          }),
+      },
+      get: () => Promise.reject(new Error("no API-key provider")),
+    });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toContain("Checking that the configured models can be called");
+    expect(result.all).not.toContain("Warning:");
   });
 
   it("only warns when it can't check deletion protection, since everything is live", async () => {

@@ -4,8 +4,15 @@ import {
   SECRET_NAMES,
   STACK_NAMES,
   STACK_OUTPUTS,
+  checkApiModel,
+  checkBedrockModel,
+  describeModelProblem,
+  planModelChecks,
   providerNeedsSecret,
+  type BedrockModelApi,
   type DeployConfig,
+  type ModelCheckResult,
+  type StatusGet,
 } from "@lgtmoose/config";
 import { CLI, loadDeployConfig } from "../paths.js";
 import { PLACEHOLDER_WEBHOOK_URL, installUrl } from "../setup/manifest.js";
@@ -44,6 +51,11 @@ export interface DeployDeps {
    * warning or a note to print, or nothing. Left out, no check runs.
    */
   releaseCheck?: () => Promise<string | undefined>;
+  /**
+   * The calls the model checks make (NIC-1121): Bedrock's control plane in the region, and a
+   * status-only GET for the API-key providers. Left out, no model is checked.
+   */
+  models?: (region: string) => { bedrock: BedrockModelApi; get: StatusGet };
   now?: () => Date;
 }
 
@@ -117,6 +129,8 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
     throw new Error(`${webhook.problem} Run ${CLI} setup and create a new App to fix it.`);
   }
   const webhookSecret = webhook.secret;
+  /** Each provider's stored credential, for the model checks. Never printed. */
+  const credentials = new Map<string, string>();
   for (const provider of config.providers.filter(providerNeedsSecret)) {
     let value: string | undefined;
     try {
@@ -137,8 +151,39 @@ async function checkSecrets(config: DeployConfig, store: SetupSecretStore) {
           `exist in ${config.region}. Run ${CLI} auth for it, or remove it from the config.`,
       );
     }
+    credentials.set(provider.id, value);
   }
-  return { app, webhookSecret };
+  return { app, webhookSecret, credentials };
+}
+
+/**
+ * Checks that every model the config pins can be called (NIC-1121): Bedrock models and
+ * profiles in the deploy region, and each API key against its model. A model that can't is a
+ * warning naming the provider, tiers, model and fix. The deploy goes ahead: another provider
+ * may cover it, and model access can be granted after. Returns the warning, or nothing.
+ */
+export async function modelWarnings(
+  config: DeployConfig,
+  credentials: ReadonlyMap<string, string>,
+  calls: { bedrock: BedrockModelApi; get: StatusGet },
+): Promise<string | undefined> {
+  const results: ModelCheckResult[] = [];
+  // One at a time: Bedrock's control plane throttles bursts.
+  for (const check of planModelChecks(config).checks) {
+    if (check.kind === "bedrock") {
+      results.push(await checkBedrockModel(calls.bedrock, check, config.region));
+      continue;
+    }
+    const key = credentials.get(check.providerId);
+    if (key !== undefined) results.push(await checkApiModel(calls.get, check, key));
+  }
+  const failed = results.filter((result) => result.status !== "ok");
+  if (failed.length === 0) return undefined;
+  const lines = failed.map((result) => `  - ${describeModelProblem(result)}`);
+  const head = failed.some((result) => result.status === "unavailable")
+    ? "Warning: reviews on these models will fail until they're fixed:"
+    : "Warning: these models couldn't be checked:";
+  return `${head}\n${lines.join("\n")}\nDeploying anyway.\n`;
 }
 
 function jwtFor(app: AppCredentials, deps: DeployDeps): string {
@@ -148,7 +193,7 @@ function jwtFor(app: AppCredentials, deps: DeployDeps): string {
 async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string> {
   const config = await loadConfig(deps);
   const store = deps.secrets(config.region);
-  const { app, webhookSecret } = await checkSecrets(config, store);
+  const { app, webhookSecret, credentials } = await checkSecrets(config, store);
   if (config.dashboard) {
     // The dashboard API's copy of the OAuth client, so it never needs the App's private key.
     const oauth = await ensureDashboardOAuth(store);
@@ -162,6 +207,16 @@ async function deploy(flags: { yes: boolean }, deps: DeployDeps): Promise<string
 
   const notice = await deps.releaseCheck?.();
   if (notice !== undefined) deps.out(notice);
+
+  if (deps.models !== undefined) {
+    deps.out("Checking that the configured models can be called…\n");
+    try {
+      const warning = await modelWarnings(config, credentials, deps.models(config.region));
+      if (warning !== undefined) deps.out(warning);
+    } catch (error) {
+      deps.out(`Warning: couldn't check the models (${errorMessage(error)}). Deploying anyway.\n`);
+    }
+  }
 
   // Every time, not just the first: it's a no-op when current, and a newer aws-cdk after
   // `git pull` can need a newer bootstrap stack.

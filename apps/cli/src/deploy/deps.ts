@@ -1,3 +1,10 @@
+import {
+  BedrockClient,
+  GetFoundationModelAvailabilityCommand,
+  GetFoundationModelCommand,
+  GetInferenceProfileCommand,
+} from "@aws-sdk/client-bedrock";
+import { bedrockModelApi, fetchStatus } from "@lgtmoose/config";
 import { configPath, nodeFiles } from "../paths.js";
 import { createAwsSecretStore } from "../setup/aws-secret-store.js";
 import { createInquirerPrompter } from "../setup/prompter.js";
@@ -27,6 +34,15 @@ export async function defaultDeployDeps(): Promise<DeployDeps> {
     github: createGitHubAppApi(),
     prompter: await createInquirerPrompter(),
     out: (text) => process.stdout.write(text),
+    models: (region) => ({
+      bedrock: bedrockModelApi({
+        client: new BedrockClient({ region }),
+        GetInferenceProfileCommand,
+        GetFoundationModelCommand,
+        GetFoundationModelAvailabilityCommand,
+      }),
+      get: fetchStatus,
+    }),
     ...(process.env[NO_RELEASE_CHECK_ENV] === "1"
       ? {}
       : {

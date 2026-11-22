@@ -113,6 +113,28 @@ export function reportProblem(providerId: string, value: 0 | 1, reason?: string)
   });
 }
 
+/** 1 while one of a provider's pinned models can't be called, 0 when a check finds all can. */
+export const MODEL_UNAVAILABLE_METRIC = "ModelUnavailable";
+
+/** Reports `ModelUnavailable` for a provider, as `reportProblem` does `CredentialProblem`. */
+export function reportModel(providerId: string, value: 0 | 1, problems?: string[]): void {
+  logLine(value === 1 ? "model unavailable" : "models ok", {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: METRIC_NAMESPACE,
+          Dimensions: [["Provider"]],
+          Metrics: [{ Name: MODEL_UNAVAILABLE_METRIC, Unit: "Count" }],
+        },
+      ],
+    },
+    Provider: providerId,
+    [MODEL_UNAVAILABLE_METRIC]: value,
+    ...(problems === undefined ? {} : { problems }),
+  });
+}
+
 /** The credentials the broker Lambdas manage, from `LGTMOOSE_CREDENTIALS` (set by the stack). */
 export function credentialsFromEnv(
   env: Readonly<Record<string, string | undefined>>,
