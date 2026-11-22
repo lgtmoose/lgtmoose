@@ -8,5 +8,7 @@ export default defineConfig({
     // `cdk synth` stages the repository under cdk.out for the image builds; its copies of other
     // packages' tests aren't this package's.
     exclude: [...configDefaults.exclude, "cdk.out/**"],
+    // Synth output and test temp files go in a per-worker directory that's cleaned up (NIC-1122).
+    setupFiles: ["./test-setup.ts"],
   },
 });

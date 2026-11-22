@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createCdk, deployArgs, destroyArgs } from "./cdk.js";
 
 describe("cdk arguments", () => {
@@ -49,6 +49,7 @@ describe("cdk arguments", () => {
 describe("createCdk", () => {
   function fakeCdkDir() {
     const dir = mkdtempSync(join(tmpdir(), "cdk-test-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
     mkdirSync(join(dir, "node_modules/aws-cdk/bin"), { recursive: true });
     writeFileSync(join(dir, "node_modules/aws-cdk/bin/cdk"), "");
     return dir;
