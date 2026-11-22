@@ -490,6 +490,8 @@ export const pullRequestDispatches = pgTable(
      */
     handleHintAt: timestamp("handle_hint_at", { withTimezone: true }),
     handleHintPosted: boolean("handle_hint_posted").notNull().default(false),
+    /** Which comment (`<id>`) or review (`review-<id>`) holds the claim: its retry may post it. */
+    handleHintClaimant: text("handle_hint_claimant"),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

@@ -180,38 +180,45 @@ export function parseCommands(body: string, handles: string | readonly string[])
 
 /**
  * Whether a comment that has no command for this App looks meant for it (NIC-1119): `@lgtmoose`,
- * the handle the docs use, followed by a command word, where this App is called something else
- * and `lgtmoose` isn't one of its aliases. Its author gets one hint per PR with the real handle.
+ * the handle the docs use, followed by a whole, well-formed command, where this App is called
+ * something else and `lgtmoose` isn't one of its aliases. Its author gets one hint per PR with
+ * the real handle.
  */
 export function addressesDocsHandle(body: string, handles: readonly string[]): boolean {
   if (handlesOf(handles).some((handle) => handle.toLowerCase() === DOCS_HANDLE)) return false;
-  return mentions(body, DOCS_HANDLE).some((text) => {
-    // A real command word, `help` included, never the empty default: "Thanks @lgtmoose!" and
-    // "cc @lgtmoose." leave only punctuation after the mention, which would parse as `help`.
-    const [first = ""] = text
-      .trim()
-      .replace(/^[,:]\s*/, "")
-      .split(/[\s:]+/);
-    const word = first.toLowerCase().replace(/[,.;:!?]+$/, "");
-    return COMMAND_WORDS.has(word) && parseCommand(text).name !== "unknown";
-  });
+  return mentions(body, DOCS_HANDLE).some(isWholeCommand);
 }
 
-/** The words a command starts with, for `addressesDocsHandle`. */
-const COMMAND_WORDS: ReadonlySet<string> = new Set([
-  "help",
-  "review",
-  "full",
-  "pause",
-  "resume",
-  "explain",
-  "learn",
-  "learnings",
-  "ignore",
-  "remember",
-  "forget",
-  "approve",
-]);
+/**
+ * Whether the text after a mention is a whole command, as `parseCommand` reads it, with nothing
+ * else on the line: "review", "full review", "approve <id>", "explain src/a.ts:3", "learn: <text>".
+ * One trailing `.`, `!` or `?` is allowed. "Thanks @lgtmoose!" (nothing), "@lgtmoose help me see
+ * why…" and "cc @lgtmoose: review of this is in #12" (more words than the command takes) aren't.
+ */
+export function isWholeCommand(text: string): boolean {
+  const trimmed = text
+    .trim()
+    .replace(/^[,:]\s*/, "")
+    .replace(/[.!?]$/, "");
+  if (trimmed === "") return false;
+  const command = parseCommand(trimmed);
+  // `learn:` takes the rest of the line as its text.
+  if (command.name === "learn") return true;
+  const words = trimmed.split(/\s+/);
+  switch (command.name) {
+    case "unknown":
+      return false;
+    case "review":
+      return words.length === (command.full ? 2 : 1);
+    case "forget":
+    case "approve":
+      return words.length === 2;
+    case "explain":
+      return words.length === (command.at === undefined ? 1 : 2);
+    default:
+      return words.length === 1;
+  }
+}
 
 /** The one-time hint for a comment `addressesDocsHandle` matched: the handle that works here. */
 export function handleHint(slug: string): string {

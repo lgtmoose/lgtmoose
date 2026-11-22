@@ -1,5 +1,5 @@
 {
-  "id": "7fea2bd4-51cf-48c4-ba1f-88779b071f77",
+  "id": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "prevId": "f5e03c7b-a039-433b-b0ae-2c8a3b5c1ea3",
   "version": "7",
   "dialect": "postgresql",
@@ -1943,6 +1943,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "handle_hint_claimant": {
+          "name": "handle_hint_claimant",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "updated_at": {
           "name": "updated_at",

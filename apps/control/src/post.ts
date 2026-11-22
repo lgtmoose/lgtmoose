@@ -50,7 +50,7 @@ import { learningIdsFor } from "./outcome-learning.js";
 import { readJudgement, readOutcome } from "./outcomes.js";
 import { ticketReview } from "./tickets.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
-import { readManifest, type RunManifest } from "./prepare.js";
+import { commandHandle, readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
 
 /** The App's slug, for the `remember` offer; none when it can't be read (no offer then). */
@@ -1308,7 +1308,8 @@ export async function post(
       manifest.tickets === undefined
         ? undefined
         : await ticketReview(deps.store, runId, prepared, manifest.tickets);
-    const handle = await slugOf(github);
+    // The handle the summary's footer names (NIC-1119): the slug, else the first alias, else none.
+    const handle = await commandHandle(deps, github);
     const finish = (open: typeof earlier.open) =>
       finishReview(repo, reviewed, outcomes, latest.headSha, {
         ...(tickets === undefined ? {} : { tickets }),
@@ -1318,8 +1319,7 @@ export async function post(
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
         ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
-        // The summary names the handle that works here (NIC-1119).
-        ...(handle.slug === undefined ? {} : { commandHandle: handle.slug }),
+        ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({

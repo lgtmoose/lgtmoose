@@ -988,14 +988,22 @@ describe("handleConversation", () => {
 
 describe("command handles (NIC-1119)", () => {
   const SLUG = "lgtmoose-acme";
-  /** A store that records the hint once per PR, as the drizzle store does. */
+  /**
+   * A store that records the hint once per PR, as the drizzle store does: a claim holds until
+   * it's posted, and its own claimant's retry may claim it again while it isn't.
+   */
   function withHintStore(f: ReturnType<typeof fakeDeps>) {
-    const claimed = new Set<string>();
-    f.deps.store.claimHandleHint = async (repo, number) => {
+    const claimed = new Map<string, { claimant: string; posted: boolean }>();
+    f.deps.store.claimHandleHint = async (repo, number, claimant) => {
       const key = `${repo}#${number}`;
-      if (claimed.has(key)) return false;
-      claimed.add(key);
+      const held = claimed.get(key);
+      if (held !== undefined && (held.posted || held.claimant !== claimant)) return false;
+      claimed.set(key, { claimant, posted: false });
       return true;
+    };
+    f.deps.store.handleHintPosted = async (repo, number) => {
+      const held = claimed.get(`${repo}#${number}`);
+      if (held !== undefined) held.posted = true;
     };
     return claimed;
   }
@@ -1092,14 +1100,99 @@ describe("command handles (NIC-1119)", () => {
   }
   const threadReply = job({ kind: "review_comment", commentId: 501 });
 
-  it("doesn't send a wrong-handle command to the reply judge: it was meant as a command", async () => {
+  it("still sends a wrong-handle command in a finding's thread to the reply judge, with the hint", async () => {
     const f = inThread("@lgtmoose ignore");
     withHintStore(f);
-    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "ignored" });
-    expect(f.added).toEqual([]);
-    expect(f.queued).toEqual([]);
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({
+      action: "reply",
+      queued: true,
+    });
+    // The judge reads it: the person may be answering the finding.
+    expect(f.added).toEqual(["@lgtmoose ignore"]);
+    // It isn't run as a command.
     expect(f.declined).toEqual([]);
     expect(f.replies[0]?.body).toContain("Commands here use");
+  });
+
+  it("leaves a sentence that starts with a command word to the normal path", async () => {
+    // Top level: not a command, so no hint and nothing diverted.
+    for (const body of [
+      "@lgtmoose help me see why this is null here",
+      "cc @lgtmoose: review of this is in #12",
+    ]) {
+      const f = fakeDeps(from("dev", body), { slug: SLUG });
+      withHintStore(f);
+      expect(await handleConversation(f.deps, job())).toMatchObject({ action: "deferred" });
+      expect(f.replies).toEqual([]);
+      expect(f.reactions).toEqual([]);
+    }
+    // In a finding's thread, the judge reads it.
+    const thread = inThread("@lgtmoose help me see why this is null here");
+    withHintStore(thread);
+    expect(await handleConversation(thread.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(thread.added).toHaveLength(1);
+    expect(thread.replies).toEqual([]);
+  });
+
+  it("posts the hint on a retry of the comment whose claim was never posted", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    // An earlier delivery of comment 500 claimed it, then its Lambda died before posting.
+    expect(await f.deps.store.claimHandleHint?.("acme/shop", 12, "500")).toBe(true);
+    // Another comment can't take it meanwhile, and gets a 😕.
+    await handleConversation(f.deps, job({ commentId: 600, deliveryId: "d-6" }));
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual(["600:confused"]);
+    // The retry of comment 500 posts it.
+    await handleConversation(f.deps, job());
+    expect(f.replies).toHaveLength(1);
+    expect(f.replies[0]).toMatchObject({ commentId: 500 });
+    // Once posted, not even comment 500 posts it again.
+    await handleConversation(f.deps, job());
+    expect(f.replies).toHaveLength(1);
+  });
+
+  it("logs a 😕 that can't be posted, and still marks the comment handled", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:03.000Z" }), {
+      slug: SLUG,
+    });
+    withHintStore(f);
+    const through: Date[] = [];
+    f.deps.store.commentsThrough = async (_repo, _number, at) => {
+      through.push(at);
+    };
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    const github = await f.deps.github(7);
+    f.deps.github = async () => ({
+      ...github,
+      react: async () => {
+        throw new Error("HTTP 404: comment deleted");
+      },
+    });
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.logs.map((entry) => entry.message)).toContain("wrong-handle reaction not posted");
+    expect(through).toHaveLength(1);
+  });
+
+  it("logs a wrong-handle review body after the hint: reviews take no reactions", async () => {
+    const f = fakeDeps(from("author", "@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "500");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
+    const review: ReviewJob = {
+      kind: "review",
+      deliveryId: "review-9001",
+      installationId: 7,
+      repo: "acme/shop",
+      prNumber: 12,
+      actor: "author",
+      reviewId: 9001,
+      receivedAt: "2026-11-15T00:00:00.000Z",
+      eventAt: "2026-11-15T00:00:00.000Z",
+    };
+    expect(await handleConversation(f.deps, review)).toMatchObject({ action: "ignored" });
+    expect(f.replies).toEqual([]);
+    expect(f.logs.map((entry) => entry.message)).toContain("wrong-handle review after the hint");
   });
 
   it("with commandHint off, gives no hint and treats the comment as before", async () => {

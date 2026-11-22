@@ -3,6 +3,7 @@ import {
   DEFAULT_BATCH_TIMEOUT_MS,
   readCommand,
   readCommandAliases,
+  readCommandHint,
   readControlEnv,
   readDispatchEnv,
   readReconcileEnv,
@@ -82,6 +83,16 @@ describe("readReviewSettings", () => {
     ]);
     for (const bad of ["@lgtmoose", "a b", "-x", "x--y", "a,b,c,d,e,f"]) {
       expect(() => readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: bad })).toThrow();
+    }
+  });
+
+  it("reads whether the wrong-handle hint is on (NIC-1119)", () => {
+    expect(readCommandHint({})).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: " " })).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: "TRUE" })).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: "False" })).toBe(false);
+    for (const bad of ["0", "no", "off", "yes"]) {
+      expect(() => readCommandHint({ LGTMOOSE_COMMAND_HINT: bad })).toThrow("true or false");
     }
   });
 

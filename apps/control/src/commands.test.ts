@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addressesDocsHandle,
   handleHint,
+  isWholeCommand,
   helpText,
   learningProposal,
   MAX_COMMANDS,
@@ -102,6 +103,44 @@ describe("addressesDocsHandle (NIC-1119)", () => {
     }
     // An explicit help is a command.
     expect(addressesDocsHandle("@lgtmoose help", ["lgtmoose-acme"])).toBe(true);
+  });
+
+  it("is false when a command word only starts a sentence", () => {
+    for (const body of [
+      "@lgtmoose help me see why this is null here",
+      "cc @lgtmoose: review of this is in #12",
+      "@lgtmoose review this again later please",
+      "@lgtmoose full review once CI is green",
+      "@lgtmoose ignore this one, it's fine",
+      "@lgtmoose approve abc123 and def456",
+      "@lgtmoose explain why",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(false);
+    }
+  });
+
+  it("takes each whole command as parseCommand reads it, with nothing else after it", () => {
+    for (const text of [
+      "help",
+      "review",
+      "review.",
+      ", full review",
+      ": pause",
+      "resume!",
+      "learnings",
+      "ignore",
+      "remember",
+      "forget abc-123",
+      "approve abc-123",
+      "explain",
+      "explain src/a.ts:3",
+      "learn: use the query builder in services/",
+    ]) {
+      expect(isWholeCommand(text)).toBe(true);
+    }
+    for (const text of ["", "!", "help me", "review it", "full", "approve", "explain why", "hi"]) {
+      expect(isWholeCommand(text)).toBe(false);
+    }
   });
 
   it("is false for a plain mention, an unknown word, code, or a handle that already works", () => {

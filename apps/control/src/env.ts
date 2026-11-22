@@ -232,10 +232,15 @@ export function readMaxExplanations(env: Env): number {
 
 /**
  * `LGTMOOSE_COMMAND_HINT` (`commandHint`, NIC-1119): whether a comment using `@lgtmoose` where
- * the App is called something else gets the one-time hint. On unless it's "false".
+ * the App is called something else gets the one-time hint. `true` or `false`, in any case; unset
+ * or empty is the default, on. Anything else fails the Lambda at start rather than being guessed.
  */
 export function readCommandHint(env: Env): boolean {
-  return env.LGTMOOSE_COMMAND_HINT?.trim() !== "false";
+  const value = env.LGTMOOSE_COMMAND_HINT?.trim().toLowerCase() ?? "";
+  if (value === "") return true;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error("LGTMOOSE_COMMAND_HINT must be true or false.");
 }
 
 /**

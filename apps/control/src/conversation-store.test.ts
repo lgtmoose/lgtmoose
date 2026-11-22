@@ -152,14 +152,14 @@ describe("drizzleConversationStore", () => {
   });
 
   it("claims a PR's handle hint once, also on one the dispatcher hasn't seen (NIC-1119)", async () => {
-    const claim = (repo: string, number: number) => {
+    const claim = (repo: string, number: number, claimant = "c1") => {
       if (store.claimHandleHint === undefined) throw new Error("no claimHandleHint");
-      return store.claimHandleHint(repo, number);
+      return store.claimHandleHint(repo, number, claimant);
     };
-    // Two at once: one of them claims it.
-    const both = await Promise.all([claim("Acme/Shop", 51), claim("acme/shop", 51)]);
+    // Two comments at once: one of them claims it.
+    const both = await Promise.all([claim("Acme/Shop", 51, "a"), claim("acme/shop", 51, "b")]);
     expect(both.filter(Boolean)).toHaveLength(1);
-    expect(await claim("Acme/Shop", 51)).toBe(false);
+    expect(await claim("Acme/Shop", 51, "c")).toBe(false);
     // Another PR has its own.
     expect(await claim("Acme/Shop", 52)).toBe(true);
     // A PR the dispatcher already tracks keeps its event time.
@@ -180,21 +180,42 @@ describe("drizzleConversationStore", () => {
     const at = (minutes: number) => new Date(Date.UTC(2026, 10, 22, 12, minutes));
     let clock = at(0);
     const timed = drizzleConversationStore(db, () => clock);
-    const claim = (number: number) => {
+    const claim = (number: number, claimant: string) => {
       if (timed.claimHandleHint === undefined) throw new Error("no claimHandleHint");
-      return timed.claimHandleHint("Acme/Shop", number);
+      return timed.claimHandleHint("Acme/Shop", number, claimant);
     };
-    // Claimed, then the Lambda died before posting: a fresh claim still holds.
-    expect(await claim(61)).toBe(true);
+    // Claimed by comment 1, then its Lambda died before posting: a fresh claim holds against
+    // another comment.
+    expect(await claim(61, "1")).toBe(true);
     clock = at(10);
-    expect(await claim(61)).toBe(false);
+    expect(await claim(61, "2")).toBe(false);
     // Past the stale time, another comment may post it.
     clock = at(16);
-    expect(await claim(61)).toBe(true);
-    // Once posted, it's never claimed again.
-    expect(await claim(62)).toBe(true);
+    expect(await claim(61, "2")).toBe(true);
+    // Once posted, it's never claimed again, by anyone.
+    expect(await claim(62, "1")).toBe(true);
     await timed.handleHintPosted?.("Acme/Shop", 62);
     clock = at(59);
-    expect(await claim(62)).toBe(false);
+    expect(await claim(62, "2")).toBe(false);
+    expect(await claim(62, "1")).toBe(false);
+  });
+
+  it("lets the claimant's retry claim an unposted hint again at once (NIC-1119)", async () => {
+    const claim = (claimant: string) => {
+      if (store.claimHandleHint === undefined) throw new Error("no claimHandleHint");
+      return store.claimHandleHint("Acme/Shop", 71, claimant);
+    };
+    // Comment 500 claims it; the post is never made.
+    expect(await claim("500")).toBe(true);
+    // Another comment can't take it, but comment 500's retry can, and posts it.
+    expect(await claim("501")).toBe(false);
+    expect(await claim("500")).toBe(true);
+    await store.handleHintPosted?.("Acme/Shop", 71);
+    expect(await claim("500")).toBe(false);
+    const [row] = await db
+      .select()
+      .from(pullRequestDispatches)
+      .where(eq(pullRequestDispatches.number, 71));
+    expect(row).toMatchObject({ handleHintClaimant: "500", handleHintPosted: true });
   });
 });

@@ -150,11 +150,13 @@ export interface ConversationStore {
    */
   commentsThrough?(repo: string, number: number, at: Date): Promise<void>;
   /**
-   * Claims the PR's one-time hint with the App's real handle (NIC-1119). True when this comment
-   * may post it: the PR has had none, or an earlier claim was never posted and is stale (its
-   * Lambda died). False once it's claimed or posted, so the hint is never posted twice.
+   * Claims the PR's one-time hint with the App's real handle (NIC-1119), for `claimant`: the
+   * comment's ID, or `review-<id>` for a submitted review. True when it may post the hint: the
+   * PR has had none, or an earlier claim was never posted and is either the same claimant's (a
+   * retry) or stale (its Lambda died). False once another claimant holds it or it's posted, so
+   * the hint is never posted twice.
    */
-  claimHandleHint?(repo: string, number: number): Promise<boolean>;
+  claimHandleHint?(repo: string, number: number, claimant: string): Promise<boolean>;
   /** Records that the claimed hint was posted, so the claim never goes stale. */
   handleHintPosted?(repo: string, number: number): Promise<void>;
   /** Gives the PR's hint back after it failed to post, so a later comment can still get it. */
@@ -252,6 +254,18 @@ function wantsHint(deps: ConversationDeps, body: string, slug: string): boolean 
   );
 }
 
+/** Whether a comment is a reply in one of our findings' threads, which the reply judge reads. */
+async function onFindingThread(
+  deps: ConversationDeps,
+  job: ReviewJob,
+  kind: ReactableKind,
+  comment: CommentInfo,
+): Promise<boolean> {
+  if (kind !== "review_comment" || comment.threadRootId === undefined) return false;
+  const finding = await deps.store.findingByComment(job.repo, job.prNumber, comment.threadRootId);
+  return finding !== undefined;
+}
+
 /**
  * What became of a hint: posted now; not posted because the PR already has one (or a live claim
  * on one); not posted because posting failed; or only logged, in shadow mode.
@@ -274,6 +288,8 @@ async function hintHandle(
   deps: ConversationDeps,
   job: ReviewJob,
   slug: string,
+  /** The comment's ID, or `review-<id>`: a retry of the same one may claim the hint again. */
+  claimant: string,
   post: (body: string) => Promise<void>,
 ): Promise<HintOutcome> {
   const { store } = deps;
@@ -283,7 +299,7 @@ async function hintHandle(
     return "shadow";
   }
   if (store.claimHandleHint === undefined) return "already";
-  if (!(await store.claimHandleHint(job.repo, job.prNumber))) return "already";
+  if (!(await store.claimHandleHint(job.repo, job.prNumber, claimant))) return "already";
   try {
     await post(`${handleHint(slug)}\n\n${REPLY_MARKER}`);
   } catch (error) {
@@ -815,15 +831,29 @@ export async function handleConversation(
   const commands = parseCommands(comment.body, handles(deps, slug));
   // Not a command: a reply for the judge, if it's on one of our findings' threads.
   if (commands.length === 0) {
-    // Meant as a command, with the docs' handle: the hint, and not a reply for the judge either.
     if (wantsHint(deps, comment.body, slug)) {
-      const outcome = await hintHandle(deps, job, slug, (body) =>
+      const outcome = await hintHandle(deps, job, slug, String(commentId), (body) =>
         github.reply(kind, job.repo, job.prNumber, commentId, body),
       );
-      // The PR has had its hint: a 😕 says this comment did nothing, without a second hint.
-      if (outcome === "already") await github.react(kind, job.repo, commentId, "confused");
-      await handled();
-      return { action: "ignored", reason: "a command for @lgtmoose, not this App's handle" };
+      // In one of our findings' threads, the reply judge still reads it, whatever it meant:
+      // a person may be answering the finding. The hint is only a pointer.
+      if (!(await onFindingThread(deps, job, kind, comment))) {
+        // The PR has had its hint: a 😕 says this comment did nothing, without a second hint.
+        if (outcome === "already" && !deps.shadow) {
+          try {
+            await github.react(kind, job.repo, commentId, "confused");
+          } catch (error) {
+            deps.log("wrong-handle reaction not posted", {
+              repo: job.repo,
+              prNumber: job.prNumber,
+              commentId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        await handled();
+        return { action: "ignored", reason: "a command for @lgtmoose, not this App's handle" };
+      }
     }
     const result = await recordReply(deps, github, { ...job, commentId }, kind, comment);
     await handled();
@@ -919,9 +949,17 @@ async function handleReview(deps: ConversationDeps, job: ReviewJob): Promise<Con
   const commands = parseCommands(review.body, handles(deps, slug));
   if (commands.length === 0) {
     if (wantsHint(deps, review.body, slug)) {
-      await hintHandle(deps, job, slug, (body) =>
+      const outcome = await hintHandle(deps, job, slug, `review-${reviewId}`, (body) =>
         github.reply("review", job.repo, job.prNumber, reviewId, `@${review.author}: ${body}`),
       );
+      // A review takes no reactions, so after the PR's hint there's nothing to answer with.
+      if (outcome === "already") {
+        deps.log("wrong-handle review after the hint", {
+          repo: job.repo,
+          prNumber: job.prNumber,
+          reviewId,
+        });
+      }
     }
     return { action: "ignored", reason: "no commands in the review" };
   }

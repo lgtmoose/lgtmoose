@@ -291,18 +291,31 @@ export function drizzleConversationStore(
         })
         .where(ofPull(repo, number));
     },
-    async claimHandleHint(repo, number) {
+    async claimHandleHint(repo, number, claimant) {
       const at = now();
       const stale = new Date(at.getTime() - HANDLE_HINT_CLAIM_MS);
+      const d = pullRequestDispatches;
       // One statement: two comments handled at once can't both claim it. A claim whose hint was
-      // never posted (the Lambda died in between) is taken again once it's stale.
+      // never posted is taken again by the same comment's retry at once, or by any comment once
+      // it's stale (the Lambda died in between). A posted hint is never claimed again.
       const rows = await db
-        .insert(pullRequestDispatches)
-        .values({ repo: lower(repo), number, lastEventAt: new Date(0), handleHintAt: at })
+        .insert(d)
+        .values({
+          repo: lower(repo),
+          number,
+          lastEventAt: new Date(0),
+          handleHintAt: at,
+          handleHintClaimant: claimant,
+        })
         .onConflictDoUpdate({
-          target: [pullRequestDispatches.repo, pullRequestDispatches.number],
-          set: { handleHintAt: at, handleHintPosted: false, updatedAt: at },
-          setWhere: sql`${pullRequestDispatches.handleHintAt} is null or (not ${pullRequestDispatches.handleHintPosted} and ${pullRequestDispatches.handleHintAt} < ${stale})`,
+          target: [d.repo, d.number],
+          set: {
+            handleHintAt: at,
+            handleHintPosted: false,
+            handleHintClaimant: claimant,
+            updatedAt: at,
+          },
+          setWhere: sql`${d.handleHintAt} is null or (not ${d.handleHintPosted} and (${d.handleHintAt} < ${stale} or ${d.handleHintClaimant} = ${claimant}))`,
         })
         .returning({ repo: pullRequestDispatches.repo });
       return rows.length > 0;
@@ -321,7 +334,12 @@ export function drizzleConversationStore(
     async releaseHandleHint(repo, number) {
       await db
         .update(pullRequestDispatches)
-        .set({ handleHintAt: null, handleHintPosted: false, updatedAt: now() })
+        .set({
+          handleHintAt: null,
+          handleHintPosted: false,
+          handleHintClaimant: null,
+          updatedAt: now(),
+        })
         .where(
           and(
             eq(pullRequestDispatches.repo, lower(repo)),

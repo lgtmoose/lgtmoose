@@ -376,11 +376,11 @@ async function judgeJobs(
 type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
 
 /**
- * The handle a check run names when it says how to ask for a review (NIC-1119): the App's slug,
- * or the deployment's first alias when the slug can't be read. Undefined when there's neither,
- * and then the check run names no handle rather than guess `@lgtmoose`.
+ * The handle a check run or the summary names when it says how to use a command (NIC-1119): the
+ * App's slug, or the deployment's first alias when the slug can't be read. Undefined when there's
+ * neither, and then no handle is named rather than a guessed `@lgtmoose`.
  */
-async function commandHandle(
+export async function commandHandle(
   deps: Pick<ControlDeps, "commandAliases">,
   github: { slug?: () => Promise<string> },
 ): Promise<string | undefined> {

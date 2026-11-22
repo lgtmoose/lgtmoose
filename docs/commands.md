@@ -30,14 +30,24 @@ commandAliases: ["lgtmoose"],
 
 Up to five aliases are allowed, each shaped like a GitHub login. A handle never changes what a command may do: that depends on who wrote the comment, as GitHub reports it. An alias is also a GitHub login, so GitHub notifies whoever owns it, and the `lgtmoose` organization owns `@lgtmoose`.
 
-Without that alias, a comment that mentions `@lgtmoose` followed by a command word, such as `@lgtmoose review` or `@lgtmoose help`, gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`." A thanks or a cc, such as "Thanks @lgtmoose!", isn't a command and gets nothing. The reply:
+Without that alias, a comment that mentions `@lgtmoose` followed by a whole command gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`."
 
-- is posted once per PR, and later wrong-handle comments on that PR get a 😕 instead;
+A whole command means the command and nothing else on the line, as the parser reads it: `@lgtmoose review`, `@lgtmoose help`, `@lgtmoose approve <id>`, or `@lgtmoose learn: <text>`. These get no hint:
+
+- a thanks or a cc, such as "Thanks @lgtmoose!";
+- a sentence that only starts with a command word, such as "@lgtmoose help me see why this is null".
+
+The reply:
+
+- is posted once per PR;
 - carries the reply marker, so nothing reads it as a command;
 - is only logged in shadow mode;
-- can still come from a later comment if posting it fails, or if the Lambda stopped before posting it.
+- can still come from a later comment if posting it fails, or from a retry of the same comment if the Lambda stopped before posting it.
 
-The comment itself runs nothing. Because it was meant as a command, it doesn't go to the reply judge either, even in a finding's thread.
+The comment itself runs nothing. What else happens to it depends on where it is:
+
+- **In one of LGTMoose's findings' threads:** it still goes to the reply judge, since the person may be answering the finding.
+- **Anywhere else:** it isn't sent anywhere. After the PR has had its hint, later ones get a 😕. A submitted review's body gets no 😕, because GitHub reviews take no reactions, so that one is only logged.
 
 The hint assumes that no other App called `lgtmoose` answers on your repositories. If one does, turn it off with `commandHint: false`. A comment like that is then handled as before, so in a finding's thread it goes to the reply judge.
 
