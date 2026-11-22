@@ -67,6 +67,7 @@ Each command takes `--help`. To try a review on one PR without deploying, run `p
 - `rds:DescribeDBInstances`, `DescribeDBClusters`, `ModifyDBInstance`, `ModifyDBCluster`, `StartDBInstance` and `StartDBCluster` (deploy checks the database's deletion protection, and destroy turns it off)
 - For `auth`: `secretsmanager:CreateSecret`, `UpdateSecret`, `TagResource` (also needed to create a tagged secret), `RestoreSecret`, `DeleteSecret` and `DescribeSecret` on `lgtmoose/provider/*`, and `secretsmanager:ListSecrets`, which can't be limited to a resource
 - For `auth bedrock`: `bedrock:ListFoundationModels`, `bedrock:GetFoundationModelAvailability` and `bedrock:ListInferenceProfiles`. Model aliases such as `sonnet` are only hinted at: Claude Code picks the model at runtime, so pin model ids in `models` to have them checked
+- For deploy's [model checks](credentials.md#model-checks) on a Bedrock provider: `bedrock:GetInferenceProfile`, `bedrock:GetFoundationModel` and `bedrock:GetFoundationModelAvailability`. Without them, deploy warns that the models couldn't be checked and goes ahead
 
 `auth` stores each provider's credential as `lgtmoose/provider/<id>`.
 

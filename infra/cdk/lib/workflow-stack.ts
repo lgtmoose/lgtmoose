@@ -29,7 +29,9 @@ import {
   credentialConcurrency,
   BOOTSTRAP_REQUEST_PREFIX,
   FEEDBACK_REPORT_KEY,
+  CLI_COMMAND,
   modelFor,
+  planModelChecks,
   providerModelEnv,
   SECRET_NAMES,
   STACK_OUTPUTS,
@@ -37,7 +39,7 @@ import {
 } from "@lgtmoose/config";
 import { lgtmooseFunction } from "./lambda.js";
 import type { Profile } from "./network-stack.js";
-import { bedrockStatements } from "./bedrock.js";
+import { bedrockStatements, modelCheckStatements } from "./bedrock.js";
 import {
   BATCH_TIMEOUT,
   RUN_PREFIX,
@@ -216,6 +218,11 @@ export class WorkflowStack extends Stack {
   readonly dispatchFunction: NodejsFunction;
   /** Provider id → the alarm on its credential's `CredentialProblem`. */
   readonly credentialAlarms: ReadonlyMap<string, Alarm>;
+  /**
+   * Provider id → the alarm on its pinned models' `ModelUnavailable` (NIC-1121). Like every
+   * alarm in the app, it notifies the alarm topic when one is configured (`notifyAlarms`).
+   */
+  readonly modelAlarms: ReadonlyMap<string, Alarm>;
   readonly reconcileFunction: NodejsFunction;
   /** Comment jobs the dispatcher forwards, for the conversation Lambda. */
   readonly conversationQueue: Queue;
@@ -401,7 +408,9 @@ export class WorkflowStack extends Stack {
       auditRetention: lean ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_YEAR,
     });
 
-    this.credentialAlarms = this.credentialHealth(props, retention);
+    const health = this.credentialHealth(props, retention);
+    this.credentialAlarms = health.credentialAlarms;
+    this.modelAlarms = health.modelAlarms;
     if (!lean) {
       // Standard only. A stopped (superseded) execution is ABORTED, not FAILED, so this counts
       // reviews that broke, not ones a newer push replaced.
@@ -705,23 +714,37 @@ export class WorkflowStack extends Stack {
    * `CREDENTIAL_CHECK_INTERVAL` and describes each provider's secret, never reading its value;
    * the broker also reports a run refused for auth (an expired or revoked token). Either sets
    * the provider's `CredentialProblem` metric to 1, which alarms until a check finds it fine.
+   *
+   * The same check asks Bedrock whether each pinned Bedrock model can still be called (NIC-1121)
+   * and sets `ModelUnavailable`, which alarms per provider. Its role may only describe those
+   * models and profiles: it can't call one.
    */
   private credentialHealth(
     props: WorkflowStackProps,
     retention: RetentionDays,
-  ): Map<string, Alarm> {
+  ): { credentialAlarms: Map<string, Alarm>; modelAlarms: Map<string, Alarm> } {
     const alarms = new Map<string, Alarm>();
+    const modelAlarms = new Map<string, Alarm>();
     const stored = props.providers.flatMap((provider) => {
       const secret = props.providerSecrets.get(provider.id);
       return secret === undefined ? [] : [{ provider, secret }];
     });
-    if (stored.length === 0) return alarms;
+    const modelChecks = planModelChecks({ providers: props.providers }).checks.filter(
+      (check) => check.kind === "bedrock",
+    );
+    if (stored.length === 0 && modelChecks.length === 0) {
+      return { credentialAlarms: alarms, modelAlarms };
+    }
     const fn = lgtmooseFunction(this, "CredentialHealthFunction", {
       entry: CREDENTIAL_HEALTH_HANDLER,
-      description: "Checks each model provider's stored credential, without reading it.",
+      description:
+        "Checks each model provider's stored credential, without reading it, and its Bedrock models.",
       memorySize: 256,
-      timeout: Duration.minutes(1),
+      // At most two Bedrock calls per pinned model, at most 42 s a check (BEDROCK_CHECK_WORST_MS);
+      // no check is started with less than 60 s left, so what was found is still reported.
+      timeout: Duration.minutes(5),
       environment: {
+        LGTMOOSE_MODEL_CHECKS: JSON.stringify(modelChecks),
         LGTMOOSE_CREDENTIALS: JSON.stringify(
           Object.fromEntries(
             stored.map(({ provider, secret }) => [
@@ -740,13 +763,23 @@ export class WorkflowStack extends Stack {
         removalPolicy: RemovalPolicy.DESTROY,
       }),
     });
-    fn.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"],
-        resources: stored.map(({ secret }) => secretArnPattern(secret)),
-      }),
-    );
+    if (stored.length > 0) {
+      fn.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ["secretsmanager:DescribeSecret", "secretsmanager:ListSecretVersionIds"],
+          resources: stored.map(({ secret }) => secretArnPattern(secret)),
+        }),
+      );
+    }
+    for (const statement of modelCheckStatements(
+      modelChecks,
+      this.partition,
+      this.region,
+      this.account,
+    )) {
+      fn.addToRolePolicy(statement);
+    }
     new Schedule(this, "CredentialHealthSchedule", {
       description: "Runs the credential health check.",
       schedule: ScheduleExpression.rate(CREDENTIAL_CHECK_INTERVAL),
@@ -771,7 +804,25 @@ export class WorkflowStack extends Stack {
         }),
       );
     }
-    return alarms;
+    for (const providerId of new Set(modelChecks.map((check) => check.providerId))) {
+      const alarm = new Alarm(this, `ModelAlarm-${providerId}`, {
+        alarmDescription: `A model the ${providerId} provider is pinned to can't be called in ${this.region}: model access, an agreement, or a profile ID. The health check's log says which, and ${CLI_COMMAND} auth bedrock --id ${providerId} checks it.`,
+        metric: new Metric({
+          namespace: "LGTMoose",
+          metricName: "ModelUnavailable",
+          dimensionsMap: { Provider: providerId },
+          statistic: "Maximum",
+          period: CREDENTIAL_CHECK_INTERVAL,
+        }),
+        threshold: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        // A check that couldn't run writes no point: it neither raises nor clears the alarm.
+        treatMissingData: TreatMissingData.IGNORE,
+      });
+      modelAlarms.set(providerId, alarm);
+    }
+    return { credentialAlarms: alarms, modelAlarms };
   }
 
   private taskDefinition(
