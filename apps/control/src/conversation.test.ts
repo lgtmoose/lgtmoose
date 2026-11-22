@@ -58,6 +58,8 @@ function fakeDeps(
     reviewGone?: boolean;
     /** The repo config's `review.trusted_bots`; left out, the fake can't read it. */
     trustedBots?: string[];
+    /** The App's slug; `lgtmoose` when left out. */
+    slug?: string;
   } = {},
 ) {
   const reviewsRead: number[] = [];
@@ -73,7 +75,7 @@ function fakeDeps(
   const deps: ConversationDeps = {
     async github() {
       return {
-        slug: async () => "lgtmoose",
+        slug: async () => options.slug ?? "lgtmoose",
         comment: async () => comment,
         review: async (_repo, _number, reviewId) => {
           reviewsRead.push(reviewId);
@@ -981,5 +983,154 @@ describe("handleConversation", () => {
     expect(f.reactions).toEqual([]);
     expect(f.replies).toEqual([]);
     expect(f.logs.map((entry) => entry.message)).toContain("shadow: command reply not posted");
+  });
+});
+
+describe("command handles (NIC-1119)", () => {
+  const SLUG = "lgtmoose-acme";
+  /** A store that records the hint once per PR, as the drizzle store does. */
+  function withHintStore(f: ReturnType<typeof fakeDeps>) {
+    const claimed = new Set<string>();
+    f.deps.store.claimHandleHint = async (repo, number) => {
+      const key = `${repo}#${number}`;
+      if (claimed.has(key)) return false;
+      claimed.add(key);
+      return true;
+    };
+    return claimed;
+  }
+
+  it("runs a command addressed to the App's own handle", async () => {
+    const f = fakeDeps(from("author", `@${SLUG} review`), { slug: SLUG });
+    expect(await handleConversation(f.deps, job())).toMatchObject({ commands: ["review"] });
+    expect(f.queued).toHaveLength(1);
+  });
+
+  it("runs a command addressed to an alias, with the same permission checks", async () => {
+    const f = fakeDeps(from("outsider", "@lgtmoose pause"), { slug: SLUG });
+    f.deps.commandAliases = ["lgtmoose"];
+    withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({
+      commands: ["pause"],
+      ok: false,
+    });
+    // An alias asks for nothing a person couldn't ask for with the real handle.
+    expect(f.paused.size).toBe(0);
+    expect(f.replies[0]?.body).toContain("needs write access");
+    const maintainer = fakeDeps(from("lead", "@lgtmoose pause"), {
+      slug: SLUG,
+      permissions: { lead: "write" },
+    });
+    maintainer.deps.commandAliases = ["lgtmoose"];
+    expect(await handleConversation(maintainer.deps, job())).toMatchObject({ ok: true });
+    expect(maintainer.paused.get("acme/shop#12")).toBe("lead");
+  });
+
+  it("answers help with the real handle, whichever handle was used", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose help"), { slug: SLUG });
+    f.deps.commandAliases = ["lgtmoose"];
+    await handleConversation(f.deps, job());
+    expect(f.replies[0]?.body).toContain(`\`@${SLUG} review\``);
+    expect(f.replies[0]?.body).not.toContain("`@lgtmoose review`");
+  });
+
+  it("hints the real handle once per PR when @lgtmoose isn't an alias", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose full review"), { slug: SLUG });
+    withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "deferred" });
+    expect(f.queued).toEqual([]);
+    expect(f.replies).toHaveLength(1);
+    expect(f.replies[0]?.body).toContain(`Commands here use \`@${SLUG}\``);
+    expect(f.replies[0]?.body).toContain(REPLY_MARKER);
+    // A second one on the same PR gets no second hint.
+    await handleConversation(f.deps, job({ commentId: 501, deliveryId: "d-2" }));
+    expect(f.replies).toHaveLength(1);
+  });
+
+  it("gives no hint for an alias, a plain mention, an unknown word or the right handle", async () => {
+    const cases: [string, string[]][] = [
+      ["@lgtmoose review", ["lgtmoose"]],
+      ["Thanks @lgtmoose", []],
+      ["@lgtmoose what do you think about tabs?", []],
+      [`@${SLUG} review`, []],
+      ["`@lgtmoose review` in code", []],
+    ];
+    for (const [body, aliases] of cases) {
+      const f = fakeDeps(from("dev", body), { slug: SLUG });
+      f.deps.commandAliases = aliases;
+      withHintStore(f);
+      await handleConversation(f.deps, job());
+      expect(f.replies.filter((reply) => reply.body.includes("Commands here use"))).toEqual([]);
+    }
+  });
+
+  it("gives no hint when the App is itself called lgtmoose", async () => {
+    const f = fakeDeps(from("dev", "Thanks @lgtmoose-fan"));
+    withHintStore(f);
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+  });
+
+  it("logs the hint in shadow mode, without posting or using it up", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG, shadow: true });
+    const claimed = withHintStore(f);
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+    expect(claimed.size).toBe(0);
+    expect(f.logs.map((entry) => entry.message)).toContain("shadow: handle hint not posted");
+  });
+
+  it("gives no hint without a store that records it", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+  });
+
+  it("hints in a submitted review's body too, addressed to its author", async () => {
+    const f = fakeDeps(from("author", "LGTM\n\n@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    const review: ReviewJob = {
+      kind: "review",
+      deliveryId: "review-9001",
+      installationId: 7,
+      repo: "acme/shop",
+      prNumber: 12,
+      actor: "author",
+      reviewId: 9001,
+      receivedAt: "2026-11-15T00:00:00.000Z",
+      eventAt: "2026-11-15T00:00:00.000Z",
+    };
+    expect(await handleConversation(f.deps, review)).toMatchObject({ action: "ignored" });
+    expect(f.replies).toEqual([
+      expect.objectContaining({
+        kind: "review",
+        commentId: 9001,
+        body: expect.stringMatching(/^@author: Commands here use `@lgtmoose-acme`/),
+      }),
+    ]);
+  });
+
+  it("takes a trusted bot's review request addressed to an alias", async () => {
+    const f = fakeDeps(from("claude[bot]", "@lgtmoose review", { authorIsBot: true }), {
+      slug: SLUG,
+      trustedBots: ["claude[bot]"],
+    });
+    f.deps.commandAliases = ["lgtmoose"];
+    expect(await handleConversation(f.deps, job({ botActor: true }))).toMatchObject({
+      commands: ["review"],
+      ok: true,
+    });
+    expect(f.queued).toHaveLength(1);
+    // Without the alias, the same comment asks for nothing, and a bot gets no hint.
+    const plain = fakeDeps(from("claude[bot]", "@lgtmoose review", { authorIsBot: true }), {
+      slug: SLUG,
+      trustedBots: ["claude[bot]"],
+    });
+    withHintStore(plain);
+    expect(await handleConversation(plain.deps, job({ botActor: true }))).toMatchObject({
+      action: "ignored",
+    });
+    expect(plain.queued).toEqual([]);
+    expect(plain.replies).toEqual([]);
   });
 });

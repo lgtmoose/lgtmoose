@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  addressesDocsHandle,
+  handleHint,
   helpText,
   learningProposal,
   MAX_COMMANDS,
@@ -43,6 +45,64 @@ describe("mentions", () => {
 
   it("escapes the slug for the pattern", () => {
     expect(mentions("@a.b review @axb pause", "a.b")).toEqual(["review @axb pause"]);
+  });
+
+  describe("with aliases (NIC-1119)", () => {
+    const handles = ["lgtmoose-acme", "lgtmoose"];
+
+    it("finds the slug and each alias, with or without [bot]", () => {
+      const body = "@lgtmoose-acme review\n@LGTMoose pause\n@lgtmoose[bot] resume";
+      expect(mentions(body, handles)).toEqual(["review", "pause", "resume"]);
+    });
+
+    it("never reads the slug as an alias followed by the rest of the name", () => {
+      // `@lgtmoose-acme` is the slug, not `@lgtmoose` then "-acme".
+      expect(mentions("@lgtmoose-acme help", ["lgtmoose", "lgtmoose-acme"])).toEqual(["help"]);
+      // A longer name that is neither is no mention at all.
+      expect(mentions("@lgtmoose-acmeish help", handles)).toEqual([]);
+    });
+
+    it("ignores an alias inside a longer name, an email, code and quotes", () => {
+      const body = [
+        "@lgtmoose-fan review",
+        "ops@lgtmoose review",
+        "`@lgtmoose review`",
+        "> @lgtmoose pause",
+      ].join("\n");
+      expect(mentions(body, handles)).toEqual([]);
+    });
+
+    it("drops empty and repeated handles", () => {
+      expect(mentions("@lgtmoose review", ["", "LGTMoose", "lgtmoose", " "])).toEqual(["review"]);
+      expect(mentions("@lgtmoose review", [])).toEqual([]);
+    });
+  });
+});
+
+describe("addressesDocsHandle (NIC-1119)", () => {
+  it("is true for @lgtmoose and a command word when the App is called something else", () => {
+    for (const body of [
+      "@lgtmoose review",
+      "please @lgtmoose full review",
+      "@lgtmoose learn: use the query builder",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(true);
+    }
+  });
+
+  it("is false for a plain mention, an unknown word, code, or a handle that already works", () => {
+    expect(addressesDocsHandle("Thanks @lgtmoose", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose do you like tabs?", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("`@lgtmoose review`", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose-fan review", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose review", ["lgtmoose-acme", "LGTMoose"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose review", ["lgtmoose"])).toBe(false);
+  });
+
+  it("names the handle that works in its hint", () => {
+    expect(handleHint("lgtmoose-acme")).toBe(
+      "Commands here use `@lgtmoose-acme`, not `@lgtmoose`. For example, `@lgtmoose-acme review`; `@lgtmoose-acme help` lists them all.",
+    );
   });
 });
 

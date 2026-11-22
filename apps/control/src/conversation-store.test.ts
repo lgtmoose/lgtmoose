@@ -150,4 +150,26 @@ describe("drizzleConversationStore", () => {
     expect(await store.reviewedHead("Acme/Shop", 44, "h1")).toBe(true);
     expect(await store.reviewedHead("Acme/Shop", 44, "h2")).toBe(false);
   });
+
+  it("claims a PR's handle hint once, also on one the dispatcher hasn't seen (NIC-1119)", async () => {
+    const claim = (repo: string, number: number) => {
+      if (store.claimHandleHint === undefined) throw new Error("no claimHandleHint");
+      return store.claimHandleHint(repo, number);
+    };
+    // Two at once: one of them claims it.
+    const both = await Promise.all([claim("Acme/Shop", 51), claim("acme/shop", 51)]);
+    expect(both.filter(Boolean)).toHaveLength(1);
+    expect(await claim("Acme/Shop", 51)).toBe(false);
+    // Another PR has its own.
+    expect(await claim("Acme/Shop", 52)).toBe(true);
+    // A PR the dispatcher already tracks keeps its event time.
+    await dispatch.advance("Acme/Shop", 53, T1, false);
+    expect(await claim("Acme/Shop", 53)).toBe(true);
+    const [row] = await db
+      .select()
+      .from(pullRequestDispatches)
+      .where(eq(pullRequestDispatches.number, 53));
+    expect(row?.lastEventAt.toISOString()).toBe(T1.toISOString());
+    expect(row?.handleHintAt).toBeInstanceOf(Date);
+  });
 });

@@ -2,6 +2,20 @@
 
 Commands and replies are how people steer LGTMoose on a PR. The bot's name is the GitHub App's slug, which `lgtmoose setup` sets (`lgtmoose-<org>` by default); `@lgtmoose` below stands for it.
 
+### Your App's handle
+
+Commands use your App's own handle: for an App called `lgtmoose-acme`, that's `@lgtmoose-acme review`. `lgtmoose setup` prints the handle when it's done, and `help`, every reply and the summary comment's footer show it too.
+
+To make the `@lgtmoose` these docs use work as well, add it as an alias in `lgtmoose.config.ts` and deploy again:
+
+```ts
+commandAliases: ["lgtmoose"],
+```
+
+Up to five aliases are allowed, each shaped like a GitHub login. A handle never changes what a command may do: that depends on who wrote the comment, as GitHub reports it. An alias is also a GitHub login, so GitHub notifies whoever owns it, and the `lgtmoose` organization owns `@lgtmoose`.
+
+Without that alias, a comment that starts with `@lgtmoose` followed by a command word gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`." It's posted once per PR, carries the reply marker so nothing reads it as a command, and is only logged in shadow mode. The comment itself runs nothing.
+
 People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or review-comment reply, one command per line. Mentions in code (fenced or inline) and in quotes (`>` lines) are ignored, and so are bots, LGTMoose included. The dispatcher holds no GitHub credential, so it forwards comment jobs to the conversation queue; the conversation Lambda reads the comment, runs its commands, reacts (👍 when every command went through, 😕 otherwise) and replies only when there's something to say. Comments without a command go to the reply judge, below.
 
 | Command               | Who                                                                                              | What it does                                                                                                                                                                                |

@@ -182,6 +182,15 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).not.toContain("didn");
   });
 
+  it("points at the commands with the App's real handle (NIC-1119)", () => {
+    expect(renderSummary(input({ commandHandle: "lgtmoose-acme" }))).toContain(
+      "_Commands: `@lgtmoose-acme help` lists them._",
+    );
+    // Only a slug-shaped handle is shown as code; anything else, and none, shows no pointer.
+    expect(renderSummary(input({ commandHandle: "x` <b>" }))).not.toContain("Commands:");
+    expect(renderSummary(input())).not.toContain("Commands:");
+  });
+
   it("lists files the PR no longer changes, with what they no longer add, escaped", () => {
     const summary = renderSummary(
       input({

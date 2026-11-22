@@ -455,6 +455,26 @@ export const deployConfigSchema = z
         "Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply.",
       ),
     /**
+     * Other handles that `@`-commands may use besides the App's own (NIC-1119). An App made with
+     * `lgtmoose setup` is often called `lgtmoose-<org>`, while the docs say `@lgtmoose`. Add
+     * `lgtmoose` here so `@lgtmoose review` works too. A handle never changes what a command may
+     * do: that depends on who wrote it. GitHub also notifies whoever owns an alias's login.
+     */
+    commandAliases: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/,
+            "aliases are GitHub logins: letters, digits and single hyphens, at most 39 characters",
+          ),
+      )
+      .max(5)
+      .default([])
+      .describe(
+        "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5.",
+      ),
+    /**
      * How long a push's review waits for the next push before it starts (NIC-1077): a newer
      * push in that time stops it before it clones. The dispatcher reads it; it holds no GitHub
      * credential, so this is a deployment setting, not a repo one.

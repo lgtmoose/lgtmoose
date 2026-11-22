@@ -11,7 +11,14 @@ import {
   type Permission,
 } from "@lgtmoose/learnings";
 import { inline } from "@lgtmoose/summary";
-import { helpText, learningProposal, parseCommands, type Command } from "./commands.js";
+import {
+  addressesDocsHandle,
+  handleHint,
+  helpText,
+  learningProposal,
+  parseCommands,
+  type Command,
+} from "./commands.js";
 import { describeFinding } from "./explain.js";
 import { patternKey, rememberText } from "./outcome-learning.js";
 import { JUDGE_REPLY_MARKER, isTrivialReply, type ReplyStore } from "./replies.js";
@@ -142,6 +149,11 @@ export interface ConversationStore {
    * handled, so the reconciler only queues ones written later.
    */
   commentsThrough?(repo: string, number: number, at: Date): Promise<void>;
+  /**
+   * Records that the PR got the one-time hint with the App's real handle (NIC-1119). True the
+   * first time, false once it has had one, so the hint is never posted twice on a PR.
+   */
+  claimHandleHint?(repo: string, number: number): Promise<boolean>;
 }
 
 export interface ConversationDeps {
@@ -160,6 +172,11 @@ export interface ConversationDeps {
    * 0, or without `replies`, `explain` replies with the finding as it's stored.
    */
   maxExplanations?: number;
+  /**
+   * Other handles commands may use besides `@<slug>` (`commandAliases`, NIC-1119), such as
+   * `lgtmoose` for an App called `lgtmoose-<org>`. Left out: only the App's own handle.
+   */
+  commandAliases?: readonly string[];
   /**
    * Outcome learning (NIC-1081): a finding `ignore` declined may complete a repeated rejection.
    * Left out, an `ignore` teaches nothing. Failures are logged, never thrown.
@@ -203,6 +220,37 @@ const RANK: Record<Permission, number> = {
 
 const short = (sha: string) => sha.slice(0, 7);
 const sameLogin = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** The handles commands may use here: the App's own, then the deployment's aliases. */
+const handles = (deps: Pick<ConversationDeps, "commandAliases">, slug: string): string[] => [
+  slug,
+  ...(deps.commandAliases ?? []),
+];
+
+/**
+ * The one-time hint (NIC-1119) for a comment that used `@lgtmoose` where this App is called
+ * something else: posted once per PR, carrying the reply marker so nothing reads it as a
+ * command. The PR is claimed before the hint is posted, so a retry never posts it twice; one
+ * that fails to post is lost, which is the safer side. Logged, not posted or claimed, in shadow
+ * mode. Without a store that records it, there's no hint at all.
+ */
+async function hintHandle(
+  deps: ConversationDeps,
+  job: ReviewJob,
+  slug: string,
+  post: (body: string) => Promise<void>,
+): Promise<void> {
+  const { store } = deps;
+  if (store.claimHandleHint === undefined) return;
+  const body = `${handleHint(slug)}\n\n${REPLY_MARKER}`;
+  if (deps.shadow) {
+    deps.log("shadow: handle hint not posted", { repo: job.repo, prNumber: job.prNumber });
+    return;
+  }
+  if (!(await store.claimHandleHint(job.repo, job.prNumber))) return;
+  await post(body);
+  deps.log("handle hint posted", { repo: job.repo, prNumber: job.prNumber });
+}
 
 interface Context {
   deps: ConversationDeps;
@@ -658,7 +706,7 @@ async function handleBotComment(
   if (job.kind !== "comment" || github.trustedBots === undefined) return ignored;
   const slug = await github.slug();
   if (sameLogin(comment.author, `${slug}[bot]`)) return ignored;
-  const commands = parseCommands(comment.body, slug);
+  const commands = parseCommands(comment.body, handles(deps, slug));
   if (!commands.some((command) => command.name === "review" && !command.full)) return ignored;
   const pull = await github.pull(job.repo, job.prNumber);
   if (!pull.open || pull.baseSha === undefined) return ignored;
@@ -709,9 +757,14 @@ export async function handleConversation(
     }
   };
   const slug = await github.slug();
-  const commands = parseCommands(comment.body, slug);
+  const commands = parseCommands(comment.body, handles(deps, slug));
   // Not a command: a reply for the judge, if it's on one of our findings' threads.
   if (commands.length === 0) {
+    if (addressesDocsHandle(comment.body, handles(deps, slug))) {
+      await hintHandle(deps, job, slug, (body) =>
+        github.reply(kind, job.repo, job.prNumber, commentId, body),
+      );
+    }
     const result = await recordReply(deps, github, { ...job, commentId }, kind, comment);
     await handled();
     return result;
@@ -803,8 +856,15 @@ async function handleReview(deps: ConversationDeps, job: ReviewJob): Promise<Con
     return { action: "ignored", reason: "a bot's review" };
   }
   const slug = await github.slug();
-  const commands = parseCommands(review.body, slug);
-  if (commands.length === 0) return { action: "ignored", reason: "no commands in the review" };
+  const commands = parseCommands(review.body, handles(deps, slug));
+  if (commands.length === 0) {
+    if (addressesDocsHandle(review.body, handles(deps, slug))) {
+      await hintHandle(deps, job, slug, (body) =>
+        github.reply("review", job.repo, job.prNumber, reviewId, `@${review.author}: ${body}`),
+      );
+    }
+    return { action: "ignored", reason: "no commands in the review" };
+  }
 
   const { ok, names, replies } = await runCommands(deps, github, job, review, slug, commands, {
     kind: "review",

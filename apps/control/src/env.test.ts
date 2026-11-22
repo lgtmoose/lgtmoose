@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BATCH_TIMEOUT_MS,
   readCommand,
+  readCommandAliases,
   readControlEnv,
   readDispatchEnv,
   readReconcileEnv,
@@ -70,6 +71,18 @@ describe("readReviewSettings", () => {
     expect(readMaxExplanations({})).toBe(5);
     expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "-1" })).toThrow();
     expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "x" })).toThrow();
+  });
+
+  it("reads the command aliases (NIC-1119)", () => {
+    expect(readCommandAliases({})).toEqual([]);
+    expect(readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: "" })).toEqual([]);
+    expect(readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: " lgtmoose, review-bot ," })).toEqual([
+      "lgtmoose",
+      "review-bot",
+    ]);
+    for (const bad of ["@lgtmoose", "a b", "-x", "x--y", "a,b,c,d,e,f"]) {
+      expect(() => readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: bad })).toThrow();
+    }
   });
 
   it("reads the most replies to judge per run", () => {

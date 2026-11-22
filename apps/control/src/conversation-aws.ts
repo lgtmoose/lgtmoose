@@ -285,6 +285,19 @@ export function drizzleConversationStore(
         })
         .where(ofPull(repo, number));
     },
+    async claimHandleHint(repo, number) {
+      // One statement: two comments handled at once can't both claim it.
+      const rows = await db
+        .insert(pullRequestDispatches)
+        .values({ repo: lower(repo), number, lastEventAt: new Date(0), handleHintAt: now() })
+        .onConflictDoUpdate({
+          target: [pullRequestDispatches.repo, pullRequestDispatches.number],
+          set: { handleHintAt: now(), updatedAt: now() },
+          setWhere: isNull(pullRequestDispatches.handleHintAt),
+        })
+        .returning({ repo: pullRequestDispatches.repo });
+      return rows.length > 0;
+    },
   };
 }
 

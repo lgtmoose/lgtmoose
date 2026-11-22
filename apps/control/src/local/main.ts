@@ -255,6 +255,7 @@ async function main(): Promise<void> {
     ...(control.outcomes === undefined ? {} : { outcomes: control.outcomes }),
     replies: drizzleReplyStore(db),
     maxExplanations: config.maxExplanations,
+    commandAliases: config.commandAliases,
     queue: sender,
     shadow: config.shadow,
     log,

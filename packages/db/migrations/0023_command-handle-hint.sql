@@ -1,0 +1,1 @@
+ALTER TABLE "pull_request_dispatches" ADD COLUMN "handle_hint_at" timestamp with time zone;

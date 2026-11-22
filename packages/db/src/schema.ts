@@ -483,6 +483,11 @@ export const pullRequestDispatches = pgTable(
      * checks say the same posts nothing: our own check run finishing is a check event too.
      */
     checksWaitState: text("checks_wait_state"),
+    /**
+     * When the PR got the one-time hint that commands here use the App's real handle, not
+     * `@lgtmoose` (NIC-1119), so it's never posted twice.
+     */
+    handleHintAt: timestamp("handle_hint_at", { withTimezone: true }),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

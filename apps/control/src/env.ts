@@ -229,6 +229,30 @@ export function readMaxExplanations(env: Env): number {
   return limit;
 }
 
+/** A GitHub login: letters, digits and single hyphens, at most 39 characters. */
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+
+/**
+ * `LGTMOOSE_COMMAND_ALIASES` (`commandAliases`, NIC-1119): other handles `@`-commands may use
+ * besides the App's own, comma-separated. Unset or empty: none. A value that isn't a login fails
+ * the Lambda at start rather than being ignored.
+ */
+export function readCommandAliases(env: Env): string[] {
+  const value = env.LGTMOOSE_COMMAND_ALIASES?.trim() ?? "";
+  if (value === "") return [];
+  const aliases = value
+    .split(",")
+    .map((alias) => alias.trim())
+    .filter((alias) => alias !== "");
+  for (const alias of aliases) {
+    if (!LOGIN.test(alias)) {
+      throw new Error("LGTMOOSE_COMMAND_ALIASES must be comma-separated GitHub logins.");
+    }
+  }
+  if (aliases.length > 5) throw new Error("LGTMOOSE_COMMAND_ALIASES takes at most 5 aliases.");
+  return aliases;
+}
+
 export function readReviewSettings(env: Env): ReviewSettings {
   const timeout = env.LGTMOOSE_BATCH_TIMEOUT_MS?.trim();
   const batchTimeoutMs = timeout ? Number(timeout) : DEFAULT_BATCH_TIMEOUT_MS;

@@ -1308,6 +1308,7 @@ export async function post(
       manifest.tickets === undefined
         ? undefined
         : await ticketReview(deps.store, runId, prepared, manifest.tickets);
+    const handle = await slugOf(github);
     const finish = (open: typeof earlier.open) =>
       finishReview(repo, reviewed, outcomes, latest.headSha, {
         ...(tickets === undefined ? {} : { tickets }),
@@ -1317,6 +1318,8 @@ export async function post(
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
         ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
+        // The summary names the handle that works here (NIC-1119).
+        ...(handle.slug === undefined ? {} : { commandHandle: handle.slug }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({

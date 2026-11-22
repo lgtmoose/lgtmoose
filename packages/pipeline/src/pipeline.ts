@@ -246,6 +246,8 @@ export interface FinishOptions {
   spendCap?: { batches: readonly number[]; reason: string };
   /** Notes for the summary about how the run started (`SummaryInput.notices`), such as CI. */
   notices?: readonly string[];
+  /** The App's slug, for the summary's pointer to its commands (`SummaryInput.commandHandle`). */
+  commandHandle?: string;
 }
 
 /** What a batch a spend cap kept from running reports as its error. */
@@ -1399,6 +1401,7 @@ export async function finishReview(
       ...(options.notices === undefined || options.notices.length === 0
         ? {}
         : { notices: options.notices }),
+      ...(options.commandHandle === undefined ? {} : { commandHandle: options.commandHandle }),
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );
