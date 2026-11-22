@@ -731,7 +731,8 @@ export class WorkflowStack extends Stack {
       description:
         "Checks each model provider's stored credential, without reading it, and its Bedrock models.",
       memorySize: 256,
-      // Up to three Bedrock calls per pinned model, each with retries and a 10 s limit.
+      // At most two Bedrock calls per pinned model, each with retries and a 10 s limit; the
+      // check stops starting new ones with 20 s left, so what it found is still reported.
       timeout: Duration.minutes(5),
       environment: {
         LGTMOOSE_MODEL_CHECKS: JSON.stringify(modelChecks),

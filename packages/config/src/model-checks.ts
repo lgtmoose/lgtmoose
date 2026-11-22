@@ -38,6 +38,11 @@ export type ModelCheckStatus =
   | "ok"
   /** It can't: `problem` says why and `fix` what to do. */
   | "unavailable"
+  /**
+   * An ACTIVE inference profile whose model access couldn't be read, because this region doesn't
+   * offer the model itself: nothing says it can't be called, so it isn't reported unavailable.
+   */
+  | "unverified"
   /** The check itself failed (throttled, no permission to ask): nothing is known. */
   | "unknown";
 
@@ -278,12 +283,12 @@ export async function checkBedrockModel(
     // A profile routes to other regions, so its model needn't be offered (or even known) in this
     // one: an ACTIVE profile settles that, and only the account's access and agreement are read.
     // Where this region doesn't offer the model, Bedrock reports its access as NOT_AVAILABLE
-    // whatever the account has, so it can't be read here: nothing is known, and the alarm is
-    // left as it is.
+    // whatever the account has, so it can't be read here. The profile is ACTIVE and nothing says
+    // the model can't be called, so it is `unverified`: not unavailable, which clears the alarm.
     const profile = match[1] !== undefined;
     const unreadable = () =>
       result(
-        "unknown",
+        "unverified",
         `model access to ${foundation} couldn't be read in ${region}, which doesn't offer it itself`,
       );
     let availability;
@@ -381,21 +386,29 @@ export async function checkApiModel(
   const url = anthropic
     ? `https://api.anthropic.com/v1/models/${encodeURIComponent(check.model)}`
     : `https://api.openai.com/v1/models/${encodeURIComponent(check.model)}`;
-  const headers: Record<string, string> = anthropic
-    ? { "x-api-key": key.trim(), "anthropic-version": "2023-06-01" }
-    : { authorization: `Bearer ${key.trim()}` };
   const result = (status: ModelCheckStatus, problem?: string, fix?: string): ModelCheckResult => ({
     ...check,
     status,
     ...(problem === undefined ? {} : { problem }),
     ...(fix === undefined ? {} : { fix }),
   });
+  const storeKey = `store a working key with ${CLI_COMMAND} auth api-key --provider ${anthropic ? "anthropic" : "openai"} --id ${check.providerId}`;
+  const trimmed = key.trim();
+  // A header can't hold control characters: fetch would refuse it with an error quoting the key.
+  if (!headerSafe(trimmed)) {
+    return result("unavailable", "the stored key has invalid characters", storeKey);
+  }
+  const headers: Record<string, string> = anthropic
+    ? { "x-api-key": trimmed, "anthropic-version": "2023-06-01" }
+    : { authorization: `Bearer ${trimmed}` };
   let status: number;
   let body: string | undefined;
   try {
     ({ status, body } = await get(url, headers));
   } catch (error) {
-    return result("unknown", `couldn't check: ${checkDetail(error)}`);
+    // Only the error's name: a fetch error's message can quote the request's headers, key and all.
+    const name = error instanceof Error && /^\w{1,64}$/.test(error.name) ? error.name : "Error";
+    return result("unknown", `couldn't check: the request to the ${vendor} API failed (${name})`);
   }
   if (status >= 200 && status < 300) return result("ok");
   if (status === 404) {
@@ -406,11 +419,7 @@ export async function checkApiModel(
     );
   }
   if (status === 401 && badKey(body)) {
-    return result(
-      "unavailable",
-      `the ${vendor} API refused the stored key (HTTP 401)`,
-      `store a working key with ${CLI_COMMAND} auth api-key --provider ${anthropic ? "anthropic" : "openai"} --id ${check.providerId}`,
-    );
+    return result("unavailable", `the ${vendor} API refused the stored key (HTTP 401)`, storeKey);
   }
   if (status === 401 || status === 403) {
     // A restricted key without model reads gets this here, and may still work for reviews.
@@ -422,13 +431,24 @@ export async function checkApiModel(
   return result("unknown", `couldn't check: the ${vendor} API answered HTTP ${status}`);
 }
 
+/** Whether a key is printable ASCII only: no line break, NUL or other control character. */
+function headerSafe(key: string): boolean {
+  for (let i = 0; i < key.length; i++) {
+    const code = key.charCodeAt(i);
+    if (code < 0x20 || code > 0x7e) return false;
+  }
+  return true;
+}
+
 /** A failed check as one line for a person: provider, tiers, model, where, why and the fix. */
 export function describeModelProblem(result: ModelCheckResult): string {
   const tiers = result.tiers.join(", ");
   // No full stop straight after a URL: it would be copied with it.
   const end = result.fix !== undefined && /https?:\/\/\S+$/.test(result.fix) ? "" : ".";
   const fix = result.fix === undefined ? "" : ` Fix: ${result.fix}${end}`;
-  return `${result.providerId} (${tiers}): ${result.model}: ${result.problem ?? result.status}.${fix}`;
+  const problem = result.problem ?? result.status;
+  const stop = /[.!?]$/.test(problem) ? "" : ".";
+  return `${result.providerId} (${tiers}): ${result.model}: ${problem}${stop}${fix}`;
 }
 
 /**

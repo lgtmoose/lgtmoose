@@ -400,7 +400,11 @@ describe("lgtmoose deploy", () => {
             id: "claude",
             harness: "claude-code",
             auth: "bedrock",
-            models: { standard: "us.anthropic.claude-sonnet-4-6" },
+            models: {
+              fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+              standard: "us.anthropic.claude-sonnet-4-6",
+              deep: "us.anthropic.claude-sonnet-4-6",
+            },
           },
         ],
       },
@@ -422,6 +426,57 @@ describe("lgtmoose deploy", () => {
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("Checking that the configured models can be called");
     expect(result.all).not.toContain("Warning:");
+    expect(result.all).not.toContain("Note:");
+    expect(result.all).not.toContain("Not checked:");
+    expect(result.all).not.toContain("Deploying anyway.");
+  });
+
+  it("notes active profiles it couldn't verify, and names each model it didn't check", async () => {
+    const h = harness({
+      config: {
+        ...bedrockConfig,
+        region: "eu-north-1",
+        providers: [
+          {
+            id: "claude",
+            harness: "claude-code",
+            auth: "bedrock",
+            models: {
+              fast: "sonnet",
+              standard: "eu.anthropic.claude-sonnet-4-6",
+              deep: "arn:aws:bedrock:eu-north-1:123456789012:application-inference-profile/x",
+            },
+          },
+        ],
+      },
+    });
+    h.deps.models = () => ({
+      bedrock: {
+        inferenceProfile: () => Promise.resolve({ status: "ACTIVE" }),
+        foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
+        availability: () =>
+          Promise.resolve({
+            region: "NOT_AVAILABLE",
+            entitlement: "NOT_AVAILABLE",
+            agreement: "AVAILABLE",
+          }),
+      },
+      get: () => Promise.reject(new Error("no API-key provider")),
+    });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    // A soft note, not a warning: the profile is active and nothing says it can't be called.
+    expect(result.all).not.toContain("Warning:");
+    expect(result.all).not.toContain("Deploying anyway.");
+    expect(result.all).toContain(
+      "Note: these inference profiles are active, but model access couldn't be verified from this region:\n" +
+        "  - claude (standard): eu.anthropic.claude-sonnet-4-6: model access to anthropic.claude-sonnet-4-6 couldn't be read in eu-north-1, which doesn't offer it itself.",
+    );
+    expect(result.all).toContain(
+      "Not checked:\n" +
+        "  - claude (fast): sonnet: an alias, which Claude Code resolves to a model ID when it runs.\n" +
+        "  - claude (deep): arn:aws:bedrock:eu-north-1:123456789012:application-inference-profile/x: an ARN is used as given.",
+    );
   });
 
   it("only warns when it can't check deletion protection, since everything is live", async () => {

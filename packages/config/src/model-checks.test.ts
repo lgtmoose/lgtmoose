@@ -292,7 +292,7 @@ describe("checkBedrockModel", () => {
 describe("checkBedrockModel through a profile", () => {
   it("never calls a working profile unavailable when the source region doesn't offer its model", async () => {
     // Bedrock reports access as NOT_AVAILABLE wherever the region doesn't offer the model, so
-    // it says nothing about what the profile can do: unknown, which leaves the alarm alone.
+    // it says nothing about what the profile can do: unverified, never unavailable.
     for (const entitlement of ["NOT_AVAILABLE", "AVAILABLE"]) {
       const result = await checkBedrockModel(
         fakeBedrock({
@@ -306,7 +306,7 @@ describe("checkBedrockModel through a profile", () => {
         "eu-north-1",
       );
       expect(result).toMatchObject({
-        status: "unknown",
+        status: "unverified",
         problem:
           "model access to anthropic.claude-opus-4-8 couldn't be read in eu-north-1, which doesn't offer it itself",
       });
@@ -323,8 +323,8 @@ describe("checkBedrockModel through a profile", () => {
       bedrockCheck("global.anthropic.claude-opus-4-8"),
       "eu-north-1",
     );
-    // Unknown, so the health check neither raises nor clears the alarm.
-    expect(result.status).toBe("unknown");
+    // Unverified: the profile is ACTIVE, so the health check may clear the alarm.
+    expect(result.status).toBe("unverified");
   });
 
   it("still needs model access and the agreement for a profile where the model is offered", async () => {
@@ -574,5 +574,48 @@ describe("checkApiModel", () => {
     expect(
       (await checkApiModel(async () => ({ status: 401, body: "<html>" }), openai, "k")).status,
     ).toBe("unknown");
+  });
+  it("never repeats a key, even one fetch would refuse with the header in its message", async () => {
+    const key = "sk-ant-abc\r\nX-Injected: 1\u0000tail";
+    let called = false;
+    const quoting = async (_url: string, headers: Record<string, string>) => {
+      called = true;
+      throw new TypeError(`Invalid header value: ${JSON.stringify(headers)}`);
+    };
+    for (const check of [anthropic, openai]) {
+      const result = await checkApiModel(quoting, check, key);
+      expect(result).toMatchObject({
+        status: "unavailable",
+        problem: "the stored key has invalid characters",
+      });
+      expect(result.fix).toMatch(/auth api-key/);
+    }
+    expect(called).toBe(false);
+    // A clean key whose request throws a message quoting it: only the error's name is kept.
+    const clean = "sk-ant-cleansecret";
+    const results = [
+      await checkApiModel(quoting, anthropic, clean),
+      await checkApiModel(quoting, openai, clean),
+    ];
+    expect(results[0]?.problem).toBe(
+      "couldn't check: the request to the Anthropic API failed (TypeError)",
+    );
+    const all = JSON.stringify(results) + results.map((r) => describeModelProblem(r)).join("\n");
+    for (const secret of [key, clean]) {
+      for (let i = 0; i + 6 <= secret.length; i++) {
+        expect(all).not.toContain(secret.slice(i, i + 6));
+      }
+    }
+  });
+
+  it("ends a line with one full stop whatever the problem ends with", () => {
+    const base = { ...anthropic, status: "unknown" as const };
+    expect(describeModelProblem({ ...base, problem: "it failed." })).toBe(
+      "anthropic (standard): claude-sonnet-4-6: it failed.",
+    );
+    expect(describeModelProblem({ ...base, problem: "why?" })).toMatch(/why\?$/);
+    expect(describeModelProblem({ ...base, problem: "no", fix: "do this" })).toBe(
+      "anthropic (standard): claude-sonnet-4-6: no. Fix: do this.",
+    );
   });
 });

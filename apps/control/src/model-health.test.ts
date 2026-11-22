@@ -189,6 +189,117 @@ describe("checkModels", () => {
       ["Bedrock models not checked: no Bedrock client here", { providers: ["bedrock"] }],
     ]);
   });
+
+  it("clears the alarm for active profiles whose model access can't be read in this region", async () => {
+    // eu-north-1 doesn't offer the models itself, so access always reads NOT_AVAILABLE: without
+    // a status of its own, the provider would never write 0 and the alarm would stay up.
+    const out = recorder();
+    const results = await checkModels({
+      checks: [
+        bedrock("global.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+        bedrock("eu.anthropic.claude-sonnet-4-6", ["standard", "deep"]),
+      ],
+      region: "eu-north-1",
+      bedrock: {
+        ...api(),
+        availability: async () => ({
+          region: "NOT_AVAILABLE",
+          entitlement: "NOT_AVAILABLE",
+          agreement: "AVAILABLE",
+        }),
+      },
+      report: out.report,
+      log: out.log,
+    });
+    expect(results.map((result) => result.status)).toEqual(["unverified", "unverified"]);
+    expect(out.reports).toEqual([["bedrock", 0, undefined]]);
+    expect(out.logs.map(([message]) => message)).toEqual([
+      "model access not verified: the profile is active",
+      "model access not verified: the profile is active",
+    ]);
+  });
+
+  it("reports each provider as soon as its checks finish", async () => {
+    const events: string[] = [];
+    await checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-sonnet-4-6"),
+        { providerId: "openai", kind: "openai-api", model: "gpt-5-codex", tiers: ["deep"] },
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+      ],
+      region: "us-east-2",
+      bedrock: api(),
+      api: {
+        get: async () => {
+          events.push("openai checked");
+          return { status: 200 };
+        },
+        key: async () => "k",
+      },
+      report: (providerId) => events.push(`${providerId} reported`),
+      log: () => undefined,
+    });
+    // Bedrock's two models are checked together, then reported before OpenAI is asked.
+    expect(events).toEqual(["bedrock reported", "openai checked", "openai reported"]);
+  });
+
+  it("starts no check with less than 20 s left, and still reports what it found", async () => {
+    const out = recorder();
+    let left = 60_000;
+    const asked: string[] = [];
+    const bedrockApi = api(["us.anthropic.claude-sonnet-4-6"]);
+    const results = await checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-sonnet-4-6"),
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+        { providerId: "openai", kind: "openai-api", model: "gpt-5-codex", tiers: ["deep"] },
+      ],
+      region: "us-east-2",
+      bedrock: {
+        ...bedrockApi,
+        inferenceProfile: async (id) => {
+          asked.push(id);
+          left -= 45_000;
+          return bedrockApi.inferenceProfile(id);
+        },
+      },
+      api: { get: async () => ({ status: 200 }), key: async () => "k" },
+      remainingMs: () => left,
+      report: out.report,
+      log: out.log,
+    });
+    expect(asked).toEqual(["us.anthropic.claude-sonnet-4-6"]);
+    expect(results.map((result) => result.status)).toEqual(["unavailable"]);
+    // An unfinished provider still raises the alarm for what failed, but never clears it.
+    expect(out.reports.map(([id, value]) => [id, value])).toEqual([["bedrock", 1]]);
+    expect(out.logs).toContainEqual([
+      "model checks stopped: the invocation is nearly out of time",
+      { notFinished: ["bedrock", "openai"] },
+    ]);
+  });
+
+  it("clears nothing for a provider it ran out of time on", async () => {
+    const out = recorder();
+    let left = 30_000;
+    await checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-sonnet-4-6"),
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+      ],
+      region: "us-east-2",
+      bedrock: {
+        ...api(),
+        inferenceProfile: async () => {
+          left = 5_000;
+          return { status: "ACTIVE" };
+        },
+      },
+      remainingMs: () => left,
+      report: out.report,
+      log: out.log,
+    });
+    expect(out.reports).toEqual([]);
+  });
 });
 
 describe("healthCheck", () => {
@@ -260,6 +371,21 @@ describe("healthCheck", () => {
     });
     expect(order).toEqual(["credentials", "bedrock"]);
     expect(result.models).toEqual({ "bedrock:us.anthropic.claude-sonnet-4-6": "ok" });
+  });
+
+  it("passes the invocation's remaining time to the model checks", async () => {
+    const out = recorder();
+    const result = await healthCheck({
+      credentials: async () => ({}),
+      checks: () => [bedrock("us.anthropic.claude-sonnet-4-6")],
+      region: "us-east-2",
+      bedrock: async () => api(),
+      remainingMs: () => 1_000,
+      report: out.report,
+      log: out.log,
+    });
+    expect(result.models).toEqual({});
+    expect(out.reports).toEqual([]);
   });
 
   it("loads no Bedrock client when no Bedrock model is checked", async () => {

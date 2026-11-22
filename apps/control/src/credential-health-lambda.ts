@@ -46,7 +46,10 @@ async function loadBedrock(region: string): Promise<BedrockModelApi> {
  * reports `CredentialProblem` for it (see `checkCredentials`), then asks Bedrock whether each
  * pinned Bedrock model can be called and reports `ModelUnavailable` (see `healthCheck`).
  */
-export async function handler(): Promise<{
+export async function handler(
+  _event?: unknown,
+  context?: { getRemainingTimeInMillis(): number },
+): Promise<{
   credentials: Record<string, string | undefined>;
   models: Record<string, string>;
 }> {
@@ -64,5 +67,6 @@ export async function handler(): Promise<{
     bedrock: () => loadBedrock(region),
     report: reportModel,
     log: logLine,
+    ...(context === undefined ? {} : { remainingMs: () => context.getRemainingTimeInMillis() }),
   });
 }

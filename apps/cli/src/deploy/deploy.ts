@@ -168,8 +168,9 @@ export async function modelWarnings(
   calls: { bedrock: BedrockModelApi; get: StatusGet },
 ): Promise<string | undefined> {
   const results: ModelCheckResult[] = [];
+  const plan = planModelChecks(config);
   // One at a time: Bedrock's control plane throttles bursts.
-  for (const check of planModelChecks(config).checks) {
+  for (const check of plan.checks) {
     if (check.kind === "bedrock") {
       results.push(await checkBedrockModel(calls.bedrock, check, config.region));
       continue;
@@ -181,17 +182,34 @@ export async function modelWarnings(
         : await checkApiModel(calls.get, check, key),
     );
   }
-  const section = (status: "unavailable" | "unknown", head: string) => {
+  const section = (status: "unavailable" | "unknown" | "unverified", head: string) => {
     const lines = results
       .filter((result) => result.status === status)
       .map((result) => `  - ${describeModelProblem(result)}`);
     return lines.length === 0 ? [] : [head, ...lines];
   };
-  const sections = [
+  const warnings = [
     ...section("unavailable", "Warning: reviews on these models will fail until they're fixed:"),
     ...section("unknown", "Warning: these models couldn't be checked:"),
   ];
-  return sections.length === 0 ? undefined : `${sections.join("\n")}\nDeploying anyway.\n`;
+  const notes = [
+    ...section(
+      "unverified",
+      "Note: these inference profiles are active, but model access couldn't be verified from this region:",
+    ),
+    ...(plan.skipped.length === 0
+      ? []
+      : [
+          "Not checked:",
+          ...plan.skipped.map(
+            (skip) =>
+              `  - ${skip.providerId} (${skip.tiers.join(", ")}): ${skip.model ?? "its default model"}: ${skip.reason.replace(/^not checked: /, "")}.`,
+          ),
+        ]),
+  ];
+  if (warnings.length === 0 && notes.length === 0) return undefined;
+  const tail = warnings.length === 0 ? "" : "Deploying anyway.\n";
+  return `${[...warnings, ...notes].join("\n")}\n${tail}`;
 }
 
 function jwtFor(app: AppCredentials, deps: DeployDeps): string {
