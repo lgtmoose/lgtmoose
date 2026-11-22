@@ -117,6 +117,8 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
     feedback: config.feedback,
     maxReplyJudgements: config.maxReplyJudgements,
     maxExplanations: config.maxExplanations,
+    commandAliases: config.commandAliases,
+    commandHint: config.commandHint,
     budgets: config.budgets,
     reviewDebounceSeconds: config.reviewDebounceSeconds,
     embeddings: config.learnings.embeddings,

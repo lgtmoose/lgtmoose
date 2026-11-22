@@ -872,6 +872,8 @@ export async function awsControlDeps(
     repeatThreshold?: number;
     /** The deploy config's `budgets` (`LGTMOOSE_BUDGETS`). Left out: no caps. */
     budgets?: Budgets;
+    /** `commandAliases` (`LGTMOOSE_COMMAND_ALIASES`), for check runs that name the handle. */
+    commandAliases?: readonly string[];
   },
 ): Promise<ControlDeps & { close(): Promise<void> }> {
   const secrets = new SecretsManagerClient({});
@@ -942,6 +944,7 @@ export async function awsControlDeps(
         ? {}
         : { repeatThreshold: options.repeatThreshold }),
       ...(options.budgets === undefined ? {} : { budgets: options.budgets }),
+      ...(options.commandAliases === undefined ? {} : { commandAliases: options.commandAliases }),
     }),
     close: () => pool.end(),
   };
@@ -964,6 +967,8 @@ export interface ControlParts {
   repeatThreshold?: number;
   /** The deploy config's `budgets` (NIC-1079); left out, no caps, but spend is still recorded. */
   budgets?: Budgets;
+  /** `commandAliases` (NIC-1119): a check run names the first when the App's slug can't be read. */
+  commandAliases?: readonly string[];
 }
 
 /**
@@ -998,6 +1003,7 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
     runs: drizzleRunStore(db),
     findings: drizzleFindingStore(db),
     tokens: parts.tokens,
+    ...(parts.commandAliases === undefined ? {} : { commandAliases: parts.commandAliases }),
     async github(installationId) {
       const token = installationTokenProvider({
         appId: app.appId,

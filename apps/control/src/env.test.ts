@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BATCH_TIMEOUT_MS,
   readCommand,
+  readCommandAliases,
+  readCommandHint,
   readControlEnv,
   readDispatchEnv,
   readReconcileEnv,
@@ -70,6 +72,28 @@ describe("readReviewSettings", () => {
     expect(readMaxExplanations({})).toBe(5);
     expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "-1" })).toThrow();
     expect(() => readMaxExplanations({ LGTMOOSE_MAX_EXPLANATIONS: "x" })).toThrow();
+  });
+
+  it("reads the command aliases (NIC-1119)", () => {
+    expect(readCommandAliases({})).toEqual([]);
+    expect(readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: "" })).toEqual([]);
+    expect(readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: " lgtmoose, review-bot ," })).toEqual([
+      "lgtmoose",
+      "review-bot",
+    ]);
+    for (const bad of ["@lgtmoose", "a b", "-x", "x--y", "a,b,c,d,e,f"]) {
+      expect(() => readCommandAliases({ LGTMOOSE_COMMAND_ALIASES: bad })).toThrow();
+    }
+  });
+
+  it("reads whether the wrong-handle hint is on (NIC-1119)", () => {
+    expect(readCommandHint({})).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: " " })).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: "TRUE" })).toBe(true);
+    expect(readCommandHint({ LGTMOOSE_COMMAND_HINT: "False" })).toBe(false);
+    for (const bad of ["0", "no", "off", "yes"]) {
+      expect(() => readCommandHint({ LGTMOOSE_COMMAND_HINT: bad })).toThrow("true or false");
+    }
   });
 
   it("reads the most replies to judge per run", () => {

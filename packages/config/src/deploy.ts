@@ -13,6 +13,12 @@ export const HARNESS_AUTH = {
 export type Harness = keyof typeof HARNESS_AUTH;
 export type AuthMethod = (typeof HARNESS_AUTH)[Harness][number];
 
+/**
+ * A GitHub login: letters, digits and single hyphens, not at either end, at most 39 characters.
+ * Written without `|` or `](`, so the configuration reference shows it as a plain code span.
+ */
+export const GITHUB_LOGIN = /^(?!-)(?!.*--)(?!.*-$)[A-Za-z0-9-]{1,39}$/;
+
 const HARNESSES = Object.keys(HARNESS_AUTH) as [Harness, ...Harness[]];
 const AUTH_METHODS = [...new Set(Object.values(HARNESS_AUTH).flat())] as [
   AuthMethod,
@@ -453,6 +459,40 @@ export const deployConfigSchema = z
       .default(5)
       .describe(
         "Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply.",
+      ),
+    /**
+     * Other handles that `@`-commands may use besides the App's own (NIC-1119). An App made with
+     * `lgtmoose setup` is often called `lgtmoose-<org>`, while the docs say `@lgtmoose`. Add
+     * `lgtmoose` here so `@lgtmoose review` works too. A handle never changes what a command may
+     * do: that depends on who wrote it. GitHub also notifies whoever owns an alias's login.
+     */
+    commandAliases: z
+      .array(
+        z
+          .string()
+          // A regex, not a refine, so the JSON schema keeps the pattern and editors flag `@lgtmoose`.
+          .regex(
+            GITHUB_LOGIN,
+            "aliases are GitHub logins: letters, digits and single hyphens, at most 39 characters",
+          )
+          .describe("A GitHub login: letters, digits and single hyphens, at most 39 characters."),
+      )
+      .max(5)
+      .default([])
+      .describe(
+        "Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-<org>. Up to 5 GitHub logins.",
+      ),
+    /**
+     * Whether a comment that mentions `@lgtmoose` followed by a whole command, where the App is called
+     * something else and `lgtmoose` isn't an alias, gets one reply per PR naming the handle that
+     * works (NIC-1119). It assumes no other App called `lgtmoose` answers on these repositories;
+     * turn it off if one does.
+     */
+    commandHint: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Reply once per PR when a comment mentions @lgtmoose followed by a whole command where the App is called something else. Turn off if another App called lgtmoose answers on these repositories.",
       ),
     /**
      * How long a push's review waits for the next push before it starts (NIC-1077): a newer

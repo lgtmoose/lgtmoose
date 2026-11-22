@@ -58,7 +58,7 @@ import {
 import { JUDGE_REPLY_MARKER } from "./replies.js";
 import { ticketReview } from "./tickets.js";
 import type { ControlDeps, FindingRecord, RunRecord } from "./ports.js";
-import { readManifest, type RunManifest } from "./prepare.js";
+import { commandHandle, readManifest, type RunManifest } from "./prepare.js";
 import { resolutionHeld, type Permission } from "./thread-policy.js";
 import { GraphQlError } from "./threads.js";
 
@@ -1483,6 +1483,8 @@ export async function post(
       manifest.tickets === undefined
         ? undefined
         : await ticketReview(deps.store, runId, prepared, manifest.tickets);
+    // The handle the summary's footer names (NIC-1119): the slug, else the first alias, else none.
+    const handle = await commandHandle(deps, github);
     const finish = (open: typeof earlier.open) =>
       finishReview(repo, reviewed, outcomes, latest.headSha, {
         ...(tickets === undefined ? {} : { tickets }),
@@ -1492,6 +1494,7 @@ export async function post(
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
         ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
+        ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,
         stored: records.map((record) => ({

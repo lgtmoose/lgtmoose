@@ -129,7 +129,8 @@ export function waitingCheckRun(
   automaticReviews = 0,
 ): { conclusion: CheckConclusion; title: string; summary: string } | undefined {
   if (gate.check_run === "off") return undefined;
-  const command = `\`@${slug ?? "lgtmoose"} review\``;
+  // The handle that works here (NIC-1119); without one, name the command, not a guessed handle.
+  const command = slug === undefined ? "the App's `review` command" : `\`@${slug} review\``;
   const ways =
     settings.trigger === "label"
       ? `Add the ${inline(settings.label)} label, or comment ${command}.`
