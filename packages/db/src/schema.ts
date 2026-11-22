@@ -483,6 +483,17 @@ export const pullRequestDispatches = pgTable(
      * checks say the same posts nothing: our own check run finishing is a check event too.
      */
     checksWaitState: text("checks_wait_state"),
+    /**
+     * When the PR's one-time hint that commands here use the App's real handle, not `@lgtmoose`
+     * (NIC-1119), was claimed, by which comment or review, and whether it was then posted. An
+     * unposted claim can be claimed again by the same claimant's retry once it's over two
+     * minutes old, or by anyone once it's over 15 minutes old (the Lambda died in between). A
+     * posted one never is.
+     */
+    handleHintAt: timestamp("handle_hint_at", { withTimezone: true }),
+    handleHintPosted: boolean("handle_hint_posted").notNull().default(false),
+    /** Which comment (`<id>`) or review (`review-<id>`) holds the claim: its retry may post it. */
+    handleHintClaimant: text("handle_hint_claimant"),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

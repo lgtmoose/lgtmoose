@@ -5,9 +5,14 @@ import { LEARNING_KINDS, type LearningKind, type LearningProposal } from "@lgtmo
  * Pure: no GitHub and no database. The body is a person's comment, so it's untrusted text;
  * nothing here acts on it, it only says which command was asked for.
  *
- * A command is a mention of the App's bot (`@<slug>` or `@<slug>[bot]`), outside code (fenced
- * blocks and inline spans) and quotes (`>` lines), followed by the command on the same line.
+ * A command is a mention of the App's bot (`@<slug>` or `@<slug>[bot]`), or of one of the
+ * deployment's `commandAliases` (NIC-1119), outside code (fenced blocks and inline spans) and
+ * quotes (`>` lines), followed by the command on the same line. Which handle was used never
+ * changes what a command may do: that depends on who wrote the comment.
  */
+
+/** The name the docs use for the bot. A deployment's App may be called something else. */
+export const DOCS_HANDLE = "lgtmoose";
 
 /** The most commands one comment can carry; later mentions are ignored. */
 export const MAX_COMMANDS = 5;
@@ -68,14 +73,39 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
 }
 
+/** The handles a comment may address: the App's slug and the aliases, without duplicates. */
+function handlesOf(handles: string | readonly string[]): string[] {
+  const list = typeof handles === "string" ? [handles] : handles;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const handle = raw.trim();
+    const key = handle.toLowerCase();
+    if (key === "" || seen.has(key)) continue;
+    seen.add(key);
+    out.push(handle);
+  }
+  return out;
+}
+
 /**
  * The text after each mention of the bot, one entry per mention, up to `MAX_COMMANDS`. A
- * mention is `@slug` or `@slug[bot]`, not part of a longer name or an email address.
+ * mention is `@<handle>` or `@<handle>[bot]`, for the App's slug or an alias, and not part of
+ * a longer name or an email address.
  */
-export function mentions(body: string, slug: string): string[] {
+export function mentions(body: string, handles: string | readonly string[]): string[] {
+  const names = handlesOf(handles);
+  if (names.length === 0) return [];
   const text = withoutCodeAndQuotes(body);
-  const name = escapeRegExp(slug);
-  const pattern = new RegExp(`(?<![\\w@.-])@${name}(?:\\[bot\\])?(?![\\w-])([^\\n]*)`, "gi");
+  // Longest first, so `@lgtmoose-acme` is never read as `@lgtmoose` followed by `-acme`.
+  const alternation = [...names]
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegExp)
+    .join("|");
+  const pattern = new RegExp(
+    `(?<![\\w@.-])@(?:${alternation})(?:\\[bot\\])?(?![\\w-])([^\\n]*)`,
+    "gi",
+  );
   const found: string[] = [];
   for (const match of text.matchAll(pattern)) {
     found.push((match[1] ?? "").trim());
@@ -140,9 +170,62 @@ export function parseCommand(text: string): Command {
   }
 }
 
-/** Every command in a comment body, in order. */
-export function parseCommands(body: string, slug: string): Command[] {
-  return mentions(body, slug).map(parseCommand);
+/**
+ * Every command in a comment body, in order. `handles` is the App's slug, or the slug followed
+ * by the deployment's aliases.
+ */
+export function parseCommands(body: string, handles: string | readonly string[]): Command[] {
+  return mentions(body, handles).map(parseCommand);
+}
+
+/**
+ * Whether a comment that has no command for this App looks meant for it (NIC-1119): `@lgtmoose`,
+ * the handle the docs use, followed by a whole, well-formed command, where this App is called
+ * something else and `lgtmoose` isn't one of its aliases. Its author gets one hint per PR with
+ * the real handle.
+ */
+export function addressesDocsHandle(body: string, handles: readonly string[]): boolean {
+  if (handlesOf(handles).some((handle) => handle.toLowerCase() === DOCS_HANDLE)) return false;
+  return mentions(body, DOCS_HANDLE).some(isWholeCommand);
+}
+
+/**
+ * Whether the text after a mention is a whole command, as `parseCommand` reads it, with nothing
+ * else on the line: "review", "full review", "approve <id>", "explain src/a.ts:3", "learn: <text>".
+ * One trailing `.`, `!` or `?` is allowed, also after a space. "Thanks @lgtmoose!" (nothing),
+ * "@lgtmoose help me see why…" and "cc @lgtmoose: review of this is in #12" (more words than the
+ * command takes) aren't. Nor is "learn from this": `parseCommand` reads `learn` with a space as
+ * the command too, but in a sentence only the `learn:` form says it's one.
+ */
+export function isWholeCommand(text: string): boolean {
+  const trimmed = text
+    .trim()
+    .replace(/^[,:]\s*/, "")
+    .replace(/[.!?]$/, "")
+    .trim();
+  if (trimmed === "") return false;
+  const command = parseCommand(trimmed);
+  // `learn:` takes the rest of the line as its text; it needs the colon and some text.
+  if (command.name === "learn") return /^learn\s*:\s*\S/i.test(trimmed);
+  const words = trimmed.split(/\s+/);
+  switch (command.name) {
+    case "unknown":
+      return false;
+    case "review":
+      return words.length === (command.full ? 2 : 1);
+    case "forget":
+    case "approve":
+      return words.length === 2;
+    case "explain":
+      return words.length === (command.at === undefined ? 1 : 2);
+    default:
+      return words.length === 1;
+  }
+}
+
+/** The one-time hint for a comment `addressesDocsHandle` matched: the handle that works here. */
+export function handleHint(slug: string): string {
+  return `Commands here use \`@${slug}\`, not \`@${DOCS_HANDLE}\`. For example, \`@${slug} review\`; \`@${slug} help\` lists them all.`;
 }
 
 /**

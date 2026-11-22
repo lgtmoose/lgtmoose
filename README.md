@@ -1,6 +1,6 @@
 # LGTMoose 🫎
 
-A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your own AWS account, and teach it by tagging `@lgtmoose` in review comments.
+A self-hosted, open-source AI pull request reviewer. Fork it, deploy it to your own AWS account, and teach it by tagging its GitHub App in review comments. The docs write that handle as `@lgtmoose`; yours is your App's name, such as `@lgtmoose-acme`, unless you add `lgtmoose` as an alias (see [Commands](docs/commands.md#your-apps-handle)).
 
 > **Status: alpha.** LGTMoose hasn't been run in production yet, its end-to-end smoke test on a real AWS account hasn't passed, and the first tagged release (v0.1.0) is still to come. Reviews run in shadow mode by default: they're recorded, not posted. Setup is in [docs/](docs/); report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
@@ -37,7 +37,7 @@ pnpm lgtmoose deploy
 - **`auth`** stores or checks a model provider's credential: `bedrock` (the default, no key to store), `claude`, `codex`, `cursor`, `api-key` or `vertex`.
 - **`deploy`** bootstraps the AWS CDK the first time, deploys every stack, points the App's webhook at the gateway and prints the install link.
 
-Then install the App on your repositories. [Getting started](docs/index.md) covers the AWS permissions a scoped role needs, Docker on x86 Linux, and pinning Bedrock models.
+Then install the App on your repositories. Setup prints the App's handle, such as `@lgtmoose-acme`: that's what commands use in PR comments, unless you also add `commandAliases: ["lgtmoose"]`. [Getting started](docs/index.md) covers the AWS permissions a scoped role needs, Docker on x86 Linux, and pinning Bedrock models.
 
 ## Documentation
 

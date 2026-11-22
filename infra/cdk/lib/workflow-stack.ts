@@ -150,6 +150,10 @@ export interface WorkflowStackProps extends StackProps {
   maxReplyJudgements?: number;
   /** The most `explain`s the explainer answers per PR per run (`maxExplanations`). Left out: 5. */
   maxExplanations?: number;
+  /** Other handles `@`-commands may use besides the App's own (`commandAliases`). Left out: none. */
+  commandAliases?: readonly string[];
+  /** Whether a wrong-handle comment gets the one-time hint (`commandHint`). Left out: on. */
+  commandHint?: boolean;
   /** How long a push's review waits for the next push (`reviewDebounceSeconds`). Left out: 60. */
   reviewDebounceSeconds?: number;
   /**
@@ -259,6 +263,8 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_SHADOW: String(props.shadow),
         LGTMOOSE_MAX_REPLY_JUDGEMENTS: String(props.maxReplyJudgements ?? 10),
         LGTMOOSE_MAX_EXPLANATIONS: String(props.maxExplanations ?? 5),
+        // A check run that says how to ask for a review names the handle (NIC-1119).
+        LGTMOOSE_COMMAND_ALIASES: (props.commandAliases ?? []).join(","),
         ...embeddingsEnvironment(embeddings),
         ...ticketsEnvironment(props.tickets),
         LGTMOOSE_MAX_PENDING_LEARNINGS: String(props.maxPendingLearnings ?? 5),
@@ -555,6 +561,9 @@ export class WorkflowStack extends Stack {
         LGTMOOSE_LEARNINGS_REPEAT_THRESHOLD: String(props.repeatThreshold ?? 2),
         // Whether `explain` asks the explainer (in a run) or replies with the stored finding.
         LGTMOOSE_MAX_EXPLANATIONS: String(props.maxExplanations ?? 5),
+        // Handles `@`-commands may use besides the App's own, and the wrong-handle hint (NIC-1119).
+        LGTMOOSE_COMMAND_ALIASES: (props.commandAliases ?? []).join(","),
+        LGTMOOSE_COMMAND_HINT: String(props.commandHint ?? true),
         // Lets Node verify the RDS server certificate.
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },

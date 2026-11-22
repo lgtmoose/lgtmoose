@@ -36,15 +36,18 @@ function requiredKeys(schema: Schema): Set<string> {
 
 /**
  * Code in a table cell. A `|` can't be escaped inside a code span the same way on GitHub and in
- * Jekyll's kramdown, so code that has one is an HTML `<code>` element with `&#124;` instead.
+ * Jekyll's kramdown, so code that has one is an HTML `<code>` element with `&#124;` instead. In
+ * that element, `]` is `&#93;` too: Markdown isn't code inside HTML, so a regex's `](` would
+ * otherwise read as a link.
  */
-function code(text: string): string {
+export function code(text: string): string {
   if (!text.includes("|")) return `\`${text}\``;
   const html = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\|/g, "&#124;");
+    .replace(/\|/g, "&#124;")
+    .replace(/\]/g, "&#93;");
   return `<code>${html}</code>`;
 }
 

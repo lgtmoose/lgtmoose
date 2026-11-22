@@ -58,6 +58,8 @@ function fakeDeps(
     reviewGone?: boolean;
     /** The repo config's `review.trusted_bots`; left out, the fake can't read it. */
     trustedBots?: string[];
+    /** The App's slug; `lgtmoose` when left out. */
+    slug?: string;
   } = {},
 ) {
   const reviewsRead: number[] = [];
@@ -73,7 +75,7 @@ function fakeDeps(
   const deps: ConversationDeps = {
     async github() {
       return {
-        slug: async () => "lgtmoose",
+        slug: async () => options.slug ?? "lgtmoose",
         comment: async () => comment,
         review: async (_repo, _number, reviewId) => {
           reviewsRead.push(reviewId);
@@ -981,5 +983,411 @@ describe("handleConversation", () => {
     expect(f.reactions).toEqual([]);
     expect(f.replies).toEqual([]);
     expect(f.logs.map((entry) => entry.message)).toContain("shadow: command reply not posted");
+  });
+});
+
+describe("command handles (NIC-1119)", () => {
+  const SLUG = "lgtmoose-acme";
+  /**
+   * A store that records the hint once per PR, as the drizzle store does: a claim holds until
+   * it's posted, and its own claimant's retry may claim it again once the claim is two minutes
+   * old. `advance` moves its clock. (Stale claims, after 15 minutes, are the PGlite tests'.)
+   */
+  function withHintStore(f: ReturnType<typeof fakeDeps>) {
+    let clock = 0;
+    const claimed = new Map<string, { claimant: string; posted: boolean; at: number }>();
+    f.deps.store.claimHandleHint = async (repo, number, claimant) => {
+      const key = `${repo}#${number}`;
+      const held = claimed.get(key);
+      if (held !== undefined) {
+        const mine = held.claimant === claimant;
+        if (held.posted) return mine ? "mine-posted" : "other-posted";
+        if (!mine) return "other-pending";
+        if (clock - held.at < 2 * 60_000) return "mine-pending";
+      }
+      claimed.set(key, { claimant, posted: false, at: clock });
+      return "claimed";
+    };
+    f.deps.store.handleHintPosted = async (repo, number) => {
+      const held = claimed.get(`${repo}#${number}`);
+      if (held !== undefined) held.posted = true;
+    };
+    return Object.assign(claimed, {
+      advance(ms: number) {
+        clock += ms;
+      },
+    });
+  }
+
+  it("runs a command addressed to the App's own handle", async () => {
+    const f = fakeDeps(from("author", `@${SLUG} review`), { slug: SLUG });
+    expect(await handleConversation(f.deps, job())).toMatchObject({ commands: ["review"] });
+    expect(f.queued).toHaveLength(1);
+  });
+
+  it("runs a command addressed to an alias, with the same permission checks", async () => {
+    const f = fakeDeps(from("outsider", "@lgtmoose pause"), { slug: SLUG });
+    f.deps.commandAliases = ["lgtmoose"];
+    withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({
+      commands: ["pause"],
+      ok: false,
+    });
+    // An alias asks for nothing a person couldn't ask for with the real handle.
+    expect(f.paused.size).toBe(0);
+    expect(f.replies[0]?.body).toContain("needs write access");
+    const maintainer = fakeDeps(from("lead", "@lgtmoose pause"), {
+      slug: SLUG,
+      permissions: { lead: "write" },
+    });
+    maintainer.deps.commandAliases = ["lgtmoose"];
+    expect(await handleConversation(maintainer.deps, job())).toMatchObject({ ok: true });
+    expect(maintainer.paused.get("acme/shop#12")).toBe("lead");
+  });
+
+  it("answers help with the real handle, whichever handle was used", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose help"), { slug: SLUG });
+    f.deps.commandAliases = ["lgtmoose"];
+    await handleConversation(f.deps, job());
+    expect(f.replies[0]?.body).toContain(`\`@${SLUG} review\``);
+    expect(f.replies[0]?.body).not.toContain("`@lgtmoose review`");
+  });
+
+  it("hints the real handle once per PR when @lgtmoose isn't an alias", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose full review"), { slug: SLUG });
+    withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.queued).toEqual([]);
+    expect(f.replies).toHaveLength(1);
+    expect(f.replies[0]?.body).toContain(`Commands here use \`@${SLUG}\``);
+    expect(f.replies[0]?.body).toContain(REPLY_MARKER);
+    // A second one on the same PR gets no second hint, only a 😕 saying it did nothing.
+    await handleConversation(f.deps, job({ commentId: 501, deliveryId: "d-2" }));
+    expect(f.replies).toHaveLength(1);
+    expect(f.reactions).toEqual(["501:confused"]);
+  });
+
+  it("sends a wrong-handle comment down the normal path without a store that records hints", async () => {
+    const f = inThread("@lgtmoose ignore");
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(f.added).toEqual(["@lgtmoose ignore"]);
+    expect(f.replies).toEqual([]);
+  });
+
+  it("gives no hint for an alias, a plain mention, an unknown word or the right handle", async () => {
+    const cases: [string, string[]][] = [
+      ["@lgtmoose review", ["lgtmoose"]],
+      ["Thanks @lgtmoose", []],
+      ["@lgtmoose what do you think about tabs?", []],
+      [`@${SLUG} review`, []],
+      ["`@lgtmoose review` in code", []],
+    ];
+    for (const [body, aliases] of cases) {
+      const f = fakeDeps(from("dev", body), { slug: SLUG });
+      f.deps.commandAliases = aliases;
+      withHintStore(f);
+      await handleConversation(f.deps, job());
+      expect(f.replies.filter((reply) => reply.body.includes("Commands here use"))).toEqual([]);
+    }
+  });
+
+  /** A wrong-handle command in one of our findings' threads, with a reply store to watch. */
+  function inThread(body: string) {
+    const f = fakeDeps(from("dev", body, { threadRootId: 100 }), {
+      slug: SLUG,
+      findings: new Map([[100, finding()]]),
+    });
+    const added: string[] = [];
+    f.deps.replies = {
+      add: async (input) => {
+        added.push(input.body);
+        return true;
+      },
+      take: async () => [],
+      finish: async () => {},
+      failed: async () => {},
+    };
+    return { ...f, added };
+  }
+  const threadReply = job({ kind: "review_comment", commentId: 501 });
+
+  it("still sends a wrong-handle command in a finding's thread to the reply judge, with the hint", async () => {
+    const f = inThread("@lgtmoose ignore");
+    withHintStore(f);
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({
+      action: "reply",
+      queued: true,
+    });
+    // The judge reads it: the person may be answering the finding.
+    expect(f.added).toEqual(["@lgtmoose ignore"]);
+    // It isn't run as a command.
+    expect(f.declined).toEqual([]);
+    expect(f.replies[0]?.body).toContain("Commands here use");
+  });
+
+  it("leaves a sentence that starts with a command word to the normal path", async () => {
+    // Top level: not a command, so no hint and nothing diverted.
+    for (const body of [
+      "@lgtmoose help me see why this is null here",
+      "cc @lgtmoose: review of this is in #12",
+    ]) {
+      const f = fakeDeps(from("dev", body), { slug: SLUG });
+      withHintStore(f);
+      expect(await handleConversation(f.deps, job())).toMatchObject({ action: "deferred" });
+      expect(f.replies).toEqual([]);
+      expect(f.reactions).toEqual([]);
+    }
+    // In a finding's thread, the judge reads it.
+    const thread = inThread("@lgtmoose help me see why this is null here");
+    withHintStore(thread);
+    expect(await handleConversation(thread.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(thread.added).toHaveLength(1);
+    expect(thread.replies).toEqual([]);
+  });
+
+  it("posts the hint on a retry of the comment whose claim was never posted", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    const store = withHintStore(f);
+    // An earlier delivery of comment 500 claimed it, then its Lambda died before posting.
+    expect(await f.deps.store.claimHandleHint?.("acme/shop", 12, "500")).toBe("claimed");
+    // Another comment can't take it meanwhile; as the hint may come yet, it hears nothing.
+    await handleConversation(f.deps, job({ commentId: 600, deliveryId: "d-6" }));
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
+    // An overlapping delivery of comment 500 waits for the first: no hint, and no 😕.
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
+    // Once no attempt can still be posting, the retry of comment 500 posts it.
+    store.advance(3 * 60_000);
+    await handleConversation(f.deps, job());
+    expect(f.replies).toHaveLength(1);
+    expect(f.replies[0]).toMatchObject({ commentId: 500 });
+    // A comment after that gets the 😕: the PR has its hint.
+    await handleConversation(f.deps, job({ commentId: 700, deliveryId: "d-7" }));
+    expect(f.reactions).toEqual(["700:confused"]);
+  });
+
+  it("gives no 😕 to a retry of the comment that got the hint, after a later step failed", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:03.000Z" }), {
+      slug: SLUG,
+    });
+    withHintStore(f);
+    let fail = true;
+    f.deps.store.commentsThrough = async () => {
+      if (fail) throw new Error("database gone");
+    };
+    // The hint is posted, then marking the comment handled throws: the job is retried.
+    await expect(handleConversation(f.deps, job())).rejects.toThrow("database gone");
+    expect(f.replies).toHaveLength(1);
+    fail = false;
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.replies).toHaveLength(1);
+    expect(f.reactions).toEqual([]);
+  });
+
+  it("logs a 😕 that can't be posted, and still marks the comment handled", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:03.000Z" }), {
+      slug: SLUG,
+    });
+    withHintStore(f);
+    const through: Date[] = [];
+    f.deps.store.commentsThrough = async (_repo, _number, at) => {
+      through.push(at);
+    };
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
+    const github = await f.deps.github(7);
+    f.deps.github = async () => ({
+      ...github,
+      react: async () => {
+        throw new Error("HTTP 404: comment deleted");
+      },
+    });
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.logs.map((entry) => entry.message)).toContain("wrong-handle reaction not posted");
+    expect(through).toHaveLength(1);
+  });
+
+  it("logs a wrong-handle review body after the hint: reviews take no reactions", async () => {
+    const f = fakeDeps(from("author", "@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "500");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
+    const review: ReviewJob = {
+      kind: "review",
+      deliveryId: "review-9001",
+      installationId: 7,
+      repo: "acme/shop",
+      prNumber: 12,
+      actor: "author",
+      reviewId: 9001,
+      receivedAt: "2026-11-15T00:00:00.000Z",
+      eventAt: "2026-11-15T00:00:00.000Z",
+    };
+    expect(await handleConversation(f.deps, review)).toMatchObject({ action: "ignored" });
+    expect(f.replies).toEqual([]);
+    expect(f.logs.map((entry) => entry.message)).toContain("wrong-handle review after the hint");
+  });
+
+  it("with commandHint off, gives no hint and treats the comment as before", async () => {
+    const f = inThread("@lgtmoose ignore, it's fine");
+    f.deps.commandHint = false;
+    withHintStore(f);
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(f.added).toEqual(["@lgtmoose ignore, it's fine"]);
+    expect(f.replies).toEqual([]);
+  });
+
+  it("logs a hint that fails to post, and gives the PR's claim back", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    const claimed = withHintStore(f);
+    const released: string[] = [];
+    f.deps.store.releaseHandleHint = async (repo, number) => {
+      released.push(`${repo}#${number}`);
+      claimed.delete(`${repo}#${number}`);
+    };
+    const github = await f.deps.github(7);
+    f.deps.github = async () => ({
+      ...github,
+      reply: async () => {
+        throw new Error("HTTP 403: conversation locked");
+      },
+    });
+    // The job carries on: nothing is thrown.
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(released).toEqual(["acme/shop#12"]);
+    expect(f.logs.map((entry) => entry.message)).toContain("handle hint not posted");
+    // A later comment can still get it.
+    expect(claimed.size).toBe(0);
+  });
+
+  it("gives no hint when the App is itself called lgtmoose", async () => {
+    // The default slug is `lgtmoose`: `@lgtmoose review` is a real command here.
+    const f = fakeDeps(from("author", "@lgtmoose review"));
+    const claimed = withHintStore(f);
+    expect(await handleConversation(f.deps, job())).toMatchObject({ commands: ["review"] });
+    expect(f.queued).toHaveLength(1);
+    expect(f.replies.filter((reply) => reply.body.includes("Commands here use"))).toEqual([]);
+    expect(claimed.size).toBe(0);
+  });
+
+  it("says nothing to a comment while another comment's hint may still be posting", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review", { createdAt: "2026-11-15T00:00:04.000Z" }), {
+      slug: SLUG,
+    });
+    withHintStore(f);
+    // Comment 999 holds an unposted claim.
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    const through: Date[] = [];
+    f.deps.store.commentsThrough = async (_repo, _number, at) => {
+      through.push(at);
+    };
+    expect(await handleConversation(f.deps, job())).toMatchObject({ action: "ignored" });
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
+    expect(through).toHaveLength(1);
+  });
+
+  it("gives the 😕 to a wrong-handle comment on a resolved finding's thread", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose ignore", { threadRootId: 100 }), {
+      slug: SLUG,
+      findings: new Map([[100, finding({ status: "fixed" })]]),
+    });
+    f.deps.replies = {
+      add: async () => true,
+      take: async () => [],
+      finish: async () => {},
+      failed: async () => {},
+    };
+    withHintStore(f);
+    await f.deps.store.claimHandleHint?.("acme/shop", 12, "999");
+    await f.deps.store.handleHintPosted?.("acme/shop", 12);
+    expect(
+      await handleConversation(f.deps, job({ kind: "review_comment", commentId: 501 })),
+    ).toMatchObject({ action: "ignored" });
+    expect(f.reactions).toEqual(["501:confused"]);
+  });
+
+  it("logs the hint in shadow mode, without posting or using it up", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG, shadow: true });
+    const claimed = withHintStore(f);
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
+    expect(claimed.size).toBe(0);
+    expect(f.logs.map((entry) => entry.message)).toContain("shadow: handle hint not posted");
+  });
+
+  it("gives no hint without a store that records it", async () => {
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    await handleConversation(f.deps, job());
+    expect(f.replies).toEqual([]);
+  });
+
+  it("records a posted hint, and gives a thanks or a cc no hint", async () => {
+    const posted: string[] = [];
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    f.deps.store.handleHintPosted = async (repo, number) => {
+      posted.push(`${repo}#${number}`);
+    };
+    await handleConversation(f.deps, job());
+    expect(posted).toEqual(["acme/shop#12"]);
+    for (const body of ["Thanks @lgtmoose!", "Good catch @lgtmoose.", "cc @lgtmoose"]) {
+      const thanks = fakeDeps(from("dev", body), { slug: SLUG });
+      withHintStore(thanks);
+      await handleConversation(thanks.deps, job());
+      expect(thanks.replies).toEqual([]);
+      expect(thanks.reactions).toEqual([]);
+    }
+  });
+
+  it("hints in a submitted review's body too, addressed to its author", async () => {
+    const f = fakeDeps(from("author", "LGTM\n\n@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    const review: ReviewJob = {
+      kind: "review",
+      deliveryId: "review-9001",
+      installationId: 7,
+      repo: "acme/shop",
+      prNumber: 12,
+      actor: "author",
+      reviewId: 9001,
+      receivedAt: "2026-11-15T00:00:00.000Z",
+      eventAt: "2026-11-15T00:00:00.000Z",
+    };
+    expect(await handleConversation(f.deps, review)).toMatchObject({ action: "ignored" });
+    expect(f.replies).toEqual([
+      expect.objectContaining({
+        kind: "review",
+        commentId: 9001,
+        body: expect.stringMatching(/^@author: Commands here use `@lgtmoose-acme`/),
+      }),
+    ]);
+  });
+
+  it("takes a trusted bot's review request addressed to an alias", async () => {
+    const f = fakeDeps(from("claude[bot]", "@lgtmoose review", { authorIsBot: true }), {
+      slug: SLUG,
+      trustedBots: ["claude[bot]"],
+    });
+    f.deps.commandAliases = ["lgtmoose"];
+    expect(await handleConversation(f.deps, job({ botActor: true }))).toMatchObject({
+      commands: ["review"],
+      ok: true,
+    });
+    expect(f.queued).toHaveLength(1);
+    // Without the alias, the same comment asks for nothing, and a bot gets no hint.
+    const plain = fakeDeps(from("claude[bot]", "@lgtmoose review", { authorIsBot: true }), {
+      slug: SLUG,
+      trustedBots: ["claude[bot]"],
+    });
+    withHintStore(plain);
+    expect(await handleConversation(plain.deps, job({ botActor: true }))).toMatchObject({
+      action: "ignored",
+    });
+    expect(plain.queued).toEqual([]);
+    expect(plain.replies).toEqual([]);
   });
 });

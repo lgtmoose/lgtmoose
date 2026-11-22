@@ -167,6 +167,19 @@ describe("waitingCheckRun", () => {
     expect(waitingCheckRun(settings(), gate("off"), "moose", true)).toBeUndefined();
   });
 
+  it("names no guessed handle when the App's isn't known (NIC-1119)", () => {
+    const check = waitingCheckRun(
+      settings({ trigger: "command", auto_pause_after: 1 }),
+      gate(),
+      undefined,
+      true,
+      1,
+    );
+    expect(check?.summary).toContain("Comment the App's `review` command.");
+    expect(check?.summary).toContain("or `resume`, to continue");
+    expect(check?.summary).not.toContain("@lgtmoose");
+  });
+
   it("pauses a push after the configured number of automatic reviews", () => {
     const limited = settings({ auto_pause_after: 2 });
     expect(reviewGate(limited, push, none, true, 1)).toEqual({ review: true });

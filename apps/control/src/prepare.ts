@@ -376,6 +376,24 @@ async function judgeJobs(
 type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
 
 /**
+ * The handle a check run or the summary names when it says how to use a command (NIC-1119): the
+ * App's slug, or the deployment's first alias when the slug can't be read. Undefined when there's
+ * neither, and then no handle is named rather than a guessed `@lgtmoose`.
+ */
+export async function commandHandle(
+  deps: Pick<ControlDeps, "commandAliases">,
+  github: { slug?: () => Promise<string> },
+): Promise<string | undefined> {
+  try {
+    const slug = await github.slug?.();
+    if (slug !== undefined) return slug;
+  } catch {
+    // Falls back below.
+  }
+  return deps.commandAliases?.[0];
+}
+
+/**
  * What this run does, by the repo's `review` config at the base (`reviewGate`, NIC-1077), read
  * before anything is cloned:
  *
@@ -471,7 +489,7 @@ async function triggered(
   const check = waitingCheckRun(
     config.review,
     config.gate,
-    await github.slug?.(),
+    await commandHandle(deps, github),
     reviewedBefore,
     automaticReviews,
   );
@@ -564,7 +582,7 @@ async function waitForChecks(
   const check = waitingForChecksRun(
     config.review,
     config.gate,
-    await github.slug?.(),
+    await commandHandle(deps, github),
     decision.checks,
   );
   if (check !== undefined) {

@@ -196,6 +196,9 @@ describe("runSetup: first run", () => {
     const result = await setup(["--org", "acme", "--yes"], h);
     for (const value of SECRET_VALUES) expect(result.all).not.toContain(value);
     expect(result.all).toContain("https://github.com/apps/lgtmoose-acme/installations/new");
+    // The handle people type in PR comments, and how to make the docs' @lgtmoose work (NIC-1119).
+    expect(result.all).toContain("@lgtmoose-acme review");
+    expect(result.all).toContain('commandAliases: ["lgtmoose"]');
     expect(result.all).toContain("pnpm lgtmoose auth");
     expect(result.all).toContain("pnpm lgtmoose deploy");
   });

@@ -18,6 +18,41 @@ People talk to LGTMoose by mentioning its bot (`@<app slug>`) in a PR comment or
 | `forget <id>`         | write access (org owner for org-wide)                                                            | Retires one of this account's learnings.                                                                                                                                                    |
 | `help`, anything else | anyone                                                                                           | The list of commands.                                                                                                                                                                       |
 
+### Your App's handle
+
+Commands use your App's own handle: for an App called `lgtmoose-acme`, that's `@lgtmoose-acme review`. `lgtmoose setup` prints the handle when it's done, and `help`, the wrong-handle hint and the summary comment's footer show it too. When neither the slug nor an alias is known, the footer leaves the pointer out.
+
+To make the `@lgtmoose` these docs use work as well, add it as an alias in `lgtmoose.config.ts` and deploy again:
+
+```ts
+commandAliases: ["lgtmoose"],
+```
+
+Up to five aliases are allowed, each shaped like a GitHub login. A handle never changes what a command may do: that depends on who wrote the comment, as GitHub reports it. An alias is also a GitHub login, so GitHub notifies whoever owns it, and the `lgtmoose` organization owns `@lgtmoose`.
+
+Without that alias, a comment that mentions `@lgtmoose` followed by a whole command gets one reply on the PR: "Commands here use `@lgtmoose-acme`, not `@lgtmoose`."
+
+A whole command means the command and nothing else on the line, as the parser reads it: `@lgtmoose review`, `@lgtmoose help`, `@lgtmoose approve <id>`, or `@lgtmoose learn: <text>`. These get no hint:
+
+- a thanks or a cc, such as "Thanks @lgtmoose!";
+- a sentence that only starts with a command word, such as "@lgtmoose help me see why this is null".
+
+The reply:
+
+- is posted once per PR;
+- carries the reply marker, so nothing reads it as a command;
+- is only logged in shadow mode;
+- can still come from a later comment if posting it fails, or from a retry of the same comment, after two minutes, if the Lambda stopped before posting it.
+
+Rarely, a PR gets the hint twice: an attempt posts it but stops before recording that, and its retry posts it again. That's accepted, as the hint is only a courtesy. The comment that got the hint is never given a 😕.
+
+The comment itself runs nothing. What else happens to it depends on where it is:
+
+- **As a reply in the thread of one of LGTMoose's findings that's still open or outdated:** it still goes to the reply judge, since the person may be answering the finding. On a finding that's fixed, declined or resolved, it's treated as anywhere else.
+- **Anywhere else:** it isn't sent anywhere. After the PR has had its hint, later ones get a 😕. A submitted review's body gets no 😕, because GitHub reviews take no reactions, so that one is only logged.
+
+The hint assumes that no other App called `lgtmoose` answers on your repositories. If one does, turn it off with `commandHint: false`. A comment like that is then handled as before, so in a finding's thread it goes to the reply judge.
+
 ### In a review's body
 
 Commands also work in the body of a submitted review (Comment, Approve or Request changes), with the same parser and rules: outside code and quotes, five at most, and bots and LGTMoose's own reviews ignored. The differences:

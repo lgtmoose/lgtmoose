@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  addressesDocsHandle,
+  handleHint,
+  isWholeCommand,
   helpText,
   learningProposal,
   MAX_COMMANDS,
@@ -43,6 +46,129 @@ describe("mentions", () => {
 
   it("escapes the slug for the pattern", () => {
     expect(mentions("@a.b review @axb pause", "a.b")).toEqual(["review @axb pause"]);
+  });
+
+  describe("with aliases (NIC-1119)", () => {
+    const handles = ["lgtmoose-acme", "lgtmoose"];
+
+    it("finds the slug and each alias, with or without [bot]", () => {
+      const body = "@lgtmoose-acme review\n@LGTMoose pause\n@lgtmoose[bot] resume";
+      expect(mentions(body, handles)).toEqual(["review", "pause", "resume"]);
+    });
+
+    it("never reads the slug as an alias followed by the rest of the name", () => {
+      // `@lgtmoose-acme` is the slug, not `@lgtmoose` then "-acme".
+      expect(mentions("@lgtmoose-acme help", ["lgtmoose", "lgtmoose-acme"])).toEqual(["help"]);
+      // A longer name that is neither is no mention at all.
+      expect(mentions("@lgtmoose-acmeish help", handles)).toEqual([]);
+    });
+
+    it("ignores an alias inside a longer name, an email, code and quotes", () => {
+      const body = [
+        "@lgtmoose-fan review",
+        "ops@lgtmoose review",
+        "`@lgtmoose review`",
+        "> @lgtmoose pause",
+      ].join("\n");
+      expect(mentions(body, handles)).toEqual([]);
+    });
+
+    it("drops empty and repeated handles", () => {
+      expect(mentions("@lgtmoose review", ["", "LGTMoose", "lgtmoose", " "])).toEqual(["review"]);
+      expect(mentions("@lgtmoose review", [])).toEqual([]);
+    });
+  });
+});
+
+describe("addressesDocsHandle (NIC-1119)", () => {
+  it("is true for @lgtmoose and a command word when the App is called something else", () => {
+    for (const body of [
+      "@lgtmoose review",
+      "please @lgtmoose full review",
+      "@lgtmoose learn: use the query builder",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(true);
+    }
+  });
+
+  it("is false for a thanks or a cc, where only punctuation follows the mention", () => {
+    for (const body of [
+      "Thanks @lgtmoose!",
+      "Good catch @lgtmoose.",
+      "@lgtmoose.",
+      "cc @lgtmoose",
+      "cc @lgtmoose, @team",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(false);
+    }
+    // An explicit help is a command.
+    expect(addressesDocsHandle("@lgtmoose help", ["lgtmoose-acme"])).toBe(true);
+  });
+
+  it("is false when a command word only starts a sentence", () => {
+    for (const body of [
+      "@lgtmoose help me see why this is null here",
+      "cc @lgtmoose: review of this is in #12",
+      "@lgtmoose review this again later please",
+      "@lgtmoose full review once CI is green",
+      "@lgtmoose ignore this one, it's fine",
+      "@lgtmoose approve abc123 and def456",
+      "@lgtmoose explain why",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(false);
+    }
+  });
+
+  it("takes each whole command as parseCommand reads it, with nothing else after it", () => {
+    for (const text of [
+      "help",
+      "review",
+      "review.",
+      ", full review",
+      ": pause",
+      "resume!",
+      "learnings",
+      "ignore",
+      "remember",
+      "forget abc-123",
+      "approve abc-123",
+      "explain",
+      "explain src/a.ts:3",
+      "learn: use the query builder in services/",
+    ]) {
+      expect(isWholeCommand(text)).toBe(true);
+    }
+    for (const text of ["", "!", "help me", "review it", "full", "approve", "explain why", "hi"]) {
+      expect(isWholeCommand(text)).toBe(false);
+    }
+    // Punctuation after a space still ends the command.
+    expect(isWholeCommand("review !")).toBe(true);
+    expect(addressesDocsHandle("@lgtmoose review !", ["lgtmoose-acme"])).toBe(true);
+  });
+
+  it("takes learn only in its learn: form, with text", () => {
+    // parseCommand reads "learn from this" as a learn command too; a sentence isn't one here.
+    expect(parseCommand("learn from this")).toEqual({ name: "learn", text: "from this" });
+    expect(isWholeCommand("learn from this")).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose learn from this", ["lgtmoose-acme"])).toBe(false);
+    expect(isWholeCommand("learn: ")).toBe(false);
+    expect(isWholeCommand("learn : use the builder")).toBe(true);
+    expect(isWholeCommand("Learn: use the builder")).toBe(true);
+  });
+
+  it("is false for a plain mention, an unknown word, code, or a handle that already works", () => {
+    expect(addressesDocsHandle("Thanks @lgtmoose", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose do you like tabs?", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("`@lgtmoose review`", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose-fan review", ["lgtmoose-acme"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose review", ["lgtmoose-acme", "LGTMoose"])).toBe(false);
+    expect(addressesDocsHandle("@lgtmoose review", ["lgtmoose"])).toBe(false);
+  });
+
+  it("names the handle that works in its hint", () => {
+    expect(handleHint("lgtmoose-acme")).toBe(
+      "Commands here use `@lgtmoose-acme`, not `@lgtmoose`. For example, `@lgtmoose-acme review`; `@lgtmoose-acme help` lists them all.",
+    );
   });
 });
 

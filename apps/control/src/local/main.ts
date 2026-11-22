@@ -145,6 +145,7 @@ async function main(): Promise<void> {
     bootstrapMaxCostUsd: config.learnings.bootstrapMaxCostUsd,
     repeatThreshold: config.learnings.repeatThreshold,
     budgets: config.budgets,
+    commandAliases: config.commandAliases,
   });
 
   const docker = new Docker(
@@ -255,6 +256,8 @@ async function main(): Promise<void> {
     ...(control.outcomes === undefined ? {} : { outcomes: control.outcomes }),
     replies: drizzleReplyStore(db),
     maxExplanations: config.maxExplanations,
+    commandAliases: config.commandAliases,
+    commandHint: config.commandHint,
     queue: sender,
     shadow: config.shadow,
     log,
