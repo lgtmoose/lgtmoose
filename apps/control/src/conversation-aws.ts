@@ -143,6 +143,12 @@ export function githubConversation(
 
 const lower = (repo: string) => repo.toLowerCase();
 
+/**
+ * How long a claimed handle hint may go unposted before another comment may claim it (NIC-1119):
+ * longer than the conversation Lambda's timeout, so a live post is never raced.
+ */
+export const HANDLE_HINT_CLAIM_MS = 15 * 60_000;
+
 const findingColumns = {
   id: findings.id,
   severity: findings.severity,
@@ -286,22 +292,36 @@ export function drizzleConversationStore(
         .where(ofPull(repo, number));
     },
     async claimHandleHint(repo, number) {
-      // One statement: two comments handled at once can't both claim it.
+      const at = now();
+      const stale = new Date(at.getTime() - HANDLE_HINT_CLAIM_MS);
+      // One statement: two comments handled at once can't both claim it. A claim whose hint was
+      // never posted (the Lambda died in between) is taken again once it's stale.
       const rows = await db
         .insert(pullRequestDispatches)
-        .values({ repo: lower(repo), number, lastEventAt: new Date(0), handleHintAt: now() })
+        .values({ repo: lower(repo), number, lastEventAt: new Date(0), handleHintAt: at })
         .onConflictDoUpdate({
           target: [pullRequestDispatches.repo, pullRequestDispatches.number],
-          set: { handleHintAt: now(), updatedAt: now() },
-          setWhere: isNull(pullRequestDispatches.handleHintAt),
+          set: { handleHintAt: at, handleHintPosted: false, updatedAt: at },
+          setWhere: sql`${pullRequestDispatches.handleHintAt} is null or (not ${pullRequestDispatches.handleHintPosted} and ${pullRequestDispatches.handleHintAt} < ${stale})`,
         })
         .returning({ repo: pullRequestDispatches.repo });
       return rows.length > 0;
     },
+    async handleHintPosted(repo, number) {
+      await db
+        .update(pullRequestDispatches)
+        .set({ handleHintPosted: true, updatedAt: now() })
+        .where(
+          and(
+            eq(pullRequestDispatches.repo, lower(repo)),
+            eq(pullRequestDispatches.number, number),
+          ),
+        );
+    },
     async releaseHandleHint(repo, number) {
       await db
         .update(pullRequestDispatches)
-        .set({ handleHintAt: null, updatedAt: now() })
+        .set({ handleHintAt: null, handleHintPosted: false, updatedAt: now() })
         .where(
           and(
             eq(pullRequestDispatches.repo, lower(repo)),

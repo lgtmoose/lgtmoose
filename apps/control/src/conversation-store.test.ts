@@ -175,4 +175,26 @@ describe("drizzleConversationStore", () => {
     await store.releaseHandleHint?.("Acme/Shop", 53);
     expect(await claim("Acme/Shop", 53)).toBe(true);
   });
+
+  it("lets a stale unposted hint claim be taken again, never a posted one (NIC-1119)", async () => {
+    const at = (minutes: number) => new Date(Date.UTC(2026, 10, 22, 12, minutes));
+    let clock = at(0);
+    const timed = drizzleConversationStore(db, () => clock);
+    const claim = (number: number) => {
+      if (timed.claimHandleHint === undefined) throw new Error("no claimHandleHint");
+      return timed.claimHandleHint("Acme/Shop", number);
+    };
+    // Claimed, then the Lambda died before posting: a fresh claim still holds.
+    expect(await claim(61)).toBe(true);
+    clock = at(10);
+    expect(await claim(61)).toBe(false);
+    // Past the stale time, another comment may post it.
+    clock = at(16);
+    expect(await claim(61)).toBe(true);
+    // Once posted, it's never claimed again.
+    expect(await claim(62)).toBe(true);
+    await timed.handleHintPosted?.("Acme/Shop", 62);
+    clock = at(59);
+    expect(await claim(62)).toBe(false);
+  });
 });

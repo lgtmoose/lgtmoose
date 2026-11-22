@@ -376,20 +376,6 @@ async function judgeJobs(
 type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
 
 /**
- * What this run does, by the repo's `review` config at the base (`reviewGate`, NIC-1077), read
- * before anything is cloned:
- *
- * - `review`: the usual run. With `review.label_once`, the label comes off as it starts.
- * - `skip`: nothing, ended like a superseded run. One that waits for a trigger says so in its
- *   check run; one that isn't a trigger at all (a label that isn't the review label) posts
- *   nothing.
- * - `conversation`: a run for replies or `explain` while the code waits for a trigger. It judges
- *   and explains, but reviews no code and doesn't move the PR's last reviewed head, so the new
- *   commits stay unreviewed. The check run says it waits, as a push's would.
- *
- * Without a way to read the config (the CLI), every run reviews.
- */
-/**
  * The handle a check run names when it says how to ask for a review (NIC-1119): the App's slug,
  * or the deployment's first alias when the slug can't be read. Undefined when there's neither,
  * and then the check run names no handle rather than guess `@lgtmoose`.
@@ -407,6 +393,20 @@ async function commandHandle(
   return deps.commandAliases?.[0];
 }
 
+/**
+ * What this run does, by the repo's `review` config at the base (`reviewGate`, NIC-1077), read
+ * before anything is cloned:
+ *
+ * - `review`: the usual run. With `review.label_once`, the label comes off as it starts.
+ * - `skip`: nothing, ended like a superseded run. One that waits for a trigger says so in its
+ *   check run; one that isn't a trigger at all (a label that isn't the review label) posts
+ *   nothing.
+ * - `conversation`: a run for replies or `explain` while the code waits for a trigger. It judges
+ *   and explains, but reviews no code and doesn't move the PR's last reviewed head, so the new
+ *   commits stay unreviewed. The check run says it waits, as a push's would.
+ *
+ * Without a way to read the config (the CLI), every run reviews.
+ */
 async function triggered(
   deps: ControlDeps,
   github: RunGitHub,

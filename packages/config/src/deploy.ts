@@ -13,8 +13,11 @@ export const HARNESS_AUTH = {
 export type Harness = keyof typeof HARNESS_AUTH;
 export type AuthMethod = (typeof HARNESS_AUTH)[Harness][number];
 
-/** A GitHub login: letters, digits and single hyphens, not at either end, at most 39 characters. */
-export const GITHUB_LOGIN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
+/**
+ * A GitHub login: letters, digits and single hyphens, not at either end, at most 39 characters.
+ * Written without `|` or `](`, so the configuration reference shows it as a plain code span.
+ */
+export const GITHUB_LOGIN = /^(?!-)(?!.*--)(?!.*-$)[A-Za-z0-9-]{1,39}$/;
 
 const HARNESSES = Object.keys(HARNESS_AUTH) as [Harness, ...Harness[]];
 const AUTH_METHODS = [...new Set(Object.values(HARNESS_AUTH).flat())] as [
@@ -467,8 +470,9 @@ export const deployConfigSchema = z
       .array(
         z
           .string()
-          .refine(
-            (alias) => GITHUB_LOGIN.test(alias),
+          // A regex, not a refine, so the JSON schema keeps the pattern and editors flag `@lgtmoose`.
+          .regex(
+            GITHUB_LOGIN,
             "aliases are GitHub logins: letters, digits and single hyphens, at most 39 characters",
           )
           .describe("A GitHub login: letters, digits and single hyphens, at most 39 characters."),

@@ -463,6 +463,7 @@
       "type": "array",
       "items": {
         "type": "string",
+        "pattern": "^(?!-)(?!.*--)(?!.*-$)[A-Za-z0-9-]{1,39}$",
         "description": "A GitHub login: letters, digits and single hyphens, at most 39 characters."
       }
     },

@@ -484,10 +484,12 @@ export const pullRequestDispatches = pgTable(
      */
     checksWaitState: text("checks_wait_state"),
     /**
-     * When the PR got the one-time hint that commands here use the App's real handle, not
-     * `@lgtmoose` (NIC-1119), so it's never posted twice.
+     * When the PR's one-time hint that commands here use the App's real handle, not `@lgtmoose`
+     * (NIC-1119), was claimed, and whether it was then posted. A claim with no post that's older
+     * than a few minutes (the Lambda died in between) can be claimed again.
      */
     handleHintAt: timestamp("handle_hint_at", { withTimezone: true }),
+    handleHintPosted: boolean("handle_hint_posted").notNull().default(false),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.repo, t.number] })],

@@ -90,6 +90,20 @@ describe("addressesDocsHandle (NIC-1119)", () => {
     }
   });
 
+  it("is false for a thanks or a cc, where only punctuation follows the mention", () => {
+    for (const body of [
+      "Thanks @lgtmoose!",
+      "Good catch @lgtmoose.",
+      "@lgtmoose.",
+      "cc @lgtmoose",
+      "cc @lgtmoose, @team",
+    ]) {
+      expect(addressesDocsHandle(body, ["lgtmoose-acme"])).toBe(false);
+    }
+    // An explicit help is a command.
+    expect(addressesDocsHandle("@lgtmoose help", ["lgtmoose-acme"])).toBe(true);
+  });
+
   it("is false for a plain mention, an unknown word, code, or a handle that already works", () => {
     expect(addressesDocsHandle("Thanks @lgtmoose", ["lgtmoose-acme"])).toBe(false);
     expect(addressesDocsHandle("@lgtmoose do you like tabs?", ["lgtmoose-acme"])).toBe(false);

@@ -150,10 +150,13 @@ export interface ConversationStore {
    */
   commentsThrough?(repo: string, number: number, at: Date): Promise<void>;
   /**
-   * Records that the PR got the one-time hint with the App's real handle (NIC-1119). True the
-   * first time, false once it has had one, so the hint is never posted twice on a PR.
+   * Claims the PR's one-time hint with the App's real handle (NIC-1119). True when this comment
+   * may post it: the PR has had none, or an earlier claim was never posted and is stale (its
+   * Lambda died). False once it's claimed or posted, so the hint is never posted twice.
    */
   claimHandleHint?(repo: string, number: number): Promise<boolean>;
+  /** Records that the claimed hint was posted, so the claim never goes stale. */
+  handleHintPosted?(repo: string, number: number): Promise<void>;
   /** Gives the PR's hint back after it failed to post, so a later comment can still get it. */
   releaseHandleHint?(repo: string, number: number): Promise<void>;
 }
@@ -238,37 +241,51 @@ const handles = (deps: Pick<ConversationDeps, "commandAliases">, slug: string): 
 /**
  * Whether a comment with no command for this App gets the handle hint (NIC-1119): it mentions
  * `@lgtmoose` with a command word, `lgtmoose` isn't this App's slug or an alias, and the
- * deployment hasn't turned the hint off (`commandHint`).
+ * deployment hasn't turned the hint off (`commandHint`). Without a store that can record the
+ * hint, no comment is treated this way: it goes down the normal path instead.
  */
 function wantsHint(deps: ConversationDeps, body: string, slug: string): boolean {
-  return deps.commandHint !== false && addressesDocsHandle(body, handles(deps, slug));
+  return (
+    deps.commandHint !== false &&
+    deps.store.claimHandleHint !== undefined &&
+    addressesDocsHandle(body, handles(deps, slug))
+  );
 }
+
+/**
+ * What became of a hint: posted now; not posted because the PR already has one (or a live claim
+ * on one); not posted because posting failed; or only logged, in shadow mode.
+ */
+type HintOutcome = "posted" | "already" | "failed" | "shadow";
 
 /**
  * The one-time hint (NIC-1119) for a comment that used `@lgtmoose` where this App is called
  * something else. It's posted once per PR and carries the reply marker, so nothing reads it as a
- * command. The PR is claimed before the hint is posted, so a retry never posts it twice. When the
- * post fails (a 502, a locked conversation), the claim is released so a later comment can still
- * get the hint, and the failure is logged, not thrown: the comment's job carries on. In shadow
- * mode it's logged, and not posted or claimed. Without a store that records it, there's no hint.
+ * command.
+ *
+ * - **Claimed before it's posted:** a retry never posts it twice. Once posted, that's recorded.
+ *   A claim left unposted by a Lambda that died goes stale and can be claimed again.
+ * - **When the post fails** (a 502, a locked conversation): the claim is given back, so a later
+ *   comment can still get the hint, and the failure is logged, not thrown. The comment's job
+ *   carries on.
+ * - **In shadow mode:** logged, and not posted or claimed.
  */
 async function hintHandle(
   deps: ConversationDeps,
   job: ReviewJob,
   slug: string,
   post: (body: string) => Promise<void>,
-): Promise<void> {
+): Promise<HintOutcome> {
   const { store } = deps;
-  if (store.claimHandleHint === undefined) return;
   const where = { repo: job.repo, prNumber: job.prNumber };
   if (deps.shadow) {
     deps.log("shadow: handle hint not posted", where);
-    return;
+    return "shadow";
   }
-  if (!(await store.claimHandleHint(job.repo, job.prNumber))) return;
+  if (store.claimHandleHint === undefined) return "already";
+  if (!(await store.claimHandleHint(job.repo, job.prNumber))) return "already";
   try {
     await post(`${handleHint(slug)}\n\n${REPLY_MARKER}`);
-    deps.log("handle hint posted", where);
   } catch (error) {
     deps.log("handle hint not posted", {
       ...where,
@@ -277,9 +294,17 @@ async function hintHandle(
     try {
       await store.releaseHandleHint?.(job.repo, job.prNumber);
     } catch {
-      // Kept claimed: this PR gets no hint, which is the quieter side.
+      // Left claimed: it goes stale, and a later comment can claim it then.
     }
+    return "failed";
   }
+  deps.log("handle hint posted", where);
+  try {
+    await store.handleHintPosted?.(job.repo, job.prNumber);
+  } catch {
+    // Unrecorded: once the claim is stale, a later comment may post one more hint.
+  }
+  return "posted";
 }
 
 interface Context {
@@ -792,9 +817,11 @@ export async function handleConversation(
   if (commands.length === 0) {
     // Meant as a command, with the docs' handle: the hint, and not a reply for the judge either.
     if (wantsHint(deps, comment.body, slug)) {
-      await hintHandle(deps, job, slug, (body) =>
+      const outcome = await hintHandle(deps, job, slug, (body) =>
         github.reply(kind, job.repo, job.prNumber, commentId, body),
       );
+      // The PR has had its hint: a 😕 says this comment did nothing, without a second hint.
+      if (outcome === "already") await github.react(kind, job.repo, commentId, "confused");
       await handled();
       return { action: "ignored", reason: "a command for @lgtmoose, not this App's handle" };
     }

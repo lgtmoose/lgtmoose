@@ -20,7 +20,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `providers[].models` | map of `"fast"` or `"standard"` or `"deep"` to string matching `^[\w.:@/[\]-]{1,128}$` |  | Model per tier (fast, standard, deep). Tiers left out use the harness default: haiku, sonnet and opus for Claude Code and the Agent SDK, the CLI's own model for Codex and Cursor. |
 | `providers[].thinkingTokens` | map of `"fast"` or `"standard"` or `"deep"` to integer, 1024 to 128000 |  | Cap on thinking tokens per tier (fast, standard, deep), at least 1024. Tiers left out keep the model's own thinking. Claude Code and the Agent SDK honor it; Codex and Cursor ignore it. |
 | `providers[].vertex` | object |  | Google Cloud settings, for auth: "vertex" only. |
-| `providers[].vertex.region` | string matching <code>^(global&#124;us&#124;eu&#124;[a-z]+-[a-z]+\d+)$</code> | `"global"` | CLOUD_ML_REGION: global, a multi-region (us, eu) or a region (us-east5). |
+| `providers[].vertex.region` | string matching <code>^(global&#124;us&#124;eu&#124;[a-z&#93;+-[a-z&#93;+\d+)$</code> | `"global"` | CLOUD_ML_REGION: global, a multi-region (us, eu) or a region (us-east5). |
 | `providers[].vertex.projectId` | string matching `^[a-z][a-z0-9-]{4,28}[a-z0-9]$` |  | Google Cloud project. Defaults to the stored service-account key's project_id. |
 | `providers[].concurrency` | integer, 1 to 64 |  | Sandbox tasks that may use this provider's credential at once, across reviews. |
 | `roles` | map of `"reviewer"` or `"crossFile"` or `"verifier"` or `"replyJudge"` or `"ticketExtractor"` to string | `{}` | The provider id each role starts on. A role left out starts on the first provider; the others follow as fallbacks. |
@@ -67,7 +67,7 @@ One per install, in your checkout. `lgtmoose setup` writes it; `lgtmoose deploy`
 | `budgets.prices.deep.cacheWrite` | number, 0 to 10000 |  | USD per million cache-write tokens. |
 | `maxReplyJudgements` | integer, 0 to 50 | `10` | Most replies on LGTMoose's findings judged per run (one fast-tier model call each). 0 turns the reply judge off. |
 | `maxExplanations` | integer, 0 to 20 | `5` | Most `@lgtmoose explain` requests a model answers per PR per run (one fast-tier model call each, at most one per finding per commit). 0 keeps the stored-finding reply. |
-| `commandAliases` | list of string | `[]` | Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-&lt;org&gt;. Up to 5 GitHub logins. |
+| `commandAliases` | list of string matching `^(?!-)(?!.*--)(?!.*-$)[A-Za-z0-9-]{1,39}$` | `[]` | Other handles @-commands may use besides the App's own, such as lgtmoose when the App is lgtmoose-&lt;org&gt;. Up to 5 GitHub logins. |
 | `commandHint` | boolean | `true` | Reply once per PR when a comment uses @lgtmoose with a command word where the App is called something else. Turn off if another App called lgtmoose answers on these repositories. |
 | `reviewDebounceSeconds` | integer, 0 to 1800 | `60` | Seconds a push's review waits for the next push before it starts. A newer push in that time replaces it. |
 | `shadow` | boolean | `true` | Record reviews to the artifact bucket and the log instead of posting them to GitHub. |

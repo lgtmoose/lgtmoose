@@ -185,10 +185,33 @@ export function parseCommands(body: string, handles: string | readonly string[])
  */
 export function addressesDocsHandle(body: string, handles: readonly string[]): boolean {
   if (handlesOf(handles).some((handle) => handle.toLowerCase() === DOCS_HANDLE)) return false;
-  return mentions(body, DOCS_HANDLE).some(
-    (text) => text !== "" && parseCommand(text).name !== "unknown",
-  );
+  return mentions(body, DOCS_HANDLE).some((text) => {
+    // A real command word, `help` included, never the empty default: "Thanks @lgtmoose!" and
+    // "cc @lgtmoose." leave only punctuation after the mention, which would parse as `help`.
+    const [first = ""] = text
+      .trim()
+      .replace(/^[,:]\s*/, "")
+      .split(/[\s:]+/);
+    const word = first.toLowerCase().replace(/[,.;:!?]+$/, "");
+    return COMMAND_WORDS.has(word) && parseCommand(text).name !== "unknown";
+  });
 }
+
+/** The words a command starts with, for `addressesDocsHandle`. */
+const COMMAND_WORDS: ReadonlySet<string> = new Set([
+  "help",
+  "review",
+  "full",
+  "pause",
+  "resume",
+  "explain",
+  "learn",
+  "learnings",
+  "ignore",
+  "remember",
+  "forget",
+  "approve",
+]);
 
 /** The one-time hint for a comment `addressesDocsHandle` matched: the handle that works here. */
 export function handleHint(slug: string): string {

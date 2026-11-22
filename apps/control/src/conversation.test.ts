@@ -1042,9 +1042,17 @@ describe("command handles (NIC-1119)", () => {
     expect(f.replies).toHaveLength(1);
     expect(f.replies[0]?.body).toContain(`Commands here use \`@${SLUG}\``);
     expect(f.replies[0]?.body).toContain(REPLY_MARKER);
-    // A second one on the same PR gets no second hint.
+    // A second one on the same PR gets no second hint, only a 😕 saying it did nothing.
     await handleConversation(f.deps, job({ commentId: 501, deliveryId: "d-2" }));
     expect(f.replies).toHaveLength(1);
+    expect(f.reactions).toEqual(["501:confused"]);
+  });
+
+  it("sends a wrong-handle comment down the normal path without a store that records hints", async () => {
+    const f = inThread("@lgtmoose ignore");
+    expect(await handleConversation(f.deps, threadReply)).toMatchObject({ action: "reply" });
+    expect(f.added).toEqual(["@lgtmoose ignore"]);
+    expect(f.replies).toEqual([]);
   });
 
   it("gives no hint for an alias, a plain mention, an unknown word or the right handle", async () => {
@@ -1138,6 +1146,7 @@ describe("command handles (NIC-1119)", () => {
     const claimed = withHintStore(f);
     await handleConversation(f.deps, job());
     expect(f.replies).toEqual([]);
+    expect(f.reactions).toEqual([]);
     expect(claimed.size).toBe(0);
     expect(f.logs.map((entry) => entry.message)).toContain("shadow: handle hint not posted");
   });
@@ -1146,6 +1155,24 @@ describe("command handles (NIC-1119)", () => {
     const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
     await handleConversation(f.deps, job());
     expect(f.replies).toEqual([]);
+  });
+
+  it("records a posted hint, and gives a thanks or a cc no hint", async () => {
+    const posted: string[] = [];
+    const f = fakeDeps(from("dev", "@lgtmoose review"), { slug: SLUG });
+    withHintStore(f);
+    f.deps.store.handleHintPosted = async (repo, number) => {
+      posted.push(`${repo}#${number}`);
+    };
+    await handleConversation(f.deps, job());
+    expect(posted).toEqual(["acme/shop#12"]);
+    for (const body of ["Thanks @lgtmoose!", "Good catch @lgtmoose.", "cc @lgtmoose"]) {
+      const thanks = fakeDeps(from("dev", body), { slug: SLUG });
+      withHintStore(thanks);
+      await handleConversation(thanks.deps, job());
+      expect(thanks.replies).toEqual([]);
+      expect(thanks.reactions).toEqual([]);
+    }
   });
 
   it("hints in a submitted review's body too, addressed to its author", async () => {
