@@ -142,8 +142,9 @@ describe("readCommand", () => {
         LGTMOOSE_RUN_ID: "r",
         LGTMOOSE_TASK_TOKEN: "t",
         LGTMOOSE_POST_ATTEMPTS: "4",
+        LGTMOOSE_POST_RETRY: "2",
       }),
-    ).toMatchObject({ attempts: 4 });
+    ).toMatchObject({ attempts: 4, retry: 2 });
     expect(
       readCommand({
         ...base,

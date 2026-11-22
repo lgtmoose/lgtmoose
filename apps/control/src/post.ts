@@ -617,7 +617,10 @@ function networkFailure(error: unknown): boolean {
  * Counts this start of the post step in the run's objects and returns its number, from 1. Not
  * conditional: two attempts at once are a race the claims settle, and either count is close.
  */
-async function countAttempt(deps: ControlDeps, runId: string): Promise<number> {
+export async function countAttempt(
+  deps: Pick<ControlDeps, "store">,
+  runId: string,
+): Promise<number> {
   const key = runKeys(runId).postAttempts;
   const text = await deps.store.getText(key);
   const parsed = z
@@ -678,6 +681,10 @@ export interface PostAttempt {
   taskArn: string | undefined;
   /** How many attempts the post step has (its retries and the first); unset when not known. */
   of?: number;
+  /** Its number, from 1, as the run's own count has it (`countAttempt`); counted here if unset. */
+  number?: number;
+  /** The state's retry count for it (from 0), as the workflow says. */
+  retry?: number;
 }
 
 /** What `post` needs besides the control task's dependencies. */
@@ -1295,7 +1302,7 @@ export async function post(
   const keys = runKeys(runId);
   // This attempt's number, counted before anything can fail: an attempt that dies early still
   // counts, so the last one is known for what it is.
-  const attemptNumber = await countAttempt(deps, runId);
+  const attemptNumber = attempt.number ?? (await countAttempt(deps, runId));
   const preparedText = await deps.store.getText(keys.prepared);
   if (preparedText === undefined) throw new Error(`Run ${runId} has no prepared review.`);
   // Written by this run's own prepare step with the control task's role; still shape-checked.
@@ -1384,6 +1391,11 @@ export async function post(
   let recheckPlan: RecheckPlan | undefined;
   // The report before the recheck's fixes were counted closed: for a run that won't close them.
   let reportOpen: ReviewReport | undefined;
+  // To make the decision again once the claims are held, should the recheck saved by then
+  // differ from this attempt's plan: the findings it can close, and the report from them.
+  let stillOpen: (EarlierFinding & { id: string })[] = [];
+  let finishWith:
+    ((open: (EarlierFinding & { id: string })[]) => Promise<ReviewReport>) | undefined;
   try {
     // Blobs only, for the cited code: no checkout.
     const repo = await deps.clone({
@@ -1546,7 +1558,8 @@ export async function post(
     }
     // Carried findings the recheck showed are fixed elsewhere (NIC-1120): the decision is made
     // again without them. They're closed once the claims are held and the run still counts.
-    const stillOpen = earlier.open.filter((entry) => !judgedFixed.has(entry.id));
+    stillOpen = earlier.open.filter((entry) => !judgedFixed.has(entry.id));
+    finishWith = finish;
     recheckPlan = await planRecheck(deps, runId, manifest, report, stillOpen);
     reportOpen = report;
     const recheckClosed = new Set(recheckPlan?.writes.fixed.map((fixed) => fixed.findingId));
@@ -1560,14 +1573,27 @@ export async function post(
         missed: report.misses.length,
       });
     }
-  } finally {
+  } catch (error) {
     await work.remove();
+    throw error;
   }
+  // The checkout is kept until the claims are held, for the report to be made again from the
+  // recheck saved by then; any failure before that removes it too.
+  const removeWork = once(() => work.remove());
+  const keepingWork = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (error) {
+      await removeWork();
+      throw error;
+    }
+  };
   let replyWrites: ReplyWrites | undefined;
   if (replied !== undefined) {
+    const { writes } = replied;
     replyWrites = replied.saved
-      ? replied.writes
-      : await saveReplyWrites(deps, runId, replied.writes);
+      ? writes
+      : await keepingWork(() => saveReplyWrites(deps, runId, writes));
   }
 
   // Two claims, both held before the first write to GitHub. The run's: attempts of this run
@@ -1575,13 +1601,36 @@ export async function post(
   // for the whole post (review, check run, summary, label and the record), so two runs at one
   // head never interleave; it's let go once the run is recorded. Progress is read once both are
   // held, so its version is the one this attempt saves over.
-  const claim = await holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim, runId);
+  const claim = await keepingWork(() =>
+    holdClaim(deps, { attempt, taskStatus }, keys.reviewClaim, runId),
+  );
   const headClaim = headKeys(
     `${target.owner}/${target.repo}`,
     target.number,
     pr.headSha,
   ).reviewClaim;
-  const head = await holdClaim(deps, { attempt, taskStatus }, headClaim, runId, "this head's post");
+  const head = await keepingWork(() =>
+    holdClaim(deps, { attempt, taskStatus }, headClaim, runId, "this head's post"),
+  );
+  // What the recheck saved, read again now the claims are held: an attempt that held them
+  // while this one waited may have saved it and closed its findings since this one planned.
+  // Its list is what's closed, so the decision is made again from it when it differs.
+  await keepingWork(async () => {
+    if (recheckPlan === undefined || recheckPlan.saved) return;
+    const text = await deps.store.getText(keys.rechecks);
+    if (text === undefined) return;
+    const writes = recheckWritesSchema.parse(JSON.parse(text));
+    const savedIds = new Set(writes.fixed.map((fixed) => fixed.findingId));
+    const plannedIds = new Set(recheckPlan.writes.fixed.map((fixed) => fixed.findingId));
+    recheckPlan = { writes, saved: true };
+    const same =
+      savedIds.size === plannedIds.size && [...savedIds].every((id) => plannedIds.has(id));
+    if (!same && finishWith !== undefined) {
+      deps.log("recheck saved by another attempt differs; deciding again from it", { runId });
+      report = await finishWith(stillOpen.filter((entry) => !savedIds.has(entry.id)));
+    }
+  });
+  await removeWork();
   const releaseLogged = (key: string, etag: string) =>
     deps.store.deleteIfMatch(key, etag).catch((release: unknown) => {
       deps.log("releasing a claim failed", {
@@ -1649,14 +1698,6 @@ export async function post(
   }
 
   let recheckWrites: RecheckWrites | undefined;
-  // What the recheck saved, read again now the claims are held: an attempt that held them
-  // while this one waited may have saved it and closed its findings since this one planned.
-  if (recheckPlan !== undefined && !recheckPlan.saved) {
-    const saved = await deps.store.getText(keys.rechecks);
-    if (saved !== undefined) {
-      recheckPlan = { writes: recheckWritesSchema.parse(JSON.parse(saved)), saved: true };
-    }
-  }
   // A run that no longer counts closes nothing it hasn't saved: a retry after the review was
   // posted skipped the stale check above, and the PR may have moved on since. Its summary,
   // check run, label and record then count those findings open, as the store still has them.
@@ -2010,7 +2051,13 @@ export async function post(
     }
     // The post step's last attempt never fails here: its review is out, and failing would
     // mark the run failed over a note on a thread.
-    const lastAttempt = attempt.of !== undefined && attemptNumber >= attempt.of;
+    // Either count saying so is enough: losing a note on a thread is cheaper than failing a
+    // run whose review is out. The own count misses an attempt that died before counting (and
+    // carries over into a redriven execution); the retry count includes tasks that never ran.
+    const lastAttempt =
+      attempt.of !== undefined &&
+      (attemptNumber >= attempt.of ||
+        (attempt.retry !== undefined && attempt.retry + 1 >= attempt.of));
     if (later > 0 && tries < RECHECK_WRITE_ATTEMPTS && !lastAttempt) {
       throw new Error(
         `${later} recheck replies or resolves weren't written; the retry writes them.`,

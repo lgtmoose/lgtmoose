@@ -3565,6 +3565,20 @@ describe("runCommand", () => {
     taskToken: "t",
   };
 
+  it("counts a post attempt before anything that can fail", async () => {
+    const h = harness();
+    // No such run: the post fails at once, after it was counted.
+    await runCommand(
+      h.deps,
+      { command: "post", executionArn: EXECUTION, runId: RUN_ID, taskToken: "t", attempts: 4 },
+      { ...SETTINGS, shadow: true },
+    );
+    expect(h.tokens.failed).toHaveLength(1);
+    expect(JSON.parse(h.objects.get(runKeys(RUN_ID).postAttempts) ?? "{}")).toEqual({
+      attempts: 1,
+    });
+  });
+
   it("marks the run superseded when its execution was stopped during prepare", async () => {
     const h = harness();
     h.execution.status = "ABORTED";
@@ -4744,6 +4758,78 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     // Once before the decision, once for the resolves: not again for the second finding.
     expect(reads).toBe(2);
     expect(replies(writes)).toHaveLength(2);
+  });
+
+  it("treats the step's real last attempt as last when an earlier one was never counted", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    // Attempt n of 4, with the state's retry count; post counts its own starts.
+    const step = (n: number) => ({
+      attempt: { id: `a${n}`, taskArn: undefined, of: 4, retry: n - 1 },
+    });
+    // Attempt 1 died before it was counted: it never reached post at all.
+    // Attempt 2 fails at the first close, before the recheck's writes.
+    const close = h.findings.closeFixed?.bind(h.findings);
+    let closing = 0;
+    h.findings.closeFixed = async (id, sha) => {
+      closing += 1;
+      if (closing === 1) throw new Error("the database went away");
+      return close?.(id, sha) ?? "theirs";
+    };
+    await expect(post(h.deps, prepared.runId, step(2))).rejects.toThrow("went away");
+    // Attempt 3 reaches the writes, and a reply fails for now.
+    const down = () => new GitHubError(502, "Bad Gateway", "POST", "/replies");
+    fail.replies.push(down(), undefined, down());
+    await expect(post(h.deps, prepared.runId, step(3))).rejects.toThrow("retry writes them");
+    // Attempt 4 is the step's last, though its own count says 3: the retry count says 4.
+    const posted = await post(h.deps, prepared.runId, step(4));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(h.logs).toContain("recheck replies or resolves given up");
+    expect(JSON.parse(h.objects.get(runKeys(prepared.runId).postAttempts) ?? "{}")).toEqual({
+      attempts: 3,
+    });
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1001: /)]);
+  });
+
+  it("decides again from the recheck another attempt saved, when it differs from this plan", async () => {
+    const setup: Setup = {};
+    const { h, writes } = rechecking(setup);
+    const prepared = await twoFixed(h);
+    // This attempt's plan closes both findings. Another attempt saved one that closes only
+    // the first (Z, the second, is in this plan but not in the saved file), while this one
+    // waited for the claim.
+    const key = runKeys(prepared.runId).rechecks;
+    const getText = h.deps.store.getText.bind(h.deps.store);
+    let reads = 0;
+    h.deps.store.getText = async (name) => {
+      if (name === key) {
+        reads += 1;
+        if (reads === 2) {
+          const first = h.findings.rows[0];
+          if (first === undefined) throw new Error("no first finding");
+          await h.deps.store.createText(
+            key,
+            JSON.stringify({
+              version: 1,
+              fixed: [
+                {
+                  findingId: first.id,
+                  githubCommentId: 1000,
+                  reason: "src/checkout.ts line 1 adds the item.",
+                },
+              ],
+            }),
+          );
+        }
+      }
+      return getText(name);
+    };
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(h.logs).toContain("recheck saved by another attempt differs; deciding again from it");
+    // Only the saved one is closed, and the decision still counts the other one open.
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "open"]);
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    expect(replies(writes).map((write) => write.slice(0, 10))).toEqual(["reply 1000"]);
   });
 
   it("doesn't reply on a finding a person closed after the recheck decided", async () => {
