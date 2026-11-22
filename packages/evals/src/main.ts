@@ -287,9 +287,20 @@ async function main(argv: readonly string[]): Promise<number> {
       rechecked === undefined
         ? 0
         : rechecked.scores.filter((score) => score.error !== undefined || !score.checked).length;
-    const report: EvalReport = {
+    const report: EvalReport & {
+      recheck?: { model: string; totals: ReturnType<typeof recheckTotals>; scores: RecheckScore[] };
+    } = {
       ...buildReport(scores, model, startedAt),
       ...(learning === undefined ? {} : { learning }),
+      ...(rechecked === undefined
+        ? {}
+        : {
+            recheck: {
+              model: rechecked.model,
+              totals: recheckTotals(rechecked.scores),
+              scores: rechecked.scores,
+            },
+          }),
     };
     const baseline = await readBaseline(baselinePath);
     // Collateral and untrusted learnings fail any run; the repeat rate is compared with the

@@ -181,20 +181,19 @@ export function selectRechecks(
     .map(({ record }) => record);
 }
 
-/** When each commit was made, in seconds, by SHA: the ones git can't read are left out. */
+/**
+ * When each commit was made, in seconds, by SHA. Each is read on its own, so one that's gone
+ * (force-pushed away) leaves out only itself: its findings sort after the rest.
+ */
 async function commitTimes(repo: Repo, shas: readonly string[]): Promise<Map<string, number>> {
   const times = new Map<string, number>();
-  if (shas.length === 0) return times;
-  try {
-    const out = await repo.git(["show", "-s", "--format=%H %ct", ...shas]);
-    for (const line of out.split("\n")) {
-      const [sha, seconds] = line.trim().split(" ");
-      if (sha !== undefined && seconds !== undefined && Number.isFinite(Number(seconds))) {
-        times.set(sha, Number(seconds));
-      }
+  for (const sha of shas) {
+    try {
+      const seconds = Number((await repo.git(["show", "-s", "--format=%ct", sha])).trim());
+      if (Number.isFinite(seconds)) times.set(sha, seconds);
+    } catch {
+      // Unread: its findings keep the order they came in, after the dated ones.
     }
-  } catch {
-    // Unread, the findings keep the order they came in.
   }
   return times;
 }

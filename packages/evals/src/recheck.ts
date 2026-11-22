@@ -231,8 +231,11 @@ export async function runRecheckScenario(
       reraised: new Set(),
       open: new Set([record.id]),
     });
-    const reason = outcome.verdicts.find((verdict) => verdict.id === "F1")?.reason;
-    return score(fixes.length > 0, reason === undefined ? {} : { reason });
+    const verdict = outcome.verdicts.find((candidate) => candidate.id === "F1");
+    // No verdict for the finding would keep it open and read as a right "holds": it's a broken
+    // run, not an answer.
+    if (verdict === undefined) return score(false, { error: "the recheck gave no verdict for F1" });
+    return score(fixes.length > 0, { reason: verdict.reason });
   } catch (error) {
     return score(false, { error: error instanceof Error ? error.message : String(error) });
   } finally {

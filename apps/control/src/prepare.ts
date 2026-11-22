@@ -921,7 +921,14 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(explain.index), JSON.stringify(input));
       batches.push({ index: explain.index });
     }
-    const keptRecheck = recheck !== undefined && spent.runs(recheck.index) ? recheck : undefined;
+    // The recheck closes a finding the review didn't raise again, which says nothing about a
+    // file a capped review batch didn't read: with any review batch left out, no recheck.
+    const keptRecheck =
+      recheck !== undefined &&
+      spent.runs(recheck.index) &&
+      !notRun.some((batch) => batch.kind === "review")
+        ? recheck
+        : undefined;
     if (keptRecheck !== undefined) {
       const input: BatchInput = batchInputSchema.parse({
         version: 1,

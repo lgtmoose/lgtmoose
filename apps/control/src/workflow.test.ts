@@ -4020,11 +4020,17 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
   function rechecking() {
     const h = harness({
       commentIds: true,
-      threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
+      threads: () => [
+        { resolved: false, firstCommentId: 1000, id: "PRRT_1" },
+        { resolved: false, firstCommentId: 1001, id: "PRRT_2" },
+      ],
     });
     const writes: string[] = [];
-    /** How many of the next replies fail, as GitHub refusing them would. */
-    const failReplies = { count: 0 };
+    /**
+     * What the next replies and resolves do, in order: fail with the error, as GitHub would, or
+     * go through for `undefined`. Once the list is empty, every one goes through.
+     */
+    const fail = { replies: [] as (Error | undefined)[], resolves: [] as (Error | undefined)[] };
     h.findings.closeFixed = async (id) => {
       const row = h.findings.rows.find((candidate) => candidate.id === id);
       if (row === undefined || (row.status !== "open" && row.status !== "outdated")) return false;
@@ -4036,21 +4042,21 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       ...(await github(installationId)),
       conversation: {
         reply: async (_target, root, body) => {
-          if (failReplies.count > 0) {
-            failReplies.count -= 1;
-            throw new Error("GitHub 502");
-          }
+          const error = fail.replies.shift();
+          if (error !== undefined) throw error;
           writes.push(`reply ${root}: ${body}`);
         },
         comment: async (_target, body) => {
           writes.push(`comment: ${body}`);
         },
         resolveThread: async (id) => {
+          const error = fail.resolves.shift();
+          if (error !== undefined) throw error;
           writes.push(`resolve ${id}`);
         },
       },
     });
-    return { h, writes, failReplies };
+    return { h, writes, fail };
   }
 
   /**
@@ -4233,38 +4239,186 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     ]);
   });
 
-  it("writes a failed recheck reply on the retry, and each one once", async () => {
-    const { h, writes, failReplies } = rechecking();
-    await run(h, 1, [finding()]);
+  /** Two open findings with inline comments 1000 and 1001, fixed elsewhere: run 2 prepared. */
+  async function twoFixed(h: ReturnType<typeof harness>) {
+    const second = finding({
+      line: 4,
+      title: "Total adds the price before the discount",
+      evidence: "sum += items[i].price;",
+    });
+    await run(h, 1, [finding(), second]);
+    expect(h.findings.rows.map((row) => row.githubCommentId)).toEqual([1000, 1001]);
     await fixElsewhere();
-    failReplies.count = 1;
     const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
     const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    const reason = "src/checkout.ts line 1 adds the item.";
+    const verdicts = [
+      { id: "F1", confirmed: false, reason },
+      { id: "F2", confirmed: false, reason },
+    ];
     for (const batch of prepared.batches) {
       h.objects.set(
         runKeys(prepared.runId).batchOutput(batch.index),
         JSON.stringify(
           batch.index === manifest.recheck?.index
-            ? {
-                version: 1,
-                index: batch.index,
-                verdicts: [{ id: "F1", confirmed: false, reason: "src/checkout.ts adds it." }],
-                transcriptKeys: [],
-              }
+            ? { version: 1, index: batch.index, verdicts, transcriptKeys: [] }
             : output({ index: batch.index, findings: [] }),
         ),
       );
     }
-    const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+    return prepared;
+  }
+  const offEcs = (id: string) => ({ attempt: { id, taskArn: undefined } });
+  const replies = (writes: string[]) => writes.filter((write) => write.startsWith("reply "));
+
+  it("writes a reply that failed for now on the retry, and each one once", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    // The first reply goes out, the second fails for now.
+    fail.replies.push(undefined, new GitHubError(502, "Bad Gateway", "POST", "/replies"));
     await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow(
-      "recheck replies weren't written",
+      "weren't written; the retry writes them",
     );
-    expect(writes).toEqual([]);
-    await post(h.deps, prepared.runId, offEcs("a2"));
     expect(writes).toEqual([expect.stringMatching(/^reply 1000: /), "resolve PRRT_1"]);
+
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    // The first one isn't written again: each write was saved as it went.
+    expect(writes).toEqual([
+      expect.stringMatching(/^reply 1000: /),
+      "resolve PRRT_1",
+      expect.stringMatching(/^reply 1001: /),
+      "resolve PRRT_2",
+    ]);
     // A third attempt finds the step done.
     await post(h.deps, prepared.runId, offEcs("a3"));
-    expect(writes).toHaveLength(2);
+    expect(writes).toHaveLength(4);
+  });
+
+  it("carries on past a thread that can never take a reply, and posts the review", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    // The first finding's comment is gone: GitHub answers 404, and would every time.
+    fail.replies.push(new GitHubError(404, "Not Found", "POST", "/replies"));
+    const posted = await post(h.deps, prepared.runId, offEcs("a1"));
+    expect(posted).toMatchObject({ event: "APPROVE", posted: true });
+    expect(writes).toEqual([expect.stringMatching(/^reply 1001: /), "resolve PRRT_2"]);
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "fixed"]);
+    expect(h.logs).toContain("recheck reply can't be written");
+  });
+
+  it("retries only the resolve when the reply went out and the resolve failed", async () => {
+    const { h, writes, fail } = rechecking();
+    const prepared = await twoFixed(h);
+    fail.resolves.push(new GitHubError(503, "Service Unavailable", "POST", "/graphql"));
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    expect(replies(writes)).toHaveLength(2);
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual(["resolve PRRT_2"]);
+
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    // No reply twice: only the resolve that failed.
+    expect(replies(writes)).toHaveLength(2);
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([
+      "resolve PRRT_2",
+      "resolve PRRT_1",
+    ]);
+  });
+
+  it("leaves a finding's step open while its thread can't be read, and resolves it on the retry", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    // GitHub's threads can't be read during the first attempt, then can.
+    let threadsDown = true;
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => {
+      const client = await github(installationId);
+      return {
+        ...client,
+        threads: {
+          reviewThreads: async (target) => {
+            if (threadsDown) throw new GitHubError(502, "Bad Gateway", "POST", "/graphql");
+            return client.threads.reviewThreads(target);
+          },
+        },
+      };
+    };
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("retry writes them");
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([]);
+    expect(replies(writes)).toHaveLength(2);
+
+    threadsDown = false;
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(replies(writes)).toHaveLength(2);
+    expect(writes.filter((write) => write.startsWith("resolve "))).toEqual([
+      "resolve PRRT_1",
+      "resolve PRRT_2",
+    ]);
+  });
+
+  it("doesn't reply on a finding a person closed after the recheck decided", async () => {
+    const { h, writes } = rechecking();
+    const prepared = await twoFixed(h);
+    // Between the attempt that saved the decision and its retry, a person declines finding 2.
+    const close = h.findings.closeFixed?.bind(h.findings);
+    let calls = 0;
+    h.findings.closeFixed = async (id, sha) => {
+      calls += 1;
+      if (calls === 2) {
+        const row = h.findings.rows.find((candidate) => candidate.id === id);
+        if (row !== undefined) row.status = "declined";
+        throw new Error("the database went away");
+      }
+      return close?.(id, sha) ?? false;
+    };
+    await expect(post(h.deps, prepared.runId, offEcs("a1"))).rejects.toThrow("went away");
+    await post(h.deps, prepared.runId, offEcs("a2"));
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["fixed", "declined"]);
+    expect(replies(writes)).toEqual([expect.stringMatching(/^reply 1000: /)]);
+  });
+
+  it("runs no recheck when a cap leaves out a review batch", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    // A review batch costs 10 by the deployment's average; the recheck far less. A cap of 5
+    // fits the recheck, not the review: then nothing re-reviewed the file, so no recheck.
+    const spend = memorySpend({ averageBatchUsd: 10 });
+    h.deps.spend = {
+      store: spend.store,
+      budgets: budgetsSchema.parse({ perPullRequest: { costPerDayUsd: 5 } }),
+    };
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    expect(manifest.spendCap?.batches.length).toBeGreaterThan(0);
+    expect(manifest.recheck).toBeUndefined();
+    expect(prepared.batches).toEqual([]);
+  });
+
+  it("keeps a finding open in post when its file was in a capped review batch", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    const prepared = await prepare(h.deps, JOB, exec(2), SETTINGS);
+    const key = runKeys(prepared.runId).prepared;
+    const manifest = readManifest(h.objects.get(key) ?? "");
+    const recheckIndex = manifest.recheck?.index ?? -1;
+    // As a manifest from before prepare dropped such a recheck: the finding's file was in a
+    // review batch the cap kept from running.
+    const job = manifest.review.jobs[0];
+    if (job === undefined) throw new Error("no review batch");
+    job.files = [...job.files, "src/total.ts"];
+    manifest.spendCap = { kind: "pr_cost", batches: [job.index], reason: "capped" };
+    h.objects.set(key, JSON.stringify(manifest));
+    h.objects.set(
+      runKeys(prepared.runId).batchOutput(recheckIndex),
+      JSON.stringify({
+        version: 1,
+        index: recheckIndex,
+        verdicts: [{ id: "F1", confirmed: false, reason: "src/checkout.ts adds it." }],
+        transcriptKeys: [],
+      }),
+    );
+    await post(h.deps, prepared.runId);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
   });
 
   it("drops the recheck, never a review batch, when a cap fits only the review", async () => {
