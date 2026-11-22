@@ -4,6 +4,7 @@ import {
   isModelAlias,
   modelFor,
   TIERS,
+  type ModelToCheck,
   type ProviderConfig,
 } from "@lgtmoose/config";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
@@ -76,5 +77,55 @@ export function bedrockStatements(
             resources: profiles,
           }),
         ]),
+  ];
+}
+
+/**
+ * The IAM statements the health check needs to ask Bedrock about the pinned models (NIC-1121):
+ * describing each inference profile and foundation model, in the stack's region only. It never
+ * gets `bedrock:InvokeModel`, so it can't call a model. `GetFoundationModelAvailability` has no
+ * resource-level permissions, and only reads the account's model access and agreements.
+ */
+export function modelCheckStatements(
+  checks: readonly ModelToCheck[],
+  partition: string,
+  region: string,
+  account: string,
+): PolicyStatement[] {
+  const ids = checks
+    .filter((check) => check.kind === "bedrock")
+    .map((check) => BEDROCK_MODEL_ID.exec(check.model))
+    .filter((match): match is RegExpExecArray => match?.[2] !== undefined);
+  if (ids.length === 0) return [];
+  const profiles = [
+    ...new Set(
+      ids
+        .filter((match) => match[1] !== undefined)
+        .map(
+          (match) => `arn:${partition}:bedrock:${region}:${account}:inference-profile/${match[0]}`,
+        ),
+    ),
+  ];
+  // Only a bare model ID is described, as configured (a `:200k`-style variant is what Claude Code
+  // calls): a profile is checked through GetInferenceProfile.
+  const models = [
+    ...new Set(
+      ids
+        .filter((match) => match[1] === undefined)
+        .map((match) => `arn:${partition}:bedrock:${region}::foundation-model/${match[2] ?? ""}`),
+    ),
+  ];
+  const statement = (action: string, resources: string[]) =>
+    resources.length === 0
+      ? []
+      : [new PolicyStatement({ effect: Effect.ALLOW, actions: [action], resources })];
+  return [
+    ...statement("bedrock:GetInferenceProfile", profiles),
+    ...statement("bedrock:GetFoundationModel", models),
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["bedrock:GetFoundationModelAvailability"],
+      resources: ["*"],
+    }),
   ];
 }

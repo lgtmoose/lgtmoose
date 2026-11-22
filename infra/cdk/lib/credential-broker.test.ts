@@ -24,7 +24,8 @@ interface State {
 /** The workflow stack's resources for a config with these providers (the first reviews). */
 function synth(providers: DeployConfigInput["providers"]) {
   const config = parseDeployConfig({ allowedOrgs: ["lgtmoose"], providers });
-  const template = Template.fromStack(buildApp(config, appWithoutBundling()).workflow);
+  const workflow = buildApp(config, appWithoutBundling()).workflow;
+  const template = Template.fromStack(workflow);
   const resources = template.toJSON().Resources as Resources;
 
   const functionWith = (name: string, without?: string) => {
@@ -58,6 +59,7 @@ function synth(providers: DeployConfigInput["providers"]) {
     return States.Batches?.ItemProcessor?.States.Attempt?.Branches?.[0]?.States ?? {};
   };
   return {
+    workflow,
     template,
     resources,
     broker: () => functionWith("LGTMOOSE_LEASE_TTL_SECONDS"),
@@ -212,6 +214,76 @@ describe("credential broker", () => {
       TreatMissingData: "notBreaching",
     });
   });
+
+  it("checks pinned Bedrock models with a role that may describe them, never call them", () => {
+    const pinned = synth([
+      {
+        id: "bedrock",
+        harness: "claude-code",
+        auth: "bedrock",
+        models: {
+          fast: "anthropic.claude-haiku-4-5-20251001-v1:0",
+          standard: "us.anthropic.claude-sonnet-4-6",
+          deep: "us.anthropic.claude-sonnet-4-6",
+        },
+      },
+    ]);
+    // A Bedrock-only deployment has no stored credential, and still gets the check.
+    const health = pinned.health();
+    expect(health).toBeDefined();
+    // Room for every pinned model's calls, each with retries and its own limit.
+    expect(health?.fn.Properties.Timeout).toBe(300);
+    expect(JSON.parse(envText(health?.env.LGTMOOSE_CREDENTIALS))).toEqual({});
+    expect(JSON.parse(envText(health?.env.LGTMOOSE_MODEL_CHECKS))).toEqual([
+      {
+        providerId: "bedrock",
+        kind: "bedrock",
+        model: "anthropic.claude-haiku-4-5-20251001-v1:0",
+        tiers: ["fast"],
+      },
+      {
+        providerId: "bedrock",
+        kind: "bedrock",
+        model: "us.anthropic.claude-sonnet-4-6",
+        tiers: ["standard", "deep"],
+      },
+    ]);
+    const granted = pinned.statements(health!.fn);
+    expect(actions(granted).sort()).toEqual([
+      "bedrock:GetFoundationModel",
+      "bedrock:GetFoundationModelAvailability",
+      "bedrock:GetInferenceProfile",
+    ]);
+    const resources = (action: string) =>
+      JSON.stringify(granted.filter((s) => actions([s]).includes(action)).map((s) => s.Resource));
+    expect(resources("bedrock:GetInferenceProfile")).toContain(
+      ":inference-profile/us.anthropic.claude-sonnet-4-6",
+    );
+    expect(resources("bedrock:GetFoundationModel")).toContain(
+      "::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    );
+    expect(resources("bedrock:GetFoundationModel")).not.toContain("*");
+    const alarms = Object.values(pinned.resources).filter(
+      (r) => r.Type === "AWS::CloudWatch::Alarm" && r.Properties.MetricName === "ModelUnavailable",
+    );
+    expect(alarms.map((alarm) => alarm.Properties.Dimensions)).toEqual([
+      [{ Name: "Provider", Value: "bedrock" }],
+    ]);
+    // Exposed like the credential alarms, and notified through the same topic.
+    expect([...pinned.workflow.modelAlarms.keys()]).toEqual(["bedrock"]);
+    expect([...pinned.workflow.credentialAlarms.keys()]).toEqual([]);
+    // A check that couldn't run writes no point, which must leave the alarm as it is.
+    expect(alarms[0]?.Properties).toMatchObject({
+      Threshold: 1,
+      Statistic: "Maximum",
+      TreatMissingData: "ignore",
+    });
+  }, 120_000);
+
+  it("has no health check for a deployment with nothing to check", () => {
+    const none = synth([{ id: "bedrock", harness: "claude-code", auth: "bedrock" }]);
+    expect(none.health()).toBeUndefined();
+  }, 120_000);
 
   describe("with a ChatGPT sign-in reviewing", () => {
     let codex: ReturnType<typeof synth>;

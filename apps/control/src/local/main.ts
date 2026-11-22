@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { FEEDBACK_REPORT_KEY, SECRET_NAMES } from "@lgtmoose/config";
+import { FEEDBACK_REPORT_KEY, SECRET_NAMES, fetchStatus, planModelChecks } from "@lgtmoose/config";
 import {
   ensureDashboardRole,
   ensureGatewayRole,
@@ -23,7 +23,8 @@ import { drizzleBootstrapStore } from "../bootstrap-store.js";
 import { drizzleConversationStore, githubConversation } from "../conversation-aws.js";
 import { conversationBatch } from "../conversation-lambda.js";
 import { checkCredentials } from "../credentials.js";
-import { reportProblem } from "../credentials-aws.js";
+import { reportModel, reportProblem } from "../credentials-aws.js";
+import { healthCheck } from "../model-health.js";
 import { drizzleChecksWaits, drizzleDispatchStore } from "../dispatch-aws.js";
 import { collectFeedback } from "../feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "../feedback-aws.js";
@@ -318,18 +319,37 @@ async function main(): Promise<void> {
     );
     process.stdout.write(`${metricsLine(counts, new Date())}\n`);
   };
+  // The runner holds every provider's key already, so it checks API-key models too (NIC-1121).
+  const modelChecks = planModelChecks(config).checks;
+  // Compose refuses Bedrock providers (`localSettings`), so there's never a Bedrock model here.
   const health = () =>
-    checkCredentials({
-      secrets,
-      credentials: Object.fromEntries(
-        settings.providers.flatMap((provider) =>
-          provider.credential === undefined
-            ? []
-            : [[provider.id, { ...provider.credential, auth: provider.auth }]],
-        ),
-      ),
-      now: Date.now,
-      problem: reportProblem,
+    healthCheck({
+      credentials: () =>
+        checkCredentials({
+          secrets,
+          credentials: Object.fromEntries(
+            settings.providers.flatMap((provider) =>
+              provider.credential === undefined
+                ? []
+                : [[provider.id, { ...provider.credential, auth: provider.auth }]],
+            ),
+          ),
+          now: Date.now,
+          problem: reportProblem,
+        }),
+      checks: () => modelChecks,
+      region: config.region,
+      bedrock: () => Promise.reject(new Error("docker compose has no Bedrock providers")),
+      api: {
+        get: fetchStatus,
+        key: async (providerId) => {
+          const secretId = settings.providers.find((p) => p.id === providerId)?.credential
+            ?.secretId;
+          return secretId === undefined ? undefined : secrets.read(secretId);
+        },
+      },
+      report: reportModel,
+      log,
     });
 
   await runner.recover();

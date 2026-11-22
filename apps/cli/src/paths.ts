@@ -1,7 +1,7 @@
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseDeployConfig, type DeployConfig } from "@lgtmoose/config";
+import { CLI_COMMAND, parseDeployConfig, type DeployConfig } from "@lgtmoose/config";
 import type { SetupFiles } from "./setup/setup.js";
 import { errorMessage } from "./errors.js";
 
@@ -13,7 +13,7 @@ export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
  * (config and CDK paths resolve from REPO_ROOT), where the root package script is how it's
  * started, so this matches the README and every other message.
  */
-export const CLI = "pnpm lgtmoose";
+export const CLI = CLI_COMMAND;
 
 /** Honours LGTMOOSE_CONFIG the same way `cdk synth` does, so both agree on the file. */
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {

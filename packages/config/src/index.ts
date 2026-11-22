@@ -65,6 +65,30 @@ export {
 } from "./models.js";
 export { jsonSchemas, serializeSchema } from "./json-schema.js";
 export {
+  BedrockNotFound,
+  CLI_COMMAND,
+  BEDROCK_CHECK_WORST_MS,
+  bedrockClientOptions,
+  bedrockModelAccessUrl,
+  bedrockModelApi,
+  checkApiModel,
+  checkBedrockModel,
+  checkDetail,
+  badKey,
+  isBedrockNotFound,
+  fetchStatus,
+  describeModelProblem,
+  planModelChecks,
+  type BedrockModelApi,
+  type BedrockSdk,
+  type ModelCheckKind,
+  type ModelCheckResult,
+  type ModelCheckStatus,
+  type ModelToCheck,
+  type SkippedModel,
+  type StatusGet,
+} from "./model-checks.js";
+export {
   PROVIDER_CREDENTIAL_KIND,
   PROVIDER_CREDENTIAL_TAGS,
   PROVIDER_SECRET_PREFIX,

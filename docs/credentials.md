@@ -48,7 +48,7 @@ This is the default setup path: the models run on Amazon Bedrock in the account 
 What the deploy sets up for a Bedrock provider:
 
 - **Environment.** Sandbox tasks get `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_REGION`. Credentials come from the ECS task role, through the AWS SDK's default chain. Each pinned tier is passed as `ANTHROPIC_DEFAULT_HAIKU_MODEL` (fast), `ANTHROPIC_DEFAULT_SONNET_MODEL` (standard) and `ANTHROPIC_DEFAULT_OPUS_MODEL` (deep), so the aliases Claude Code uses on its own, such as the Haiku model for background tasks, resolve to the same pinned models. See [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock).
-- **IAM.** Only the sandbox task role gets Bedrock permissions, and only when a Bedrock provider is configured:
+- **IAM.** Only the sandbox task role can call a model, and only when a Bedrock provider is configured. The health check's role may only describe the pinned models ([Model checks](#model-checks)):
   - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`. With all three tiers pinned to Anthropic ids, these are allowed on exactly those foundation models (in any region, since a cross-region profile routes to several) and their inference profiles in the account. When a tier still uses an alias, Claude Code picks the model at runtime, so they're allowed on every `anthropic.*` foundation model and Anthropic inference profile, and never on other vendors' models.
   - `bedrock:ListInferenceProfiles` and `bedrock:GetInferenceProfile`, which Claude Code uses to find the profile for a model.
 - **Egress.** The proxy lets sandbox tasks reach `bedrock-runtime.<region>.amazonaws.com` (model calls) and `bedrock.<region>.amazonaws.com` (profile lookups).
@@ -128,7 +128,38 @@ The broker controls how review runs use the stored credentials. It runs as two L
 
   The alarm clears once a check finds nothing wrong. The fix is usually `lgtmoose auth` for that provider.
 
-A Bedrock provider has no stored credential. It has no lease, no slots and no alarm.
+A Bedrock provider has no stored credential. It has no lease, no slots and no credential alarm. Its models have their own alarm (see below).
+
+## Model checks
+
+A model the account can't call fails every review that reaches it. So LGTMoose checks each pinned model before the first review, and again on a schedule.
+
+What's checked, per provider:
+
+| Provider                                         | How                                                                                                                                                                                                                                                                                                 | When                                                      |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| Bedrock (`claude-code` or `agent-sdk`)           | An inference profile (`us.…`, `global.…`) must exist in the region and be active. A bare model ID must exist and take on-demand calls. Either way the account must have model access and the model's agreement accepted. These are Bedrock control-plane reads, free and without calling the model. | `lgtmoose deploy`, and every 6 hours in the health check  |
+| Anthropic API key (`claude-code` or `agent-sdk`) | `GET https://api.anthropic.com/v1/models/<model>` with the stored key. Free.                                                                                                                                                                                                                        | `lgtmoose deploy`, and every 6 hours under docker compose |
+| OpenAI API key (`codex`)                         | `GET https://api.openai.com/v1/models/<model>` with the stored key. Free.                                                                                                                                                                                                                           | `lgtmoose deploy`, and every 6 hours under docker compose |
+
+A few answers are reported as "couldn't check" rather than "can't be called". They never raise an alarm, and they don't stop another model of the same provider from clearing it:
+
+- an API key that gets HTTP 403 on the models endpoint, or a 401 whose error doesn't call the key invalid (a restricted OpenAI key without `api.model.read` gets one, and still works for reviews). A 401 saying the key is invalid is "can't be called";
+- any throttled or denied control-plane call;
+- an API request that fails outright (no answer at all). Only the error's name is reported, never its message, which can quote the request's headers. A stored key with characters a header can't carry (a pasted line break, say) is "can't be called" without a request: store it again.
+
+An active inference profile whose model the source region doesn't offer or doesn't know is "active, access not verified": Bedrock then reports model access as not granted whatever the account has, so it can't be read. Nothing says the model can't be called, so it counts as passing for the alarm (it can clear it), and deploy shows it as a note rather than a warning.
+
+A bare model ID, `:200k`-style variants included, is checked as configured, since that's what Claude Code calls. One that takes only provisioned throughput can't be used: pin a model that takes on-demand calls.
+
+Not checked, and listed under "Not checked:" at deploy with the reason: model aliases such as `sonnet`, which Claude Code resolves to a model ID only when it runs (pin model IDs to have them checked); ARNs, which are used as given; Vertex AI; Cursor; and subscription sign-ins, which have no cheap way to ask. A model several tiers share is checked once.
+
+- **At deploy.** A model that can't be called is a warning, before anything is deployed, naming the provider, the tiers, the model ID, the region and the fix: usually the Bedrock console's model access page, or the right profile ID. The deploy goes ahead, since a fallback provider may still cover it and model access can be granted after. The identity running `lgtmoose deploy` needs `bedrock:GetInferenceProfile`, `bedrock:GetFoundationModel` and `bedrock:GetFoundationModelAvailability`; without them, the models are reported as not checked.
+- **In the health check.** The 6-hourly check sets the `LGTMoose` `ModelUnavailable` metric for each provider with a checked model: 1 when one of its models can't be called; 0 when none can't be called and at least one passed or is an active profile whose access couldn't be verified; nothing when every check of it couldn't run. A model that can't be called is reported the moment it's found, so a later check that hangs can't lose it; a provider is cleared once all its checks are done. No check is started with less than 60 seconds of the invocation left (one check takes at most 42: two Bedrock calls, each with two attempts and 5-second connection and request limits), and a provider it didn't finish is never cleared. Each provider has an alarm on it, `ModelAlarm-<id>`. The log line `model unavailable` names the tiers, model, region and fix. A check that couldn't run (throttled, say) never raises the alarm. It doesn't hold it up either: when another of the provider's models passes, the provider reports 0, so a throttled check of a model that was unavailable can let the alarm clear until a later run finds it unavailable again. On AWS only Bedrock models are checked here: the Lambda's role may describe exactly the pinned profiles and models in the stack's region, plus `bedrock:GetFoundationModelAvailability` (granted on `*`: AWS's reference couldn't be confirmed to support resource-level permissions for it), and can't call any model or read any secret. An API key that stops working shows up as a run refused for auth instead (`CredentialProblem`). Under docker compose the runner already holds the keys, so it checks API-key models too. Compose can't run Bedrock providers at all (it refuses them at start), so there is no Bedrock model to check there. If a run ever has Bedrock checks but no Bedrock client, it logs `Bedrock models not checked` once rather than passing them silently.
+
+If the Lambda runtime's own `@aws-sdk/client-bedrock` is missing a command the check needs, the model check logs `model checks not run` and is skipped. The credential check still runs and reports as usual.
+
+A check doesn't reorder the fallback chain. A batch still tries the provider, and moves to the next one if the failure is one the chain falls back on.
 
 ## Secret contract
 

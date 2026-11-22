@@ -1,6 +1,6 @@
 import { parseDeployConfig } from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
-import { bedrockStatements } from "./bedrock.js";
+import { bedrockStatements, modelCheckStatements } from "./bedrock.js";
 
 const provider = (models?: Record<string, string>) =>
   parseDeployConfig({
@@ -73,5 +73,57 @@ describe("bedrockStatements", () => {
   it("falls back to Anthropic's models when one tier is still an alias", () => {
     const [invoke] = json({ fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
     expect(invoke?.Resource).toContain("arn:aws:bedrock:*::foundation-model/anthropic.*");
+  });
+});
+
+describe("modelCheckStatements", () => {
+  const check = (model: string) => ({
+    providerId: "bedrock",
+    kind: "bedrock" as const,
+    model,
+    tiers: ["standard" as const],
+  });
+  const statementsFor = (models: string[]) =>
+    modelCheckStatements(models.map(check), "aws", "us-east-2", "123456789012").map((s) =>
+      s.toStatementJson(),
+    );
+
+  it("describes each profile and bare model in the stack's region, and invokes nothing", () => {
+    expect(
+      statementsFor([
+        "us.anthropic.claude-sonnet-4-6",
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+        "anthropic.claude-sonnet-4-6-v1:0:200k",
+      ]),
+    ).toEqual([
+      {
+        Effect: "Allow",
+        Action: "bedrock:GetInferenceProfile",
+        Resource:
+          "arn:aws:bedrock:us-east-2:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6",
+      },
+      {
+        Effect: "Allow",
+        Action: "bedrock:GetFoundationModel",
+        // The variant as configured: it's what Claude Code calls, so it's what's described.
+        Resource: [
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6-v1:0:200k",
+        ],
+      },
+      { Effect: "Allow", Action: "bedrock:GetFoundationModelAvailability", Resource: "*" },
+    ]);
+  });
+
+  it("grants nothing when there is no Bedrock model to check", () => {
+    expect(statementsFor([])).toEqual([]);
+    expect(
+      modelCheckStatements(
+        [{ ...check("claude-sonnet-4-6"), kind: "anthropic-api" }],
+        "aws",
+        "us-east-2",
+        "123456789012",
+      ),
+    ).toEqual([]);
   });
 });

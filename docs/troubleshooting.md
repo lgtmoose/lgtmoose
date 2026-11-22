@@ -37,6 +37,8 @@ LGTMoose's approval may not count towards GitHub's required reviews: see [Provid
 
 **A credential alarm fired.** Each stored credential has a `CredentialAlarm-<provider id>` alarm on the `CredentialProblem` metric. It fires when the secret is missing, being deleted or has no current version, when a Claude token is close to its year's expiry, or when a run was refused for auth (an expired or revoked token). Run `pnpm lgtmoose auth <method>` again for that provider. The credential broker's log says which run hit it.
 
+**A model alarm fired, or deploy warned about a model.** `ModelAlarm-<provider id>` fires when a model a provider is pinned to can't be called: the inference profile doesn't exist in the region, a bare model ID needs a profile, model access isn't granted, or the model's agreement isn't accepted. The health check's `model unavailable` log line, and the deploy warning, name the tier, model ID, region and fix. `pnpm lgtmoose auth bedrock` lists the profiles and models the region offers. See [Model checks](credentials.md#model-checks).
+
 **Reviews slow down or move to another provider.** A rate limit, a used-up plan or a rejected credential sends a batch to the next provider in `providers`, and the provider sits out for a while (the `provider_cooldowns` table). The summary comment ends with usage per provider, including limit hits and fallbacks.
 
 **A provider only runs a few tasks at once.** Each credential has a concurrency limit across every review: 1 for a ChatGPT sign-in, 2 by default for other plan credentials, 16 for API keys. Batches wait for a free slot. See [Providers and auth](credentials.md#the-credential-broker).
