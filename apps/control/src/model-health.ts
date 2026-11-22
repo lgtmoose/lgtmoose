@@ -52,6 +52,13 @@ export interface ModelHealthDeps {
 /** Runs the checks one at a time, reports each provider once, and returns what each found. */
 export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResult[]> {
   const results: ModelCheckResult[] = [];
+  const bedrock = deps.checks.filter((check) => check.kind === "bedrock");
+  if (deps.bedrock === undefined && bedrock.length > 0) {
+    // Said once per run, so a skipped check is never mistaken for a passed one.
+    deps.log("Bedrock models not checked: no Bedrock client here", {
+      providers: [...new Set(bedrock.map((check) => check.providerId))],
+    });
+  }
   for (const check of deps.checks) {
     if (check.kind === "bedrock") {
       if (deps.bedrock !== undefined) {
@@ -95,4 +102,50 @@ export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResu
     }
   }
   return results;
+}
+
+/**
+ * The whole scheduled health check: the credential check first, then the model checks. A
+ * model check that can't run at all (the runtime's Bedrock client is missing a command, the
+ * checks don't parse) is logged and skipped: it never fails the credential check, whose result
+ * is returned either way.
+ */
+export async function healthCheck(deps: {
+  credentials: () => Promise<Record<string, string | undefined>>;
+  checks: () => ModelToCheck[];
+  region: string;
+  bedrock: () => Promise<BedrockModelApi>;
+  report: ModelHealthDeps["report"];
+  log: ModelHealthDeps["log"];
+}): Promise<{ credentials: Record<string, string | undefined>; models: Record<string, string> }> {
+  const credentials = await deps.credentials();
+  const models: Record<string, string> = {};
+  try {
+    const checks = deps.checks();
+    if (checks.length === 0) return { credentials, models };
+    let bedrock: BedrockModelApi | undefined;
+    if (checks.some((check) => check.kind === "bedrock")) {
+      try {
+        bedrock = await deps.bedrock();
+      } catch (error) {
+        deps.log("model checks not run: no Bedrock client", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { credentials, models };
+      }
+    }
+    const results = await checkModels({
+      checks,
+      region: deps.region,
+      ...(bedrock === undefined ? {} : { bedrock }),
+      report: deps.report,
+      log: deps.log,
+    });
+    for (const result of results) models[`${result.providerId}:${result.model}`] = result.status;
+  } catch (error) {
+    deps.log("model checks failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return { credentials, models };
 }

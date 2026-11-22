@@ -106,9 +106,34 @@ function checkKind(
   return { reason: SUBSCRIPTION_REASON };
 }
 
+/** The AWS console's host for a region's partition: commercial, GovCloud or China. */
+function consoleHost(region: string): string {
+  if (region.startsWith("us-gov-")) return "console.amazonaws-us-gov.com";
+  if (region.startsWith("cn-")) return "console.amazonaws.cn";
+  return `${region}.console.aws.amazon.com`;
+}
+
 /** The Bedrock console page where model access is turned on, for a region. */
 export function bedrockModelAccessUrl(region: string): string {
-  return `https://${region}.console.aws.amazon.com/bedrock/home?region=${region}#/modelaccess`;
+  return `https://${consoleHost(region)}/bedrock/home?region=${region}#/modelaccess`;
+}
+
+/**
+ * The cross-region inference profile prefix for a region's geography (`us.`, `eu.`, `apac.`,
+ * `us-gov.`), or undefined where Bedrock has none: then only `global.` is suggested.
+ */
+function profilePrefix(region: string): string | undefined {
+  if (region.startsWith("us-gov-")) return "us-gov";
+  if (region.startsWith("us-") || region.startsWith("ca-")) return "us";
+  if (region.startsWith("eu-")) return "eu";
+  if (region.startsWith("ap-")) return "apac";
+  return undefined;
+}
+
+/** Profile IDs to suggest for a bare model ID in a region. */
+function profileSuggestion(model: string, region: string): string {
+  const geo = profilePrefix(region);
+  return geo === undefined ? `global.${model}` : `${geo}.${model} or global.${model}`;
 }
 
 /** An AWS answer that says the thing asked about doesn't exist. */
@@ -210,7 +235,7 @@ export async function checkBedrockModel(
         return result(
           "unavailable",
           `Bedrock has no model ${check.model} in ${region}`,
-          `check the ID, or use an inference profile ID such as us.${check.model}`,
+          `check the ID, or use an inference profile ID such as ${profileSuggestion(check.model, region)}`,
         );
       }
       if (
@@ -221,18 +246,22 @@ export async function checkBedrockModel(
         return result(
           "unavailable",
           `${check.model} can only be called through an inference profile in ${region}`,
-          `pin a profile ID instead, such as us.${check.model} or global.${check.model}`,
+          `pin a profile ID instead, such as ${profileSuggestion(check.model, region)}`,
         );
       }
     }
+    // A profile routes to other regions, so its model needn't be offered (or even known) in this
+    // one: an ACTIVE profile settles that, and only the account's access and agreement are read.
+    const profile = match[1] !== undefined;
     let availability;
     try {
       availability = await api.availability(foundation);
     } catch (error) {
       if (!(error instanceof BedrockNotFound)) throw error;
+      if (profile) return result("ok");
       return result("unavailable", `Bedrock has no model ${foundation} in ${region}`, access);
     }
-    if (availability.region !== undefined && availability.region !== "AVAILABLE") {
+    if (!profile && availability.region !== undefined && availability.region !== "AVAILABLE") {
       return result(
         "unavailable",
         `${foundation} isn't offered in ${region}`,
@@ -319,8 +348,26 @@ export function describeModelProblem(result: ModelCheckResult): string {
   return `${result.providerId} (${tiers}): ${result.model}: ${result.problem ?? result.status}.${fix}`;
 }
 
-/** AWS errors that say a model or profile ID doesn't exist (or isn't a valid one) here. */
-const NOT_FOUND_ERRORS = new Set(["ResourceNotFoundException", "ValidationException"]);
+/**
+ * Whether an AWS error says the model or profile ID doesn't exist here: a
+ * `ResourceNotFoundException`, or a `ValidationException` about the identifier itself. Any other
+ * validation error is a problem with the request, so the check is `unknown`, not `unavailable`.
+ */
+export function isBedrockNotFound(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "ResourceNotFoundException") return true;
+  return (
+    error.name === "ValidationException" &&
+    ABOUT_THE_ID.test(error.message) &&
+    NOT_AN_ID.test(error.message)
+  );
+}
+
+/** A message about the model or profile identifier, as Bedrock words it. */
+const ABOUT_THE_ID = /\b(?:model|profile) (?:identifier|id)\b|\binference profile\b/i;
+/** …that says the identifier isn't one ("The provided model identifier is invalid."). */
+const NOT_AN_ID =
+  /\b(?:invalid|not valid|unknown|not found|could not resolve|couldn't resolve|doesn't exist|does not exist)\b/i;
 
 /** The parts of `@aws-sdk/client-bedrock` the checks use, passed in so this package needs no SDK. */
 export interface BedrockSdk {
@@ -336,7 +383,7 @@ export function bedrockModelApi(sdk: BedrockSdk): BedrockModelApi {
     try {
       return (await sdk.client.send(command)) as T;
     } catch (error) {
-      if (error instanceof Error && NOT_FOUND_ERRORS.has(error.name)) {
+      if (error instanceof Error && isBedrockNotFound(error)) {
         throw new BedrockNotFound(error.message);
       }
       throw error;

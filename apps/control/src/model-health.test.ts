@@ -1,6 +1,6 @@
 import { BedrockNotFound, type BedrockModelApi, type ModelToCheck } from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
-import { checkModels, modelChecksSchema } from "./model-health.js";
+import { checkModels, healthCheck, modelChecksSchema } from "./model-health.js";
 
 const bedrock = (model: string, tiers: ModelToCheck["tiers"] = ["standard"]): ModelToCheck => ({
   providerId: "bedrock",
@@ -145,11 +145,12 @@ describe("checkModels", () => {
     expect(JSON.stringify([out.reports, out.logs])).not.toMatch(/STORED/);
   });
 
-  it("skips Bedrock without a client and API keys without a reader", async () => {
+  it("skips Bedrock without a client, says so once, and skips API keys without a reader", async () => {
     const out = recorder();
     const results = await checkModels({
       checks: [
         bedrock("us.anthropic.claude-sonnet-4-6"),
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
         {
           providerId: "anthropic",
           kind: "anthropic-api",
@@ -163,6 +164,82 @@ describe("checkModels", () => {
     });
     expect(results).toEqual([]);
     expect(out.reports).toEqual([]);
+    expect(out.logs).toEqual([
+      ["Bedrock models not checked: no Bedrock client here", { providers: ["bedrock"] }],
+    ]);
+  });
+});
+
+describe("healthCheck", () => {
+  const credentials = async () => ({ claude: undefined });
+
+  it("still returns the credential check when the Bedrock client can't be loaded", async () => {
+    const out = recorder();
+    const result = await healthCheck({
+      credentials,
+      checks: () => [bedrock("us.anthropic.claude-sonnet-4-6")],
+      region: "us-east-2",
+      bedrock: async () => {
+        throw new Error("@aws-sdk/client-bedrock has no GetFoundationModelAvailabilityCommand.");
+      },
+      report: out.report,
+      log: out.log,
+    });
+    expect(result).toEqual({ credentials: { claude: undefined }, models: {} });
+    expect(out.reports).toEqual([]);
+    expect(out.logs[0]?.[0]).toBe("model checks not run: no Bedrock client");
+  });
+
+  it("still returns the credential check when the model checks don't parse", async () => {
+    const out = recorder();
+    const result = await healthCheck({
+      credentials,
+      checks: () => modelChecksSchema.parse([{ kind: "vertex" }]),
+      region: "us-east-2",
+      bedrock: async () => api(),
+      report: out.report,
+      log: out.log,
+    });
+    expect(result.credentials).toEqual({ claude: undefined });
+    expect(out.logs[0]?.[0]).toBe("model checks failed");
+  });
+
+  it("runs the credential check first, then the models", async () => {
+    const order: string[] = [];
+    const out = recorder();
+    const result = await healthCheck({
+      credentials: async () => {
+        order.push("credentials");
+        return {};
+      },
+      checks: () => [bedrock("us.anthropic.claude-sonnet-4-6")],
+      region: "us-east-2",
+      bedrock: async () => {
+        order.push("bedrock");
+        return api();
+      },
+      report: out.report,
+      log: out.log,
+    });
+    expect(order).toEqual(["credentials", "bedrock"]);
+    expect(result.models).toEqual({ "bedrock:us.anthropic.claude-sonnet-4-6": "ok" });
+  });
+
+  it("loads no Bedrock client when no Bedrock model is checked", async () => {
+    let loaded = false;
+    const out = recorder();
+    await healthCheck({
+      credentials,
+      checks: () => [],
+      region: "us-east-2",
+      bedrock: async () => {
+        loaded = true;
+        return api();
+      },
+      report: out.report,
+      log: out.log,
+    });
+    expect(loaded).toBe(false);
   });
 });
 

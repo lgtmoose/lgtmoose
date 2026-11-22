@@ -795,7 +795,8 @@ export class WorkflowStack extends Stack {
         threshold: 1,
         comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         evaluationPeriods: 1,
-        treatMissingData: TreatMissingData.NOT_BREACHING,
+        // A check that couldn't run writes no point: it neither raises nor clears the alarm.
+        treatMissingData: TreatMissingData.IGNORE,
       });
     }
     return alarms;

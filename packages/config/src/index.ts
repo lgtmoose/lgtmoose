@@ -70,6 +70,7 @@ export {
   checkApiModel,
   checkBedrockModel,
   checkDetail,
+  isBedrockNotFound,
   fetchStatus,
   describeModelProblem,
   planModelChecks,

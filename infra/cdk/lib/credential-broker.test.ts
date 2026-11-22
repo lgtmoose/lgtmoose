@@ -265,6 +265,12 @@ describe("credential broker", () => {
     expect(alarms.map((alarm) => alarm.Properties.Dimensions)).toEqual([
       [{ Name: "Provider", Value: "bedrock" }],
     ]);
+    // A check that couldn't run writes no point, which must leave the alarm as it is.
+    expect(alarms[0]?.Properties).toMatchObject({
+      Threshold: 1,
+      Statistic: "Maximum",
+      TreatMissingData: "ignore",
+    });
   }, 120_000);
 
   it("has no health check for a deployment with nothing to check", () => {

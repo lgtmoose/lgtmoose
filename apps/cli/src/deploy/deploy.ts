@@ -177,13 +177,17 @@ export async function modelWarnings(
     const key = credentials.get(check.providerId);
     if (key !== undefined) results.push(await checkApiModel(calls.get, check, key));
   }
-  const failed = results.filter((result) => result.status !== "ok");
-  if (failed.length === 0) return undefined;
-  const lines = failed.map((result) => `  - ${describeModelProblem(result)}`);
-  const head = failed.some((result) => result.status === "unavailable")
-    ? "Warning: reviews on these models will fail until they're fixed:"
-    : "Warning: these models couldn't be checked:";
-  return `${head}\n${lines.join("\n")}\nDeploying anyway.\n`;
+  const section = (status: "unavailable" | "unknown", head: string) => {
+    const lines = results
+      .filter((result) => result.status === status)
+      .map((result) => `  - ${describeModelProblem(result)}`);
+    return lines.length === 0 ? [] : [head, ...lines];
+  };
+  const sections = [
+    ...section("unavailable", "Warning: reviews on these models will fail until they're fixed:"),
+    ...section("unknown", "Warning: these models couldn't be checked:"),
+  ];
+  return sections.length === 0 ? undefined : `${sections.join("\n")}\nDeploying anyway.\n`;
 }
 
 function jwtFor(app: AppCredentials, deps: DeployDeps): string {

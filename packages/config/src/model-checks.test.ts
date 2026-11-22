@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { parseDeployConfig } from "./deploy.js";
 import {
   BedrockNotFound,
+  bedrockModelAccessUrl,
+  bedrockModelApi,
   checkApiModel,
   checkBedrockModel,
   describeModelProblem,
+  isBedrockNotFound,
   planModelChecks,
   type BedrockModelApi,
   type ModelToCheck,
@@ -238,6 +241,141 @@ describe("checkBedrockModel", () => {
       "us-east-2",
     );
     expect(result.status).toBe("unavailable");
+  });
+});
+
+describe("checkBedrockModel through a profile", () => {
+  it("accepts a global profile whose model isn't offered in the source region", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        availability: async () => ({
+          region: "NOT_AVAILABLE",
+          entitlement: "AVAILABLE",
+          agreement: "AVAILABLE",
+        }),
+      }),
+      bedrockCheck("global.anthropic.claude-opus-4-8"),
+      "eu-north-1",
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("accepts an active profile whose model the source region doesn't know", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        availability: async () => {
+          throw new BedrockNotFound();
+        },
+      }),
+      bedrockCheck("global.anthropic.claude-opus-4-8"),
+      "eu-north-1",
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("still needs model access and the agreement for a profile", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        availability: async () => ({
+          region: "NOT_AVAILABLE",
+          entitlement: "NOT_AVAILABLE",
+          agreement: "AVAILABLE",
+        }),
+      }),
+      bedrockCheck("global.anthropic.claude-opus-4-8"),
+      "eu-north-1",
+    );
+    expect(result.status).toBe("unavailable");
+    expect(result.problem).toMatch(/model access/);
+  });
+});
+
+describe("region-specific hints", () => {
+  const needsProfile = (region: string) =>
+    checkBedrockModel(
+      fakeBedrock({ foundationModel: async () => ({ inferenceTypes: ["INFERENCE_PROFILE"] }) }),
+      bedrockCheck("anthropic.claude-sonnet-4-6"),
+      region,
+    );
+
+  it("suggests the region's own profile prefix", async () => {
+    expect((await needsProfile("eu-west-1")).fix).toContain("eu.anthropic.claude-sonnet-4-6");
+    expect((await needsProfile("ap-southeast-2")).fix).toContain(
+      "apac.anthropic.claude-sonnet-4-6",
+    );
+    expect((await needsProfile("us-gov-west-1")).fix).toContain(
+      "us-gov.anthropic.claude-sonnet-4-6",
+    );
+    const other = await needsProfile("sa-east-1");
+    expect(other.fix).toContain("global.anthropic.claude-sonnet-4-6");
+    expect(other.fix).not.toMatch(/\bus\./);
+  });
+
+  it("links to the partition's console", () => {
+    expect(bedrockModelAccessUrl("us-east-2")).toBe(
+      "https://us-east-2.console.aws.amazon.com/bedrock/home?region=us-east-2#/modelaccess",
+    );
+    expect(bedrockModelAccessUrl("us-gov-west-1")).toMatch(
+      /^https:\/\/console\.amazonaws-us-gov\.com\//,
+    );
+    expect(bedrockModelAccessUrl("cn-north-1")).toMatch(/^https:\/\/console\.amazonaws\.cn\//);
+  });
+});
+
+describe("isBedrockNotFound", () => {
+  const error = (name: string, message: string) => Object.assign(new Error(message), { name });
+
+  it("takes a missing resource and an invalid identifier as not found", () => {
+    expect(isBedrockNotFound(error("ResourceNotFoundException", "not found"))).toBe(true);
+    expect(
+      isBedrockNotFound(error("ValidationException", "The provided model identifier is invalid.")),
+    ).toBe(true);
+    expect(
+      isBedrockNotFound(
+        error(
+          "ValidationException",
+          "Could not resolve the foundation model from the provided model identifier.",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves any other validation error as a failed check", () => {
+    expect(
+      isBedrockNotFound(
+        error(
+          "ValidationException",
+          "1 validation error detected: Value at 'maxResults' failed to satisfy constraint",
+        ),
+      ),
+    ).toBe(false);
+    expect(isBedrockNotFound(error("AccessDeniedException", "not authorized"))).toBe(false);
+  });
+
+  it("makes a request problem unknown, and an invalid identifier unavailable", async () => {
+    const api = (message: string) =>
+      bedrockModelApi({
+        client: {
+          send: async () => {
+            throw error("ValidationException", message);
+          },
+        },
+        GetInferenceProfileCommand: class {},
+        GetFoundationModelCommand: class {},
+        GetFoundationModelAvailabilityCommand: class {},
+      });
+    const request = await checkBedrockModel(
+      api("1 validation error detected: Value at 'x' failed to satisfy constraint"),
+      bedrockCheck("us.anthropic.claude-sonnet-4-6"),
+      "us-east-2",
+    );
+    expect(request.status).toBe("unknown");
+    const invalid = await checkBedrockModel(
+      api("The provided model identifier is invalid."),
+      bedrockCheck("us.anthropic.claude-sonnet-4-6"),
+      "us-east-2",
+    );
+    expect(invalid.status).toBe("unavailable");
   });
 });
 

@@ -341,6 +341,56 @@ describe("lgtmoose deploy", () => {
     expect(h.calls).toEqual(["bootstrap:123456789012", "deploy", "webhook", "protect"]);
   });
 
+  it("lists models that can't be called apart from ones that couldn't be checked", async () => {
+    const h = harness({
+      config: {
+        ...bedrockConfig,
+        providers: [
+          {
+            id: "claude",
+            harness: "claude-code",
+            auth: "bedrock",
+            models: {
+              fast: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+              standard: "us.anthropic.claude-sonnet-4-6",
+              deep: "us.anthropic.claude-sonnet-4-6",
+            },
+          },
+        ],
+      },
+    });
+    h.deps.models = () => ({
+      bedrock: {
+        inferenceProfile: (id) =>
+          id === "us.anthropic.claude-sonnet-4-6"
+            ? Promise.reject(new BedrockNotFound())
+            : Promise.reject(
+                Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }),
+              ),
+        foundationModel: () => Promise.resolve({ inferenceTypes: ["ON_DEMAND"] }),
+        availability: () =>
+          Promise.resolve({
+            region: "AVAILABLE",
+            entitlement: "AVAILABLE",
+            agreement: "AVAILABLE",
+          }),
+      },
+      get: () => Promise.reject(new Error("no API-key provider")),
+    });
+    const result = await run(runDeploy, [], h);
+    expect(result.exitCode).toBe(0);
+    const failing = result.all.indexOf("Warning: reviews on these models will fail");
+    const unchecked = result.all.indexOf("Warning: these models couldn't be checked:");
+    expect(failing).toBeGreaterThanOrEqual(0);
+    expect(unchecked).toBeGreaterThan(failing);
+    const between = result.all.slice(failing, unchecked);
+    expect(between).toContain("us.anthropic.claude-sonnet-4-6");
+    expect(between).not.toContain("claude-haiku");
+    expect(result.all.slice(unchecked)).toContain(
+      "claude (fast): us.anthropic.claude-haiku-4-5-20251001-v1:0: couldn't check: ThrottlingException: Rate exceeded.",
+    );
+  });
+
   it("says nothing more when every model can be called", async () => {
     const h = harness({
       config: {
