@@ -19,7 +19,7 @@ import {
   buildReplyJudgePrompt,
 } from "@lgtmoose/roles";
 import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
-import { RECHECK_TIMEOUT_MS, recheckJob, type RecheckJob } from "./recheck.js";
+import { RECHECK_TIMEOUT_MS, recheckJob, type RecheckJob, type RecheckMode } from "./recheck.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { reviewGate, waitingCheckRun } from "./trigger.js";
@@ -380,6 +380,31 @@ async function judgeJobs(
   return judges;
 }
 
+/**
+ * Whether two preparations of one review planned the same batches: the same indices with the
+ * same files. Comments don't change the plan, so a rebuild that hides different ones should
+ * come out the same; only its prompts differ.
+ */
+function samePlan(a: PreparedReview, b: PreparedReview): boolean {
+  return (
+    a.jobs.length === b.jobs.length &&
+    a.jobs.every(
+      (job, i) =>
+        job.index === b.jobs[i]?.index && job.files.join("\n") === b.jobs[i]?.files.join("\n"),
+    )
+  );
+}
+
+/** `into` with the reviewer prompts of `from`, a rebuild with the same plan (`samePlan`). */
+function promptsFrom(from: PreparedReview, into: PreparedReview): PreparedReview {
+  return {
+    ...into,
+    jobs: from.jobs,
+    ...(from.reviewerSystem === undefined ? {} : { reviewerSystem: from.reviewerSystem }),
+    ...(from.reviewerShared === undefined ? {} : { reviewerShared: from.reviewerShared }),
+  };
+}
+
 type RunGitHub = Awaited<ReturnType<ControlDeps["github"]>>;
 
 /**
@@ -711,34 +736,40 @@ export async function prepare(
     });
     const { learnings } = deps;
     const taken = await takeReplies(deps, run.pullRequestId, settings);
-    // Carried findings the new commits may have fixed (NIC-1120): only on an incremental
-    // review, which is what carries findings over. A reply the judge reads this run already
-    // covers its finding. Chosen before the review is prepared, so the reviewer isn't shown
-    // their comments (`hiddenThreads`, as for a claimed fix): "not raised again" then means it
-    // looked at the code afresh. Numbered after the other batches, below. Should the recheck
-    // not run after all (the review isn't incremental, or the caps leave it out), the review's
-    // prompts are built again with those comments in.
-    const rechecking =
-      conversationOnly ||
-      full ||
-      lastReviewed === undefined ||
-      deps.findings.closeFixed === undefined
-        ? undefined
-        : await recheckJob({
-            repo,
-            records: await deps.findings.trackedFindings(run.pullRequestId),
-            skip: new Set(taken.pending.map((reply) => reply.findingId)),
-            sinceSha: lastReviewed,
-            headSha: pr.headSha,
-            baseSha: pr.baseSha,
-            index: 0,
-            log: (message, fields) => deps.log(message, fields),
-          });
+    // Carried findings the new commits may have fixed (NIC-1120). A reply the judge reads this
+    // run already covers its finding. Chosen before the review is prepared, so the reviewer
+    // isn't shown their comments (`hiddenThreads`, as for a claimed fix): "not raised again"
+    // then means it looked at the code afresh. Numbered after the other batches, below. Should
+    // the recheck not run after all (the caps leave it out, say), the review's prompts are built
+    // again with those comments in.
+    // A full review (NIC-1123) reads every file again, so it rechecks any open blocking or
+    // should-fix finding, measured from when they were raised (`mode: "full"`). Without that,
+    // its reviewer, not told to repeat our comments, stays silent on a fixed one, and it stays
+    // open. A review that was going to be incremental but didn't come out so gets the same,
+    // below.
+    const canRecheck =
+      !conversationOnly &&
+      deps.findings.closeFixed !== undefined &&
+      (full || lastReviewed !== undefined);
+    const recheckFor = async (mode: RecheckMode) =>
+      recheckJob({
+        repo,
+        records: await deps.findings.trackedFindings(run.pullRequestId),
+        skip: new Set(taken.pending.map((reply) => reply.findingId)),
+        sinceSha: lastReviewed,
+        headSha: pr.headSha,
+        baseSha: pr.baseSha,
+        index: 0,
+        mode,
+        log: (message, fields) => deps.log(message, fields),
+      });
+    let rechecking = canRecheck ? await recheckFor(full ? "full" : "incremental") : undefined;
     const fixedIds = (await deps.findings.fixedCommentIds?.(run.pullRequestId)) ?? [];
-    const recheckIds =
-      rechecking?.targets.flatMap((target) =>
+    const commentsOf = (job: RecheckJob | undefined) =>
+      job?.targets.flatMap((target) =>
         target.githubCommentId === undefined ? [] : [target.githubCommentId],
       ) ?? [];
+    let recheckIds = commentsOf(rechecking);
     const review = (hidden: readonly number[]) =>
       prepareReview(
         {
@@ -769,6 +800,28 @@ export async function prepare(
     // A conversation-only run keeps the plan (the post step reads the PR from it) but reviews
     // none of it: no review batches.
     let prepared: PreparedReview = conversationOnly ? { ...planned, jobs: [] } : planned;
+    // Meant to be incremental, but every file is read again (NIC-1123): recheck as a full review
+    // does, with the new targets' comments hidden from the reviewer instead. The plan doesn't
+    // depend on comments, so only the prompts are taken from the rebuild; if it came out
+    // differently after all, there's no recheck (and the first prompts, which hid only the
+    // incremental targets, are rebuilt with every comment shown, below).
+    if (canRecheck && rechecking?.mode !== "full" && prepared.kind !== "incremental") {
+      const fullJob = await recheckFor("full");
+      const fullIds = commentsOf(fullJob);
+      const rebuilt = fullJob === undefined ? undefined : await review(fullIds);
+      if (rebuilt !== undefined && samePlan(rebuilt, prepared)) {
+        prepared = promptsFrom(rebuilt, prepared);
+        rechecking = fullJob;
+        recheckIds = fullIds;
+      } else {
+        if (fullJob !== undefined) {
+          deps.log("full-review recheck left out: the plan came out differently", {
+            runId: run.runId,
+          });
+        }
+        rechecking = undefined;
+      }
+    }
     // Before the checkout is sealed: whether a finding's file changed needs its commit.
     const judges = await judgeJobs(deps, taken, repo, pr.headSha, prepared);
     // Linked tickets, read here with the provider's credential; their text goes to the sandbox
@@ -802,9 +855,10 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
-    // The recheck, after the explains (none unless the review came out incremental).
+    // The recheck, after the explains: an incremental one only when the review came out
+    // incremental, a full review's (NIC-1123) whatever its kind.
     const recheck =
-      rechecking === undefined || prepared.kind !== "incremental"
+      rechecking === undefined || (rechecking.mode !== "full" && prepared.kind !== "incremental")
         ? undefined
         : {
             ...rechecking,
@@ -910,20 +964,8 @@ export async function prepare(
     // is the same (comments don't change it), so only the prompts are taken from the rebuild.
     if (keptRecheck === undefined && recheckIds.length > 0 && !conversationOnly) {
       const shown = await review([]);
-      const same =
-        shown.jobs.length === prepared.jobs.length &&
-        shown.jobs.every(
-          (job, i) =>
-            job.index === prepared.jobs[i]?.index &&
-            job.files.join("\n") === prepared.jobs[i]?.files.join("\n"),
-        );
-      if (same) {
-        prepared = {
-          ...prepared,
-          jobs: shown.jobs,
-          ...(shown.reviewerSystem === undefined ? {} : { reviewerSystem: shown.reviewerSystem }),
-          ...(shown.reviewerShared === undefined ? {} : { reviewerShared: shown.reviewerShared }),
-        };
+      if (samePlan(shown, prepared)) {
+        prepared = promptsFrom(shown, prepared);
       } else {
         deps.log("review prompts not rebuilt: the plan came out differently", {
           runId: run.runId,

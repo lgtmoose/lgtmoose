@@ -68,9 +68,12 @@ describe("the recheck scenarios", () => {
 
   it("picks each finding, sends its change, and scores a right answer as right", async () => {
     // Fixed where the later commit really fixes it: the router mounts requireAdmin, the
-    // payment section turns the saved card into a token.
+    // payment section turns the saved card into a token, the analytics bus tracks add_to_cart.
     const harness = stubRecheck(
-      (prompt) => /\+.*requireAdmin\(exportUsers\)|\+.*tokenForSavedCard\(card/.test(prompt),
+      (prompt) =>
+        /\+.*requireAdmin\(exportUsers\)|\+.*tokenForSavedCard\(card|\+.*track\(\W*add_to_cart/.test(
+          prompt,
+        ),
       true,
     );
     const scores = await runRecheckScenarios(scenarios, {
@@ -91,6 +94,28 @@ describe("the recheck scenarios", () => {
     expect(savedCard).toContain('<untrusted source="code" path="src/checkout/pay.ts"');
     expect(renderRecheckMarkdown(scores, "stub")).toContain("False closes: 0.");
   }, 120_000);
+
+  it("picks a finding on a full review though its fix is in an unrelated file (NIC-1123)", async () => {
+    const full = scenarios.filter((s) => s.review === "full");
+    expect(full.length).toBeGreaterThanOrEqual(1);
+    const harness = stubRecheck((prompt) => /\+.*track\(\W*add_to_cart/.test(prompt), true);
+    const scores = await runRecheckScenarios(full, {
+      harness,
+      model: "stub",
+      timeoutMs: 5_000,
+      workRoot,
+    });
+    expect(scores.map((score) => [score.checked, score.closed])).toEqual([[true, true]]);
+    expect(harness.prompts[0]).toContain("+++ b/src/analytics/bus.ts");
+    expect(harness.prompts[0]).toContain('<untrusted source="code" path="src/cart/CartContext.ts"');
+
+    // Run as an incremental review, the import graph doesn't reach the fix: nothing is picked.
+    const incremental = await runRecheckScenarios(
+      full.map((s) => ({ ...s, review: undefined })),
+      { harness, model: "stub", timeoutMs: 5_000, workRoot },
+    );
+    expect(incremental.map((score) => score.checked)).toEqual([false]);
+  }, 60_000);
 
   it("keeps a protected finding open on a verdict that doesn't name its fix", async () => {
     const said = stubRecheck(() => true, false);

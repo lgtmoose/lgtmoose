@@ -1,0 +1,25 @@
+{
+  "description": "The pilot's full review: adding to the cart sends no add_to_cart event. The later commit doesn't touch the cart context or the store it calls; the analytics bus the store publishes to now tracks add_to_cart. That file is two imports away and in another folder, so only a full review's recheck picks the finding.",
+  "expect": "fixed",
+  "review": "full",
+  "base": {
+    "src/analytics/track.ts": "export function track(event: string, properties: Record<string, unknown>): void {\n  void fetch(\"/events\", { method: \"POST\", body: JSON.stringify({ event, properties }) });\n}\n",
+    "src/analytics/bus.ts": "type Listener = (payload: Record<string, unknown>) => void;\n\nconst listeners = new Map<string, Listener[]>();\n\nexport function on(topic: string, listener: Listener): void {\n  listeners.set(topic, [...(listeners.get(topic) ?? []), listener]);\n}\n\nexport function publish(topic: string, payload: Record<string, unknown>): void {\n  for (const listener of listeners.get(topic) ?? []) listener(payload);\n}\n",
+    "src/store/cart.ts": "import { publish } from \"../analytics/bus\";\n\nexport interface CartItem {\n  id: string;\n  priceCents: number;\n}\n\nconst items: CartItem[] = [];\n\nexport function add(item: CartItem): void {\n  items.push(item);\n  publish(\"cart:add\", { id: item.id, priceCents: item.priceCents });\n}\n"
+  },
+  "raised": {
+    "src/cart/CartContext.ts": "import { add, type CartItem } from \"../store/cart\";\n\nexport function addToCart(item: CartItem): void {\n  // Analytics: every add sends add_to_cart.\n  add(item);\n}\n"
+  },
+  "later": {
+    "src/analytics/bus.ts": "import { track } from \"./track\";\n\ntype Listener = (payload: Record<string, unknown>) => void;\n\nconst listeners = new Map<string, Listener[]>();\n\nexport function on(topic: string, listener: Listener): void {\n  listeners.set(topic, [...(listeners.get(topic) ?? []), listener]);\n}\n\nexport function publish(topic: string, payload: Record<string, unknown>): void {\n  for (const listener of listeners.get(topic) ?? []) listener(payload);\n}\n\non(\"cart:add\", (payload) => track(\"add_to_cart\", payload));\n"
+  },
+  "finding": {
+    "rule_category": "correctness",
+    "severity": "should_fix",
+    "path": "src/cart/CartContext.ts",
+    "line": 5,
+    "start_line": 3,
+    "title": "Adding to the cart sends no add_to_cart event",
+    "body": "addToCart() says every add sends add_to_cart, but it only calls the store's add(), and nothing listens for the cart:add topic it publishes, so the event is never tracked."
+  }
+}

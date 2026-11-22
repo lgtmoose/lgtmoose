@@ -4,9 +4,10 @@ import { UNTRUSTED_TAG, wrapUntrusted } from "./untrusted.js";
 import type { CodeExcerpt } from "./verifier.js";
 
 /**
- * The recheck (NIC-1120): on an incremental review, our open blocking and should-fix findings
- * that the new commits may have fixed are checked again against the PR's head, one batch per
- * run. It answers in the verifier's shape, with its own descriptions (`recheckOutputSchema`): one
+ * The recheck (NIC-1120): our open blocking and should-fix findings that the new commits may
+ * have fixed (any of them on a full review, NIC-1123), and findings of any severity whose cited
+ * line has since been edited or deleted (NIC-1124), are checked again against the PR's head, one
+ * batch per run. It answers in the verifier's shape, with its own descriptions (`recheckOutputSchema`): one
  * verdict per finding, `confirmed` meaning the problem is still there, or may be.
  *
  * The verifier tries to disprove a new finding, so it rejects one it can't show is real. The
@@ -36,6 +37,11 @@ export interface RecheckTarget {
   raisedAtSha: string;
   /** The code around the cited lines when the finding was raised. */
   excerpt?: CodeExcerpt;
+  /**
+   * The cited line was edited or deleted since it was raised (NIC-1124), such as by a committed
+   * suggestion: the recheck checks the code that replaced it.
+   */
+  citedLineChanged?: boolean;
 }
 
 export interface RecheckPromptInput {
@@ -97,6 +103,12 @@ function renderTarget(target: RecheckTarget): string {
     target.body,
   ].join("\n");
   const parts = [`## Finding ${target.id}`, "", wrapUntrusted("finding", fields)];
+  if (target.citedLineChanged === true) {
+    parts.push(
+      "",
+      "The cited line has been edited or deleted since. Find the code that replaced it at the latest commit, and check whether the problem is still there.",
+    );
+  }
   const { excerpt } = target;
   if (excerpt !== undefined && excerpt.lines.length > 0) {
     const code = excerpt.lines
