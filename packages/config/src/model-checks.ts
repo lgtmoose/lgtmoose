@@ -447,7 +447,7 @@ export function describeModelProblem(result: ModelCheckResult): string {
   const end = result.fix !== undefined && /https?:\/\/\S+$/.test(result.fix) ? "" : ".";
   const fix = result.fix === undefined ? "" : ` Fix: ${result.fix}${end}`;
   const problem = result.problem ?? result.status;
-  const stop = /[.!?]$/.test(problem) ? "" : ".";
+  const stop = /[.!?…]$/.test(problem) ? "" : ".";
   return `${result.providerId} (${tiers}): ${result.model}: ${problem}${stop}${fix}`;
 }
 
@@ -480,15 +480,33 @@ export interface BedrockSdk {
   GetFoundationModelAvailabilityCommand: new (input: { modelId: string }) => unknown;
 }
 
+const BEDROCK_ATTEMPTS = 2;
+const BEDROCK_CONNECTION_TIMEOUT_MS = 5_000;
+const BEDROCK_REQUEST_TIMEOUT_MS = 5_000;
+/** The SDK's standard retry waits at most this long before a second attempt, throttled or not. */
+const BEDROCK_RETRY_WAIT_MS = 1_000;
+
 /**
- * Options for the checks' `BedrockClient`: a few retries for throttling, and limits so a call
- * that hangs can't use up the health check's run.
+ * The longest one Bedrock model check can take: at most two calls, each with every attempt
+ * hitting both timeouts, plus the wait between attempts.
+ */
+export const BEDROCK_CHECK_WORST_MS =
+  2 *
+  (BEDROCK_ATTEMPTS * (BEDROCK_CONNECTION_TIMEOUT_MS + BEDROCK_REQUEST_TIMEOUT_MS) +
+    (BEDROCK_ATTEMPTS - 1) * BEDROCK_RETRY_WAIT_MS);
+
+/**
+ * Options for the checks' `BedrockClient`: one retry for throttling, and limits so a call that
+ * hangs can't use up the health check's run (see `BEDROCK_CHECK_WORST_MS`).
  */
 export function bedrockClientOptions(region: string) {
   return {
     region,
-    maxAttempts: 3,
-    requestHandler: { connectionTimeout: 5_000, requestTimeout: 10_000 },
+    maxAttempts: BEDROCK_ATTEMPTS,
+    requestHandler: {
+      connectionTimeout: BEDROCK_CONNECTION_TIMEOUT_MS,
+      requestTimeout: BEDROCK_REQUEST_TIMEOUT_MS,
+    },
   };
 }
 

@@ -1,6 +1,11 @@
 import { BedrockNotFound, type BedrockModelApi, type ModelToCheck } from "@lgtmoose/config";
-import { describe, expect, it } from "vitest";
-import { checkModels, healthCheck, modelChecksSchema } from "./model-health.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  MODEL_CHECK_RESERVE_MS,
+  checkModels,
+  healthCheck,
+  modelChecksSchema,
+} from "./model-health.js";
 
 const bedrock = (model: string, tiers: ModelToCheck["tiers"] = ["standard"]): ModelToCheck => ({
   providerId: "bedrock",
@@ -243,7 +248,7 @@ describe("checkModels", () => {
     expect(events).toEqual(["bedrock reported", "openai checked", "openai reported"]);
   });
 
-  it("starts no check with less than 20 s left, and still reports what it found", async () => {
+  it("starts no check with less than the worst-case check left, and still reports what it found", async () => {
     const out = recorder();
     let left = 60_000;
     const asked: string[] = [];
@@ -280,7 +285,7 @@ describe("checkModels", () => {
 
   it("clears nothing for a provider it ran out of time on", async () => {
     const out = recorder();
-    let left = 30_000;
+    let left = 100_000;
     await checkModels({
       checks: [
         bedrock("us.anthropic.claude-sonnet-4-6"),
@@ -298,7 +303,70 @@ describe("checkModels", () => {
       report: out.report,
       log: out.log,
     });
+    expect(left).toBe(5_000);
     expect(out.reports).toEqual([]);
+  });
+
+  it("reports an unavailable model at once, before a later check that never returns", async () => {
+    // The Lambda is killed mid-check: what it found before that must already be reported.
+    const out = recorder();
+    const working = api(["us.anthropic.claude-sonnet-4-6"]);
+    let hung = false;
+    void checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-sonnet-4-6"),
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+      ],
+      region: "us-east-2",
+      bedrock: {
+        ...working,
+        inferenceProfile: (id) => {
+          if (id === "us.anthropic.claude-sonnet-4-6") return working.inferenceProfile(id);
+          hung = true;
+          return new Promise(() => undefined);
+        },
+      },
+      remainingMs: () => 10 * 60_000,
+      report: out.report,
+      log: out.log,
+    });
+    await vi.waitFor(() => expect(hung).toBe(true));
+    expect(out.reports).toEqual([
+      [
+        "bedrock",
+        1,
+        [
+          expect.stringContaining(
+            "us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2.",
+          ),
+        ],
+      ],
+    ]);
+  });
+
+  it("reports every unavailable model so far each time another is found", async () => {
+    const out = recorder();
+    await checkModels({
+      checks: [
+        bedrock("us.anthropic.claude-sonnet-4-6"),
+        bedrock("us.anthropic.claude-haiku-4-5-20251001-v1:0", ["fast"]),
+      ],
+      region: "us-east-2",
+      bedrock: api([
+        "us.anthropic.claude-sonnet-4-6",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      ]),
+      report: out.report,
+      log: out.log,
+    });
+    expect(out.reports.map(([id, value, problems]) => [id, value, problems?.length])).toEqual([
+      ["bedrock", 1, 1],
+      ["bedrock", 1, 2],
+    ]);
+  });
+
+  it("keeps room for one worst-case check, and some to spare", () => {
+    expect(MODEL_CHECK_RESERVE_MS).toBe(60_000);
   });
 });
 

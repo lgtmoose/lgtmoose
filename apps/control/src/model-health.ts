@@ -1,4 +1,5 @@
 import {
+  BEDROCK_CHECK_WORST_MS,
   checkApiModel,
   checkBedrockModel,
   describeModelProblem,
@@ -22,8 +23,8 @@ import { z } from "zod";
  *
  * A provider with a model that can't be called reports `ModelUnavailable` 1, which alarms; one
  * with none unavailable and at least one that passed (or is an active profile whose access can't
- * be read) reports 0. A check that couldn't run reports nothing, so a throttled call neither
- * raises nor clears the alarm.
+ * be read) reports 0. A check that couldn't run (throttled, say) never raises the alarm, and
+ * doesn't stop another model of the provider from clearing it.
  */
 
 export const modelChecksSchema = z.array(
@@ -52,13 +53,17 @@ export interface ModelHealthDeps {
   remainingMs?: () => number;
 }
 
-/** No check is started with less than this left, so the ones already done are still reported. */
-export const MODEL_CHECK_RESERVE_MS = 20_000;
+/**
+ * No check is started with less than this left: the longest one check can take (42 s), and a
+ * margin for the reports and the log lines.
+ */
+export const MODEL_CHECK_RESERVE_MS = BEDROCK_CHECK_WORST_MS + 18_000;
 
 /**
- * Runs the checks one at a time, provider by provider, reports each provider as soon as its
- * checks are done, and returns what each found. Stops starting checks when the invocation is
- * nearly out of time; a provider it didn't finish is reported only if a model was unavailable.
+ * Runs the checks one at a time, provider by provider, and returns what each found. A model
+ * that can't be called is reported (1) the moment it's found; a provider is cleared (0) once its
+ * checks are done. Stops starting checks when the invocation is nearly out of time, and never
+ * clears a provider it didn't finish.
  */
 export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResult[]> {
   const results: ModelCheckResult[] = [];
@@ -87,9 +92,15 @@ export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResu
       if (result === undefined) continue;
       found.push(result);
       logResult(deps, result);
+      if (result.status === "unavailable") {
+        // At once, with every problem found so far: a later check that hangs until the
+        // invocation is killed can't lose it.
+        const unavailable = found.filter((each) => each.status === "unavailable");
+        deps.report(providerId, 1, unavailable.map(describeModelProblem));
+      }
     }
     results.push(...found);
-    reportProvider(deps, providerId, found, finished);
+    reportCleared(deps, providerId, found, finished);
     if (!finished) {
       deps.log("model checks stopped: the invocation is nearly out of time", {
         notFinished: providers.slice(index).map(([id]) => id),
@@ -150,23 +161,21 @@ function logResult(deps: ModelHealthDeps, result: ModelCheckResult): void {
 }
 
 /**
- * 1 when a model is unavailable. 0 needs every model checked and one that passed or is an active
- * profile (`unverified`): a provider whose every check couldn't run reports nothing, and one model
- * that's always unknown can't keep the alarm up once the rest pass.
+ * 0 once a provider's checks are done, when none was unavailable (that was reported as it was
+ * found) and one passed or is an active profile (`unverified`). A provider whose every check
+ * couldn't run reports nothing. A model that couldn't be checked doesn't stop the 0: otherwise
+ * one model that's always unknown would keep the alarm up after a fix. So a throttled check of a
+ * model that was unavailable can let the alarm clear when another of the provider's models
+ * passes, until a later run finds it unavailable again.
  */
-function reportProvider(
+function reportCleared(
   deps: ModelHealthDeps,
   providerId: string,
   found: ModelCheckResult[],
   finished: boolean,
 ): void {
-  const unavailable = found.filter((result) => result.status === "unavailable");
-  if (unavailable.length > 0) {
-    deps.report(providerId, 1, unavailable.map(describeModelProblem));
-  } else if (
-    finished &&
-    found.some((result) => result.status === "ok" || result.status === "unverified")
-  ) {
+  if (!finished || found.some((result) => result.status === "unavailable")) return;
+  if (found.some((result) => result.status === "ok" || result.status === "unverified")) {
     deps.report(providerId, 0);
   }
 }

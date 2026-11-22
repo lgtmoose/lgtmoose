@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { parseDeployConfig } from "./deploy.js";
 import {
+  BEDROCK_CHECK_WORST_MS,
   BedrockNotFound,
+  bedrockClientOptions,
   bedrockModelAccessUrl,
   bedrockModelApi,
   checkApiModel,
@@ -364,6 +366,17 @@ describe("checkBedrockModel through a profile", () => {
   });
 });
 
+describe("bedrockClientOptions", () => {
+  it("bounds one check at 42 s: two calls, two attempts each, 5 s limits", () => {
+    expect(bedrockClientOptions("us-east-2")).toEqual({
+      region: "us-east-2",
+      maxAttempts: 2,
+      requestHandler: { connectionTimeout: 5_000, requestTimeout: 5_000 },
+    });
+    expect(BEDROCK_CHECK_WORST_MS).toBe(42_000);
+  });
+});
+
 describe("region-specific hints", () => {
   const needsProfile = (region: string) =>
     checkBedrockModel(
@@ -614,6 +627,7 @@ describe("checkApiModel", () => {
       "anthropic (standard): claude-sonnet-4-6: it failed.",
     );
     expect(describeModelProblem({ ...base, problem: "why?" })).toMatch(/why\?$/);
+    expect(describeModelProblem({ ...base, problem: "and so on…" })).toMatch(/so on…$/);
     expect(describeModelProblem({ ...base, problem: "no", fix: "do this" })).toBe(
       "anthropic (standard): claude-sonnet-4-6: no. Fix: do this.",
     );
