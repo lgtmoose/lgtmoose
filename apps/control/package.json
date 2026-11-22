@@ -13,6 +13,10 @@
     "./outcome-learning": {
       "types": "./dist/outcome-learning.d.ts",
       "default": "./dist/outcome-learning.js"
+    },
+    "./recheck": {
+      "types": "./dist/recheck.d.ts",
+      "default": "./dist/recheck.js"
     }
   },
   "files": [

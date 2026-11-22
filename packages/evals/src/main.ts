@@ -9,6 +9,14 @@ import { loadFixtures, type Fixture } from "./fixture.js";
 import { learningTotals, loadScenarios, runScenarios, type Scenario } from "./learning.js";
 import { renderLearningMarkdown } from "./learning-report.js";
 import {
+  loadRecheckScenarios,
+  recheckTotals,
+  renderRecheckMarkdown,
+  runRecheckScenarios,
+  type RecheckScenario,
+  type RecheckScore,
+} from "./recheck.js";
+import {
   matrixAssignments,
   matrixRan,
   modelsFrom,
@@ -41,9 +49,11 @@ const HELP = `Usage: lgtmoose-evals [options]
 Runs the review pipeline (the one behind \`lgtmoose review --dry-run\`) with Claude Code on every
 fixture, scores the findings and writes report.md and report.json. Then runs the learning-speed
 scenarios in learning/ on the fast model: a correction after each review, and the next PR shows
-whether it stuck. Needs a model credential in the environment, as the dry run does. Exits 1 when
+whether it stuck. Then runs the recheck scenarios in recheck/ on the same fast model: a carried
+finding fixed in another file should close, one that still holds should stay open. Needs a model credential in the environment, as the dry run does. Exits 1 when
 recall falls below the baseline or the learning gate fails (any collateral in a protected
-category, any untrusted learning in a prompt, or a repeat rate above the baseline's), and 2 when
+category, any untrusted learning in a prompt, or a repeat rate above the baseline's) or a
+recheck closes a finding that still holds, and 2 when
 the evals couldn't run (bad fixtures or options, or every fixture run failed, as without a model
 credential).
 
@@ -55,6 +65,7 @@ Options:
   --only <name>        Run only this fixture or learning scenario (repeatable); the baseline
                        isn't checked (collateral still fails the run)
   --no-learning        Leave out the learning-speed scenarios
+  --no-recheck         Leave out the recheck scenarios
   --learning-model <name>
                        Reviewer model for the learning scenarios (default: haiku, the fast tier)
   --out <dir>          Where to write the report and transcripts (default: ./eval-report)
@@ -79,7 +90,7 @@ Provider matrix (instead of the single Claude Code run and its baseline gate):
                        (repeatable). Only roles the pipeline runs today can be set: reviewer
   --results <dir>      Also keep a timestamped copy of matrix.json here, to compare runs later
 
-A matrix run leaves out the learning scenarios. It writes matrix.md (the side-by-side table) and
+A matrix run leaves out the learning and recheck scenarios. It writes matrix.md (the side-by-side table) and
 matrix.json to --out, and each configuration's report.md, report.json and transcripts to a
 folder of its own. A provider without a credential is skipped, and limit hits are counted, not
 fatal. It exits 2 when no configuration could run, and 0 otherwise.
@@ -110,6 +121,7 @@ async function main(argv: readonly string[]): Promise<number> {
       "no-public": { type: "boolean" },
       only: { type: "string", multiple: true },
       "no-learning": { type: "boolean" },
+      "no-recheck": { type: "boolean" },
       "learning-model": { type: "string" },
       out: { type: "string" },
       baseline: { type: "string" },
@@ -187,12 +199,18 @@ async function main(argv: readonly string[]): Promise<number> {
   let fixtures = await loadFixtures(roots);
   let scenarios: Scenario[] =
     matrix || values["no-learning"] ? [] : await loadScenarios(join(PACKAGE_DIR, "learning"));
+  let rechecks: RecheckScenario[] =
+    matrix || values["no-recheck"] ? [] : await loadRecheckScenarios(join(PACKAGE_DIR, "recheck"));
   if (values.only !== undefined) {
     const only = new Set(values.only);
     fixtures = fixtures.filter((fixture) => only.has(fixture.name));
     scenarios = scenarios.filter((scenario) => only.has(scenario.name));
+    rechecks = rechecks.filter((scenario) => only.has(scenario.name));
     const missing = [...only].filter(
-      (name) => !fixtures.some((f) => f.name === name) && !scenarios.some((s) => s.name === name),
+      (name) =>
+        !fixtures.some((f) => f.name === name) &&
+        !scenarios.some((s) => s.name === name) &&
+        !rechecks.some((r) => r.name === name),
     );
     if (missing.length > 0) {
       throw new Error(`No fixture or learning scenario named ${missing.join(", ")}.`);
@@ -246,6 +264,23 @@ async function main(argv: readonly string[]): Promise<number> {
       });
       learning = { model: learningModel, totals: learningTotals(scored), scenarios: scored };
     }
+    // Carried findings checked again (NIC-1120), on the fast model the recheck runs on.
+    let rechecked: { model: string; scores: RecheckScore[] } | undefined;
+    if (rechecks.length > 0) {
+      const recheckModel = values["learning-model"] ?? "haiku";
+      rechecked = {
+        model: recheckModel,
+        scores: await runRecheckScenarios(rechecks, {
+          harness,
+          model: recheckModel,
+          timeoutMs: Math.round(minutes * 60_000),
+          workRoot,
+          progress,
+        }),
+      };
+    }
+    const recheckFalseCloses =
+      rechecked === undefined ? 0 : recheckTotals(rechecked.scores).falseCloses;
     const report: EvalReport = {
       ...buildReport(scores, model, startedAt),
       ...(learning === undefined ? {} : { learning }),
@@ -284,20 +319,30 @@ async function main(argv: readonly string[]): Promise<number> {
       ...(learning === undefined || learningGate === undefined
         ? []
         : [renderLearningMarkdown(learning.scenarios, learningGate, learning.model)]),
+      ...(rechecked === undefined
+        ? []
+        : [renderRecheckMarkdown(rechecked.scores, rechecked.model)]),
     ].join("\n");
     await writeFile(join(out, "report.md"), markdown);
+    let recheckMessage = "";
+    if (rechecked !== undefined) {
+      recheckMessage =
+        recheckFalseCloses > 0
+          ? `The recheck closed ${recheckFalseCloses} finding${recheckFalseCloses === 1 ? "" : "s"} that still hold.\n`
+          : "The recheck closed no finding that still holds.\n";
+    }
     process.stderr.write(
-      `${gate.message}\n${learningGate === undefined ? "" : `${learningGate.message}\n`}Report: ${join(out, "report.md")}\n`,
+      `${gate.message}\n${learningGate === undefined ? "" : `${learningGate.message}\n`}${recheckMessage}Report: ${join(out, "report.md")}\n`,
     );
     if (failed > 0) return 2;
     if (learning !== undefined && learning.totals.failedRuns === learning.scenarios.length) {
       return 2;
     }
     // A run with collateral never becomes the baseline.
-    if (values["update-baseline"] && learningGate?.ok !== false) {
+    if (values["update-baseline"] && learningGate?.ok !== false && recheckFalseCloses === 0) {
       await writeFile(baselinePath, `${JSON.stringify(baselineFrom(report), null, 2)}\n`);
     }
-    return gate.ok && learningGate?.ok !== false ? 0 : 1;
+    return gate.ok && learningGate?.ok !== false && recheckFalseCloses === 0 ? 0 : 1;
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }

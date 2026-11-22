@@ -1,0 +1,24 @@
+{
+  "description": "A protected category: the export handler has no authorization check. The later commit leaves the handler alone and mounts it behind requireAdmin in the router, which imports it, so the finding is fixed in another file.",
+  "expect": "fixed",
+  "base": {
+    "src/routes/auth.ts": "export function requireAdmin(handler: (req: Req) => Promise<unknown>) {\n  return async (req: Req) => {\n    if (req.user.role !== \"admin\") throw new Error(\"forbidden\");\n    return handler(req);\n  };\n}\n\nexport interface Req {\n  user: { id: string; role: string };\n}\n",
+    "src/db.ts": "export const db = { users: { list: async () => [] as { id: string; email: string }[] } };\n"
+  },
+  "raised": {
+    "src/routes/export-users.ts": "import { db } from \"../db\";\nimport type { Req } from \"./auth\";\n\nexport async function exportUsers(_req: Req) {\n  return db.users.list();\n}\n",
+    "src/routes/index.ts": "import { exportUsers } from \"./export-users\";\n\nexport const routes = {\n  \"GET /admin/export\": exportUsers,\n};\n"
+  },
+  "later": {
+    "src/routes/index.ts": "import { requireAdmin } from \"./auth\";\nimport { exportUsers } from \"./export-users\";\n\nexport const routes = {\n  \"GET /admin/export\": requireAdmin(exportUsers),\n};\n"
+  },
+  "finding": {
+    "rule_category": "authz",
+    "severity": "blocking",
+    "path": "src/routes/export-users.ts",
+    "line": 5,
+    "start_line": 4,
+    "title": "User export has no authorization check",
+    "body": "exportUsers returns every user's email to any signed-in caller: nothing checks that the caller is an admin."
+  }
+}

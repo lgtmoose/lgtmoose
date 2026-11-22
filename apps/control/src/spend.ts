@@ -89,7 +89,7 @@ export function readBudgets(env: Readonly<Record<string, string | undefined>>): 
 /** One batch the run would dispatch, in the order it's kept. */
 export interface PlannedBatch {
   index: number;
-  kind: "review" | "judge" | "ticket" | "explain" | "bootstrap";
+  kind: "review" | "judge" | "ticket" | "explain" | "bootstrap" | "recheck";
   tier: Tier;
 }
 

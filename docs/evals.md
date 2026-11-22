@@ -147,6 +147,26 @@ Loading checks that each finding's file is one the PR changes and that the line 
 
 Known limit: the stub reviewer can't measure the reviewer prompt's own rule that a learning never quiets a protected finding. A suppressing learning with no category that names a protected topic is refused before it is stored. One that names a category other than the four protected ones is still stored, and then the model's instructions are the defence. Only a model run measures that.
 
+## Recheck of carried findings
+
+Each file in `packages/evals/recheck/` is one scenario of three commits: `base`, the commit a finding was `raised` at, and a `later` commit that doesn't touch the finding's cited lines. With `expect: fixed`, the later commit fixes the problem in another file. With `expect: holds`, it changes something nearby and the problem remains. Two of the four scenarios are in protected categories.
+
+Each scenario runs the control task's own code: `recheckJob` picks the finding and builds the prompt from a real clone, the recheck runs, and `fixedByRecheck` decides.
+
+- **False close:** a finding that still holds, closed as fixed. Any one fails the run, and such a run never becomes the baseline.
+- **Missed fix:** a fixed finding kept open. It's reported, not gated: it's noise, not harm.
+
+Without a model, the normal test job runs the scenarios with a stub that answers from the diff, so CI checks the plumbing:
+
+- the finding is picked;
+- the prompt carries the other file's change;
+- a protected finding stays open on a verdict that doesn't name its fix;
+- a false close is counted.
+
+With a model, the evals run the scenarios after the learning ones, on the same fast model (`--learning-model`). `--no-recheck` leaves them out.
+
+A scenario's JSON holds `description`, `expect`, `base`, `raised` and `later` (files laid over the commit before), and the `finding` as it was raised: `rule_category`, `severity` (blocking or should-fix), `path`, `line`, optional `start_line`, `title` and `body`.
+
 ## CI
 
-In CI, `.github/workflows/evals.yml` runs this on PRs that touch prompts, rule packs, harnesses, the pipeline, the learnings package, outcome learning or the evals. It needs an `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` repository secret, and skips without one. The learning-speed scenarios also run without a model, in the normal test job, on every PR.
+In CI, `.github/workflows/evals.yml` runs this on PRs that touch prompts, rule packs, harnesses, the pipeline, the learnings package, outcome learning, the recheck or the evals. It needs an `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` repository secret, and skips without one. The learning-speed and recheck scenarios also run without a model, in the normal test job, on every PR.

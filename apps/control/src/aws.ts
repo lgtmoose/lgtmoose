@@ -736,6 +736,25 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         return true;
       });
     },
+    async closeFixed(findingId, sha) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(findings)
+          .set({ status: "fixed", updatedAt: now() })
+          .where(and(eq(findings.id, findingId), inArray(findings.status, ["open", "outdated"])))
+          .returning({ id: findings.id, commentId: findings.githubCommentId });
+        if (row === undefined) return false;
+        // Ours, on the recheck's verdict and the checks around it: no person's reply.
+        await tx.insert(findingEvents).values({
+          findingId,
+          type: "fixed",
+          actor: "self",
+          sha,
+          githubCommentId: row.commentId,
+        });
+        return true;
+      });
+    },
     async recordReply(findingId, type, commentId, sha) {
       await db
         .insert(findingEvents)

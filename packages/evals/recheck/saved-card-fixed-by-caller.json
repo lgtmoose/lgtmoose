@@ -1,0 +1,23 @@
+{
+  "description": "The pilot's case: pay() ignores the saved card. The later commit doesn't touch pay(); the payment section now turns the saved card into the confirmation token pay() charges, so the finding is fixed in another file.",
+  "expect": "fixed",
+  "base": {
+    "src/checkout/stripe.ts": "export async function charge(confirmationTokenId: string): Promise<void> {\n  await fetch(`/charge/${confirmationTokenId}`, { method: \"POST\" });\n}\n\nexport async function tokenForSavedCard(paymentMethodId: string): Promise<string> {\n  const reply = await fetch(`/tokens/${paymentMethodId}`, { method: \"POST\" });\n  return ((await reply.json()) as { id: string }).id;\n}\n"
+  },
+  "raised": {
+    "src/checkout/pay.ts": "import { charge } from \"./stripe\";\n\nexport interface PayInput {\n  confirmationTokenId?: string;\n  savedPaymentMethodId?: string;\n}\n\nexport async function pay(input: PayInput): Promise<void> {\n  await charge(input.confirmationTokenId ?? \"\");\n}\n",
+    "src/checkout/PaymentSection.ts": "import { pay } from \"./pay\";\n\nexport async function confirm(card: { savedPaymentMethodId?: string; confirmationTokenId?: string }): Promise<void> {\n  await pay(card);\n}\n"
+  },
+  "later": {
+    "src/checkout/PaymentSection.ts": "import { pay } from \"./pay\";\nimport { tokenForSavedCard } from \"./stripe\";\n\nexport async function confirm(card: { savedPaymentMethodId?: string; confirmationTokenId?: string }): Promise<void> {\n  const confirmationTokenId =\n    card.savedPaymentMethodId === undefined\n      ? card.confirmationTokenId\n      : await tokenForSavedCard(card.savedPaymentMethodId);\n  await pay({ confirmationTokenId });\n}\n"
+  },
+  "finding": {
+    "rule_category": "correctness",
+    "severity": "blocking",
+    "path": "src/checkout/pay.ts",
+    "line": 9,
+    "start_line": 8,
+    "title": "A saved card is never charged",
+    "body": "pay() accepts savedPaymentMethodId but only charges confirmationTokenId, so paying with a saved card charges an empty token."
+  }
+}

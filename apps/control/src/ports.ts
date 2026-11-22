@@ -153,6 +153,11 @@ export interface FindingStore {
     reply: { login: string; commentId: number },
     sha: string,
   ): Promise<boolean>;
+  /**
+   * Closes an open or outdated finding as fixed on the recheck's word (NIC-1120): our decision,
+   * with no person's reply behind it. False when it was closed already.
+   */
+  closeFixed?(findingId: string, sha: string): Promise<boolean>;
   /** Records that we replied on a finding's thread (`replied` or `dispute_answered`). */
   recordReply?(
     findingId: string,

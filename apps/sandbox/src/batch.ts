@@ -9,6 +9,7 @@ import {
   runBootstrap,
   runExplain,
   runJudge,
+  runRecheck,
   runTicketCheck,
   type BatchOutput,
   type BatchUrls,
@@ -159,6 +160,35 @@ export async function runSandboxBatch(deps: SandboxDeps, batchUrls: string): Pro
     deps.log("reply judged", {
       index: input.index,
       kind: output.judgement?.kind,
+      error: output.error,
+    });
+    return output;
+  }
+  if (input.role === "recheck") {
+    const rechecked = await runRecheck(
+      harness,
+      { index: input.index, prompt: input.prompt },
+      {
+        cwd: checkout,
+        model: input.tier === "fast" ? (deps.fastModel ?? "") : (deps.model ?? input.model),
+        timeoutMs: input.timeoutMs,
+        runId: batchRunId(input.runId, input.index),
+        ...thinkingCap(deps, input.tier),
+      },
+    );
+    const output: BatchOutput = batchOutputSchema.parse({
+      version: 1,
+      index: input.index,
+      ...(rechecked.verdicts === undefined ? {} : { verdicts: rechecked.verdicts }),
+      ...(rechecked.error === undefined ? {} : { error: rechecked.error.slice(0, 4000) }),
+      transcriptKeys: rechecked.transcriptKeys.slice(0, 3),
+      ...(rechecked.usage === undefined ? {} : { usage: rechecked.usage }),
+    });
+    await put(deps, urls.output, JSON.stringify(output));
+    deps.log("findings rechecked", {
+      index: input.index,
+      verdicts: output.verdicts?.length,
+      stillOpen: output.verdicts?.filter((verdict) => verdict.confirmed).length,
       error: output.error,
     });
     return output;

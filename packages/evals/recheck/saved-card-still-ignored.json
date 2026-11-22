@@ -1,0 +1,23 @@
+{
+  "description": "The same finding, but the later commit only renames a variable in the payment section: a saved card still reaches pay() as savedPaymentMethodId, which pay() ignores. The finding still holds.",
+  "expect": "holds",
+  "base": {
+    "src/checkout/stripe.ts": "export async function charge(confirmationTokenId: string): Promise<void> {\n  await fetch(`/charge/${confirmationTokenId}`, { method: \"POST\" });\n}\n"
+  },
+  "raised": {
+    "src/checkout/pay.ts": "import { charge } from \"./stripe\";\n\nexport interface PayInput {\n  confirmationTokenId?: string;\n  savedPaymentMethodId?: string;\n}\n\nexport async function pay(input: PayInput): Promise<void> {\n  await charge(input.confirmationTokenId ?? \"\");\n}\n",
+    "src/checkout/PaymentSection.ts": "import { pay } from \"./pay\";\n\nexport async function confirm(card: { savedPaymentMethodId?: string; confirmationTokenId?: string }): Promise<void> {\n  await pay(card);\n}\n"
+  },
+  "later": {
+    "src/checkout/PaymentSection.ts": "import { pay } from \"./pay\";\n\nexport async function confirm(selected: { savedPaymentMethodId?: string; confirmationTokenId?: string }): Promise<void> {\n  // Pay with whichever card the customer picked.\n  await pay(selected);\n}\n"
+  },
+  "finding": {
+    "rule_category": "correctness",
+    "severity": "blocking",
+    "path": "src/checkout/pay.ts",
+    "line": 9,
+    "start_line": 8,
+    "title": "A saved card is never charged",
+    "body": "pay() accepts savedPaymentMethodId but only charges confirmationTokenId, so paying with a saved card charges an empty token."
+  }
+}

@@ -28,6 +28,28 @@ When a person resolves one of LGTMoose's review threads, the `pull_request_revie
 
 Resolving a thread isn't a way round the gate. A blocking finding, or one in a protected category, counts as resolved only when someone other than the PR's author, with write access or higher on the repository, resolved it. The dispatcher holds no GitHub credential, so for these it records the resolution as not counted and leaves the finding open. The next run's thread sync reads who resolved each thread (`resolvedBy`) and their permission (the collaborators API), and resolves the finding then if they qualify. Otherwise it stays open, and the summary says that a resolved thread still counts. Anyone, the author included, may resolve a should_fix or nit finding.
 
+### How carried findings close
+
+A finding stays open while its cited lines are there. Its line changing or going away makes it `outdated`. A person resolving its thread, declining it, or replying that it's fixed (which the reply judge checks) closes it. A fix often lands somewhere else, though: the caller now passes the right value, a guard goes in before the call, the router mounts the handler behind a check. The cited line doesn't change, so before the recheck the finding stayed open and kept the decision at "changes requested".
+
+On an incremental review, the prepare step now picks our open blocking and should-fix findings that the new commits may have fixed. It takes those whose file the commits changed, and those whose file is related to a changed one. A file is related when it's in the same directory, or when either file imports the other by a relative path, read at head. That's plain code, and it errs on the side of checking. The planner's cross-file pass works on the reviewer's notes, not an import graph, so the recheck reads imports itself. It takes blocking findings first, then should-fix, oldest first, at most 10 (the verifier's run size). They go to one recheck batch on the fast tier, in the sandbox like any batch, with:
+
+- each finding;
+- the code it cited when it was raised;
+- the diff since the last review of the changed files that matter;
+
+all in untrusted blocks. Its output is the verifier's (`verifierOutputSchema`), but with the burden reversed: `confirmed` means the problem is still there, and the recheck says so when it can't tell.
+
+The post step closes a finding as fixed only when all of these hold:
+
+- the recheck's verdict says the problem is gone;
+- this run's review didn't raise it again;
+- in a protected category (`authz`, `tenant_scoping`, `money`, `secrets`), the verdict names one of the changed files as where the fix is.
+
+A failed batch, a missing verdict or any doubt keeps the finding open. The decision is then made again without it. Its thread gets a reply saying the commit it was fixed at, with the recheck's reason, escaped, and the thread is resolved. The event is recorded as `fixed`, by LGTMoose, at that commit.
+
+There's no recheck on a full review, on a run that only judges replies or answers explains while the code waits for a trigger, or for a finding whose reply the judge reads in the same run. The recheck batch counts towards the spend caps like any batch. In shadow mode the reply and the resolve are logged instead of written.
+
 Other reviewers' unresolved inline comments count too. Those from other bots (CodeRabbit, say), or from people who are owners, members or collaborators, that are marked Critical (blocking), Major or a bug (should fix), on files the review covers and still on the current diff, count towards the decision as open findings. The summary lists them with who raised them. They're never posted again, never stored as LGTMoose's own, and their text never reaches a model or the summary: only its opening words are read, for the severity. When one is on a file LGTMoose reviewed and none of its own findings is within a few lines, the run writes it to `misses.json` (path, line, severity and source, no text) for the evals.
 
 ## How a review runs

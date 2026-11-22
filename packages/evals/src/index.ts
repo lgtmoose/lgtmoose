@@ -65,6 +65,18 @@ export {
   type ScenarioSpec,
 } from "./learning.js";
 export { renderLearningMarkdown } from "./learning-report.js";
+export {
+  loadRecheckScenarios,
+  recheckScenarioSchema,
+  recheckTotals,
+  renderRecheckMarkdown,
+  runRecheckScenario,
+  runRecheckScenarios,
+  type RecheckRunOptions,
+  type RecheckScenario,
+  type RecheckScore,
+  type RecheckTotals,
+} from "./recheck.js";
 export { checkLearningBaseline, type LearningReport } from "./report.js";
 export {
   EVALUATED_ROLES,

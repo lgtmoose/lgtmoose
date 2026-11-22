@@ -24,6 +24,8 @@ on:
       - packages/learnings/**
       - apps/control/src/commands.ts
       - apps/control/src/outcome-learning.ts
+      # What the recheck scenarios exercise: picking carried findings and closing fixed ones.
+      - apps/control/src/recheck.ts
       - packages/evals/**
       - .github/workflows/evals.yml
 

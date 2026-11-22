@@ -1,0 +1,23 @@
+{
+  "description": "A protected category that still holds: the orders query has no tenant filter. The later commit adds logging to the handler that calls it, next door, and the query still returns every tenant's orders.",
+  "expect": "holds",
+  "base": {
+    "src/db.ts": "export const db = {\n  orders: { where: async (_filter: Record<string, unknown>) => [] as { id: string; tenantId: string }[] },\n};\n"
+  },
+  "raised": {
+    "src/orders/query.ts": "import { db } from \"../db\";\n\nexport async function listOrders(status: string) {\n  return db.orders.where({ status });\n}\n",
+    "src/orders/handler.ts": "import { listOrders } from \"./query\";\n\nexport async function handle(req: { tenantId: string; status: string }) {\n  return listOrders(req.status);\n}\n"
+  },
+  "later": {
+    "src/orders/handler.ts": "import { listOrders } from \"./query\";\n\nexport async function handle(req: { tenantId: string; status: string }) {\n  console.info(\"listing orders\", { tenant: req.tenantId, status: req.status });\n  return listOrders(req.status);\n}\n"
+  },
+  "finding": {
+    "rule_category": "tenant_scoping",
+    "severity": "blocking",
+    "path": "src/orders/query.ts",
+    "line": 4,
+    "start_line": 3,
+    "title": "Orders are listed across tenants",
+    "body": "listOrders filters by status only, so one tenant's request returns every tenant's orders."
+  }
+}

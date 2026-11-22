@@ -13,11 +13,13 @@ import {
 } from "@lgtmoose/pipeline";
 import {
   EXPLAINER_TIER,
+  RECHECK_TIER,
   REPLY_JUDGE_TIER,
   TICKET_CHECKER_TIER,
   buildReplyJudgePrompt,
 } from "@lgtmoose/roles";
 import { EXPLAIN_TIMEOUT_MS, explainJobs, type ExplainJob } from "./explain.js";
+import { RECHECK_TIMEOUT_MS, recheckJob, type RecheckJob } from "./recheck.js";
 import { jobTarget, type WorkflowJob } from "./job.js";
 import { TICKET_TIMEOUT_MS, prepareTickets, type TicketsManifest } from "./tickets.js";
 import { reviewGate, waitingCheckRun } from "./trigger.js";
@@ -86,6 +88,11 @@ export interface RunManifest {
   tickets?: TicketsManifest;
   /** The `explain`s this run answers (NIC-1053); their batches follow the tickets'. */
   explanations?: ExplainJob[];
+  /**
+   * Our open findings the new commits may have fixed, checked again in one batch after the
+   * explains' (NIC-1120). The post step closes the ones it shows are fixed.
+   */
+  recheck?: RecheckJob;
   /**
    * The spend cap that kept batches from running (NIC-1079): which, the review batches it kept
    * (not dispatched), and what the summary says.
@@ -746,6 +753,30 @@ export async function prepare(
           ...tickets.batches.map((ticket) => ticket.index),
         ) + 1,
     });
+    // Carried findings the new commits may have fixed (NIC-1120), checked again after the
+    // explains: only on an incremental review, which is what carries findings over. A reply the
+    // judge reads this run already covers its finding.
+    const recheck =
+      conversationOnly || prepared.kind !== "incremental" || deps.findings.closeFixed === undefined
+        ? undefined
+        : await recheckJob({
+            repo,
+            records: await deps.findings.trackedFindings(run.pullRequestId),
+            skip: new Set(taken.pending.map((reply) => reply.findingId)),
+            sinceSha: lastReviewed,
+            headSha: pr.headSha,
+            index:
+              Math.max(
+                -1,
+                ...prepared.jobs.map((batch) => batch.index),
+                ...judges.map((j) => j.index),
+                ...tickets.batches.map((ticket) => ticket.index),
+                ...explains.flatMap((explain) =>
+                  explain.index === undefined ? [] : [explain.index],
+                ),
+              ) + 1,
+            log: (message, fields) => deps.log(message, fields),
+          });
     // What the caps let run, reserved before anything is dispatched: people's replies and
     // explains first, then tickets, then the review's batches in plan order (riskiest first).
     const wanted: PlannedBatch[] = [
@@ -764,6 +795,9 @@ export async function prepare(
         kind: "ticket" as const,
         tier: TICKET_CHECKER_TIER as Tier,
       })),
+      ...(recheck === undefined
+        ? []
+        : [{ index: recheck.index, kind: "recheck" as const, tier: RECHECK_TIER as Tier }]),
       ...prepared.jobs.flatMap((batch) =>
         batch.prompt === undefined
           ? []
@@ -879,6 +913,21 @@ export async function prepare(
       await deps.store.putText(keys.batchInput(explain.index), JSON.stringify(input));
       batches.push({ index: explain.index });
     }
+    const keptRecheck = recheck !== undefined && spent.runs(recheck.index) ? recheck : undefined;
+    if (keptRecheck !== undefined) {
+      const input: BatchInput = batchInputSchema.parse({
+        version: 1,
+        runId: run.runId,
+        index: keptRecheck.index,
+        prompt: keptRecheck.prompt,
+        role: "recheck",
+        tier: RECHECK_TIER,
+        model: settings.model,
+        timeoutMs: Math.min(settings.batchTimeoutMs, RECHECK_TIMEOUT_MS),
+      });
+      await deps.store.putText(keys.batchInput(keptRecheck.index), JSON.stringify(input));
+      batches.push({ index: keptRecheck.index });
+    }
     const manifest: RunManifest = {
       version: MANIFEST_VERSION,
       installationId: job.installationId,
@@ -891,6 +940,9 @@ export async function prepare(
       ...(keptExplains.length === 0
         ? {}
         : { explanations: keptExplains.map(({ prompt: _, ...rest }) => rest) }),
+      ...(keptRecheck === undefined
+        ? {}
+        : { recheck: (({ prompt: _, ...rest }) => rest)(keptRecheck) }),
       ...(spent.cap === undefined
         ? {}
         : {

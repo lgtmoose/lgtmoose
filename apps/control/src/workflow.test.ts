@@ -4012,3 +4012,202 @@ describe("spend caps (NIC-1079)", () => {
     expect(spend.capped.get(RUN_ID)).toBe("repo_monthly");
   });
 });
+
+describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
+  const exec = (n: number) => `${EXECUTION}-${n}`;
+
+  /** A harness whose store can close findings on the recheck's word, and GitHub writes kept. */
+  function rechecking() {
+    const h = harness({
+      commentIds: true,
+      threads: () => [{ resolved: false, firstCommentId: 1000, id: "PRRT_1" }],
+    });
+    const writes: string[] = [];
+    h.findings.closeFixed = async (id) => {
+      const row = h.findings.rows.find((candidate) => candidate.id === id);
+      if (row === undefined || (row.status !== "open" && row.status !== "outdated")) return false;
+      row.status = "fixed";
+      return true;
+    };
+    const github = h.deps.github.bind(h.deps);
+    h.deps.github = async (installationId) => ({
+      ...(await github(installationId)),
+      conversation: {
+        reply: async (_target, root, body) => {
+          writes.push(`reply ${root}: ${body}`);
+        },
+        comment: async (_target, body) => {
+          writes.push(`comment: ${body}`);
+        },
+        resolveThread: async (id) => {
+          writes.push(`resolve ${id}`);
+        },
+      },
+    });
+    return { h, writes };
+  }
+
+  /**
+   * Prepares and posts run `n`: review batches find `found`, and the recheck batch (if any)
+   * answers with `verdicts`, or writes nothing when they're left out.
+   */
+  async function run(
+    h: ReturnType<typeof harness>,
+    n: number,
+    found: Finding[] = [],
+    verdicts?: NonNullable<BatchOutput["verdicts"]>,
+    job: Parameters<typeof prepare>[1] = JOB,
+  ) {
+    const prepared = await prepare(h.deps, job, exec(n), SETTINGS);
+    const manifest = readManifest(h.objects.get(runKeys(prepared.runId).prepared) ?? "");
+    for (const batch of prepared.batches) {
+      const key = runKeys(prepared.runId).batchOutput(batch.index);
+      if (batch.index !== manifest.recheck?.index) {
+        h.objects.set(key, JSON.stringify(output({ index: batch.index, findings: found })));
+      } else if (verdicts !== undefined) {
+        h.objects.set(
+          key,
+          JSON.stringify({ version: 1, index: batch.index, verdicts, transcriptKeys: [] }),
+        );
+      }
+    }
+    return { prepared, manifest, posted: await post(h.deps, prepared.runId) };
+  }
+
+  /** The fix lands in another file of the same folder: the finding's line is untouched. */
+  const fixElsewhere = async () => {
+    headSha = await commit(
+      { "src/checkout.ts": "export const items = (all: Item[]) => [...all, { price: 0 }];\n" },
+      "fix in the caller",
+    );
+  };
+
+  it("closes a blocking finding fixed in another file, replies, resolves and approves", async () => {
+    const { h, writes } = rechecking();
+    const { posted: first } = await run(h, 1, [finding()]);
+    expect(first).toMatchObject({ event: "REQUEST_CHANGES" });
+    await fixElsewhere();
+
+    const { prepared, manifest, posted } = await run(
+      h,
+      2,
+      [],
+      [
+        {
+          id: "F1",
+          confirmed: false,
+          reason: "src/checkout.ts line 1 adds the item the loop skips.",
+        },
+      ],
+    );
+
+    expect(manifest.recheck).toMatchObject({
+      changed: ["src/checkout.ts"],
+      targets: [{ id: "F1", findingId: "f0", severity: "blocking", githubCommentId: 1000 }],
+    });
+    const input = JSON.parse(
+      h.objects.get(runKeys(prepared.runId).batchInput(manifest.recheck?.index ?? -1)) ?? "{}",
+    ) as Record<string, unknown>;
+    expect(input).toMatchObject({ role: "recheck", tier: "fast" });
+    expect(input.prompt).toContain('<untrusted source="finding">');
+    expect(input.prompt).toContain("+++ b/src/checkout.ts");
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+    expect(posted).toMatchObject({ event: "APPROVE" });
+    expect(writes).toHaveLength(2);
+    expect(writes[0]).toMatch(/^reply 1000: This looks fixed at [0-9a-f]{7}/);
+    // The verdict's reason, escaped: it's model output.
+    expect(writes[0]).toContain("src\\/checkout\\.ts line 1 adds the item");
+    expect(writes[0]).toContain("<!-- lgtmoose:reply -->");
+    expect(writes[1]).toBe("resolve PRRT_1");
+  });
+
+  it("keeps a finding the recheck still finds, or gave no verdict for, open", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    const { posted } = await run(
+      h,
+      2,
+      [],
+      [{ id: "F1", confirmed: true, reason: "src/total.ts line 3 still stops one short." }],
+    );
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
+    expect(writes).toEqual([]);
+
+    // No output at all for the recheck batch: nothing closes either.
+    headSha = await commit({ "src/checkout.ts": "export const none = 0;\n" }, "again");
+    const { posted: again } = await run(h, 3, [], undefined);
+    expect(again).toMatchObject({ event: "REQUEST_CHANGES" });
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("closes a protected-category finding only when the verdict names the fix", async () => {
+    const authz = finding({ rule_category: "authz", title: "Total is computed for any caller" });
+    const { h } = rechecking();
+    await run(h, 1, [authz]);
+    await fixElsewhere();
+    await run(h, 2, [], [{ id: "F1", confirmed: false, reason: "This looks handled now." }]);
+    expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+
+    headSha = await commit({ "src/checkout.ts": "export const guarded = true;\n" }, "guard");
+    await run(
+      h,
+      3,
+      [],
+      [{ id: "F1", confirmed: false, reason: "checkout.ts line 1 now checks the caller first." }],
+    );
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+  });
+
+  it("keeps a finding this run's review raised again, whatever the recheck says", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    headSha = await commit(
+      { "src/total.ts": HEAD_TOTAL.replace("  let sum = 0;", "  let sum = 0; // total") },
+      "touch the file",
+    );
+    const { posted } = await run(
+      h,
+      2,
+      [finding()],
+      [{ id: "F1", confirmed: false, reason: "src/total.ts no longer has the bug." }],
+    );
+    expect(h.findings.rows.map((row) => row.status)).toEqual(["open"]);
+    expect(posted).toMatchObject({ event: "REQUEST_CHANGES" });
+  });
+
+  it("checks at most ten findings in one batch, blocking ones first", async () => {
+    const { h } = rechecking();
+    const many = [1, 2, 3, 4, 5, 6].flatMap((line) => [
+      finding({ line, severity: "should_fix", title: `Should fix number ${line} here` }),
+      finding({ line, title: `Blocking problem number ${line} here` }),
+    ]);
+    await run(h, 1, many);
+    expect(h.findings.rows.filter((row) => row.status === "open")).toHaveLength(12);
+    await fixElsewhere();
+
+    const { manifest } = await run(h, 2, [], []);
+
+    const targets = manifest.recheck?.targets ?? [];
+    expect(targets).toHaveLength(10);
+    expect(targets.slice(0, 6).every((target) => target.severity === "blocking")).toBe(true);
+    expect(targets.map((target) => target.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `F${i + 1}`),
+    );
+  });
+
+  it("doesn't recheck on a full review or without the store's support", async () => {
+    const { h } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    const full = await run(h, 2, [], undefined, { ...JOB, requested: "full_review" });
+    expect(full.manifest.recheck).toBeUndefined();
+
+    const plain = harness({ commentIds: true });
+    await run(plain, 1, [finding()]);
+    headSha = await commit({ "src/checkout.ts": "export const later = 1;\n" }, "later");
+    const { manifest } = await run(plain, 2);
+    expect(manifest.recheck).toBeUndefined();
+  });
+});
