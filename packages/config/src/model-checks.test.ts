@@ -315,6 +315,25 @@ describe("checkBedrockModel through a profile", () => {
     }
   });
 
+  it("points a bare ID whose access Bedrock doesn't know at the ID and a profile", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        availability: async () => {
+          throw new BedrockNotFound();
+        },
+      }),
+      bedrockCheck("anthropic.claude-sonnet-4-6"),
+      "us-east-2",
+    );
+    expect(result).toMatchObject({
+      status: "unavailable",
+      problem: "Bedrock has no model anthropic.claude-sonnet-4-6 in us-east-2",
+    });
+    expect(result.fix).toMatch(
+      /^check the ID, or use an inference profile ID such as us\.anthropic\.claude-sonnet-4-6/,
+    );
+  });
+
   it("can't tell model access for an active profile whose model the region doesn't know", async () => {
     const result = await checkBedrockModel(
       fakeBedrock({
@@ -628,6 +647,12 @@ describe("checkApiModel", () => {
     );
     expect(describeModelProblem({ ...base, problem: "why?" })).toMatch(/why\?$/);
     expect(describeModelProblem({ ...base, problem: "and so on…" })).toMatch(/so on…$/);
+    expect(
+      describeModelProblem({ ...base, problem: "no", fix: "wait for it, then check again." }),
+    ).toBe("anthropic (standard): claude-sonnet-4-6: no. Fix: wait for it, then check again.");
+    expect(describeModelProblem({ ...base, problem: "no", fix: "try again?" })).toMatch(
+      /Fix: try again\?$/,
+    );
     expect(describeModelProblem({ ...base, problem: "no", fix: "do this" })).toBe(
       "anthropic (standard): claude-sonnet-4-6: no. Fix: do this.",
     );

@@ -297,7 +297,11 @@ export async function checkBedrockModel(
     } catch (error) {
       if (!(error instanceof BedrockNotFound)) throw error;
       if (profile) return unreadable();
-      return result("unavailable", `Bedrock has no model ${foundation} in ${region}`, access);
+      return result(
+        "unavailable",
+        `Bedrock has no model ${foundation} in ${region}`,
+        `check the ID, or use an inference profile ID such as ${profileSuggestion(foundation, region)}`,
+      );
     }
     const offeredHere = availability.region === undefined || availability.region === "AVAILABLE";
     if (profile && !offeredHere) return unreadable();
@@ -440,14 +444,20 @@ function headerSafe(key: string): boolean {
   return true;
 }
 
+/** A sentence that already ends: no full stop is added after it. */
+const ENDS = /[.!?…]$/;
+
 /** A failed check as one line for a person: provider, tiers, model, where, why and the fix. */
 export function describeModelProblem(result: ModelCheckResult): string {
   const tiers = result.tiers.join(", ");
   // No full stop straight after a URL: it would be copied with it.
-  const end = result.fix !== undefined && /https?:\/\/\S+$/.test(result.fix) ? "" : ".";
+  const end =
+    result.fix !== undefined && (/https?:\/\/\S+$/.test(result.fix) || ENDS.test(result.fix))
+      ? ""
+      : ".";
   const fix = result.fix === undefined ? "" : ` Fix: ${result.fix}${end}`;
   const problem = result.problem ?? result.status;
-  const stop = /[.!?…]$/.test(problem) ? "" : ".";
+  const stop = ENDS.test(problem) ? "" : ".";
   return `${result.providerId} (${tiers}): ${result.model}: ${problem}${stop}${fix}`;
 }
 
