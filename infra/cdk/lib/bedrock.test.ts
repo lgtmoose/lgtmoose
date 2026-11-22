@@ -105,9 +105,10 @@ describe("modelCheckStatements", () => {
       {
         Effect: "Allow",
         Action: "bedrock:GetFoundationModel",
+        // The variant as configured: it's what Claude Code calls, so it's what's described.
         Resource: [
           "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
-          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6-v1:0",
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6-v1:0:200k",
         ],
       },
       { Effect: "Allow", Action: "bedrock:GetFoundationModelAvailability", Resource: "*" },

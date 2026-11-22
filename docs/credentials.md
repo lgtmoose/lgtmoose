@@ -142,6 +142,14 @@ What's checked, per provider:
 | Anthropic API key (`claude-code` or `agent-sdk`) | `GET https://api.anthropic.com/v1/models/<model>` with the stored key. Free.                                                                                                                                                                                                                        | `lgtmoose deploy`, and every 6 hours under docker compose |
 | OpenAI API key (`codex`)                         | `GET https://api.openai.com/v1/models/<model>` with the stored key. Free.                                                                                                                                                                                                                           | `lgtmoose deploy`, and every 6 hours under docker compose |
 
+A few answers are reported as "couldn't check" rather than "can't be called", so they never raise or clear an alarm:
+
+- an API key that gets HTTP 403 on the models endpoint, since a restricted OpenAI key without model reads still works for reviews;
+- an active inference profile whose model the source region doesn't know, where the account's model access can't be read;
+- any throttled or denied control-plane call.
+
+A bare model ID, `:200k`-style variants included, is checked as configured, since that's what Claude Code calls. One that takes only provisioned throughput can't be used: pin a model that takes on-demand calls.
+
 Not checked: model aliases such as `sonnet`, which Claude Code resolves to a model ID only when it runs (pin model IDs to have them checked); ARNs, which are used as given; Vertex AI; Cursor; and subscription sign-ins, which have no cheap way to ask. A model several tiers share is checked once.
 
 - **At deploy.** A model that can't be called is a warning, before anything is deployed, naming the provider, the tiers, the model ID, the region and the fix: usually the Bedrock console's model access page, or the right profile ID. The deploy goes ahead, since a fallback provider may still cover it and model access can be granted after. The identity running `lgtmoose deploy` needs `bedrock:GetInferenceProfile`, `bedrock:GetFoundationModel` and `bedrock:GetFoundationModelAvailability`; without them, the models are reported as not checked.

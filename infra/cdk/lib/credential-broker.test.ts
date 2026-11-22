@@ -24,7 +24,8 @@ interface State {
 /** The workflow stack's resources for a config with these providers (the first reviews). */
 function synth(providers: DeployConfigInput["providers"]) {
   const config = parseDeployConfig({ allowedOrgs: ["lgtmoose"], providers });
-  const template = Template.fromStack(buildApp(config, appWithoutBundling()).workflow);
+  const workflow = buildApp(config, appWithoutBundling()).workflow;
+  const template = Template.fromStack(workflow);
   const resources = template.toJSON().Resources as Resources;
 
   const functionWith = (name: string, without?: string) => {
@@ -58,6 +59,7 @@ function synth(providers: DeployConfigInput["providers"]) {
     return States.Batches?.ItemProcessor?.States.Attempt?.Branches?.[0]?.States ?? {};
   };
   return {
+    workflow,
     template,
     resources,
     broker: () => functionWith("LGTMOOSE_LEASE_TTL_SECONDS"),
@@ -265,6 +267,9 @@ describe("credential broker", () => {
     expect(alarms.map((alarm) => alarm.Properties.Dimensions)).toEqual([
       [{ Name: "Provider", Value: "bedrock" }],
     ]);
+    // Exposed like the credential alarms, and notified through the same topic.
+    expect([...pinned.workflow.modelAlarms.keys()]).toEqual(["bedrock"]);
+    expect([...pinned.workflow.credentialAlarms.keys()]).toEqual([]);
     // A check that couldn't run writes no point, which must leave the alarm as it is.
     expect(alarms[0]?.Properties).toMatchObject({
       Threshold: 1,

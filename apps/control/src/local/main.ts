@@ -24,7 +24,7 @@ import { drizzleConversationStore, githubConversation } from "../conversation-aw
 import { conversationBatch } from "../conversation-lambda.js";
 import { checkCredentials } from "../credentials.js";
 import { reportModel, reportProblem } from "../credentials-aws.js";
-import { checkModels } from "../model-health.js";
+import { healthCheck } from "../model-health.js";
 import { drizzleChecksWaits, drizzleDispatchStore } from "../dispatch-aws.js";
 import { collectFeedback } from "../feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "../feedback-aws.js";
@@ -318,22 +318,25 @@ async function main(): Promise<void> {
   };
   // The runner holds every provider's key already, so it checks API-key models too (NIC-1121).
   const modelChecks = planModelChecks(config).checks;
-  const health = async () => {
-    await checkCredentials({
-      secrets,
-      credentials: Object.fromEntries(
-        settings.providers.flatMap((provider) =>
-          provider.credential === undefined
-            ? []
-            : [[provider.id, { ...provider.credential, auth: provider.auth }]],
-        ),
-      ),
-      now: Date.now,
-      problem: reportProblem,
-    });
-    await checkModels({
-      checks: modelChecks,
+  // Compose refuses Bedrock providers (`localSettings`), so there's never a Bedrock model here.
+  const health = () =>
+    healthCheck({
+      credentials: () =>
+        checkCredentials({
+          secrets,
+          credentials: Object.fromEntries(
+            settings.providers.flatMap((provider) =>
+              provider.credential === undefined
+                ? []
+                : [[provider.id, { ...provider.credential, auth: provider.auth }]],
+            ),
+          ),
+          now: Date.now,
+          problem: reportProblem,
+        }),
+      checks: () => modelChecks,
       region: config.region,
+      bedrock: () => Promise.reject(new Error("docker compose has no Bedrock providers")),
       api: {
         get: fetchStatus,
         key: async (providerId) => {
@@ -345,7 +348,6 @@ async function main(): Promise<void> {
       report: reportModel,
       log,
     });
-  };
 
   await runner.recover();
   log("runner started", {

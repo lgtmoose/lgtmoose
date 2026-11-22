@@ -80,9 +80,6 @@ export function bedrockStatements(
   ];
 }
 
-/** Context-window variants such as `…-v1:0:200k` share their base model's access. */
-const CONTEXT_VARIANT = /:\d+k$/;
-
 /**
  * The IAM statements the health check needs to ask Bedrock about the pinned models (NIC-1121):
  * describing each inference profile and foundation model, in the stack's region only. It never
@@ -109,15 +106,13 @@ export function modelCheckStatements(
         ),
     ),
   ];
-  // Only a bare model ID is described: a profile is checked through GetInferenceProfile.
+  // Only a bare model ID is described, as configured (a `:200k`-style variant is what Claude Code
+  // calls): a profile is checked through GetInferenceProfile.
   const models = [
     ...new Set(
       ids
         .filter((match) => match[1] === undefined)
-        .map(
-          (match) =>
-            `arn:${partition}:bedrock:${region}::foundation-model/${(match[2] ?? "").replace(CONTEXT_VARIANT, "")}`,
-        ),
+        .map((match) => `arn:${partition}:bedrock:${region}::foundation-model/${match[2] ?? ""}`),
     ),
   ];
   const statement = (action: string, resources: string[]) =>

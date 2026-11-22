@@ -147,7 +147,7 @@ describe("checkBedrockModel", () => {
     );
     expect(result).toMatchObject({ status: "unavailable" });
     expect(describeModelProblem(result)).toBe(
-      "bedrock (standard): us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2. Fix: check the ID against the profiles listed in us-east-2 (lgtmoose auth bedrock lists them).",
+      "bedrock (standard): us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2. Fix: check the ID against the profiles pnpm lgtmoose auth bedrock --id bedrock lists for us-east-2.",
     );
   });
 
@@ -206,14 +206,37 @@ describe("checkBedrockModel", () => {
     expect(region.problem).toBe("anthropic.claude-opus-4-8 isn't offered in eu-north-1");
   });
 
-  it("checks a context-window variant's base model", async () => {
+  it("checks how a context-window variant is called, and its base model's access", async () => {
     const api = fakeBedrock();
     await checkBedrockModel(
       api,
       bedrockCheck("anthropic.claude-sonnet-4-6-v1:0:200k"),
       "us-east-2",
     );
-    expect(api.calls).toContain("availability anthropic.claude-sonnet-4-6-v1:0");
+    // Claude Code calls the variant, so that's the ID described; access is the base model's.
+    expect(api.calls).toEqual([
+      "model anthropic.claude-sonnet-4-6-v1:0:200k",
+      "availability anthropic.claude-sonnet-4-6-v1:0",
+    ]);
+  });
+
+  it("refuses a provisioned-only variant, and suggests its on-demand base, not a profile", async () => {
+    const result = await checkBedrockModel(
+      fakeBedrock({
+        foundationModel: async (id) => ({
+          inferenceTypes: id.endsWith(":200k") ? ["PROVISIONED"] : ["ON_DEMAND"],
+        }),
+      }),
+      bedrockCheck("anthropic.claude-sonnet-4-6-v1:0:200k"),
+      "us-east-2",
+    );
+    expect(result.status).toBe("unavailable");
+    expect(result.problem).toBe(
+      "anthropic.claude-sonnet-4-6-v1:0:200k can only be called with provisioned throughput in us-east-2, which LGTMoose doesn't use",
+    );
+    expect(result.fix).toContain("anthropic.claude-sonnet-4-6-v1:0");
+    expect(result.fix).not.toMatch(/profile ID/);
+    expect(result.fix).toContain("pnpm lgtmoose auth bedrock --id bedrock");
   });
 
   it("reports a failed call as unknown, not unavailable", async () => {
@@ -260,7 +283,7 @@ describe("checkBedrockModel through a profile", () => {
     expect(result.status).toBe("ok");
   });
 
-  it("accepts an active profile whose model the source region doesn't know", async () => {
+  it("can't tell model access for an active profile whose model the region doesn't know", async () => {
     const result = await checkBedrockModel(
       fakeBedrock({
         availability: async () => {
@@ -270,7 +293,11 @@ describe("checkBedrockModel through a profile", () => {
       bedrockCheck("global.anthropic.claude-opus-4-8"),
       "eu-north-1",
     );
-    expect(result.status).toBe("ok");
+    // Unknown, so the health check neither raises nor clears the alarm.
+    expect(result).toMatchObject({
+      status: "unknown",
+      problem: "model access to anthropic.claude-opus-4-8 couldn't be read in eu-north-1",
+    });
   });
 
   it("still needs model access and the agreement for a profile", async () => {
@@ -298,14 +325,24 @@ describe("region-specific hints", () => {
       region,
     );
 
-  it("suggests the region's own profile prefix", async () => {
-    expect((await needsProfile("eu-west-1")).fix).toContain("eu.anthropic.claude-sonnet-4-6");
-    expect((await needsProfile("ap-southeast-2")).fix).toContain(
-      "apac.anthropic.claude-sonnet-4-6",
-    );
-    expect((await needsProfile("us-gov-west-1")).fix).toContain(
-      "us-gov.anthropic.claude-sonnet-4-6",
-    );
+  it("suggests the region's own profile prefix, with global as the alternative", async () => {
+    const prefixes: Record<string, string> = {
+      "us-east-2": "us",
+      "ca-central-1": "us",
+      "us-gov-west-1": "us-gov",
+      "eu-west-1": "eu",
+      "ap-northeast-1": "jp",
+      "ap-northeast-3": "jp",
+      "ap-southeast-2": "au",
+      "ap-southeast-4": "au",
+      "ap-south-1": "apac",
+      "ap-northeast-2": "apac",
+    };
+    for (const [region, prefix] of Object.entries(prefixes)) {
+      expect((await needsProfile(region)).fix).toBe(
+        `pin a profile ID instead, such as ${prefix}.anthropic.claude-sonnet-4-6 or global.anthropic.claude-sonnet-4-6`,
+      );
+    }
     const other = await needsProfile("sa-east-1");
     expect(other.fix).toContain("global.anthropic.claude-sonnet-4-6");
     expect(other.fix).not.toMatch(/\bus\./);
@@ -419,6 +456,13 @@ describe("checkApiModel", () => {
     expect(missing.problem).toMatch(/no model claude-sonnet-4-6/);
     const refused = await checkApiModel(async () => 401, openai, "sk-openai");
     expect(refused.problem).toBe("the OpenAI API refused the stored key (HTTP 401)");
+    expect(refused.fix).toBe(
+      "store a working key with pnpm lgtmoose auth api-key --provider openai --id openai",
+    );
+    // A restricted key with model reads turned off gets 403, and still works for reviews.
+    const restricted = await checkApiModel(async () => 403, openai, "sk-openai");
+    expect(restricted.status).toBe("unknown");
+    expect(restricted.problem).toMatch(/may lack only the permission to read models/);
     const odd = await checkApiModel(async () => 503, openai, "sk-openai");
     expect(odd.status).toBe("unknown");
     const failed = await checkApiModel(

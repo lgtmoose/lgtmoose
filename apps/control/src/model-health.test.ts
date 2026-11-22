@@ -63,7 +63,7 @@ describe("checkModels", () => {
         "bedrock",
         1,
         [
-          "bedrock (standard, deep): us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2. Fix: check the ID against the profiles listed in us-east-2 (lgtmoose auth bedrock lists them).",
+          "bedrock (standard, deep): us.anthropic.claude-sonnet-4-6: Bedrock has no inference profile us.anthropic.claude-sonnet-4-6 in us-east-2. Fix: check the ID against the profiles pnpm lgtmoose auth bedrock --id bedrock lists for us-east-2.",
         ],
       ],
     ]);
@@ -143,6 +143,11 @@ describe("checkModels", () => {
       ["openai", 0],
     ]);
     expect(JSON.stringify([out.reports, out.logs])).not.toMatch(/STORED/);
+    // A provider with no readable key is named, not passed over silently.
+    expect(out.logs).toContainEqual([
+      "model not checked: no stored key",
+      { providerId: "nokey", model: "gpt-5-codex" },
+    ]);
   });
 
   it("skips Bedrock without a client, says so once, and skips API keys without a reader", async () => {
@@ -202,6 +207,22 @@ describe("healthCheck", () => {
     });
     expect(result.credentials).toEqual({ claude: undefined });
     expect(out.logs[0]?.[0]).toBe("model checks failed");
+  });
+
+  it("still runs the model checks when the credential check throws, then throws its error", async () => {
+    const out = recorder();
+    const failure = new Error("Secrets Manager is down");
+    await expect(
+      healthCheck({
+        credentials: () => Promise.reject(failure),
+        checks: () => [bedrock("us.anthropic.claude-sonnet-4-6")],
+        region: "us-east-2",
+        bedrock: async () => api(["us.anthropic.claude-sonnet-4-6"]),
+        report: out.report,
+        log: out.log,
+      }),
+    ).rejects.toBe(failure);
+    expect(out.reports.map(([id, value]) => [id, value])).toEqual([["bedrock", 1]]);
   });
 
   it("runs the credential check first, then the models", async () => {

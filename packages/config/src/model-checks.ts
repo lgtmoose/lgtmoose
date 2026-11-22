@@ -118,11 +118,24 @@ export function bedrockModelAccessUrl(region: string): string {
   return `https://${consoleHost(region)}/bedrock/home?region=${region}#/modelaccess`;
 }
 
+/** How the CLI is run, for fix hints. The CLI's own `CLI` is this. */
+export const CLI_COMMAND = "pnpm lgtmoose";
+
+/** Regions whose cross-region profiles have a country prefix of their own. */
+const COUNTRY_PROFILES: Readonly<Record<string, string>> = {
+  "ap-northeast-1": "jp",
+  "ap-northeast-3": "jp",
+  "ap-southeast-2": "au",
+  "ap-southeast-4": "au",
+};
+
 /**
- * The cross-region inference profile prefix for a region's geography (`us.`, `eu.`, `apac.`,
- * `us-gov.`), or undefined where Bedrock has none: then only `global.` is suggested.
+ * The cross-region inference profile prefix for a region's geography (`us.`, `us-gov.`, `eu.`,
+ * `jp.`, `au.`, `apac.`), or undefined where Bedrock has none: then only `global.` is suggested.
  */
 function profilePrefix(region: string): string | undefined {
+  const country = COUNTRY_PROFILES[region];
+  if (country !== undefined) return country;
   if (region.startsWith("us-gov-")) return "us-gov";
   if (region.startsWith("us-") || region.startsWith("ca-")) return "us";
   if (region.startsWith("eu-")) return "eu";
@@ -205,7 +218,11 @@ export async function checkBedrockModel(
       "use anthropic.… or an inference profile ID such as us.anthropic.…",
     );
   }
-  const foundation = match[2].replace(CONTEXT_VARIANT, "");
+  // Claude Code calls the configured ID, a `:200k`-style variant included, so that's what must
+  // take on-demand calls; access and agreements are the base model's.
+  const configured = match[2];
+  const foundation = configured.replace(CONTEXT_VARIANT, "");
+  const listProfiles = `${CLI_COMMAND} auth bedrock --id ${check.providerId}`;
   try {
     if (match[1] !== undefined) {
       let profile;
@@ -216,7 +233,7 @@ export async function checkBedrockModel(
         return result(
           "unavailable",
           `Bedrock has no inference profile ${check.model} in ${region}`,
-          `check the ID against the profiles listed in ${region} (lgtmoose auth bedrock lists them)`,
+          `check the ID against the profiles ${listProfiles} lists for ${region}`,
         );
       }
       if (profile.status !== undefined && profile.status !== "ACTIVE") {
@@ -229,7 +246,7 @@ export async function checkBedrockModel(
     } else {
       let model;
       try {
-        model = await api.foundationModel(foundation);
+        model = await api.foundationModel(configured);
       } catch (error) {
         if (!(error instanceof BedrockNotFound)) throw error;
         return result(
@@ -238,15 +255,19 @@ export async function checkBedrockModel(
           `check the ID, or use an inference profile ID such as ${profileSuggestion(check.model, region)}`,
         );
       }
-      if (
-        model.inferenceTypes !== undefined &&
-        model.inferenceTypes.length > 0 &&
-        !model.inferenceTypes.includes("ON_DEMAND")
-      ) {
+      const types = model.inferenceTypes ?? [];
+      if (types.length > 0 && !types.includes("ON_DEMAND")) {
+        if (types.includes("INFERENCE_PROFILE")) {
+          return result(
+            "unavailable",
+            `${check.model} can only be called through an inference profile in ${region}`,
+            `pin a profile ID instead, such as ${profileSuggestion(check.model, region)}`,
+          );
+        }
         return result(
           "unavailable",
-          `${check.model} can only be called through an inference profile in ${region}`,
-          `pin a profile ID instead, such as ${profileSuggestion(check.model, region)}`,
+          `${check.model} can only be called with provisioned throughput in ${region}, which LGTMoose doesn't use`,
+          `pin a model ID that takes on-demand calls, such as the base model ${foundation}, or ${listProfiles} to see which do`,
         );
       }
     }
@@ -258,7 +279,10 @@ export async function checkBedrockModel(
       availability = await api.availability(foundation);
     } catch (error) {
       if (!(error instanceof BedrockNotFound)) throw error;
-      if (profile) return result("ok");
+      // The profile is active, but whether the account may use its model can't be read here:
+      // nothing is known, so the alarm is left as it is.
+      if (profile)
+        return result("unknown", `model access to ${foundation} couldn't be read in ${region}`);
       return result("unavailable", `Bedrock has no model ${foundation} in ${region}`, access);
     }
     if (!profile && availability.region !== undefined && availability.region !== "AVAILABLE") {
@@ -331,11 +355,18 @@ export async function checkApiModel(
       "check the model name in lgtmoose.config.ts",
     );
   }
-  if (status === 401 || status === 403) {
+  if (status === 401) {
     return result(
       "unavailable",
-      `the ${vendor} API refused the stored key (HTTP ${status})`,
-      `store a working key with lgtmoose auth api-key --provider ${anthropic ? "anthropic" : "openai"}`,
+      `the ${vendor} API refused the stored key (HTTP 401)`,
+      `store a working key with ${CLI_COMMAND} auth api-key --provider ${anthropic ? "anthropic" : "openai"} --id ${check.providerId}`,
+    );
+  }
+  if (status === 403) {
+    // A restricted key with model reads turned off gets 403 here, and still works for reviews.
+    return result(
+      "unknown",
+      `couldn't check: the ${vendor} API answered HTTP 403, so the key may lack only the permission to read models`,
     );
   }
   return result("unknown", `couldn't check: the ${vendor} API answered HTTP ${status}`);

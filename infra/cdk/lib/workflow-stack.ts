@@ -29,6 +29,7 @@ import {
   credentialConcurrency,
   BOOTSTRAP_REQUEST_PREFIX,
   FEEDBACK_REPORT_KEY,
+  CLI_COMMAND,
   modelFor,
   planModelChecks,
   providerModelEnv,
@@ -213,6 +214,11 @@ export class WorkflowStack extends Stack {
   readonly dispatchFunction: NodejsFunction;
   /** Provider id → the alarm on its credential's `CredentialProblem`. */
   readonly credentialAlarms: ReadonlyMap<string, Alarm>;
+  /**
+   * Provider id → the alarm on its pinned models' `ModelUnavailable` (NIC-1121). Like every
+   * alarm in the app, it notifies the alarm topic when one is configured (`notifyAlarms`).
+   */
+  readonly modelAlarms: ReadonlyMap<string, Alarm>;
   readonly reconcileFunction: NodejsFunction;
   /** Comment jobs the dispatcher forwards, for the conversation Lambda. */
   readonly conversationQueue: Queue;
@@ -396,7 +402,9 @@ export class WorkflowStack extends Stack {
       auditRetention: lean ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_YEAR,
     });
 
-    this.credentialAlarms = this.credentialHealth(props, retention);
+    const health = this.credentialHealth(props, retention);
+    this.credentialAlarms = health.credentialAlarms;
+    this.modelAlarms = health.modelAlarms;
     if (!lean) {
       // Standard only. A stopped (superseded) execution is ABORTED, not FAILED, so this counts
       // reviews that broke, not ones a newer push replaced.
@@ -705,8 +713,9 @@ export class WorkflowStack extends Stack {
   private credentialHealth(
     props: WorkflowStackProps,
     retention: RetentionDays,
-  ): Map<string, Alarm> {
+  ): { credentialAlarms: Map<string, Alarm>; modelAlarms: Map<string, Alarm> } {
     const alarms = new Map<string, Alarm>();
+    const modelAlarms = new Map<string, Alarm>();
     const stored = props.providers.flatMap((provider) => {
       const secret = props.providerSecrets.get(provider.id);
       return secret === undefined ? [] : [{ provider, secret }];
@@ -714,7 +723,9 @@ export class WorkflowStack extends Stack {
     const modelChecks = planModelChecks({ providers: props.providers }).checks.filter(
       (check) => check.kind === "bedrock",
     );
-    if (stored.length === 0 && modelChecks.length === 0) return alarms;
+    if (stored.length === 0 && modelChecks.length === 0) {
+      return { credentialAlarms: alarms, modelAlarms };
+    }
     const fn = lgtmooseFunction(this, "CredentialHealthFunction", {
       entry: CREDENTIAL_HEALTH_HANDLER,
       description:
@@ -783,8 +794,8 @@ export class WorkflowStack extends Stack {
       );
     }
     for (const providerId of new Set(modelChecks.map((check) => check.providerId))) {
-      new Alarm(this, `ModelAlarm-${providerId}`, {
-        alarmDescription: `A model the ${providerId} provider is pinned to can't be called in ${this.region}: model access, an agreement, or a profile ID. The health check's log says which, and lgtmoose auth bedrock checks it.`,
+      const alarm = new Alarm(this, `ModelAlarm-${providerId}`, {
+        alarmDescription: `A model the ${providerId} provider is pinned to can't be called in ${this.region}: model access, an agreement, or a profile ID. The health check's log says which, and ${CLI_COMMAND} auth bedrock --id ${providerId} checks it.`,
         metric: new Metric({
           namespace: "LGTMoose",
           metricName: "ModelUnavailable",
@@ -798,8 +809,9 @@ export class WorkflowStack extends Stack {
         // A check that couldn't run writes no point: it neither raises nor clears the alarm.
         treatMissingData: TreatMissingData.IGNORE,
       });
+      modelAlarms.set(providerId, alarm);
     }
-    return alarms;
+    return { credentialAlarms: alarms, modelAlarms };
   }
 
   private taskDefinition(

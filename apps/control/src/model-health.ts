@@ -77,7 +77,14 @@ export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResu
       });
       continue;
     }
-    if (key !== undefined) results.push(await checkApiModel(deps.api.get, check, key));
+    if (key === undefined) {
+      deps.log("model not checked: no stored key", {
+        providerId: check.providerId,
+        model: check.model,
+      });
+      continue;
+    }
+    results.push(await checkApiModel(deps.api.get, check, key));
   }
   const byProvider = new Map<string, ModelCheckResult[]>();
   for (const result of results) {
@@ -105,24 +112,46 @@ export async function checkModels(deps: ModelHealthDeps): Promise<ModelCheckResu
 }
 
 /**
- * The whole scheduled health check: the credential check first, then the model checks. A
- * model check that can't run at all (the runtime's Bedrock client is missing a command, the
- * checks don't parse) is logged and skipped: it never fails the credential check, whose result
- * is returned either way.
+ * The whole scheduled health check: the credential check, then the model checks, each
+ * independent of the other. A model check that can't run at all (the runtime's Bedrock client
+ * is missing a command, the checks don't parse) is logged and skipped, and the credential
+ * result is returned as usual. A credential check that throws doesn't stop the model checks:
+ * they run, and then its error is thrown again, so the invocation still fails and is retried.
  */
 export async function healthCheck(deps: {
   credentials: () => Promise<Record<string, string | undefined>>;
   checks: () => ModelToCheck[];
   region: string;
+  /** Bedrock's control plane, loaded only when a Bedrock model is checked. */
   bedrock: () => Promise<BedrockModelApi>;
+  /** For API-key models, where the process holds the keys (docker compose). */
+  api?: ModelHealthDeps["api"];
   report: ModelHealthDeps["report"];
   log: ModelHealthDeps["log"];
 }): Promise<{ credentials: Record<string, string | undefined>; models: Record<string, string> }> {
-  const credentials = await deps.credentials();
+  let credentials: Record<string, string | undefined> = {};
+  let credentialError: { error: unknown } | undefined;
+  try {
+    credentials = await deps.credentials();
+  } catch (error) {
+    credentialError = { error };
+  }
+  const models = await checkAllModels(deps);
+  if (credentialError !== undefined) throw credentialError.error;
+  return { credentials, models };
+}
+
+/** The model half of `healthCheck`: never throws, and returns each model's status. */
+async function checkAllModels(
+  deps: Pick<
+    Parameters<typeof healthCheck>[0],
+    "checks" | "region" | "bedrock" | "api" | "report" | "log"
+  >,
+): Promise<Record<string, string>> {
   const models: Record<string, string> = {};
   try {
     const checks = deps.checks();
-    if (checks.length === 0) return { credentials, models };
+    if (checks.length === 0) return models;
     let bedrock: BedrockModelApi | undefined;
     if (checks.some((check) => check.kind === "bedrock")) {
       try {
@@ -131,13 +160,14 @@ export async function healthCheck(deps: {
         deps.log("model checks not run: no Bedrock client", {
           error: error instanceof Error ? error.message : String(error),
         });
-        return { credentials, models };
+        return models;
       }
     }
     const results = await checkModels({
       checks,
       region: deps.region,
       ...(bedrock === undefined ? {} : { bedrock }),
+      ...(deps.api === undefined ? {} : { api: deps.api }),
       report: deps.report,
       log: deps.log,
     });
@@ -147,5 +177,5 @@ export async function healthCheck(deps: {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  return { credentials, models };
+  return models;
 }

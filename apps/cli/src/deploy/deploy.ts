@@ -175,7 +175,11 @@ export async function modelWarnings(
       continue;
     }
     const key = credentials.get(check.providerId);
-    if (key !== undefined) results.push(await checkApiModel(calls.get, check, key));
+    results.push(
+      key === undefined
+        ? { ...check, status: "unknown", problem: "couldn't check: no stored key" }
+        : await checkApiModel(calls.get, check, key),
+    );
   }
   const section = (status: "unavailable" | "unknown", head: string) => {
     const lines = results
