@@ -9,8 +9,9 @@ export default defineConfig({
     // packages' tests aren't this package's.
     exclude: [...configDefaults.exclude, "cdk.out/**"],
     // Synth output and test temp files go in a per-file directory that's cleaned up (NIC-1122).
-    // That needs each test file to have its own process environment: forked workers, not threads.
+    // That needs each test file to run in a fresh process of its own: forked, isolated workers.
     pool: "forks",
+    isolate: true,
     setupFiles: ["./test-setup.ts"],
   },
 });
