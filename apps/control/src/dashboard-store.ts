@@ -157,7 +157,7 @@ export interface DashboardStore {
   repoSummaries(repos: readonly string[]): Promise<RepoSummary[]>;
   /**
    * Open findings in `repos`, most severe first, at most `limit`. With a pull request `number`
-   * (NIC-1140), only that PR's, and its outdated ones too.
+   * (NIC-1140), only that PR's and only LGTMoose's own, its outdated ones too.
    */
   openFindings(repos: readonly string[], limit: number, number?: number): Promise<OpenFinding[]>;
   /** A finding by ID, for an answer (NIC-1140); undefined when there's none, or the list hides it. */
@@ -299,7 +299,11 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
               ? open
               : and(inArray(findings.status, ["open", "outdated"]), visible),
             inRepos(repos),
-            ...(number === undefined ? [] : [eq(pullRequests.number, number)]),
+            // One PR's list is for answering: only ours, filtered before the limit, so other
+            // reviewers' findings can't push ours out.
+            ...(number === undefined
+              ? []
+              : [eq(pullRequests.number, number), eq(findings.source, "self")]),
           ),
         )
         .orderBy(SEVERITY_ORDER, desc(findings.createdAt))

@@ -199,6 +199,37 @@ describe("listing a PR's findings with a token", () => {
     expect(body.findings.map((f) => f.id)).toEqual([id]);
   });
 
+  it("lists ours even when other reviewers' findings fill more than the limit", async () => {
+    const ours = await finding({ severity: "nit", fingerprint: "ours" });
+    // 201 blocking findings from other reviewers: sorted first, they'd take every row.
+    await db.insert(findings).values(
+      Array.from({ length: 201 }, (_, i) => ({
+        pullRequestId: pullId,
+        fingerprint: `theirs:${i}`,
+        source: i % 2 === 0 ? ("human" as const) : ("bot" as const),
+        sourceLogin: "zed",
+        ruleCategory: "correctness",
+        severity: "blocking" as const,
+        title: "Theirs",
+        body: "Another reviewer's.",
+        path: "src/cart.ts",
+        line: 4,
+        side: "RIGHT" as const,
+        raisedAtSha: "a".repeat(40),
+      })),
+    );
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(READER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    const body = JSON.parse(response.body) as { findings: { id: string }[] };
+    expect(body.findings.map((f) => f.id)).toEqual([ours]);
+  });
+
   it("needs a token GitHub accepts", async () => {
     const response = await handleDashboardRequest(
       deps,

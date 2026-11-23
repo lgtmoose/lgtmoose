@@ -146,7 +146,7 @@ Findings someone said are fixed with `lgtmoose findings ack` (below) are checked
 
 ## Findings outside GitHub: `lgtmoose findings`
 
-In shadow mode a finding has no thread to reply in. `lgtmoose findings` lists a pull request's open findings and answers them through the deployment's dashboard API, in shadow mode or live. It posts nothing to GitHub.
+In shadow mode a finding has no thread to reply in. `lgtmoose findings` lists LGTMoose's own open findings on a pull request (other reviewers' are answered on GitHub) and answers them through the deployment's dashboard API, in shadow mode or live. It posts nothing to GitHub.
 
 ```bash
 pnpm lgtmoose findings acme/shop#42 --format md
