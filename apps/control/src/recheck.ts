@@ -740,23 +740,58 @@ export function fixedByRecheck(
 }
 
 /**
- * The fix claims (NIC-1140) the recheck settled, by finding ID: a claimed finding it closed
- * (`fixed`), or one whose verdict says the problem is still there, on a file this review read
- * well enough to trust it (`readEnough`). Pure. A claim whose finding the plan didn't close for
- * another reason (its file unreviewed, its batch failed), or that got no verdict, isn't settled:
- * it stays first in the next run's recheck.
+ * Whether this run's review read a recheck target's file well enough for the recheck's verdict
+ * on it to count. Pure. The one rule for both closing a finding as fixed and settling a fix
+ * claim (NIC-1140), so the two can't disagree.
+ *
+ * - `pathNow`: each finding's file at head, followed from where it was raised (renames
+ *   included); none when its line is gone.
+ * - `outdated`: the findings whose cited line head doesn't have (NIC-1124).
+ * - `reviewed`: the files this review read; `unreviewed`: those it changed and didn't read (its
+ *   batch failed, timed out or was capped, or the planner skipped the file).
+ */
+export function verdictCounts(context: {
+  mode: RecheckMode;
+  pathNow: ReadonlyMap<string, string>;
+  outdated: ReadonlySet<string>;
+  reviewed: ReadonlySet<string>;
+  unreviewed: ReadonlySet<string>;
+}): (entry: RecheckEntry) => boolean {
+  const { mode, pathNow, outdated, reviewed, unreviewed } = context;
+  return (entry) => {
+    const path = pathNow.get(entry.findingId);
+    if (path === undefined) {
+      // Its line is gone: only a review of its file now says anything about it. Only when
+      // prepare saw the line gone too and told the recheck so: one this step can't place (its
+      // commit is gone) was never checked against the code that replaced its line.
+      return entry.outdated === true && outdated.has(entry.findingId) && reviewed.has(entry.path);
+    }
+    // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
+    // or not in the PR's change any more) says nothing about the finding.
+    if (mode === "full") return reviewed.has(path);
+    // Changed and not read: "not raised again" says nothing there.
+    if (unreviewed.has(path)) return false;
+    // Moved since it was raised: the recheck read it by its old name, which head doesn't have,
+    // so only a review of the file under its new name says anything about it.
+    return path === entry.path || reviewed.has(path);
+  };
+}
+
+/**
+ * The fix claims (NIC-1140) the recheck settled, by finding ID: each claimed target it gave a
+ * verdict on that `counts` (`verdictCounts`), whatever the verdict. Closed, still there, or gone
+ * but held open by a re-raise (the review saying it's still there) or by the protected-category
+ * rule (a real check that didn't pass): the claim has had its recheck. Pure. One with no verdict,
+ * or whose file wasn't read well enough, keeps its claim for the next run.
  */
 export function settledFixClaims(
   targets: readonly RecheckEntry[],
   verdicts: readonly Verdict[],
-  fixed: ReadonlySet<string>,
-  readEnough: (entry: RecheckEntry) => boolean,
+  counts: (entry: RecheckEntry) => boolean,
 ): string[] {
-  const byId = new Map<string, Verdict>();
-  for (const verdict of verdicts) if (!byId.has(verdict.id)) byId.set(verdict.id, verdict);
+  const answered = new Set(verdicts.map((verdict) => verdict.id));
   return targets.flatMap((entry) =>
-    entry.fixClaimedAt !== undefined &&
-    (fixed.has(entry.findingId) || (byId.get(entry.id)?.confirmed === true && readEnough(entry)))
+    entry.fixClaimedAt !== undefined && answered.has(entry.id) && counts(entry)
       ? [entry.findingId]
       : [],
   );

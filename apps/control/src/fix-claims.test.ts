@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { ControlDeps } from "./ports.js";
 import { clearFixClaims } from "./post.js";
-import { settledFixClaims, type RecheckEntry, type RecheckWrites } from "./recheck.js";
+import {
+  fixedByRecheck,
+  settledFixClaims,
+  verdictCounts,
+  type RecheckEntry,
+  type RecheckWrites,
+} from "./recheck.js";
 
 /**
- * Settling the fix claims a run's recheck looked at (NIC-1140): only those it closed, or whose
- * verdict says the problem is still there on a file the review read. Any other claim (no
- * verdict, or a "fixed" verdict the post step didn't act on) stays for the next run.
+ * Settling the fix claims a run's recheck looked at (NIC-1140): each one it gave a verdict on
+ * whose file the review read well enough for that verdict to count (`verdictCounts`, the same
+ * rule that closes a finding), whatever the verdict. Any other claim stays for the next run.
  */
 
 const RUN = "4c1f8a2e-6b3d-4e5f-9a7b-1c2d3e4f5a6b";
@@ -17,6 +23,7 @@ const target = (
   findingId: string,
   claimed = true,
   path = "src/a.ts",
+  over: Partial<RecheckEntry> = {},
 ): RecheckEntry => ({
   id,
   findingId,
@@ -25,6 +32,7 @@ const target = (
   ruleCategory: "correctness",
   severity: "should_fix",
   ...(claimed ? { fixClaimedAt: CLAIMED } : {}),
+  ...over,
 });
 
 const verdict = (id: string, confirmed: boolean) => ({
@@ -34,34 +42,74 @@ const verdict = (id: string, confirmed: boolean) => ({
 });
 
 describe("settledFixClaims", () => {
-  const targets = [
-    target("F1", "f1"),
-    target("F2", "f2"),
-    target("F3", "f3"),
-    target("F4", "f4", true, "src/unreviewed.ts"),
-    target("F5", "f5"),
-    target("F6", "f6", false),
-  ];
-  const settled = settledFixClaims(
-    targets,
-    [
-      // Closed by the plan.
-      verdict("F1", false),
-      // "Fixed", but the plan didn't close it (its file wasn't reviewed, say): kept.
-      verdict("F2", false),
-      // Still there, on a file the review read: settled.
-      verdict("F3", true),
-      // Still there, but its file wasn't read: kept.
-      verdict("F4", true),
-      // F5 got no verdict: kept. F6 has no claim.
-      verdict("F6", true),
-    ],
-    new Set(["f1"]),
-    (entry) => entry.path !== "src/unreviewed.ts",
-  );
+  // An incremental run that reviewed src/a.ts and src/new-name.ts, and changed src/skipped.ts
+  // without reviewing it.
+  const context = (pathNow: [string, string][], outdated: string[] = []) =>
+    verdictCounts({
+      mode: "incremental",
+      pathNow: new Map(pathNow),
+      outdated: new Set(outdated),
+      reviewed: new Set(["src/a.ts", "src/new-name.ts"]),
+      unreviewed: new Set(["src/skipped.ts"]),
+    });
 
-  it("settles only claims closed, or confirmed on a file the review read", () => {
-    expect(settled).toEqual(["f1", "f3"]);
+  it("settles a claim the recheck closed, or found still there", () => {
+    const counts = context([
+      ["f1", "src/a.ts"],
+      ["f2", "src/a.ts"],
+    ]);
+    const targets = [target("F1", "f1"), target("F2", "f2")];
+    const verdicts = [verdict("F1", false), verdict("F2", true)];
+    expect(settledFixClaims(targets, verdicts, counts)).toEqual(["f1", "f2"]);
+  });
+
+  it("settles a claim whose 'gone' verdict a re-raise held open", () => {
+    const counts = context([["f1", "src/a.ts"]]);
+    const targets = [target("F1", "f1")];
+    const verdicts = [verdict("F1", false)];
+    // Not closed: the review raised it again.
+    const reraised = { reraised: new Set(["fp-f1"]), open: new Set(["f1"]) };
+    expect(fixedByRecheck({ targets }, verdicts, reraised)).toEqual([]);
+    expect(settledFixClaims(targets, verdicts, counts)).toEqual(["f1"]);
+  });
+
+  it("settles a protected claim held open because the verdict didn't name its fix", () => {
+    const counts = context([["f1", "src/a.ts"]]);
+    const targets = [target("F1", "f1", true, "src/a.ts", { ruleCategory: "authz" })];
+    const verdicts = [verdict("F1", false)];
+    const open = { reraised: new Set<string>(), open: new Set(["f1"]) };
+    expect(fixedByRecheck({ targets }, verdicts, open)).toEqual([]);
+    expect(settledFixClaims(targets, verdicts, counts)).toEqual(["f1"]);
+  });
+
+  it("keeps a claim with no verdict, or on a file the review didn't read", () => {
+    const counts = context([
+      ["f1", "src/a.ts"],
+      ["f2", "src/skipped.ts"],
+    ]);
+    const targets = [target("F1", "f1"), target("F2", "f2", true, "src/skipped.ts")];
+    expect(settledFixClaims(targets, [verdict("F2", true)], counts)).toEqual([]);
+  });
+
+  it("keeps a claim on a file renamed since and not reviewed under its new name", () => {
+    // Raised on src/old-name.ts, at head src/other-name.ts, which this run didn't review.
+    const counts = context([["f1", "src/other-name.ts"]]);
+    const targets = [target("F1", "f1", true, "src/old-name.ts")];
+    expect(settledFixClaims(targets, [verdict("F1", true)], counts)).toEqual([]);
+    // Reviewed under its new name: the verdict counts.
+    const renamed = context([["f1", "src/new-name.ts"]]);
+    expect(settledFixClaims(targets, [verdict("F1", true)], renamed)).toEqual(["f1"]);
+  });
+
+  it("keeps a claim whose line is gone unless prepare saw it gone too", () => {
+    const targets = [target("F1", "f1")];
+    // No place at head, but neither prepare (`entry.outdated`) nor this step saw it outdated.
+    expect(settledFixClaims(targets, [verdict("F1", true)], context([]))).toEqual([]);
+    // This step did, prepare didn't.
+    expect(settledFixClaims(targets, [verdict("F1", true)], context([], ["f1"]))).toEqual([]);
+    // Both did, and the review read its file.
+    const outdated = [target("F1", "f1", true, "src/a.ts", { outdated: true })];
+    expect(settledFixClaims(outdated, [verdict("F1", true)], context([], ["f1"]))).toEqual(["f1"]);
   });
 });
 

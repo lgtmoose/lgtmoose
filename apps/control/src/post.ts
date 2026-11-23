@@ -54,6 +54,7 @@ import {
   recheckReply,
   recheckWritesSchema,
   settledFixClaims,
+  verdictCounts,
   type RecheckWrites,
 } from "./recheck.js";
 import { JUDGE_REPLY_MARKER } from "./replies.js";
@@ -560,43 +561,19 @@ async function planRecheck(
   const unreviewed = new Set(
     manifest.review.files.map((file) => file.path).filter((path) => !reviewed.has(path)),
   );
-  // Each finding's file at head, followed from where it was raised (renames included).
-  const pathNow = new Map(open.map((entry) => [entry.id, entry.finding.path]));
-  const full = job.mode === "full";
-  // Whether this review read a finding's file well enough for a verdict on it to count.
-  const readEnough = (path: string) => (full ? reviewed.has(path) : !unreviewed.has(path));
+  const counts = verdictCounts({
+    mode: job.mode ?? "incremental",
+    // Each finding's file at head, followed from where it was raised (renames included).
+    pathNow: new Map(open.map((entry) => [entry.id, entry.finding.path])),
+    outdated,
+    reviewed,
+    unreviewed,
+  });
   const fixes = fixedByRecheck(job, verdicts, {
     reraised: new Set(report.reraised),
     open: new Set([...open.map((entry) => entry.id), ...outdated]),
-  }).filter((fix) => {
-    const path = pathNow.get(fix.entry.findingId);
-    if (path === undefined) {
-      // Its line is gone (NIC-1124): only a review of its file now says anything about it. Only
-      // when prepare saw the line gone too and told the recheck so: one this step can't place
-      // (its commit is gone) was never checked against the code that replaced its line.
-      return (
-        fix.entry.outdated === true &&
-        outdated.has(fix.entry.findingId) &&
-        reviewed.has(fix.entry.path)
-      );
-    }
-    // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
-    // or not in the PR's change any more) says nothing about the finding.
-    if (!readEnough(path)) return false;
-    if (full) return true;
-    // Moved since it was raised: the recheck read it by its old name, which head doesn't
-    // have, so only a review of the file under its new name says anything about it.
-    return path === fix.entry.path || reviewed.has(path);
-  });
-  const settledClaims = settledFixClaims(
-    job.targets,
-    verdicts,
-    new Set(fixes.map((fix) => fix.entry.findingId)),
-    (entry) => {
-      const path = pathNow.get(entry.findingId);
-      return path === undefined ? reviewed.has(entry.path) : readEnough(path);
-    },
-  );
+  }).filter((fix) => counts(fix.entry));
+  const settledClaims = settledFixClaims(job.targets, verdicts, counts);
   return {
     writes: {
       version: 1,
@@ -658,9 +635,9 @@ async function applyRecheck(
 }
 
 /**
- * Clears the fix claims (NIC-1140) the run's recheck settled: those it closed, and those its
- * verdict says are still there on a file this review read (`settledFixClaims`). Any other claim
- * stays for the next run. A failure is only logged.
+ * Clears the fix claims (NIC-1140) the run's recheck settled: those it closed, and the others it
+ * gave a verdict that counts on (`settledFixClaims`). Any other claim stays for the next run. A
+ * failure is only logged.
  */
 export async function clearFixClaims(
   deps: ControlDeps,
