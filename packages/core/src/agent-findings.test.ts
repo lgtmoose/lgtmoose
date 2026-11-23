@@ -98,6 +98,10 @@ describe("plainLine", () => {
     );
   });
 
+  it("takes out bidi overrides and isolates, and zero-width and direction marks", () => {
+    expect(plainLine("a\u202Eb\u2066c\u2069d\u200Ee\u200Ff\u200Bg")).toBe("a b c d e f g");
+  });
+
   it("keeps a body's newlines in the markdown, without its control characters", () => {
     const text = agentFindingsMarkdown({
       repo: "acme/app",

@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { DASHBOARD_ORIGIN_HEADER } from "@lgtmoose/config";
 
 /**
  * HTTP plumbing for the dashboard API (NIC-840): API Gateway HTTP API (payload 2.0) events in and
@@ -99,6 +100,23 @@ export function fromHttpApiEvent(event: HttpApiEvent): DashboardRequest {
               : event.body,
         }),
   };
+}
+
+/**
+ * The request without its origin secret, when CloudFront sent it (`DASHBOARD_ORIGIN_HEADER`
+ * holds `secret`); undefined when it didn't, so the API's own URL can't be called directly and
+ * `CloudFront-Viewer-Address` (`clientIp`) can't be set by a caller (NIC-1140). The secret is
+ * compared in constant time and never kept on the request.
+ */
+export function throughCloudFront(
+  request: DashboardRequest,
+  secret: string,
+): DashboardRequest | undefined {
+  const given = request.headers[DASHBOARD_ORIGIN_HEADER];
+  if (given === undefined || secret === "" || !safeEqual(given, secret)) return undefined;
+  const headers = { ...request.headers };
+  delete headers[DASHBOARD_ORIGIN_HEADER];
+  return { ...request, headers };
 }
 
 export function toHttpApiResult(response: DashboardResponse): HttpApiResult {

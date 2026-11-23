@@ -19,7 +19,10 @@ import {
   HeadersReferrerPolicy,
   HttpVersion,
   OriginProtocolPolicy,
+  OriginRequestCookieBehavior,
+  OriginRequestHeaderBehavior,
   OriginRequestPolicy,
+  OriginRequestQueryStringBehavior,
   PriceClass,
   ResponseHeadersPolicy,
   ViewerProtocolPolicy,
@@ -36,6 +39,8 @@ import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import type { Construct } from "constructs";
 import {
   DASHBOARD_CSP,
+  DASHBOARD_ORIGIN_HEADER,
+  DASHBOARD_TOKEN_HEADER,
   FEEDBACK_REPORT_KEY,
   SECRET_NAMES,
   STACK_OUTPUTS,
@@ -101,6 +106,16 @@ export class DashboardStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // CloudFront sends this on every request to the API, which refuses one without it
+    // (NIC-1140): so the API's own URL can't be called directly, and CloudFront-Viewer-Address
+    // (the client's address, for limiting failed token sign-ins) is CloudFront's, not a
+    // caller's. Generated; the API reads it from Secrets Manager and never logs it.
+    const originSecret = new Secret(this, "OriginSecret", {
+      description: "Proves a request to the LGTMoose dashboard API came through its CloudFront.",
+      generateSecretString: { passwordLength: 48, excludePunctuation: true },
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     this.apiFunction = lgtmooseFunction(this, "DashboardApiFunction", {
       entry: DASHBOARD_HANDLER,
       description: "The LGTMoose dashboard's API: sign-in, findings and review runs.",
@@ -114,6 +129,7 @@ export class DashboardStack extends Stack {
         DATABASE_NAME: props.databaseName,
         OAUTH_SECRET_ID: SECRET_NAMES.githubAppOAuth,
         SIGNING_KEY_SECRET_ARN: signingKey.secretArn,
+        ORIGIN_SECRET_ARN: originSecret.secretArn,
         ORIGIN_PARAMETER_NAME,
         ALLOWED_ORGS: props.allowedOrgs.join(","),
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
@@ -130,6 +146,7 @@ export class DashboardStack extends Stack {
     props.databaseSecret.grantRead(this.apiFunction);
     oauthSecret.grantRead(this.apiFunction);
     signingKey.grantRead(this.apiFunction);
+    originSecret.grantRead(this.apiFunction);
     // The acceptance report only: not transcripts, run data or anything else in the bucket.
     props.artifactBucket.grantRead(this.apiFunction, FEEDBACK_REPORT_KEY);
     // By ARN, not by the parameter resource: the parameter needs CloudFront, which needs the API.
@@ -188,6 +205,23 @@ export class DashboardStack extends Stack {
       },
     });
 
+    // What reaches the API: the viewer's cookies and query, the headers the API reads, and
+    // CloudFront-Viewer-Address. Not Host, which must stay the API's own. (A managed policy
+    // can't both drop Host and add a CloudFront header.)
+    const apiRequests = new OriginRequestPolicy(this, "DashboardApiRequests", {
+      comment: "LGTMoose dashboard API: cookies, query, the headers it reads, the viewer address",
+      cookieBehavior: OriginRequestCookieBehavior.all(),
+      queryStringBehavior: OriginRequestQueryStringBehavior.all(),
+      headerBehavior: OriginRequestHeaderBehavior.allowList(
+        "Origin",
+        "Sec-Fetch-Site",
+        "Content-Type",
+        "Accept",
+        DASHBOARD_TOKEN_HEADER,
+        "CloudFront-Viewer-Address",
+      ),
+    });
+
     this.distribution = new Distribution(this, "Distribution", {
       comment: "LGTMoose dashboard",
       defaultRootObject: "index.html",
@@ -204,12 +238,14 @@ export class DashboardStack extends Stack {
         "/api/*": {
           origin: new HttpOrigin(`${api.apiId}.execute-api.${this.region}.${this.urlSuffix}`, {
             protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
+            customHeaders: {
+              [DASHBOARD_ORIGIN_HEADER]: originSecret.secretValue.unsafeUnwrap(),
+            },
           }),
           viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: AllowedMethods.ALLOW_ALL,
           cachePolicy: CachePolicy.CACHING_DISABLED,
-          // Cookies, the query and headers such as Origin reach the API; Host is the API's own.
-          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          originRequestPolicy: apiRequests,
           responseHeadersPolicy: headers,
         },
       },

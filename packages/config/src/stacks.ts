@@ -82,6 +82,19 @@ export const BOOTSTRAP_REQUEST_PREFIX = "requests/learnings-bootstrap/";
  * plugins, and the API the only place it connects to. Sign-in leaves by navigation, which CSP
  * doesn't restrict. CloudFront sends it on AWS and the dashboard server under docker compose.
  */
+/**
+ * The header `lgtmoose findings` sends the person's GitHub token in (NIC-1140). Not
+ * `Authorization`, which CloudFront drops from a GET.
+ */
+export const DASHBOARD_TOKEN_HEADER = "x-lgtmoose-github-token";
+
+/**
+ * The header CloudFront adds to every request to the dashboard API, holding a secret the stack
+ * generates (NIC-1140). The API refuses a request without it, so its own URL can't be called
+ * directly and `CloudFront-Viewer-Address` is CloudFront's.
+ */
+export const DASHBOARD_ORIGIN_HEADER = "x-lgtmoose-origin-secret";
+
 export const DASHBOARD_CSP = [
   "default-src 'none'",
   "script-src 'self'",

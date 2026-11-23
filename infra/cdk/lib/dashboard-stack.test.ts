@@ -1,5 +1,7 @@
 import { Match, Template } from "aws-cdk-lib/assertions";
 import {
+  DASHBOARD_ORIGIN_HEADER,
+  DASHBOARD_TOKEN_HEADER,
   FEEDBACK_REPORT_KEY,
   SECRET_NAMES,
   STACK_OUTPUTS,
@@ -61,13 +63,45 @@ describe("DashboardStack", () => {
           Match.objectLike({
             PathPattern: "/api/*",
             ViewerProtocolPolicy: "https-only",
-            // Managed CachingDisabled and AllViewerExceptHostHeader.
+            // Managed CachingDisabled, and the stack's own origin request policy.
             CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac",
+            OriginRequestPolicyId: { Ref: Match.stringLikeRegexp("DashboardApiRequests") },
           }),
         ],
       }),
     });
+  });
+
+  it("sends the API the viewer's address and a secret only CloudFront has (NIC-1140)", () => {
+    // Cookies, the query, the headers the API reads and CloudFront-Viewer-Address; never Host.
+    template.hasResourceProperties("AWS::CloudFront::OriginRequestPolicy", {
+      OriginRequestPolicyConfig: Match.objectLike({
+        CookiesConfig: { CookieBehavior: "all" },
+        QueryStringsConfig: { QueryStringBehavior: "all" },
+        HeadersConfig: {
+          HeaderBehavior: "whitelist",
+          Headers: Match.arrayWith([
+            "Origin",
+            "Sec-Fetch-Site",
+            DASHBOARD_TOKEN_HEADER,
+            "CloudFront-Viewer-Address",
+          ]),
+        },
+      }),
+    });
+    const policy = JSON.stringify(template.findResources("AWS::CloudFront::OriginRequestPolicy"));
+    expect(policy).not.toMatch(/"Host"/i);
+    // The API origin carries the generated secret, as a Secrets Manager reference, not text.
+    const distribution = JSON.stringify(template.findResources("AWS::CloudFront::Distribution"));
+    expect(distribution).toContain(DASHBOARD_ORIGIN_HEADER);
+    expect(distribution).toMatch(/resolve:secretsmanager:/);
+    template.hasResourceProperties("AWS::SecretsManager::Secret", {
+      GenerateSecretString: Match.objectLike({ PasswordLength: 48 }),
+    });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({ ORIGIN_SECRET_ARN: Match.anyValue() }) },
+    });
+    expect(apiRolePolicies()).toMatch(/OriginSecret/);
   });
 
   it("sends strict security headers on every response", () => {

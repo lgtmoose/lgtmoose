@@ -112,7 +112,9 @@ type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 export class DashboardGitHubError extends Error {
   readonly status: number;
   readonly sso: boolean;
-  constructor(what: string, status: number, sso = false) {
+  /** GitHub's rate limit, not a refusal: a 403 or 429 with no requests left or a Retry-After. */
+  readonly rateLimited: boolean;
+  constructor(what: string, status: number, sso = false, rateLimited = false) {
     super(
       status === 0
         ? `GitHub couldn't be reached for ${what}.`
@@ -121,6 +123,7 @@ export class DashboardGitHubError extends Error {
     this.name = "DashboardGitHubError";
     this.status = status;
     this.sso = sso;
+    this.rateLimited = rateLimited;
   }
 }
 
@@ -164,7 +167,16 @@ export function githubDashboard(
       throw new DashboardGitHubError(what, 0);
     }
     if (!response.ok && response.status !== 404) {
-      throw new DashboardGitHubError(what, response.status, response.headers.has("x-github-sso"));
+      const limited =
+        (response.status === 403 || response.status === 429) &&
+        (response.headers.get("x-ratelimit-remaining") === "0" ||
+          response.headers.has("retry-after"));
+      throw new DashboardGitHubError(
+        what,
+        response.status,
+        response.headers.has("x-github-sso"),
+        limited,
+      );
     }
     return response;
   };

@@ -59,10 +59,11 @@ function fenced(text: string): string {
 
 /** One line of plain text: newlines and backticks out, so it can't break the list around it. */
 export function plainLine(text: string): string {
-  // Control characters (ANSI escapes and NEL included) and Unicode line and paragraph
+  // Control characters (ANSI escapes and NEL included), format characters (bidi overrides and
+  // isolates, zero-width and direction marks) and Unicode line and paragraph
   // separators become spaces, so text can't move a terminal's cursor or start a new line.
   return text
-    .replace(/[\p{Cc}\u2028\u2029]+/gu, " ")
+    .replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ")
     .replaceAll("`", "'")
     .replace(/ {2,}/g, " ")
     .trim();
@@ -70,7 +71,7 @@ export function plainLine(text: string): string {
 
 /** A block's text with control characters out, newlines and tabs kept. */
 function plainBlock(text: string): string {
-  return text.replace(/\r\n?/g, "\n").replace(/[^\P{Cc}\n\t]|[\u2028\u2029]/gu, " ");
+  return text.replace(/\r\n?/g, "\n").replace(/[^\P{Cc}\n\t]|[\p{Cf}\u2028\u2029]/gu, " ");
 }
 
 /**

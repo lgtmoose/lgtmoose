@@ -1,3 +1,4 @@
+import { DASHBOARD_TOKEN_HEADER } from "@lgtmoose/config";
 import { answerRequestSchema } from "@lgtmoose/core";
 import { DashboardGitHubError, type RepoAccess } from "./dashboard-github.js";
 import {
@@ -23,9 +24,14 @@ import { resolutionHeld } from "./thread-policy.js";
  *   with the `repo` scope (`public_repo` on a public repository), such as `gh auth token`. A
  *   fine-grained token's permissions aren't reported by GitHub, so it can only list. The
  *   repository's owner must be one of `allowedOrgs`.
+ * - **Who may see:** as at sign-in, only an active member of the allowed org that owns the
+ *   repository (or that account itself); a public repository shows everyone `pull`, so that
+ *   alone lists nothing.
  * - **Abuse:** a token GitHub refused is remembered for a while by its hash and refused again
- *   without asking, and failed token sign-ins are limited per client address and in all, so
- *   random tokens can't get the dashboard rate-limited by GitHub.
+ *   without asking. GitHub is asked about a token we don't know yet only while failed sign-ins,
+ *   from this client and in all, are under their limits; a known token never waits on them, and
+ *   a token that isn't shaped like one never reaches GitHub. So random tokens can't get the
+ *   dashboard rate-limited by GitHub, nor lock out people already signed in.
  * - **Answers:** `fixed` marks the finding for the next run's recheck, which alone closes it;
  *   only a finding the recheck can take (on a line of the PR's new code) can be marked.
  *   `declined` closes it with the reason, as an accepted decline on its thread would, under the
@@ -34,7 +40,7 @@ import { resolutionHeld } from "./thread-policy.js";
  */
 
 /** The header the CLI's GitHub token comes in. */
-export const TOKEN_HEADER = "x-lgtmoose-github-token";
+export const TOKEN_HEADER = DASHBOARD_TOKEN_HEADER;
 
 /** A token's login, and its access per repository, are read again after this long. */
 const ACCESS_TTL_MS = 60_000;
@@ -108,20 +114,29 @@ function cached(key: string, now: number): string | undefined {
   return hit !== undefined && now - hit.at < hit.ttl ? hit.value : undefined;
 }
 
-/** Whether `client` (or everyone) has failed too often in this window. */
-function tooManyFailures(client: string, now: number): boolean {
-  if (now - failures.windowAt >= FAILURE_WINDOW_MS) {
-    failures.windowAt = now;
-    failures.all = 0;
-    failures.byClient.clear();
-  }
+/** Starts a new window once the current one is over. */
+function rollWindow(now: number): void {
+  if (now - failures.windowAt < FAILURE_WINDOW_MS) return;
+  failures.windowAt = now;
+  failures.all = 0;
+  failures.byClient.clear();
+}
+
+/**
+ * Whether GitHub may be asked about a token we don't know yet: not while `client`, or everyone
+ * together, has had too many refused this window. A known token never waits on this.
+ */
+function mayAskGitHub(client: string, now: number): boolean {
+  rollWindow(now);
   return (
-    failures.all >= FAILURES_IN_ALL || (failures.byClient.get(client) ?? 0) >= FAILURES_PER_CLIENT
+    failures.all < FAILURES_IN_ALL && (failures.byClient.get(client) ?? 0) < FAILURES_PER_CLIENT
   );
 }
 
-function countFailure(client: string): void {
-  failures.all += 1;
+/** Counts a failed sign-in for `client`, and for everyone when GitHub was asked. */
+function countFailure(client: string, now: number, askedGitHub: boolean): void {
+  rollWindow(now);
+  if (askedGitHub) failures.all += 1;
   failures.byClient.set(client, (failures.byClient.get(client) ?? 0) + 1);
   // Bounded: the window resets the map, and few addresses fail in one.
   if (failures.byClient.size > ACCESS_ENTRIES) failures.byClient.clear();
@@ -135,6 +150,10 @@ function ownerAllowed(deps: DashboardDeps, repo: string): boolean {
 /** A GitHub failure as the CLI is told it, or undefined when it isn't one. */
 function githubFailure(error: unknown): DashboardResponse | undefined {
   if (!(error instanceof DashboardGitHubError)) return undefined;
+  // GitHub's rate limit, whether it answers 403 or 429: for now, not a refusal.
+  if (error.rateLimited) {
+    return json(503, { error: "GitHub's rate limit was reached: try again in a few minutes" });
+  }
   if (error.status === 401) return json(401, { error: "bad-token" });
   if (error.status === 403 && error.sso) {
     return json(403, {
@@ -156,25 +175,34 @@ async function tokenAsker(
   client: string,
 ): Promise<Asker | DashboardResponse> {
   const at = deps.now().getTime();
-  if (tooManyFailures(client, at)) return json(429, { error: "too-many-failures" });
+  // Refused without asking GitHub, and counted only against this client.
   if (!TOKEN_SHAPE.test(token)) {
-    countFailure(client);
+    countFailure(client, at, false);
     return json(401, { error: "bad-token" });
+  }
+  if (token.startsWith("ghs_")) {
+    return json(401, {
+      error:
+        "this is an installation token, not a person's: use `gh auth token`, or a personal token",
+    });
   }
   // Keyed by the token's hash: the token itself is never kept.
   const key = sha256Hex(token);
   let login = cached(`login:${key}`, at);
   if (login === REFUSED) {
-    countFailure(client);
+    countFailure(client, at, false);
     return json(401, { error: "bad-token" });
   }
   if (login === undefined) {
+    // Only a token we don't know yet waits on the failure limit: GitHub isn't asked while it's
+    // reached, so random tokens can't get this address rate-limited by GitHub.
+    if (!mayAskGitHub(client, at)) return json(429, { error: "too-many-failures" });
     try {
       login = await deps.github.login(token);
     } catch (error) {
       if (error instanceof DashboardGitHubError && error.status === 401) {
         remember(`login:${key}`, REFUSED, at, REFUSED_TTL_MS);
-        countFailure(client);
+        countFailure(client, at, true);
       }
       const failure = githubFailure(error);
       if (failure !== undefined) return failure;
@@ -182,16 +210,31 @@ async function tokenAsker(
     }
     remember(`login:${key}`, login, at, ACCESS_TTL_MS);
   }
+  const self = login.toLowerCase();
+  const lookup = async (cacheKey: string, read: () => Promise<string>): Promise<string> => {
+    const now = deps.now().getTime();
+    const hit = cached(cacheKey, now);
+    if (hit !== undefined) return hit;
+    const value = await read();
+    remember(cacheKey, value, now, ACCESS_TTL_MS);
+    return value;
+  };
   return {
     login,
     async access(repo) {
       if (!ownerAllowed(deps, repo)) return "none";
-      const now = deps.now().getTime();
-      const hit = cached(`access:${key}:${repo}`, now);
-      if (hit !== undefined) return hit as RepoAccess;
-      const value = await deps.github.repoAccess(token, repo);
-      remember(`access:${key}:${repo}`, value, now, ACCESS_TTL_MS);
-      return value;
+      // What sign-in asks for: an active member of the allowed org that owns the repository (or
+      // the account itself). A public repository shows anyone `pull`, so that alone isn't enough.
+      const owner = repo.split("/")[0] ?? "";
+      if (owner !== self) {
+        const role = await lookup(`member:${key}:${owner}`, () =>
+          deps.github.orgRole(token, owner),
+        );
+        if (role === "none") return "none";
+      }
+      return (await lookup(`access:${key}:${repo}`, () =>
+        deps.github.repoAccess(token, repo),
+      )) as RepoAccess;
     },
   };
 }

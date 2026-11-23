@@ -1,5 +1,10 @@
 import { parseArgs } from "node:util";
-import { STACK_NAMES, STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
+import {
+  DASHBOARD_TOKEN_HEADER,
+  STACK_NAMES,
+  STACK_OUTPUTS,
+  type DeployConfig,
+} from "@lgtmoose/config";
 import {
   agentFindingSchema,
   agentFindingsMarkdown,
@@ -40,7 +45,7 @@ Options:
 `;
 
 /** The header the dashboard API reads the token from (`dashboard-findings.ts`). */
-export const TOKEN_HEADER = "x-lgtmoose-github-token";
+export const TOKEN_HEADER = DASHBOARD_TOKEN_HEADER;
 
 export interface FindingsDeps {
   loadConfig(): Promise<DeployConfig | undefined>;

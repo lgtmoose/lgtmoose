@@ -187,4 +187,28 @@ describe("repoAccess", () => {
     });
     await expect(down.repoAccess("t", "acme/app")).rejects.toMatchObject({ status: 0 });
   });
+
+  it("tells GitHub's rate limit from a refusal", async () => {
+    const limited = githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": {
+          status: 403,
+          body: {},
+          headers: { "x-ratelimit-remaining": "0" },
+        },
+      }).fetch,
+    });
+    await expect(limited.repoAccess("t", "acme/app")).rejects.toMatchObject({
+      status: 403,
+      rateLimited: true,
+    });
+    const refused = githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": { status: 403, body: {}, headers: { "x-ratelimit-remaining": "4000" } },
+      }).fetch,
+    });
+    await expect(refused.repoAccess("t", "acme/app")).rejects.toMatchObject({
+      rateLimited: false,
+    });
+  });
 });

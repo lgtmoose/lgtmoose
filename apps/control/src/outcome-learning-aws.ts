@@ -142,7 +142,7 @@ export function drizzleAnswerLearningStore(db: Db): AnswerLearningStore {
         .innerJoin(findings, eq(findings.id, findingEvents.findingId))
         .innerJoin(pullRequests, eq(pullRequests.id, findings.pullRequestId))
         .where(eq(findingEvents.learnPending, true))
-        .orderBy(asc(findingEvents.createdAt))
+        .orderBy(asc(findingEvents.learnAttempts), asc(findingEvents.createdAt))
         .limit(limit);
       return rows;
     },
@@ -152,6 +152,18 @@ export function drizzleAnswerLearningStore(db: Db): AnswerLearningStore {
         .update(findingEvents)
         .set({ learnPending: false })
         .where(inArray(findingEvents.id, [...eventIds]));
+    },
+    async answersFailed(eventIds, maxAttempts) {
+      if (eventIds.length === 0) return [];
+      const rows = await db
+        .update(findingEvents)
+        .set({
+          learnAttempts: sql`${findingEvents.learnAttempts} + 1`,
+          learnPending: sql`${findingEvents.learnAttempts} + 1 < ${maxAttempts}`,
+        })
+        .where(and(inArray(findingEvents.id, [...eventIds]), eq(findingEvents.learnPending, true)))
+        .returning({ id: findingEvents.id, pending: findingEvents.learnPending });
+      return rows.flatMap((row) => (row.pending === true ? [] : [row.id]));
     },
   };
 }

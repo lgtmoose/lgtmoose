@@ -1,6 +1,6 @@
 {
-  "id": "27ab80c0-0bc8-4431-af88-9b2d0c8887d3",
-  "prevId": "fc020549-73d7-4f63-a343-3499bf9786f1",
+  "id": "4dd80b7e-2c14-4a28-82ef-d77716180619",
+  "prevId": "3e14b0b2-e4f3-40d1-911a-42da0dc13ec3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -447,6 +447,13 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": false
+        },
+        "learn_attempts": {
+          "name": "learn_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "created_at": {
           "name": "created_at",

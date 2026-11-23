@@ -7,6 +7,7 @@ import {
   SESSION_COOKIE,
   SIGN_IN_COOKIE,
   fromHttpApiEvent,
+  throughCloudFront,
   parseCookies,
   pkceChallenge,
   sha256Hex,
@@ -488,5 +489,41 @@ describe("dashboard HTTP plumbing", () => {
     expect(verify(KEY, signed)).toEqual({ a: 1 });
     expect(verify(KEY, `${signed.slice(0, -2)}xx`)).toBeUndefined();
     expect(verify(KEY, "garbage")).toBeUndefined();
+  });
+});
+
+describe("throughCloudFront (NIC-1140)", () => {
+  const SECRET = "s".repeat(48);
+  const event = (headers: Record<string, string>) =>
+    fromHttpApiEvent({
+      rawPath: "/api/me",
+      headers,
+      requestContext: { http: { method: "GET", sourceIp: "130.176.1.1" } },
+    });
+
+  it("takes only a request CloudFront sent, and drops the secret from it", () => {
+    const request = throughCloudFront(
+      event({
+        "X-Lgtmoose-Origin-Secret": SECRET,
+        "CloudFront-Viewer-Address": "203.0.113.7:51234",
+      }),
+      SECRET,
+    );
+    expect(request?.headers["x-lgtmoose-origin-secret"]).toBeUndefined();
+    expect(request?.clientIp).toBe("203.0.113.7");
+  });
+
+  it("refuses a request to the API's own URL, or with the wrong secret", () => {
+    expect(
+      throughCloudFront(event({ "CloudFront-Viewer-Address": "1.2.3.4:1" }), SECRET),
+    ).toBeUndefined();
+    expect(
+      throughCloudFront(event({ "x-lgtmoose-origin-secret": "t".repeat(48) }), SECRET),
+    ).toBeUndefined();
+    expect(throughCloudFront(event({ "x-lgtmoose-origin-secret": "" }), "")).toBeUndefined();
+  });
+
+  it("reads an IPv6 viewer address", () => {
+    expect(event({ "cloudfront-viewer-address": "2001:db8::1:443" }).clientIp).toBe("2001:db8::1");
   });
 });

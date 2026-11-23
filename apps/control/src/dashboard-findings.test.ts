@@ -44,6 +44,9 @@ const LIMITED = "github_pat_limited_ffffffffff";
 const SSO = "ghp_sso_token_gggggggggggggggg";
 const FORBIDDEN = "ghp_forbidden_token_hhhhhhhhhh";
 const DOWN = "ghp_down_token_iiiiiiiiiiiiiiii";
+const LIMITED_RATE = "ghp_rate_token_jjjjjjjjjjjjjjj";
+/** Someone outside the org: GitHub shows them `pull` on a public repository. */
+const OUTSIDER = "ghp_outsider_token_kkkkkkkkkkk";
 
 const people: Record<string, { login: string; access: RepoAccess }> = {
   [WRITER]: { login: "Carol", access: "write" },
@@ -54,6 +57,8 @@ const people: Record<string, { login: string; access: RepoAccess }> = {
   [SSO]: { login: "Gus", access: "write" },
   [FORBIDDEN]: { login: "Hal", access: "write" },
   [DOWN]: { login: "Ivy", access: "write" },
+  [LIMITED_RATE]: { login: "Jo", access: "write" },
+  [OUTSIDER]: { login: "Kim", access: "read" },
   // The dashboard session's own sign-in token.
   gho_user: { login: "Alice", access: "write" },
 };
@@ -68,13 +73,19 @@ const github: DashboardGitHub = {
     if (person === undefined) throw new DashboardGitHubError("reading the signed-in user", 401);
     return person.login;
   },
-  orgRole: async (_token, org) => (org === "acme" ? "member" : "none"),
+  async orgRole(token, org) {
+    lookups.push(`member:${token}:${org}`);
+    return org === "acme" && token !== OUTSIDER ? "member" : "none";
+  },
   visibleRepos: async () => ({ repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] }),
   async repoAccess(token, repo) {
     lookups.push(`access:${token}:${repo}`);
     if (token === SSO) throw new DashboardGitHubError("reading a repository", 403, true);
     if (token === FORBIDDEN) throw new DashboardGitHubError("reading a repository", 403);
     if (token === DOWN) throw new DashboardGitHubError("reading a repository", 0);
+    if (token === LIMITED_RATE) {
+      throw new DashboardGitHubError("reading a repository", 403, false, true);
+    }
     return repo === "acme/api" ? (people[token]?.access ?? "none") : "none";
   },
 };
@@ -248,7 +259,11 @@ describe("listing a PR's findings with a token", () => {
         ),
       );
     }
-    expect(lookups).toEqual([`login:${READER}`, `access:${READER}:acme/api`]);
+    expect(lookups).toEqual([
+      `login:${READER}`,
+      `member:${READER}:acme`,
+      `access:${READER}:acme/api`,
+    ]);
     expect(JSON.stringify(logged)).not.toContain(READER);
   });
 });
@@ -324,6 +339,32 @@ describe("answering a finding with a token", () => {
     expect(rejected).toEqual([{ repo: "acme/api", ids: [id] }]);
   });
 
+  it("gives up on a decline whose learning keeps failing, without holding up the rest", async () => {
+    const stuck = await finding({ fingerprint: "stuck" });
+    await ack(stuck, WRITER, { outcome: "declined", reason: "uninstalled" });
+    const failing = {
+      store: drizzleAnswerLearningStore(db),
+      rejected: async () => {
+        throw new Error("no installation");
+      },
+      log: (message: string) => logged.push({ message }),
+    };
+    for (let i = 0; i < 5; i += 1) expect(await learnFromAnswers(failing)).toBe(0);
+    expect(logged.map((entry) => entry.message)).toContain(
+      "answers given up on: outcome learning kept failing",
+    );
+    const [event] = await db.select().from(findingEvents).where(eq(findingEvents.findingId, stuck));
+    expect([event?.learnPending, event?.learnAttempts]).toEqual([false, 5]);
+    // A newer decline is read first even while an older one is still failing.
+    const older = await finding({ fingerprint: "older" });
+    await ack(older, WRITER, { outcome: "declined", reason: "a" });
+    await learnFromAnswers(failing);
+    const newer = await finding({ fingerprint: "newer" });
+    await ack(newer, WRITER, { outcome: "declined", reason: "b" });
+    const order = await drizzleAnswerLearningStore(db).pendingAnswers(10);
+    expect(order.map((answer) => answer.findingId)).toEqual([newer, older]);
+  });
+
   it("needs write access to answer, and a reason to decline", async () => {
     const id = await finding();
     expect((await ack(id, READER, { outcome: "fixed" })).status).toBe(403);
@@ -397,11 +438,71 @@ describe("review round 1 (NIC-1140)", () => {
     expect((await list(bad, "203.0.113.1")).status).toBe(401);
     // GitHub was asked once: the refusal is remembered by the token's hash.
     expect(lookups.filter((entry) => entry === `login:${bad}`)).toHaveLength(1);
+    // A known token is never held up by the limit, from any client.
+    expect((await list(READER, "203.0.113.1")).status).toBe(200);
     for (let i = 0; i < 10; i += 1) await list(bad, "203.0.113.1");
-    expect((await list(bad, "203.0.113.1")).status).toBe(429);
-    // Even a good token, from that client, until the window ends; others go on.
-    expect((await list(READER, "203.0.113.1")).status).toBe(429);
-    expect((await list(READER, "203.0.113.2")).status).toBe(200);
+    expect((await list(bad, "203.0.113.1")).status).toBe(401);
+    // A token we don't know yet, from that client, isn't asked about until the window ends.
+    expect((await list(WRITER, "203.0.113.1")).status).toBe(429);
+    expect(lookups.some((entry) => entry === `login:${WRITER}`)).toBe(false);
+    expect((await list(READER, "203.0.113.1")).status).toBe(200);
+    expect((await list(WRITER, "203.0.113.2")).status).toBe(200);
+  });
+
+  it("rejects a malformed token cheaply, without counting it against everyone", async () => {
+    for (let i = 0; i < 150; i += 1) {
+      const response = await handleDashboardRequest(
+        deps,
+        request(
+          "GET",
+          "/api/findings",
+          withToken("not a token", {
+            query: { repo: "acme/api", pr: "232" },
+            clientIp: `198.51.100.${i % 200}`,
+          }),
+        ),
+      );
+      expect(response.status).toBe(401);
+    }
+    expect(lookups).toEqual([]);
+    // Everyone else still signs in.
+    const fresh = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(WRITER, { query: { repo: "acme/api", pr: "232" }, clientIp: "192.0.2.9" }),
+      ),
+    );
+    expect(fresh.status).toBe(200);
+  });
+
+  it("tells an installation token to use a person's", async () => {
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken("ghs_installation_token_llllllll", { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    expect(response.status).toBe(401);
+    expect(response.body).toContain("installation token");
+    expect(lookups).toEqual([]);
+  });
+
+  it("lists nothing to someone outside the org, even on a public repository", async () => {
+    await finding({ ruleCategory: "secrets", fingerprint: "s" });
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(OUTSIDER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    expect(response.status).toBe(404);
+    expect(lookups).toContain(`member:${OUTSIDER}:acme`);
   });
 
   it("says why GitHub refused, or that it couldn't be asked", async () => {
@@ -410,6 +511,7 @@ describe("review round 1 (NIC-1140)", () => {
       [SSO, 403, "single sign-on"],
       [FORBIDDEN, 403, "refused this token"],
       [DOWN, 503, "couldn't be asked"],
+      [LIMITED_RATE, 503, "rate limit"],
     ] as const) {
       const response = await ack(id, token, { outcome: "fixed" });
       expect(response.status).toBe(status);

@@ -278,6 +278,12 @@ export const findingEvents = pgTable(
      * from it and clears it. Null for events that never wait.
      */
     learnPending: boolean("learn_pending"),
+    /**
+     * How often outcome learning failed on this answer. The reconciler reads the least tried
+     * first, and gives up (clearing `learn_pending`) after a few, so one repository whose
+     * learning keeps failing never holds up the rest.
+     */
+    learnAttempts: integer("learn_attempts").notNull().default(0),
     createdAt: createdAt(),
   },
   (t) => [
