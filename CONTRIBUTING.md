@@ -26,6 +26,8 @@ The repo uses TypeScript 7, the native compiler. Its package has no JavaScript A
 
 Dependabot opens weekly PRs for npm packages, GitHub Actions and the test Postgres image. A bump of a third-party action (one not under `actions/`) runs with CI's tokens and can write to the shared turbo cache, so read the action's diff between the two pinned commits before merging. Don't merge it as routine.
 
+pnpm won't resolve a package version until it has been published for 3 days (`minimumReleaseAge` in `pnpm-workspace.yaml`), the same window Dependabot waits. If `pnpm add` or `pnpm update` fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`, wait for the version to age rather than lowering the setting. For an urgent security fix, add that one package to `minimumReleaseAgeExclude` in the same PR and say why.
+
 ## Changing prompts or rule packs
 
 Changes to prompts, rule packs or harnesses must keep eval recall at or above the baseline. CI reports this once the eval harness lands.
