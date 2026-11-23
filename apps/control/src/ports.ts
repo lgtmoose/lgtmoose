@@ -48,6 +48,11 @@ export interface RunRecord {
   lastReviewEvent: ReviewEvent | undefined;
   /** That review's GitHub ID; undefined in shadow mode. */
   lastReviewId: number | undefined;
+  /**
+   * The review and label above came from a live run, so they're on GitHub (NIC-1141). Left out
+   * when they came from a shadow run, or it isn't known: a live run doesn't go by them then.
+   */
+  reviewLive?: boolean;
   /** The head the run reviews. */
   headSha: string;
   /** The execution the run belongs to. */
@@ -127,13 +132,15 @@ export interface FindingStore {
   /**
    * Retires the PR's findings raised in shadow mode, never posted and unanswered since
    * (NIC-1141, `unpostedShadow`): status `shadow`, with a `shadow_retired` event at `sha`.
-   * Nobody could see them, so on a live run they don't count. Returns how many of the PR's
-   * retirements no run that wrote the PR's summary has reported yet, and keeps that on run
-   * `runId`: once it writes its summary they're reported, a retry gets the same number, and a
-   * run that writes nothing (covered, or overtaken) leaves them to the next. Without it, nothing
-   * is retired.
+   * Nobody could see them, so on a live run they don't count. Returns how many this call retired;
+   * a second call retires none. Without it, nothing is retired.
    */
-  retireShadowFindings?(pullRequestId: string, runId: string, sha: string): Promise<number>;
+  retireShadowFindings?(pullRequestId: string, sha: string): Promise<number>;
+  /**
+   * How many of the PR's findings were retired from shadow mode since its last full review
+   * (`retiredSinceFullReview`), for the summary's note. Without it, no note.
+   */
+  retiredShadowFindings?(pullRequestId: string): Promise<number>;
   /**
    * Follows what people did to our comments' review threads: an open or outdated finding whose
    * thread is resolved becomes `resolved_by_human`, and one resolved that way whose thread was
@@ -205,8 +212,6 @@ export interface RunStore {
     executionArn: string;
     /** When the job's event happened, which orders the PR's runs. */
     eventAt?: Date;
-    /** The run is in shadow mode: it posts nothing (NIC-1141). Left out, it isn't recorded. */
-    shadow?: boolean;
   }): Promise<RunRecord>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** Records what the run reviews: how many files, and whether only since `fromSha`. */
@@ -289,8 +294,8 @@ export interface RunStore {
   supersedeRun(runId: string): Promise<void>;
   /**
    * Records whether the run's post is in shadow mode (NIC-1141), which decides whether its
-   * findings were posted: the post step's mode, not the prepare step's, should a deploy change
-   * it in between. Setting it again is a no-op.
+   * findings were posted. Only the first call sets it: a retry after a deploy changed the mode
+   * keeps the one its findings were saved in.
    */
   recordShadow?(runId: string, shadow: boolean): Promise<void>;
   /**

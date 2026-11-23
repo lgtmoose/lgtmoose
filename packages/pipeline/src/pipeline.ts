@@ -254,6 +254,8 @@ export interface FinishOptions {
    * the deployment's first alias (`SummaryInput.commandHandle`).
    */
   commandHandle?: string;
+  /** Findings retired from shadow mode since the PR's last full review (`SummaryInput`). */
+  shadowRetired?: number;
 }
 
 /** What a batch a spend cap kept from running reports as its error. */
@@ -1450,6 +1452,9 @@ export async function finishReview(
         ? {}
         : { notices: options.notices }),
       ...(options.commandHandle === undefined ? {} : { commandHandle: options.commandHandle }),
+      ...(options.shadowRetired === undefined || options.shadowRetired <= 0
+        ? {}
+        : { shadowRetired: options.shadowRetired }),
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );

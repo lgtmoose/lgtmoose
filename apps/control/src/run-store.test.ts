@@ -573,8 +573,8 @@ describe("drizzleFindingStore", () => {
 
   describe("findings raised in shadow mode (NIC-1141)", () => {
     const number = 47;
-    const run = (arn: string, shadow?: boolean) =>
-      store.startRun({
+    const run = async (arn: string, shadow: boolean) => {
+      const started = await store.startRun({
         installationId: 5,
         repo: "acme/shop",
         number,
@@ -582,8 +582,10 @@ describe("drizzleFindingStore", () => {
         headSha: sha("1"),
         baseSha: sha("b"),
         executionArn: arn,
-        ...(shadow === undefined ? {} : { shadow }),
       });
+      await store.recordShadow?.(started.runId, shadow);
+      return started;
+    };
     const save = (runId: string, pr: string, title: string, githubCommentId?: number) =>
       findingStore.saveFindings(pr, runId, sha("1"), [
         {
@@ -609,7 +611,13 @@ describe("drizzleFindingStore", () => {
         createdAt: at,
       });
 
-    it("retires unposted, unanswered ones once per run, and leaves the rest", async () => {
+    it("records a run's mode once", async () => {
+      const started = await run("arn:exec:shadow:mode", true);
+      await store.recordShadow?.(started.runId, false);
+      expect((await runRow(started.runId))?.shadow).toBe(true);
+    });
+
+    it("retires unposted, unanswered ones, and leaves the rest", async () => {
       const shadowRun = await run("arn:exec:shadow:1", true);
       const pr = shadowRun.pullRequestId;
       await save(shadowRun.runId, pr, "Shadow");
@@ -617,68 +625,34 @@ describe("drizzleFindingStore", () => {
       await save(shadowRun.runId, pr, "Shadow answered");
       // Answered, then raised again in shadow mode: the answer was about the earlier finding.
       await save(shadowRun.runId, pr, "Answered before");
-      // Recorded by control code older than the run's column: a succeeded run with no review ID.
-      const oldShadow = await run("arn:exec:shadow:old");
-      await db
-        .update(reviewRuns)
-        .set({ status: "succeeded" })
-        .where(eq(reviewRuns.id, oldShadow.runId));
-      await save(oldShadow.runId, pr, "Old shadow");
       // Live: outside the diff (no comment), or with one deleted on GitHub since (ID kept).
       const liveRun = await run("arn:exec:shadow:live", false);
       await save(liveRun.runId, pr, "Live outside diff");
       await save(liveRun.runId, pr, "Live", 901);
-      // An old live run: it posted a review.
-      const oldLive = await run("arn:exec:shadow:old-live");
-      await db
-        .update(reviewRuns)
-        .set({ status: "succeeded", reviewId: 77 })
-        .where(eq(reviewRuns.id, oldLive.runId));
-      await save(oldLive.runId, pr, "Old live outside diff");
 
       const id = async (title: string) => (await row(title))?.id ?? "";
       await findingStore.markOutdated([await id("Shadow outdated")], sha("2"));
       await answer(await id("Shadow answered"), new Date(Date.now() + 60_000));
-      const before = await id("Answered before");
-      await answer(before, new Date(Date.now() - 60_000));
+      await answer(await id("Answered before"), new Date(Date.now() - 60_000));
 
       const unposted = async () =>
         (await findingStore.trackedFindings(pr))
           .filter((record) => record.unpostedShadow === true)
           .map((record) => record.title)
           .toSorted();
-      expect(await unposted()).toEqual([
-        "Answered before",
-        "Old shadow",
-        "Shadow",
-        "Shadow outdated",
-      ]);
+      expect(await unposted()).toEqual(["Answered before", "Shadow", "Shadow outdated"]);
 
-      // A live run that retires them but writes no summary (covered, or overtaken): the next run
-      // that does reports them.
-      const covered = await run("arn:exec:shadow:covered", false);
-      expect(await findingStore.retireShadowFindings?.(pr, covered.runId, sha("3"))).toBe(4);
-      const live = await run("arn:exec:shadow:going-live", false);
-      expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
-      // A retry of the same run says the same and retires nothing more.
-      expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
-      // Once it has written the PR's summary, they're reported: the next run has none to tell.
-      await db.update(reviewRuns).set({ wrotePr: true }).where(eq(reviewRuns.id, live.runId));
-      const next = await run("arn:exec:shadow:next", false);
-      expect(await findingStore.retireShadowFindings?.(pr, next.runId, sha("3"))).toBe(0);
-      // The run's mode as its post ran it, set again from the prepare step's.
-      await store.recordShadow?.(next.runId, true);
-      expect((await runRow(next.runId))?.shadow).toBe(true);
+      expect(await findingStore.retireShadowFindings?.(pr, sha("3"))).toBe(3);
+      // A retry retires none.
+      expect(await findingStore.retireShadowFindings?.(pr, sha("3"))).toBe(0);
+      // The note's count comes from what's stored: the same however often it's asked.
+      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(3);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(3);
 
-      for (const title of ["Shadow", "Shadow outdated", "Answered before", "Old shadow"]) {
+      for (const title of ["Shadow", "Shadow outdated", "Answered before"]) {
         expect((await row(title))?.status).toBe("shadow");
       }
-      for (const title of [
-        "Shadow answered",
-        "Live outside diff",
-        "Live",
-        "Old live outside diff",
-      ]) {
+      for (const title of ["Shadow answered", "Live outside diff", "Live"]) {
         expect((await row(title))?.status).toBe("open");
       }
       const events = await db
@@ -694,12 +668,13 @@ describe("drizzleFindingStore", () => {
       // Retired isn't closed by a person: a review raising one again isn't dropped.
       expect(await findingStore.closedFindings(pr)).toEqual([]);
 
-      // Raised again by a live run: open, with its comment, and no longer a shadow finding.
-      await save(live.runId, pr, "Shadow", 902);
+      // Raised again by a live run: open, with its comment, and no longer counted in the note.
+      await save(liveRun.runId, pr, "Shadow", 902);
       expect(await row("Shadow")).toMatchObject({ status: "open", githubCommentId: 902 });
       expect(await unposted()).toEqual([]);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(2);
       // A retired one was never shown: raised again less severely, it takes the new severity.
-      await findingStore.saveFindings(pr, live.runId, sha("3"), [
+      await findingStore.saveFindings(pr, liveRun.runId, sha("3"), [
         {
           finding: { ...finding("Shadow outdated"), severity: "nit" },
           fingerprint: "fp:Shadow outdated",
@@ -707,6 +682,33 @@ describe("drizzleFindingStore", () => {
         },
       ]);
       expect(await row("Shadow outdated")).toMatchObject({ status: "open", severity: "nit" });
+      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(1);
+
+      // A full review that finished since: none left to mention.
+      const full = await run("arn:exec:shadow:full", false);
+      await db
+        .update(reviewRuns)
+        .set({ kind: "full", status: "succeeded", finishedAt: new Date(Date.now() + 120_000) })
+        .where(eq(reviewRuns.id, full.runId));
+      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(0);
+    });
+
+    it("records whether the PR's review came from a live run", async () => {
+      const shadowRun = await run("arn:exec:shadow:review", true);
+      const succeed = (runId: string) =>
+        store.succeedRun(runId, {
+          filesDone: 0,
+          costUsd: undefined,
+          headSha: sha("1"),
+          statusLabel: "LGTMoose: approved",
+          summaryCommentId: undefined,
+          review: { event: "APPROVE", id: undefined },
+        });
+      await succeed(shadowRun.runId);
+      expect((await loaded(shadowRun.runId)).reviewLive).toBeUndefined();
+      const liveRun = await run("arn:exec:live:review", false);
+      await succeed(liveRun.runId);
+      expect((await loaded(liveRun.runId)).reviewLive).toBe(true);
     });
   });
 

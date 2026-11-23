@@ -123,6 +123,12 @@ export const pullRequests = pgTable(
     /** That review's GitHub ID, to tell whether an approval was dismissed since. */
     lastReviewId: bigint("last_review_id", { mode: "number" }),
     paused: boolean("paused").notNull().default(false),
+    /**
+     * Whether the review and label recorded above came from a run in shadow mode (NIC-1141):
+     * then they were never on GitHub, and a live run doesn't go by them. Null: not known, so
+     * not trusted either.
+     */
+    reviewShadow: boolean("review_shadow"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -170,15 +176,11 @@ export const reviewRuns = pgTable(
      */
     spendCap: text("spend_cap"),
     /**
-     * Whether the run was in shadow mode, so posted nothing to GitHub (NIC-1141). Null for runs
-     * recorded before it was kept: then a succeeded run without a review ID was a shadow one.
+     * Whether the run's post was in shadow mode, so wrote nothing to GitHub (NIC-1141). Set once,
+     * by the post step, before it saves findings. Runs from before it was kept were all marked
+     * shadow by the migration that added it.
      */
     shadow: boolean("shadow"),
-    /**
-     * How many findings raised in shadow mode this live run retired (NIC-1141), for its summary:
-     * a retry says the same, and another run at the same head doesn't repeat it.
-     */
-    shadowRetired: integer("shadow_retired"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

@@ -151,8 +151,10 @@ interface Run extends RunRecord {
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
   files: FileRecord[];
-  /** Started in shadow mode (NIC-1141). */
+  /** Its post was in shadow mode (NIC-1141). */
   shadow?: boolean;
+  /** When it succeeded, on the test's clock (`tick`). */
+  finishedAt?: number;
   covered?: boolean;
   coverResult?: Parameters<RunStore["coverRun"]>[1];
 }
@@ -199,6 +201,7 @@ function memoryRuns(): RunStore & {
       statusLabel: pr.statusLabel,
       lastReviewEvent: pr.lastReviewEvent,
       lastReviewId: pr.lastReviewId,
+      reviewLive: pr.reviewLive,
     });
   return {
     runs,
@@ -227,7 +230,6 @@ function memoryRuns(): RunStore & {
         status: "running",
         executionArn: input.executionArn,
         files: [],
-        ...(input.shadow === true ? { shadow: true } : {}),
       });
       runs.set(run.runId, run);
       return run;
@@ -272,7 +274,10 @@ function memoryRuns(): RunStore & {
     async succeedRun(id, result) {
       const run = runs.get(id);
       if (!run) return;
-      Object.assign(run, { status: "succeeded", result });
+      Object.assign(run, { status: "succeeded", result, finishedAt: tick() });
+      // A shadow run's review and label were never on GitHub (NIC-1141).
+      if (run.shadow === false) pr.reviewLive = true;
+      else delete pr.reviewLive;
       Object.assign(pr, {
         lastReviewedSha: result.headSha,
         ...(result.review === undefined
@@ -314,7 +319,7 @@ function memoryRuns(): RunStore & {
     },
     async recordShadow(runId, shadow) {
       const run = runs.get(runId);
-      if (run !== undefined) run.shadow = shadow;
+      if (run !== undefined) run.shadow ??= shadow;
     },
     async supersedeRun(runId) {
       const run = runs.get(runId);
@@ -329,7 +334,13 @@ type StoredFinding = Omit<FindingRecord, "status" | "unpostedShadow"> & {
     FindingRecord["status"] | "resolved_by_human" | "declined" | "fixed" | "disputed" | "shadow";
   /** Last raised by a run in shadow mode (NIC-1141). */
   shadowRun?: boolean;
+  /** When it was retired from shadow mode, on the test's clock (`tick`). */
+  retiredAt?: number;
 };
+
+/** The test's clock: retirements and finished runs, in order. */
+let clock = 0;
+const tick = () => ++clock;
 
 /** Raised in shadow mode and never posted (`unpostedShadow`; no person's answers here). */
 function unposted(row: StoredFinding): boolean {
@@ -342,15 +353,13 @@ function unposted(row: StoredFinding): boolean {
 
 /**
  * `findings` for one PR, like `drizzleFindingStore`: `shadowRun` says which runs were shadow, and
- * `wrote` which wrote the PR's summary (so reported their retirements).
+ * `lastFullReview` when the latest full review succeeded (`tick`), if one did.
  */
 function memoryFindings(
   shadowRun: (runId: string) => boolean = () => false,
-  wrote: (runId: string) => boolean = () => false,
+  lastFullReview: () => number = () => 0,
 ): FindingStore & { rows: StoredFinding[] } {
   const rows: StoredFinding[] = [];
-  let retirements = 0;
-  const toReport = new Map<string, number>();
   return {
     rows,
     async trackedFindings() {
@@ -406,15 +415,18 @@ function memoryFindings(
         }
       }
     },
-    async retireShadowFindings(_pr, runId) {
+    async retireShadowFindings() {
       const retiring = rows.filter((row) => unposted(row));
-      for (const row of retiring) row.status = "shadow";
-      retirements += retiring.length;
-      let reported = 0;
-      for (const [id, n] of toReport) if (id !== runId && wrote(id)) reported += n;
-      const unreported = Math.max(retirements - reported, 0);
-      toReport.set(runId, unreported);
-      return unreported;
+      for (const row of retiring) {
+        row.status = "shadow";
+        row.retiredAt = tick();
+      }
+      return retiring.length;
+    },
+    async retiredShadowFindings() {
+      return rows.filter(
+        (row) => row.status === "shadow" && (row.retiredAt ?? 0) > lastFullReview(),
+      ).length;
     },
     async markOutdated(ids) {
       for (const row of rows)
@@ -567,7 +579,13 @@ function harness(setup: Setup = {}) {
   const runs = memoryRuns();
   const findings = memoryFindings(
     (id) => runs.runs.get(id)?.shadow === true,
-    (id) => runs.runs.get(id)?.status === "succeeded",
+    () =>
+      Math.max(
+        0,
+        ...[...runs.runs.values()]
+          .filter((run) => run.kind === "full" && run.status === "succeeded")
+          .map((run) => run.finishedAt ?? 0),
+      ),
   );
   /** The review IDs read from GitHub. */
   const reviewReads: number[] = [];
@@ -2247,6 +2265,25 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.runs.pr).toMatchObject({ lastReviewedSha: headSha, statusLabel: expect.any(String) });
     expect(shadowRecords(h.objects, "summary-comment")).toHaveLength(2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+  });
+
+  it("posts a review on the first live run even when a shadow run recorded the same decision (NIC-1141)", async () => {
+    const h = harness();
+    await addOther();
+    // Shadow mode: the decision and label are recorded, but nothing is on GitHub.
+    h.deps.shadow = true;
+    const { posted: first } = await review(h, 1);
+    expect(first).toMatchObject({ event: "APPROVE", reviewed: true });
+    expect(h.runs.pr.reviewLive).toBeUndefined();
+    headSha = await commit({ "src/other.ts": "export const rate = 5;\n" }, "unrelated");
+
+    // Live, same decision and label: it posts its own review, since the recorded one never was.
+    h.deps.shadow = false;
+    const { posted } = await review(h, 2);
+    expect(posted).toMatchObject({ event: "APPROVE", reviewed: true });
+    expect(reviews(h)).toBe(2);
+    // From then on the record is GitHub's, and quiet runs go by it as before (the test above).
+    expect(h.runs.pr.reviewLive).toBe(true);
   });
 
   describe("explain answered by the explainer", () => {
@@ -4275,19 +4312,27 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       expect(manifest.recheck).toBeUndefined();
       expect(h.findings.rows).toMatchObject([{ status: "shadow" }]);
       expect(live).toMatchObject({ event: "APPROVE" });
-      expect(summaries(h, first.runId)).toContain("1 finding from shadow mode was retired");
+      expect(summaries(h, first.runId)).toContain(
+        "1 finding from shadow mode was never posted and no longer counts",
+      );
       expect(summaries(h, first.runId)).toContain("full review");
       expect(writes).toEqual([]);
-      // A retry of that run's post says the same.
-      expect(await h.findings.retireShadowFindings?.("pr-1", first.runId, headSha)).toBe(1);
+      // A retry retires none, and the note comes from what's stored: the same.
+      expect(await h.findings.retireShadowFindings?.("pr-1", headSha)).toBe(0);
+      expect(await h.findings.retiredShadowFindings?.("pr-1")).toBe(1);
 
-      // `full review` at the same head, as the summary says: raised again, posted as new with a
-      // comment, and it counts. This run retired nothing, so its summary doesn't repeat the note.
-      const { prepared: second, posted: again } = await run(h, 4, [finding()], undefined, {
+      // Every summary says it until a full review: an incremental one at the next push too.
+      headSha = await commit({ "src/other.ts": "export const other = 2;\n" }, "and another");
+      const { prepared: next } = await run(h, 4, []);
+      expect(summaries(h, next.runId)).toContain("never posted and no longer counts");
+
+      // `full review`, as the summary says: raised again, posted as new with a comment, and it
+      // counts. Afterwards no summary has the note.
+      const { posted: again } = await run(h, 5, [finding()], undefined, {
         ...JOB,
         requested: "full_review" as const,
       });
-      expect(summaries(h, second.runId)).not.toContain("from shadow mode");
+      expect(await h.findings.retiredShadowFindings?.("pr-1")).toBe(0);
       expect(again).toMatchObject({ event: "REQUEST_CHANGES" });
       expect(h.findings.rows).toHaveLength(1);
       expect(h.findings.rows[0]).toMatchObject({ status: "open" });

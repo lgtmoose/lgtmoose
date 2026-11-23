@@ -1,5 +1,5 @@
 {
-  "id": "1fe7be2d-4897-4388-a4a0-3347b3468120",
+  "id": "7ea64a37-a161-4ca5-a5e6-14ca9e9f67a3",
   "prevId": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "version": "7",
   "dialect": "postgresql",
@@ -2061,6 +2061,12 @@
           "notNull": true,
           "default": false
         },
+        "review_shadow": {
+          "name": "review_shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2221,12 +2227,6 @@
         "shadow": {
           "name": "shadow",
           "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "shadow_retired": {
-          "name": "shadow_retired",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },

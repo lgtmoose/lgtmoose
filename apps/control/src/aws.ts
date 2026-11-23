@@ -54,7 +54,7 @@ import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { githubBootstrap } from "./bootstrap-github.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import { databaseTls } from "./database.js";
-import { unpostedShadow } from "./shadow-findings.js";
+import { retiredSinceFullReview, unpostedShadow } from "./shadow-findings.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -181,10 +181,19 @@ async function recordOnPr(
     .where(eq(pullRequests.id, run.pullRequestId))
     .for("update");
   if (await newerRunPosted(tx, run)) return;
+  // Whether what it records was on GitHub (NIC-1141): a shadow run's review and label weren't.
+  const [mode] =
+    pr.review === undefined && pr.statusLabel === undefined
+      ? []
+      : await tx
+          .select({ shadow: reviewRuns.shadow })
+          .from(reviewRuns)
+          .where(eq(reviewRuns.id, run.runId));
   await tx
     .update(pullRequests)
     .set({
       lastReviewedSha: pr.headSha,
+      ...(mode === undefined ? {} : { reviewShadow: mode.shadow }),
       ...(pr.review === undefined
         ? {}
         : { lastReviewEvent: pr.review.event, lastReviewId: pr.review.id ?? null }),
@@ -207,6 +216,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         statusLabel: pullRequests.statusLabel,
         lastReviewEvent: pullRequests.lastReviewEvent,
         lastReviewId: pullRequests.lastReviewId,
+        reviewShadow: pullRequests.reviewShadow,
         headSha: reviewRuns.headSha,
         executionArn: reviewRuns.executionArn,
       })
@@ -223,6 +233,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           statusLabel: row.statusLabel ?? undefined,
           lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
           lastReviewId: row.lastReviewId ?? undefined,
+          ...(row.reviewShadow === false ? { reviewLive: true } : {}),
           headSha: row.headSha,
           executionArn: row.executionArn ?? undefined,
         };
@@ -288,7 +299,6 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           status: "running",
           executionArn: input.executionArn,
           eventAt: input.eventAt ?? null,
-          ...(input.shadow === undefined ? {} : { shadow: input.shadow }),
           startedAt: now(),
         })
         .returning({ id: reviewRuns.id });
@@ -419,7 +429,11 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         );
     },
     async recordShadow(runId, shadow) {
-      await db.update(reviewRuns).set({ shadow }).where(eq(reviewRuns.id, runId));
+      // Once: a retry after a deploy changed the mode keeps the mode its findings were saved in.
+      await db
+        .update(reviewRuns)
+        .set({ shadow })
+        .where(and(eq(reviewRuns.id, runId), isNull(reviewRuns.shadow)));
     },
     async supersedeRun(runId) {
       // A run that already finished (or failed) keeps its status.
@@ -660,7 +674,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         }
       });
     },
-    async retireShadowFindings(pullRequestId, runId, sha) {
+    async retireShadowFindings(pullRequestId, sha) {
       return db.transaction(async (tx) => {
         const rows = await tx
           .update(findings)
@@ -677,37 +691,15 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             })),
           );
         }
-        // What's left to tell: the PR's retirements, less those another run already reported
-        // (it wrote the PR's summary). Kept on this run, so once it writes its own, they're
-        // reported; a retry works it out the same; a run that writes nothing leaves them to the
-        // next run that does.
-        const [retired] = await tx
-          .select({ n: count() })
-          .from(findingEvents)
-          .innerJoin(findings, eq(findings.id, findingEvents.findingId))
-          .where(
-            and(
-              eq(findings.pullRequestId, pullRequestId),
-              eq(findingEvents.type, "shadow_retired"),
-            ),
-          );
-        const [reported] = await tx
-          .select({ n: sql<number>`coalesce(sum(${reviewRuns.shadowRetired}), 0)`.mapWith(Number) })
-          .from(reviewRuns)
-          .where(
-            and(
-              eq(reviewRuns.pullRequestId, pullRequestId),
-              eq(reviewRuns.wrotePr, true),
-              ne(reviewRuns.id, runId),
-            ),
-          );
-        const unreported = Math.max((retired?.n ?? 0) - (reported?.n ?? 0), 0);
-        await tx
-          .update(reviewRuns)
-          .set({ shadowRetired: unreported })
-          .where(eq(reviewRuns.id, runId));
-        return unreported;
+        return rows.length;
       });
+    },
+    async retiredShadowFindings(pullRequestId) {
+      const [row] = await db
+        .select({ n: count() })
+        .from(findings)
+        .where(and(eq(findings.pullRequestId, pullRequestId), retiredSinceFullReview()));
+      return row?.n ?? 0;
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),

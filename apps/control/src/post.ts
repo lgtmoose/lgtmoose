@@ -1317,18 +1317,6 @@ async function standing(
   return { open, outdated, reopened };
 }
 
-/**
- * The summary's note on findings retired from shadow mode (NIC-1141): they never had a comment,
- * so a full review is how any still there get raised again, this time posted.
- */
-export function shadowRetiredNotice(retired: number, handle: string | undefined): string {
-  const which =
-    retired === 1
-      ? "1 finding from shadow mode was retired: it was never posted, so it doesn't count"
-      : `${retired} findings from shadow mode were retired: they were never posted, so they don't count`;
-  return `${which}. Comment "@${handle ?? "lgtmoose"} full review" to raise any that are still there.`;
-}
-
 function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
   return entry;
 }
@@ -1482,13 +1470,15 @@ export async function post(
   await deps.runs.recordShadow?.(runId, deps.shadow === true);
   // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
   // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
-  // review that raises one again posts it as new. The summary reports those no run has yet: a
-  // retry the same, and a run that writes no summary leaves them to the next one that does.
-  const shadowRetired =
+  // review that raises one again posts it as new. A retry finds none left to retire.
+  const retiredNow =
     deps.shadow === true || deps.findings.retireShadowFindings === undefined
       ? 0
-      : await deps.findings.retireShadowFindings(run.pullRequestId, runId, pr.headSha);
-  if (shadowRetired > 0) deps.log("shadow findings retired", { runId, count: shadowRetired });
+      : await deps.findings.retireShadowFindings(run.pullRequestId, pr.headSha);
+  if (retiredNow > 0) deps.log("shadow findings retired", { runId, count: retiredNow });
+  // The summary's note: those retired since the PR's last full review, from the stored state,
+  // so every summary says the same until a full review runs or they're raised again.
+  const shadowRetired = (await deps.findings.retiredShadowFindings?.(run.pullRequestId)) ?? 0;
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -1633,14 +1623,8 @@ export async function post(
           : {
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
-        ...(manifest.notices === undefined && shadowRetired === 0
-          ? {}
-          : {
-              notices: [
-                ...(manifest.notices ?? []),
-                ...(shadowRetired > 0 ? [shadowRetiredNotice(shadowRetired, handle)] : []),
-              ],
-            }),
+        ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
+        ...(shadowRetired > 0 ? { shadowRetired } : {}),
         ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,
@@ -1852,6 +1836,9 @@ export async function post(
     ? progress.quiet === true
     : report.kind === "incremental" &&
       fresh === 0 &&
+      // A shadow run's review and label were never on GitHub (NIC-1141): a live run posts its
+      // own. In shadow mode, nothing is posted either way, so the record is all there is.
+      (deps.shadow === true || run.reviewLive === true) &&
       decision.label !== undefined &&
       decision.label === run.statusLabel &&
       decision.event === run.lastReviewEvent &&

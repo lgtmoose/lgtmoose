@@ -8,12 +8,8 @@ import { sql, type SQL } from "drizzle-orm";
  *
  * - **Never posted:** our own finding, open or outdated, with no comment. A comment deleted on
  *   GitHub since keeps its ID here, so a live finding whose comment is gone doesn't match.
- * - **Raised in shadow mode:** the run that last raised it (`findings.run_id`) was a shadow run.
- *   Runs record that from the start (`review_runs.shadow`). One recorded before that, or by
- *   control code older than the column, counts as shadow when it succeeded without a review ID:
- *   a live run that raised findings posted a review (findings outside the diff go in its body).
- *   Known limit: a live run from before `review_id` was recorded (migration 0006) has none
- *   either, so its unposted findings would count as shadow ones. No deployment ran live then.
+ * - **Raised in shadow mode:** the run that last raised it (`findings.run_id`) was a shadow run
+ *   (`review_runs.shadow`, set by its post step).
  * - **Unanswered:** no event by a person (one with a login: a reply on its thread, a resolve, an
  *   answer from the findings CLI or dashboard) after its latest `raised` event. An answer from
  *   before it was raised again was about the earlier finding.
@@ -27,15 +23,7 @@ export function unpostedShadow(): SQL {
     and "findings"."github_comment_id" is null
     and exists (
       select 1 from "review_runs" as shadow_run
-      where shadow_run.id = "findings"."run_id"
-        and (
-          shadow_run.shadow = true
-          or (
-            shadow_run.shadow is null
-            and shadow_run.status = 'succeeded'
-            and shadow_run.review_id is null
-          )
-        )
+      where shadow_run.id = "findings"."run_id" and shadow_run.shadow = true
     )
     and not exists (
       select 1 from "finding_events" as answer
@@ -48,6 +36,29 @@ export function unpostedShadow(): SQL {
           ),
           '-infinity'::timestamptz
         )
+    )
+  )`;
+}
+
+/**
+ * Findings retired from shadow mode (status `shadow`) since the PR's last full review, as a
+ * condition on `findings`: the summary asks for a full review to raise any still there. One raised
+ * again is open again, so no longer counts; once a full review has run, none do.
+ */
+export function retiredSinceFullReview(): SQL {
+  return sql`(
+    "findings"."status" = 'shadow'
+    and (
+      select max(retire.created_at) from "finding_events" as retire
+      where retire.finding_id = "findings"."id" and retire.type = 'shadow_retired'
+    ) > coalesce(
+      (
+        select max(full_run.finished_at) from "review_runs" as full_run
+        where full_run.pull_request_id = "findings"."pull_request_id"
+          and full_run.kind = 'full'
+          and full_run.status = 'succeeded'
+      ),
+      '-infinity'::timestamptz
     )
   )`;
 }
