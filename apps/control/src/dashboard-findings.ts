@@ -228,9 +228,13 @@ function prParams(
   if (!REPO_PARAM.test(repo)) return undefined;
   if (query.pr === undefined || query.pr === "") return { repo, number: undefined };
   const number = Number(query.pr);
-  if (!Number.isSafeInteger(number) || number < 1) return undefined;
+  // At most Postgres's integer: a bigger one is a bad request, not a failed query.
+  if (!Number.isSafeInteger(number) || number < 1 || number > MAX_PR_NUMBER) return undefined;
   return { repo, number };
 }
+
+/** The largest pull request number the database holds (`int4`). */
+export const MAX_PR_NUMBER = 2_147_483_647;
 
 /** `GET /api/findings?repo=owner/name&pr=N` with a token: one PR's open and outdated findings. */
 async function listForToken(
@@ -356,4 +360,4 @@ export async function handleTokenRequest(
   }
 }
 
-export { ANSWER_PATH, prParams };
+export { ANSWER_PATH, PR_FINDINGS_LIMIT, prParams };

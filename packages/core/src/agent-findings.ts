@@ -52,7 +52,12 @@ export const agentFindingSchema = z.object({
   source: z.enum(["self", "bot", "human"]).optional(),
 });
 
-// The schema parses into the plain `AgentFinding`: a field one adds and the other misses fails
-// the type check here.
-const parsesToAgentFinding = (value: z.infer<typeof agentFindingSchema>): AgentFinding => value;
-void parsesToAgentFinding;
+// The schema and the plain `AgentFinding` (which the browser bundle uses) must describe the same
+// object: the same keys, and each assignable to the other. A field one adds, drops or retypes
+// that the other misses fails the type check here.
+type Parsed = z.infer<typeof agentFindingSchema>;
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const sameKeys: Same<keyof Parsed, keyof AgentFinding> = true;
+const parsedIsFinding = (value: Parsed): AgentFinding => value;
+const findingIsParsed = (value: AgentFinding): Parsed => value;
+void [sameKeys, parsedIsFinding, findingIsParsed];

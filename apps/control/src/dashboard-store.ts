@@ -80,6 +80,13 @@ export interface OpenFinding {
   fixClaimedAt: string | undefined;
   fixClaimedBy: string | undefined;
   createdAt: string;
+  /** Whether it can take a fix claim: on a line of the new code (`AnswerTarget.recheckable`). */
+  recheckable: boolean;
+}
+
+/** On a line of the pull request's new code, so a recheck can check it. */
+function recheckable(side: string | null, path: string | null, line: number | null): boolean {
+  return side === "RIGHT" && path !== null && line !== null;
 }
 
 /** A finding someone means to answer (NIC-1140), with what the answer's rules read. */
@@ -290,6 +297,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           fixClaimedAt: findings.fixClaimedAt,
           fixClaimedBy: findings.fixClaimedBy,
           createdAt: findings.createdAt,
+          side: findings.side,
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
@@ -308,8 +316,10 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         )
         .orderBy(SEVERITY_ORDER, desc(findings.createdAt))
         .limit(limit);
-      return rows.map((row) => ({
+      return rows.map(({ side, ...row }) => ({
         ...row,
+        // The rule `answerTarget` holds a fix claim to.
+        recheckable: recheckable(side, row.path, row.line),
         status: row.status === "outdated" ? ("outdated" as const) : ("open" as const),
         path: row.path ?? undefined,
         line: row.line ?? undefined,
@@ -341,7 +351,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         .limit(1);
       if (row === undefined) return undefined;
       const { side, path, line, ...target } = row;
-      return { ...target, recheckable: side === "RIGHT" && path !== null && line !== null };
+      return { ...target, recheckable: recheckable(side, path, line) };
     },
     async claimFix(id, login) {
       // Through `lgtmoose_claim_fix` (migration 0026): the dashboard's login may call it, not

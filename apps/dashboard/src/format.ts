@@ -22,11 +22,14 @@ function learningStatus(value: string | null): LearningStatus {
 
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-/** A pull request number from the location: digits only, positive, safe. */
+/** The largest pull request number the API takes: Postgres's `int4`, as the server checks. */
+export const MAX_PR_NUMBER = 2_147_483_647;
+
+/** A pull request number from the location: digits only, from 1 to `MAX_PR_NUMBER`. */
 function pullNumber(value: string | null): number | undefined {
   if (value === null || !/^[1-9][0-9]{0,9}$/.test(value)) return undefined;
   const number = Number(value);
-  return Number.isSafeInteger(number) ? number : undefined;
+  return number <= MAX_PR_NUMBER ? number : undefined;
 }
 
 /** The page a location hash names, such as `#/findings?repo=acme/api`. Anything else: repos. */

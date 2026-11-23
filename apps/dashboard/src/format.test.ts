@@ -9,6 +9,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   DECLINE_REASON_LIMIT,
+  MAX_PR_NUMBER,
   answerRefusal,
   answerState,
   count,
@@ -87,7 +88,10 @@ describe("routes", () => {
     expect(routeHash({ page: "findings", repo: "acme/api", pr: 12 })).toBe(
       "#/findings?repo=acme%2Fapi&pr=12",
     );
-    for (const pr of ["0", "-1", "1.5", "12abc", "1e3", "99999999999"]) {
+    expect(parseRoute("#/findings?repo=acme/api&pr=2147483647")).toMatchObject({
+      pr: MAX_PR_NUMBER,
+    });
+    for (const pr of ["0", "-1", "1.5", "12abc", "1e3", "2147483648", "99999999999"]) {
       expect(parseRoute(`#/findings?repo=acme/api&pr=${pr}`)).toEqual({
         page: "findings",
         repo: "acme/api",

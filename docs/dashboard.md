@@ -34,7 +34,7 @@ Findings, runs and repositories can be filtered to one repository. Findings' and
 - **Decline** asks for your reason (up to 2,000 characters) and closes the finding at once. The reason feeds [learning from outcomes](learning.md#learning-from-outcomes), as a reply on GitHub would. A pull request's author can't decline a blocking or protected finding; someone else with write access can.
 - **Copy for agent** copies the pull request's findings as markdown for a coding agent, the same as `lgtmoose findings <owner/repo>#<n> --format md`, with how to answer each one from the CLI. Where the browser doesn't allow copying, the text is shown selected to copy by hand.
 
-The buttons show on LGTMoose's own findings in repositories you could write to when you signed in. The API checks again when you answer, and says why if it doesn't take the answer.
+The buttons show on LGTMoose's own findings in repositories you could write to when you signed in; **Fixed** only on one a recheck can check. An answer from the dashboard uses that same access from sign-in: the session keeps no GitHub token to ask again, so write access GitHub takes away still counts until you sign in again, or until the session ends (at most 8 hours). The CLI asks GitHub each time (within a minute's cache). The API checks the rest when you answer (the author rule, the finding's state, whether a recheck can check it) and says why if it doesn't take the answer.
 
 ### What was learned lately
 

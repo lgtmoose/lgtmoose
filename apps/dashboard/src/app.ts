@@ -133,6 +133,8 @@ interface Finding extends AgentFinding {
   sourceLogin: string | undefined;
   /** Whether the page offers Fixed and Decline: a hint only, the answer route checks. */
   canAnswer?: boolean;
+  /** Whether it can take Fixed: on a line of the new code, which a recheck can check. */
+  recheckable?: boolean;
 }
 
 interface Run {
@@ -340,7 +342,15 @@ function answerControls(finding: Finding): HTMLElement {
       reason,
     ]);
   });
-  return el("div", { class: "answer" }, el("div", {}, fixed, " ", decline), form, status);
+  // Fixed only where a recheck can check it: the API refuses a claim on anything else.
+  const canClaim = finding.recheckable === true;
+  return el(
+    "div",
+    { class: "answer" },
+    el("div", {}, canClaim ? fixed : undefined, canClaim ? " " : undefined, decline),
+    form,
+    status,
+  );
 }
 
 /** Copies `text`; where the Clipboard API isn't allowed, shows it selected to copy by hand. */
@@ -409,7 +419,8 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
             const state = answerState(finding);
             return [
               el("span", { class: `sev-${finding.severity}` }, severityLabel(finding.severity)),
-              onePr
+              // The PR view lists only LGTMoose's own, so only those link to it.
+              onePr || finding.source !== "self"
                 ? prLink(finding.repo, finding.number)
                 : el(
                     "span",

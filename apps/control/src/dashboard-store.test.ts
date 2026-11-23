@@ -159,6 +159,19 @@ describe("drizzleDashboardStore", () => {
     expect(await store.openFindings([], 10)).toEqual([]);
   });
 
+  it("says which findings can take a fix claim, by the rule answers use (NIC-1142)", async () => {
+    // The fixtures have no side, so no recheck can check them.
+    const before = await store.openFindings(["acme/api"], 10);
+    expect(before.map((row) => row.recheckable)).toEqual([false, false]);
+    const id = before[0]?.id ?? "";
+    expect((await store.answerTarget(id))?.recheckable).toBe(false);
+    await db.update(findings).set({ side: "RIGHT" }).where(eq(findings.id, id));
+    const after = await store.openFindings(["acme/api"], 10);
+    expect(after.find((row) => row.id === id)?.recheckable).toBe(true);
+    expect((await store.answerTarget(id))?.recheckable).toBe(true);
+    await db.update(findings).set({ side: null }).where(eq(findings.id, id));
+  });
+
   it("stops counting unposted shadow findings once live, and keeps them stored (NIC-1141)", async () => {
     const pr = await pullRequest("Acme/Shadowed", 3);
     const [shadowRun] = await db
