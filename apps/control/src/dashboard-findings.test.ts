@@ -347,6 +347,20 @@ describe("answering a finding with a token", () => {
     expect(rejected).toEqual([{ repo: "acme/api", ids: [id] }]);
   });
 
+  it("stores a decline's reason as a reply's body is: with secrets redacted", async () => {
+    const id = await finding({ fingerprint: "secret" });
+    const token = `ghp_${"a".repeat(36)}`;
+    const answered = await ack(id, WRITER, {
+      outcome: "declined",
+      reason: `The test uses ${token} on purpose, password = "hunter22"`,
+    });
+    expect(answered.status).toBe(200);
+    const [event] = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect(event?.reason).not.toContain(token);
+    expect(event?.reason).not.toContain("hunter22");
+    expect(event?.reason).toContain("[redacted token]");
+  });
+
   it("keeps a decline pending when learning failed on it, and gives it up after five", async () => {
     const id = await finding({ fingerprint: "half" });
     await ack(id, WRITER, { outcome: "declined", reason: "nope" });
@@ -455,35 +469,38 @@ describe("review round 1 (NIC-1140)", () => {
       request("GET", "/api/findings", withToken(token, { query: { repo: "acme/api", pr: "232" } })),
     );
 
-  it("remembers a refused token, and caps failed lookups of new tokens only", async () => {
-    const bad = (i: number) => `ghp_unknown_token_${String(i).padStart(12, "0")}`;
-    // A token people already use, verified before the attack.
-    expect((await list(READER)).status).toBe(200);
-    expect((await list(bad(0))).status).toBe(401);
-    expect((await list(bad(0))).status).toBe(401);
+  it("remembers a refused token for ten minutes", async () => {
+    const bad = "ghp_unknown_token_000000000000";
+    expect((await list(bad)).status).toBe(401);
+    expect((await list(bad)).status).toBe(401);
     // GitHub was asked once: the refusal is remembered by the token's hash.
-    expect(lookups.filter((entry) => entry === `login:${bad(0)}`)).toHaveLength(1);
-    for (let i = 1; i < 100; i += 1) await list(bad(i));
-    // The cap is reached: a token we haven't verified waits, and GitHub isn't asked about it.
-    expect((await list(WRITER)).status).toBe(429);
-    expect(lookups).not.toContain(`login:${WRITER}`);
-    // One verified already is never held up.
-    expect((await list(READER)).status).toBe(200);
-    // Once the window ends, new tokens are looked up again.
+    expect(lookups.filter((entry) => entry === `login:${bad}`)).toHaveLength(1);
     now = new Date(NOW.getTime() + 11 * 60_000);
-    expect((await list(WRITER)).status).toBe(200);
+    expect((await list(bad)).status).toBe(401);
+    expect(lookups.filter((entry) => entry === `login:${bad}`)).toHaveLength(2);
   });
 
-  it("keeps a verified login for an hour, and permissions for a minute", async () => {
+  it("keeps a verified login an hour after it was last used, and permissions for a minute", async () => {
+    const at = (minutes: number) => {
+      now = new Date(NOW.getTime() + minutes * 60_000);
+    };
+    const logins = () => lookups.filter((entry) => entry === `login:${READER}`).length;
     await list(READER);
-    now = new Date(NOW.getTime() + 2 * 60_000);
+    at(2);
     await list(READER);
     // Membership and access read again after a minute; the login isn't.
-    expect(lookups.filter((entry) => entry === `login:${READER}`)).toHaveLength(1);
+    expect(logins()).toBe(1);
     expect(lookups.filter((entry) => entry === `access:${READER}:acme/api`)).toHaveLength(2);
-    now = new Date(NOW.getTime() + 61 * 60_000);
+    // Used every 50 minutes, it never expires.
+    at(52);
     await list(READER);
-    expect(lookups.filter((entry) => entry === `login:${READER}`)).toHaveLength(2);
+    at(102);
+    await list(READER);
+    expect(logins()).toBe(1);
+    // Left alone for over an hour, it's looked up again.
+    at(170);
+    await list(READER);
+    expect(logins()).toBe(2);
   });
 
   it("rejects a malformed token cheaply, counting it nowhere", async () => {

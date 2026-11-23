@@ -28,13 +28,12 @@ import { resolutionHeld } from "./thread-policy.js";
  *   such as `gh auth token`. GitHub doesn't report a fine-grained token's permissions, so one
  *   (with Members read) can list, never answer.
  * - **Abuse:** a token that isn't shaped like one, or is an installation token (`ghs_`), is
- *   refused without asking GitHub. A token GitHub refused is remembered by its hash for ten
- *   minutes. A verified token's login is kept by its hash for an hour. Only a token hash we
- *   haven't verified within that hour is looked up on GitHub (`/user`), and those lookups that
- *   fail are capped in all per window: past the cap, a brand-new token waits for the window to
- *   end. Permission and membership reads are cached a minute and never capped. So an attack can
- *   at worst delay new tokens for a window, never people already using theirs, and API
- *   Gateway's throttle stays the outer limit.
+ *   refused without asking GitHub. By the token's hash, a token GitHub refused is remembered
+ *   for ten minutes, and a verified login for an hour after it was last used; membership and
+ *   permissions for a minute. These caches are per Lambda instance and nothing caps lookups
+ *   across instances: API Gateway's throttle is the limit. What's left is that a flood of
+ *   distinct bad tokens, within that throttle, makes as many `/user` calls to GitHub from the
+ *   dashboard's address.
  * - **Answers:** `fixed` marks the finding for the next run's recheck, which alone closes it;
  *   only a finding the recheck can take (on a line of the PR's new code) can be marked.
  *   `declined` closes it at once with the reason, as an accepted decline on its thread would,
@@ -45,7 +44,7 @@ import { resolutionHeld } from "./thread-policy.js";
 /** The header the CLI's GitHub token comes in. */
 export const TOKEN_HEADER = DASHBOARD_TOKEN_HEADER;
 
-/** A verified token's login is kept this long by its hash. */
+/** A verified token's login is kept this long by its hash after it was last used. */
 const LOGIN_TTL_MS = 60 * 60_000;
 /** Permission and membership answers are read again after this long. */
 const ACCESS_TTL_MS = 60_000;
@@ -53,9 +52,6 @@ const ACCESS_TTL_MS = 60_000;
 const REFUSED_TTL_MS = 10 * 60_000;
 /** Cache entries kept, oldest dropped first: a warm Lambda serves few people. */
 const ACCESS_ENTRIES = 500;
-/** Failed `/user` lookups of unverified tokens allowed in all, per window. */
-const FAILED_LOOKUPS = 100;
-const FAILURE_WINDOW_MS = 10 * 60_000;
 /** The most findings one pull request's list returns. */
 const PR_FINDINGS_LIMIT = 200;
 /** The longest body an answer may have. */
@@ -96,16 +92,15 @@ export function sessionAsker(session: {
   };
 }
 
-/** A login, an access level or `REFUSED`, by the token's hash (and repository or org). */
+/**
+ * A login, an access level or `REFUSED`, by the token's hash (and repository or org). Per
+ * Lambda instance (or compose server), and at most `ACCESS_ENTRIES`.
+ */
 const cache = new Map<string, { value: string; at: number; ttl: number }>();
-/** Failed `/user` lookups of unverified tokens in the current window. */
-const failures = { windowAt: 0, count: 0 };
 
-/** Clears the token cache and the failure count (tests). */
+/** Clears the token cache (tests). */
 export function clearTokenCache(): void {
   cache.clear();
-  failures.windowAt = 0;
-  failures.count = 0;
 }
 
 function remember(key: string, value: string, now: number, ttl: number): void {
@@ -118,18 +113,12 @@ function remember(key: string, value: string, now: number, ttl: number): void {
   }
 }
 
-function cached(key: string, now: number): string | undefined {
+/** A live entry's value; with `slide`, its time starts again, so one in use doesn't expire. */
+function cached(key: string, now: number, slide = false): string | undefined {
   const hit = cache.get(key);
-  return hit !== undefined && now - hit.at < hit.ttl ? hit.value : undefined;
-}
-
-/** Whether failed lookups have reached the cap in this window (starting a new one when due). */
-function lookupsCapped(now: number): boolean {
-  if (now - failures.windowAt >= FAILURE_WINDOW_MS) {
-    failures.windowAt = now;
-    failures.count = 0;
-  }
-  return failures.count >= FAILED_LOOKUPS;
+  if (hit === undefined || now - hit.at >= hit.ttl) return undefined;
+  if (slide) remember(key, hit.value, now, hit.ttl);
+  return hit.value;
 }
 
 function ownerAllowed(deps: DashboardDeps, repo: string): boolean {
@@ -175,18 +164,16 @@ async function tokenAsker(deps: DashboardDeps, token: string): Promise<Asker | D
   }
   // Keyed by the token's hash: the token itself is never kept.
   const key = sha256Hex(token);
-  let login = cached(`login:${key}`, at);
-  if (login === REFUSED) return json(401, { error: "bad-token" });
+  // A verified login slides: each use keeps it another hour. A refusal doesn't.
+  const known = cached(`login:${key}`, at);
+  if (known === REFUSED) return json(401, { error: "bad-token" });
+  let login = known === undefined ? undefined : cached(`login:${key}`, at, true);
   if (login === undefined) {
-    // Only a token we haven't verified lately waits on the cap, which only failed lookups fill:
-    // people already using theirs are never held up.
-    if (lookupsCapped(at)) return json(429, { error: "too-many-failures" });
     try {
       login = await deps.github.login(token);
     } catch (error) {
       if (error instanceof DashboardGitHubError && error.status === 401) {
         remember(`login:${key}`, REFUSED, at, REFUSED_TTL_MS);
-        failures.count += 1;
       }
       const failure = githubFailure(error);
       if (failure !== undefined) return failure;

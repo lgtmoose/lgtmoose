@@ -152,12 +152,7 @@ describe("lgtmoose findings <repo>#<pr>", () => {
         deps({ reply: { status: 503, body: { error: "GitHub is unavailable" } } }).deps,
     });
     expect(down.stderr).toContain("couldn't be asked about your access just now");
-    const slow = await run(["findings", "acme/app#1"], {
-      findingsDeps: async () =>
-        deps({ reply: { status: 429, body: { error: "too-many-failures" } } }).deps,
-    });
-    expect(slow.stderr).toContain("Too many unknown tokens were refused lately");
-    // The compose server's own rate limit says something else.
+    // A throttle: API Gateway's, or the compose server's.
     const busy = await run(["findings", "acme/app#1"], {
       findingsDeps: async () => deps({ reply: { status: 429, body: { error: "slow-down" } } }).deps,
     });

@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,6 +138,36 @@ describe("the compose dashboard server", () => {
     } as RequestInit);
     expect(response.status).toBe(413);
     expect(seen.length).toBe(before);
+  });
+
+  it("answers 413 to an endless chunked body without reading it to the end", async () => {
+    const url = new URL(`${base}/api/findings/x/ack`);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest({
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: { "x-forwarded-for": "198.51.100.9", "transfer-encoding": "chunked" },
+      });
+      const chunk = "x".repeat(1024);
+      let answered = false;
+      // Never ends: only the server's answer stops it.
+      const pump = () => {
+        if (answered) return;
+        req.write(chunk, () => setImmediate(pump));
+      };
+      req.on("response", (response) => {
+        answered = true;
+        resolve(response.statusCode ?? 0);
+        req.destroy();
+      });
+      req.on("error", (error) => {
+        if (!answered) reject(error);
+      });
+      pump();
+    });
+    expect(status).toBe(413);
   });
 
   it("allows only GET and POST on the API, and answers a handler's failure with 500", async () => {

@@ -126,19 +126,24 @@ function sendResult(response: ServerResponse, result: DashboardResponse): void {
  * undefined when it's longer, which the handler then refuses.
  */
 function readBody(request: IncomingMessage): Promise<string | undefined> {
-  // Read to the end, keeping at most MAX_BODY_BYTES: a longer (chunked) body is drained, not
-  // cut off, so the client gets its 413 rather than a reset connection.
+  // At most MAX_BODY_BYTES: past that it stops reading at once (undefined), and the caller
+  // answers 413 and closes the connection, rather than reading an endless chunked body.
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    request.on("data", (chunk: Buffer | string) => {
+    const onData = (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.length;
-      if (size <= MAX_BODY_BYTES) chunks.push(buffer);
-    });
-    request.on("end", () =>
-      resolve(size > MAX_BODY_BYTES ? undefined : Buffer.concat(chunks).toString("utf8")),
-    );
+      if (size > MAX_BODY_BYTES) {
+        request.off("data", onData);
+        request.pause();
+        resolve(undefined);
+        return;
+      }
+      chunks.push(buffer);
+    };
+    request.on("data", onData);
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     request.on("error", reject);
   });
 }
@@ -202,7 +207,10 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
       }
       const body = method === "POST" ? await readBody(request) : undefined;
       if (method === "POST" && body === undefined) {
-        sendResult(response, json(413, { error: "too-large" }));
+        const result = json(413, { error: "too-large" });
+        sendResult(response, { ...result, headers: { ...result.headers, connection: "close" } });
+        // Once the answer is out, drop the rest of the body with the connection.
+        response.once("finish", () => request.destroy());
         return;
       }
       sendResult(response, await options.handle(toDashboardRequest(request, url, body)));

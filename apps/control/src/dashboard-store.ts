@@ -7,8 +7,10 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
+import { redactSensitive } from "@lgtmoose/learnings";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
+import { MAX_REPLY_BODY } from "./replies-aws.js";
 
 /**
  * The dashboard's reads and its sessions (NIC-840). Every read takes the repositories the
@@ -307,9 +309,11 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
     },
     async declineFinding(id, login, reason) {
       // Through `lgtmoose_decline_finding` (migration 0025), which also writes the `declined`
-      // event with the reason and `learn_pending`, for the reconciler's outcome learning.
+      // event with the reason and `learn_pending`, for the reconciler's outcome learning. The
+      // reason is kept as a reply's body is: capped, and with secrets redacted.
+      const stored = redactSensitive(reason.slice(0, MAX_REPLY_BODY)).text;
       const result = (await db.execute(
-        sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${reason}) as done`,
+        sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${stored}) as done`,
       )) as unknown as { rows: { done: unknown }[] };
       return result.rows[0]?.done === true;
     },
