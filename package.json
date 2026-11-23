@@ -30,10 +30,10 @@
     "esbuild": "^0.28.2",
     "oxlint": "1.93.0",
     "oxlint-tsgolint": "7.0.2007",
-    "prettier": "^3.10.0",
+    "prettier": "^3.10.1",
     "tsx": "^4.23.15",
     "turbo": "^2.11.11",
     "typescript": "catalog:",
-    "vitest": "^4.1.12"
+    "vitest": "^5.1.0"
   }
 }
