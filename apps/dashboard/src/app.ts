@@ -304,9 +304,10 @@ function answerControls(finding: Finding): HTMLElement {
   const fixed = el("button", { type: "button" }, "Fixed");
   const decline = el("button", { type: "button" }, "Decline");
   const form = el("div", { class: "decline", hidden: "" });
+  // No maxlength: a pasted reason is never cut short. `declineReasonProblem` refuses one that's
+  // too long, by the same trimmed length the counter shows.
   const reason = el("textarea", {
     rows: "3",
-    maxlength: String(DECLINE_REASON_LIMIT),
     "aria-label": "Why this isn't a problem",
     placeholder: "Why this isn't a problem",
   });
@@ -315,10 +316,18 @@ function answerControls(finding: Finding): HTMLElement {
   const cancel = el("button", { type: "button" }, "Cancel");
   form.append(reason, el("div", {}, send, " ", cancel, " ", counter));
   reason.addEventListener("input", () => {
-    replace(counter, `${reason.value.trim().length} / ${DECLINE_REASON_LIMIT}`);
+    const length = reason.value.trim().length;
+    replace(
+      counter,
+      length > DECLINE_REASON_LIMIT
+        ? el("span", { class: "sev-blocking" }, `${length} / ${DECLINE_REASON_LIMIT}: too long`)
+        : `${length} / ${DECLINE_REASON_LIMIT}`,
+    );
   });
+  // Every control for this finding, all held while either answer is being sent.
+  const controls = [fixed, decline, send, cancel, reason];
   fixed.addEventListener("click", () => {
-    void sendAnswer(finding, { outcome: "fixed" }, status, [fixed, decline]);
+    void sendAnswer(finding, { outcome: "fixed" }, status, controls);
   });
   decline.addEventListener("click", () => {
     form.hidden = false;
@@ -334,13 +343,12 @@ function answerControls(finding: Finding): HTMLElement {
       replace(status, problem);
       return;
     }
-    void sendAnswer(finding, { outcome: "declined", reason: reason.value.trim() }, status, [
-      fixed,
-      decline,
-      send,
-      cancel,
-      reason,
-    ]);
+    void sendAnswer(
+      finding,
+      { outcome: "declined", reason: reason.value.trim() },
+      status,
+      controls,
+    );
   });
   // Fixed only where a recheck can check it: the API refuses a claim on anything else.
   const canClaim = finding.recheckable === true;
