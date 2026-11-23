@@ -418,6 +418,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           ),
         );
     },
+    async recordShadow(runId, shadow) {
+      await db.update(reviewRuns).set({ shadow }).where(eq(reviewRuns.id, runId));
+    },
     async supersedeRun(runId) {
       // A run that already finished (or failed) keeps its status.
       await db
@@ -619,8 +622,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
               set: {
                 runId,
                 // Never lowered: the enum runs from blocking to nit, so the least is the most
-                // severe.
-                severity: sql`least(${findings.severity}, excluded.severity)`,
+                // severe. One retired from shadow mode (NIC-1141) was never shown, so it's raised
+                // as new, at the severity raised now.
+                severity: sql`case when ${findings.status} = 'shadow' then excluded.severity else least(${findings.severity}, excluded.severity) end`,
                 // Reopened (from outdated): the new comment's ID, or none if it wasn't posted
                 // inline, since the old comment is on code that's gone. Still open: kept unless
                 // there's a new one.
@@ -673,14 +677,36 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             })),
           );
         }
-        // This run's count, kept on it: a retry adds none and says the same; another run at the
-        // same head keeps its own.
-        const [run] = await tx
+        // What's left to tell: the PR's retirements, less those another run already reported
+        // (it wrote the PR's summary). Kept on this run, so once it writes its own, they're
+        // reported; a retry works it out the same; a run that writes nothing leaves them to the
+        // next run that does.
+        const [retired] = await tx
+          .select({ n: count() })
+          .from(findingEvents)
+          .innerJoin(findings, eq(findings.id, findingEvents.findingId))
+          .where(
+            and(
+              eq(findings.pullRequestId, pullRequestId),
+              eq(findingEvents.type, "shadow_retired"),
+            ),
+          );
+        const [reported] = await tx
+          .select({ n: sql<number>`coalesce(sum(${reviewRuns.shadowRetired}), 0)`.mapWith(Number) })
+          .from(reviewRuns)
+          .where(
+            and(
+              eq(reviewRuns.pullRequestId, pullRequestId),
+              eq(reviewRuns.wrotePr, true),
+              ne(reviewRuns.id, runId),
+            ),
+          );
+        const unreported = Math.max((retired?.n ?? 0) - (reported?.n ?? 0), 0);
+        await tx
           .update(reviewRuns)
-          .set({ shadowRetired: sql`coalesce(${reviewRuns.shadowRetired}, 0) + ${rows.length}` })
-          .where(eq(reviewRuns.id, runId))
-          .returning({ retired: reviewRuns.shadowRetired });
-        return run?.retired ?? rows.length;
+          .set({ shadowRetired: unreported })
+          .where(eq(reviewRuns.id, runId));
+        return unreported;
       });
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),

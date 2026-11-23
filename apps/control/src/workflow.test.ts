@@ -312,6 +312,10 @@ function memoryRuns(): RunStore & {
       pause.noted.push(runId);
       pause.head = undefined;
     },
+    async recordShadow(runId, shadow) {
+      const run = runs.get(runId);
+      if (run !== undefined) run.shadow = shadow;
+    },
     async supersedeRun(runId) {
       const run = runs.get(runId);
       if (run?.status === "running") run.status = "superseded";
@@ -336,12 +340,17 @@ function unposted(row: StoredFinding): boolean {
   );
 }
 
-/** `findings` for one PR, like `drizzleFindingStore`; `shadowRun` says which runs were shadow. */
+/**
+ * `findings` for one PR, like `drizzleFindingStore`: `shadowRun` says which runs were shadow, and
+ * `wrote` which wrote the PR's summary (so reported their retirements).
+ */
 function memoryFindings(
   shadowRun: (runId: string) => boolean = () => false,
+  wrote: (runId: string) => boolean = () => false,
 ): FindingStore & { rows: StoredFinding[] } {
   const rows: StoredFinding[] = [];
-  const retiredBy = new Map<string, number>();
+  let retirements = 0;
+  const toReport = new Map<string, number>();
   return {
     rows,
     async trackedFindings() {
@@ -400,8 +409,12 @@ function memoryFindings(
     async retireShadowFindings(_pr, runId) {
       const retiring = rows.filter((row) => unposted(row));
       for (const row of retiring) row.status = "shadow";
-      retiredBy.set(runId, (retiredBy.get(runId) ?? 0) + retiring.length);
-      return retiredBy.get(runId) ?? 0;
+      retirements += retiring.length;
+      let reported = 0;
+      for (const [id, n] of toReport) if (id !== runId && wrote(id)) reported += n;
+      const unreported = Math.max(retirements - reported, 0);
+      toReport.set(runId, unreported);
+      return unreported;
     },
     async markOutdated(ids) {
       for (const row of rows)
@@ -552,7 +565,10 @@ function harness(setup: Setup = {}) {
     },
   };
   const runs = memoryRuns();
-  const findings = memoryFindings((id) => runs.runs.get(id)?.shadow === true);
+  const findings = memoryFindings(
+    (id) => runs.runs.get(id)?.shadow === true,
+    (id) => runs.runs.get(id)?.status === "succeeded",
+  );
   /** The review IDs read from GitHub. */
   const reviewReads: number[] = [];
   const logFields: Record<string, unknown>[] = [];

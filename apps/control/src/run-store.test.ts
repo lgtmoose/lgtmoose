@@ -654,13 +654,21 @@ describe("drizzleFindingStore", () => {
         "Shadow outdated",
       ]);
 
+      // A live run that retires them but writes no summary (covered, or overtaken): the next run
+      // that does reports them.
+      const covered = await run("arn:exec:shadow:covered", false);
+      expect(await findingStore.retireShadowFindings?.(pr, covered.runId, sha("3"))).toBe(4);
       const live = await run("arn:exec:shadow:going-live", false);
       expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
       // A retry of the same run says the same and retires nothing more.
       expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
-      // Another run at the same head retired nothing itself.
+      // Once it has written the PR's summary, they're reported: the next run has none to tell.
+      await db.update(reviewRuns).set({ wrotePr: true }).where(eq(reviewRuns.id, live.runId));
       const next = await run("arn:exec:shadow:next", false);
       expect(await findingStore.retireShadowFindings?.(pr, next.runId, sha("3"))).toBe(0);
+      // The run's mode as its post ran it, set again from the prepare step's.
+      await store.recordShadow?.(next.runId, true);
+      expect((await runRow(next.runId))?.shadow).toBe(true);
 
       for (const title of ["Shadow", "Shadow outdated", "Answered before", "Old shadow"]) {
         expect((await row(title))?.status).toBe("shadow");
@@ -690,6 +698,15 @@ describe("drizzleFindingStore", () => {
       await save(live.runId, pr, "Shadow", 902);
       expect(await row("Shadow")).toMatchObject({ status: "open", githubCommentId: 902 });
       expect(await unposted()).toEqual([]);
+      // A retired one was never shown: raised again less severely, it takes the new severity.
+      await findingStore.saveFindings(pr, live.runId, sha("3"), [
+        {
+          finding: { ...finding("Shadow outdated"), severity: "nit" },
+          fingerprint: "fp:Shadow outdated",
+          githubCommentId: 903,
+        },
+      ]);
+      expect(await row("Shadow outdated")).toMatchObject({ status: "open", severity: "nit" });
     });
   });
 

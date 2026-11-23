@@ -1477,10 +1477,13 @@ export async function post(
     pullRequestId: run.pullRequestId,
     ...(await slugOf(github)),
   });
+  // The mode this post runs in decides whether its findings reach GitHub (NIC-1141): recorded
+  // before they're saved, should a deploy have changed it since the prepare step.
+  await deps.runs.recordShadow?.(runId, deps.shadow === true);
   // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
   // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
-  // review that raises one again posts it as new. A retry retires none more and
-  // reports this run's count again; another run at the same head reports only its own.
+  // review that raises one again posts it as new. The summary reports those no run has yet: a
+  // retry the same, and a run that writes no summary leaves them to the next one that does.
   const shadowRetired =
     deps.shadow === true || deps.findings.retireShadowFindings === undefined
       ? 0

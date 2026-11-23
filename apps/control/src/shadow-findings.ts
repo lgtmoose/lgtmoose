@@ -12,6 +12,8 @@ import { sql, type SQL } from "drizzle-orm";
  *   Runs record that from the start (`review_runs.shadow`). One recorded before that, or by
  *   control code older than the column, counts as shadow when it succeeded without a review ID:
  *   a live run that raised findings posted a review (findings outside the diff go in its body).
+ *   Known limit: a live run from before `review_id` was recorded (migration 0006) has none
+ *   either, so its unposted findings would count as shadow ones. No deployment ran live then.
  * - **Unanswered:** no event by a person (one with a login: a reply on its thread, a resolve, an
  *   answer from the findings CLI or dashboard) after its latest `raised` event. An answer from
  *   before it was raised again was about the earlier finding.

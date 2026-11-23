@@ -127,10 +127,11 @@ export interface FindingStore {
   /**
    * Retires the PR's findings raised in shadow mode, never posted and unanswered since
    * (NIC-1141, `unpostedShadow`): status `shadow`, with a `shadow_retired` event at `sha`.
-   * Nobody could see them, so on a live run they don't count. Returns how many distinct
-   * findings run `runId` has retired, by this call or an earlier attempt of the same run, so a
-   * retry reports the same number and another run doesn't repeat it. Without it, nothing is
-   * retired.
+   * Nobody could see them, so on a live run they don't count. Returns how many of the PR's
+   * retirements no run that wrote the PR's summary has reported yet, and keeps that on run
+   * `runId`: once it writes its summary they're reported, a retry gets the same number, and a
+   * run that writes nothing (covered, or overtaken) leaves them to the next. Without it, nothing
+   * is retired.
    */
   retireShadowFindings?(pullRequestId: string, runId: string, sha: string): Promise<number>;
   /**
@@ -286,6 +287,12 @@ export interface RunStore {
   ): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
+  /**
+   * Records whether the run's post is in shadow mode (NIC-1141), which decides whether its
+   * findings were posted: the post step's mode, not the prepare step's, should a deploy change
+   * it in between. Setting it again is a no-op.
+   */
+  recordShadow?(runId: string, shadow: boolean): Promise<void>;
   /**
    * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
    * and not one a spend cap stopped) that started after `resume` or a review someone asked for.
