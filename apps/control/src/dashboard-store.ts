@@ -1,5 +1,6 @@
 import {
   dashboardSessions,
+  findingEvents,
   findings,
   postgresSpend,
   providerCooldowns,
@@ -68,7 +69,24 @@ export interface OpenFinding {
   /** Who raised it: LGTMoose, or another reviewer's login. */
   source: "self" | "bot" | "human";
   sourceLogin: string | undefined;
+  /** When someone said it's fixed from the CLI or the dashboard (NIC-1140), and who. */
+  fixClaimedAt: string | undefined;
+  fixClaimedBy: string | undefined;
   createdAt: string;
+}
+
+/** A finding someone means to answer (NIC-1140), with what the answer's rules read. */
+export interface AnswerTarget {
+  id: string;
+  /** Lowercased owner/name. */
+  repo: string;
+  number: number;
+  status: string;
+  severity: "blocking" | "should_fix" | "nit";
+  ruleCategory: string;
+  source: "self" | "bot" | "human";
+  /** The pull request's author. */
+  prAuthor: string;
 }
 
 export interface RunSummary {
@@ -96,8 +114,24 @@ export interface DashboardStore {
   /** Removes sessions that have ended. */
   deleteExpired(now: Date): Promise<number>;
   repoSummaries(repos: readonly string[]): Promise<RepoSummary[]>;
-  /** Open findings in `repos`, most severe first, at most `limit`. */
-  openFindings(repos: readonly string[], limit: number): Promise<OpenFinding[]>;
+  /**
+   * Open findings in `repos`, most severe first, at most `limit`; only pull request `number`'s
+   * when it's given (NIC-1140).
+   */
+  openFindings(repos: readonly string[], limit: number, number?: number): Promise<OpenFinding[]>;
+  /** A finding by ID, for an answer (NIC-1140); undefined when there's none. */
+  answerTarget(id: string): Promise<AnswerTarget | undefined>;
+  /**
+   * Records that `login` says an open or outdated finding of ours is fixed (NIC-1140): it's
+   * rechecked first on the next run, which alone closes it. False when it isn't open or outdated.
+   */
+  claimFix(id: string, login: string, at: Date): Promise<boolean>;
+  /**
+   * Declines an open or outdated finding of ours for `login`, with their reason (NIC-1140), as an
+   * accepted decline on its thread would: closed, with a `declined` event that outcome learning
+   * reads later. False when it isn't open or outdated.
+   */
+  declineFinding(id: string, login: string, reason: string): Promise<boolean>;
   /** The newest review runs in `repos`, at most `limit`. */
   recentRuns(repos: readonly string[], limit: number): Promise<RunSummary[]>;
   /** Provider use by runs in `repos` since `since`, by provider. */
@@ -186,7 +220,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         })
         .sort((a, b) => a.repo.localeCompare(b.repo));
     },
-    async openFindings(repos, limit) {
+    async openFindings(repos, limit, number) {
       if (repos.length === 0) return [];
       const rows = await db
         .select({
@@ -201,11 +235,19 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
           line: findings.line,
           source: findings.source,
           sourceLogin: findings.sourceLogin,
+          fixClaimedAt: findings.fixClaimedAt,
+          fixClaimedBy: findings.fixClaimedBy,
           createdAt: findings.createdAt,
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
-        .where(and(eq(findings.status, "open"), inRepos(repos)))
+        .where(
+          and(
+            eq(findings.status, "open"),
+            inRepos(repos),
+            ...(number === undefined ? [] : [eq(pullRequests.number, number)]),
+          ),
+        )
         .orderBy(SEVERITY_ORDER, desc(findings.createdAt))
         .limit(limit);
       return rows.map((row) => ({
@@ -213,8 +255,79 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         path: row.path ?? undefined,
         line: row.line ?? undefined,
         sourceLogin: row.sourceLogin ?? undefined,
+        fixClaimedAt: iso(row.fixClaimedAt),
+        fixClaimedBy: row.fixClaimedBy ?? undefined,
         createdAt: row.createdAt.toISOString(),
       }));
+    },
+    async answerTarget(id) {
+      const [row] = await db
+        .select({
+          id: findings.id,
+          repo: sql<string>`lower(${pullRequests.repo})`,
+          number: pullRequests.number,
+          status: findings.status,
+          severity: findings.severity,
+          ruleCategory: findings.ruleCategory,
+          source: findings.source,
+          prAuthor: pullRequests.author,
+        })
+        .from(findings)
+        .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
+        .where(eq(findings.id, id))
+        .limit(1);
+      return row;
+    },
+    async claimFix(id, login, at) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(findings)
+          .set({ fixClaimedAt: at, fixClaimedBy: login, updatedAt: at })
+          .where(
+            and(
+              eq(findings.id, id),
+              eq(findings.source, "self"),
+              inArray(findings.status, ["open", "outdated"]),
+            ),
+          )
+          .returning({ sha: findings.raisedAtSha });
+        if (row === undefined) return false;
+        await tx.insert(findingEvents).values({
+          findingId: id,
+          type: "fix_claimed",
+          actor: "human",
+          actorLogin: login,
+          sha: row.sha,
+        });
+        return true;
+      });
+    },
+    async declineFinding(id, login, reason) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(findings)
+          .set({ status: "declined", updatedAt: sql`now()` })
+          .where(
+            and(
+              eq(findings.id, id),
+              eq(findings.source, "self"),
+              inArray(findings.status, ["open", "outdated"]),
+            ),
+          )
+          .returning({ sha: findings.raisedAtSha });
+        if (row === undefined) return false;
+        await tx.insert(findingEvents).values({
+          findingId: id,
+          type: "declined",
+          actor: "human",
+          actorLogin: login,
+          sha: row.sha,
+          reason,
+          // Outcome learning reads it on the reconciler's next run (`learnFromAnswers`).
+          learnPending: true,
+        });
+        return true;
+      });
     },
     async recentRuns(repos, limit) {
       if (repos.length === 0) return [];

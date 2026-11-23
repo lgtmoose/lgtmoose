@@ -28,6 +28,8 @@ import { healthCheck } from "../model-health.js";
 import { drizzleChecksWaits, drizzleDispatchStore } from "../dispatch-aws.js";
 import { collectFeedback } from "../feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "../feedback-aws.js";
+import { learnFromAnswers } from "../finding-answers.js";
+import { drizzleAnswerLearningStore } from "../outcome-learning-aws.js";
 import { embedderFor } from "../learnings.js";
 import { log } from "../log.js";
 import { metricsLine, reconcile } from "../reconcile.js";
@@ -309,6 +311,21 @@ async function main(): Promise<void> {
     counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
     counts.categoriesFlagged = feedback.categoriesFlagged;
     counts.errors += feedback.errors;
+    // Findings declined from the CLI or the dashboard (NIC-1140): outcome learning.
+    const outcomes = control.outcomes;
+    if (outcomes !== undefined) {
+      await learnFromAnswers({
+        store: drizzleAnswerLearningStore(db),
+        rejected: (installationId, repo, rejected) =>
+          outcomes.rejected(installationId, repo, rejected),
+        log,
+      }).catch((error: unknown) => {
+        counts.errors += 1;
+        log("reconcile: answers not learned from", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
     // Spend caps (NIC-1079): settle runs post never reached, from their batches' outputs.
     await settleStaleSpend(
       { store: postgresSpend(db), budgets: config.budgets },

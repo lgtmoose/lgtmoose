@@ -108,6 +108,16 @@ describe("the compose dashboard server", () => {
     expect(request?.headers.origin).toBe("https://dash.test");
   });
 
+  it("hands an API POST's body to the handler (NIC-1140)", async () => {
+    const response = await fetch(`${base}/api/findings/x/ack`, {
+      method: "POST",
+      body: JSON.stringify({ outcome: "fixed" }),
+      headers: { "x-forwarded-for": "198.51.100.7" },
+    });
+    expect(response.status).toBe(404);
+    expect(seen.at(-1)).toMatchObject({ method: "POST", body: '{"outcome":"fixed"}' });
+  });
+
   it("allows only GET and POST on the API, and answers a handler's failure with 500", async () => {
     const put = await fetch(`${base}/api/me`, { method: "PUT" });
     expect(put.status).toBe(405);

@@ -566,6 +566,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
+                ...(row.fixClaimedAt === null
+                  ? {}
+                  : { fixClaimedAt: row.fixClaimedAt.toISOString() }),
               },
             ],
       );
@@ -778,6 +781,19 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
       await db
         .insert(findingEvents)
         .values({ findingId, type, actor: "self", sha, githubCommentId: commentId });
+    },
+    async clearFixClaims(claims) {
+      for (const claim of claims) {
+        await db
+          .update(findings)
+          .set({ fixClaimedAt: null, fixClaimedBy: null, updatedAt: now() })
+          .where(
+            and(
+              eq(findings.id, claim.findingId),
+              eq(findings.fixClaimedAt, new Date(claim.fixClaimedAt)),
+            ),
+          );
+      }
     },
     async fixedCommentIds(pullRequestId) {
       const rows = await db

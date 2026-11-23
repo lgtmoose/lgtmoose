@@ -16,7 +16,9 @@ import pg from "pg";
  * - which learnings weren't followed (NIC-1081): SELECT of `learning_id`, `type` and
  *   `created_at` on `learning_events`, not who did what;
  * - the feedback report, through the `dashboard_feedback_report` view of that one artifact, not
- *   the `artifacts` table, which holds transcripts and run data.
+ *   the `artifacts` table, which holds transcripts and run data;
+ * - answering a finding (NIC-1140): UPDATE of `status`, `updated_at`, `fix_claimed_at` and
+ *   `fix_claimed_by` on `findings`, and INSERT on `finding_events`.
  *
  * Nothing else: not the job queue, executions, artifacts, feedback rows or any delete but its
  * own sessions'. The runner calls this after the migrations, as `ensureGatewayRole`, so the
@@ -75,4 +77,10 @@ export async function ensureDashboardRole(
     `grant select (learning_id, type, created_at) on table learning_events to ${name}`,
   );
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
+  // Answering a finding (NIC-1140): a fix claim, or a decline, and its event. Whether a person
+  // may is decided from GitHub (write access, and the author rule for a decline).
+  await client.query(
+    `grant update (status, updated_at, fix_claimed_at, fix_claimed_by) on table findings to ${name}`,
+  );
+  await client.query(`grant insert on table finding_events to ${name}`);
 }

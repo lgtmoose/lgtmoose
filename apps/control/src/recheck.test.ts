@@ -246,6 +246,38 @@ describe("recheckJob", () => {
   });
 });
 
+describe("findings someone said are fixed (NIC-1140)", () => {
+  const claimed = "2026-11-23T10:00:00.000Z";
+
+  it("come first, whatever their severity or line", () => {
+    const records = [
+      record({ id: "blocking" }),
+      record({ id: "claimed-nit", severity: "nit", fixClaimedAt: claimed }),
+      record({ id: "claimed-outdated", status: "outdated", fixClaimedAt: claimed }),
+      record({ id: "nit", severity: "nit" }),
+      record({ id: "claimed-left", side: "LEFT", fixClaimedAt: claimed }),
+    ];
+    expect(rankRechecks(records, 10).map((row) => row.id)).toEqual([
+      "claimed-nit",
+      "claimed-outdated",
+      "blocking",
+    ]);
+    expect(rankRechecks(records, 1).map((row) => row.id)).toEqual(["claimed-nit"]);
+  });
+
+  it("count on an incremental review when anything changed, near the finding or not", () => {
+    const records = [
+      record({ id: "far", path: "docs/guide.md", severity: "nit", fixClaimedAt: claimed }),
+      record({ id: "unclaimed-far", path: "docs/other.md" }),
+    ];
+    expect(
+      selectRechecks(records, ["src/pay/usePayment.ts"], new Map()).map((row) => row.id),
+    ).toEqual(["far"]);
+    // Nothing changed: nothing could have fixed it.
+    expect(selectRechecks(records, [], new Map())).toEqual([]);
+  });
+});
+
 describe("rankRechecks (NIC-1123)", () => {
   it("takes open blocking and should-fix findings anywhere, blocking first, oldest first", () => {
     const old = "b".repeat(40);

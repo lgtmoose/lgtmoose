@@ -216,9 +216,21 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     expect(await get("/api/repos")).toMatchObject({
       repos: [{ repo: "acme/shop", openFindings: 1, blocking: 1 }],
     });
-    expect(await get("/api/findings", { repo: "acme/shop" })).toMatchObject({
-      findings: [{ title: "Off by one" }],
+    const listed = await get("/api/findings", { repo: "acme/shop" });
+    expect(listed).toMatchObject({ findings: [{ title: "Off by one" }] });
+    // Answering a finding (NIC-1140) through its column grants.
+    const findingId = (listed.findings as { id: string }[])[0]?.id ?? "";
+    const answered = await handleDashboardRequest(deps, {
+      ...request("POST", `/api/findings/${findingId}/ack`),
+      body: JSON.stringify({ outcome: "fixed" }),
     });
+    expect(answered.status).toBe(200);
+    const claims = await owner.query<{ fix_claimed_by: string; type: string }>(
+      `select f.fix_claimed_by, e.type from findings f
+         join finding_events e on e.finding_id = f.id where f.id = $1`,
+      [findingId],
+    );
+    expect(claims.rows).toEqual([{ fix_claimed_by: "dev", type: "fix_claimed" }]);
     expect(await get("/api/runs")).toMatchObject({ runs: [{ status: "succeeded" }] });
     expect(await get("/api/usage")).toMatchObject({
       providers: [{ providerId: "claude" }],
@@ -299,8 +311,14 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "select actor from learning_events",
       "update learning_events set actor = 'mallory'",
       "delete from learning_events",
-      "update findings set status = 'outdated'",
+      // An answer to a finding (NIC-1140) changes its status and fix claim, nothing else.
+      "update findings set title = 'something else'",
+      "update findings set severity = 'nit'",
+      "update findings set github_comment_id = 1",
       "delete from findings",
+      "select * from finding_events",
+      "update finding_events set actor_login = 'mallory'",
+      "delete from finding_events",
       "update review_runs set status = 'failed'",
       "update spend_ledger set settled = true",
       "delete from spend_ledger",

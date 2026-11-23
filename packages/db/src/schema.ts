@@ -58,6 +58,9 @@ export const findingEventType = pgEnum("finding_event_type", [
   "escalated",
   // A person unresolved the finding's review thread after resolving it: open again.
   "unresolved",
+  // A person said it's fixed, from the CLI or the dashboard (NIC-1140): rechecked first, and
+  // closed only on the recheck's word.
+  "fix_claimed",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [
@@ -228,6 +231,13 @@ export const findings = pgTable(
      * fixed, and recorded as not followed when it's declined against one of them.
      */
     learningIds: text("learning_ids").array(),
+    /**
+     * When a person last said it's fixed, from the CLI or the dashboard (NIC-1140), and who. The
+     * next run's recheck takes it first and clears this once it has looked; only the recheck
+     * closes it.
+     */
+    fixClaimedAt: timestamp("fix_claimed_at", { withTimezone: true }),
+    fixClaimedBy: text("fix_claimed_by"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -258,9 +268,24 @@ export const findingEvents = pgTable(
     counted: boolean("counted"),
     sha: text("sha"),
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
+    /**
+     * For a `declined` event given from the CLI or the dashboard (NIC-1140), with no GitHub reply
+     * behind it: the person's reason. Untrusted text, as a reply's body is.
+     */
+    reason: text("reason"),
+    /**
+     * True while outcome learning hasn't read this answer yet (NIC-1140): the reconciler learns
+     * from it and clears it. Null for events that never wait.
+     */
+    learnPending: boolean("learn_pending"),
     createdAt: createdAt(),
   },
-  (t) => [index("finding_events_finding_idx").on(t.findingId, t.createdAt)],
+  (t) => [
+    index("finding_events_finding_idx").on(t.findingId, t.createdAt),
+    index("finding_events_learn_pending_idx")
+      .on(t.createdAt)
+      .where(sql`${t.learnPending}`),
+  ],
 );
 
 export const pendingReplyStatus = pgEnum("pending_reply_status", [

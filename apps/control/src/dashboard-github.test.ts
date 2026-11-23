@@ -115,3 +115,28 @@ describe("githubDashboard", () => {
     );
   });
 });
+
+describe("repoAccess", () => {
+  it("reads the person's own permission on the repository", async () => {
+    const reply = (permissions: Record<string, boolean>) =>
+      githubDashboard({
+        fetch: fakeFetch({ "/repos/acme/app": { body: { permissions } } }).fetch,
+      });
+    expect(await reply({ pull: true, push: true }).repoAccess("t", "acme/app")).toBe("write");
+    expect(await reply({ pull: true, maintain: true }).repoAccess("t", "acme/app")).toBe("write");
+    expect(await reply({ pull: true }).repoAccess("t", "acme/app")).toBe("read");
+    expect(await reply({}).repoAccess("t", "acme/app")).toBe("none");
+  });
+
+  it("is none when GitHub doesn't show the repository to the token", async () => {
+    const github = githubDashboard({ fetch: fakeFetch({}).fetch });
+    expect(await github.repoAccess("t", "acme/app")).toBe("none");
+  });
+
+  it("refuses a token GitHub rejects", async () => {
+    const github = githubDashboard({
+      fetch: fakeFetch({ "/repos/acme/app": { status: 401, body: {} } }).fetch,
+    });
+    await expect(github.repoAccess("t", "acme/app")).rejects.toThrow("HTTP 401");
+  });
+});

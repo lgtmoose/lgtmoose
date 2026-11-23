@@ -12,6 +12,8 @@ export interface DashboardRequest {
   query: Readonly<Record<string, string | undefined>>;
   headers: Readonly<Record<string, string | undefined>>;
   cookies: Readonly<Record<string, string>>;
+  /** The request's body as text, when it has one (NIC-1140: an answer to a finding). */
+  body?: string;
 }
 
 export interface DashboardResponse {
@@ -29,6 +31,8 @@ export interface HttpApiEvent {
   cookies?: string[];
   queryStringParameters?: Record<string, string | undefined>;
   requestContext?: { http?: { method?: string } };
+  body?: string;
+  isBase64Encoded?: boolean;
 }
 
 export interface HttpApiResult {
@@ -65,6 +69,14 @@ export function fromHttpApiEvent(event: HttpApiEvent): DashboardRequest {
     query: event.queryStringParameters ?? {},
     headers,
     cookies: parseCookies(cookieValues),
+    ...(event.body === undefined
+      ? {}
+      : {
+          body:
+            event.isBase64Encoded === true
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : event.body,
+        }),
   };
 }
 

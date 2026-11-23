@@ -33,6 +33,13 @@ export interface DashboardGitHub {
     owners: ReadonlySet<string>,
     limit: number,
   ): Promise<{ repos: string[]; writeRepos: string[] }>;
+  /**
+   * The token's person's own permission on `repo` (owner/name), as GitHub reports it to them
+   * (NIC-1140): `write` for push, maintain or admin, `read` when they can see it, `none` when
+   * they can't (GitHub answers 404). Works with any token that can read the repository: a
+   * personal access token, `gh auth token`, or the App's user token.
+   */
+  repoAccess(token: string, repo: string): Promise<"write" | "read" | "none">;
 }
 
 /** The URL GitHub's sign-in starts at. */
@@ -98,6 +105,17 @@ export class DashboardGitHubError extends Error {
 
 const PAGE = 100;
 
+const repoReply = z.object({
+  permissions: z
+    .object({
+      admin: z.boolean().optional(),
+      maintain: z.boolean().optional(),
+      push: z.boolean().optional(),
+      pull: z.boolean().optional(),
+    })
+    .optional(),
+});
+
 export function githubDashboard(
   options: { apiUrl?: string; webUrl?: string; timeoutMs?: number; fetch?: Fetch } = {},
 ): DashboardGitHub {
@@ -158,6 +176,27 @@ export function githubDashboard(
       const reply = membershipReply.safeParse(await response.json());
       if (!reply.success || reply.data.state !== "active") return "none";
       return reply.data.role === "admin" ? "admin" : "member";
+    },
+    async repoAccess(token, repo) {
+      const [owner = "", name = ""] = repo.split("/");
+      const response = await get(
+        token,
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+        "reading a repository",
+      );
+      if (!response.ok) return "none";
+      const can = repoReply.safeParse(await response.json());
+      if (!can.success) return "none";
+      const permissions = can.data.permissions;
+      if (
+        permissions?.push === true ||
+        permissions?.maintain === true ||
+        permissions?.admin === true
+      ) {
+        return "write";
+      }
+      // A public repository answers anyone; only a token GitHub says can pull it reads it.
+      return permissions?.pull === true ? "read" : "none";
     },
     async visibleRepos(token, owners, limit) {
       const repos = new Set<string>();

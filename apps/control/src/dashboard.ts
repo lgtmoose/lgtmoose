@@ -12,6 +12,13 @@ import {
 import { z } from "zod";
 import { authorizeUrl, type DashboardGitHub } from "./dashboard-github.js";
 import {
+  ANSWER_PATH,
+  answerFinding,
+  handleTokenRequest,
+  prParams,
+  sessionAsker,
+} from "./dashboard-findings.js";
+import {
   SESSION_COOKIE,
   SIGN_IN_COOKIE,
   clearCookie,
@@ -46,6 +53,8 @@ import type { Bootstrap, BootstrapStore } from "./bootstrap-store.js";
  *   sign-in, within the allowed orgs.
  * - **Writes:** a request that changes anything must come from the dashboard's own origin
  *   (`Origin`, and `Sec-Fetch-Site` when the browser sends it), on top of SameSite.
+ * - **Findings (NIC-1140):** listed by pull request and answered (fixed or declined), with the
+ *   session or, for the CLI, a GitHub token (`dashboard-findings.ts`).
  * - **Learnings:** approving and rejecting go through `approveLearning` and `forgetLearning`, with
  *   the session's login as the actor. Their permission checks read what GitHub said about the
  *   person at sign-in (write access per repository, owner per org), never the App's key, so a
@@ -571,6 +580,9 @@ export async function handleDashboardRequest(
   const route = `${request.method} ${request.path}`;
   if (route === "GET /api/auth/login") return login(deps);
   if (route === `GET ${CALLBACK_PATH}`) return callback(deps, request);
+  // The CLI's GitHub token (NIC-1140): only the findings list and answers, never the session.
+  const viaToken = await handleTokenRequest(deps, request);
+  if (viaToken !== undefined) return viaToken;
   if (request.method !== "GET" && !fromDashboard(request, await deps.origin())) {
     return json(403, { error: "cross-origin" });
   }
@@ -588,6 +600,11 @@ export async function handleDashboardRequest(
   const action = request.method === "POST" ? LEARNING_ACTION.exec(request.path) : null;
   if (action?.[1] !== undefined && (action[2] === "approve" || action[2] === "reject")) {
     return changeLearning(deps, session, action[1], action[2]);
+  }
+  const answer = request.method === "POST" ? ANSWER_PATH.exec(request.path) : null;
+  if (answer?.[1] !== undefined) {
+    // What GitHub said about the person at sign-in, as for learnings.
+    return answerFinding(deps, sessionAsker(session), answer[1], request.body);
   }
   const bulk = request.method === "POST" ? BOOTSTRAP_ACTION.exec(request.path) : null;
   if (bulk?.[1] !== undefined && (bulk[2] === "approve" || bulk[2] === "reject")) {
@@ -612,6 +629,16 @@ export async function handleDashboardRequest(
     case "GET /api/findings": {
       const repos = scope(session, request.query.repo);
       if (repos === undefined) return json(404, { error: "no such repository" });
+      // One pull request's (NIC-1140): `pr` needs `repo`.
+      if (request.query.pr !== undefined) {
+        const params = prParams(request.query);
+        if (params?.number === undefined) {
+          return json(400, { error: "give repo=owner/name and pr=<number>" });
+        }
+        return json(200, {
+          findings: await deps.store.openFindings(repos, FINDINGS_LIMIT, params.number),
+        });
+      }
       return json(200, { findings: await deps.store.openFindings(repos, FINDINGS_LIMIT) });
     }
     case "GET /api/runs": {

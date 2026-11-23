@@ -644,6 +644,30 @@ async function applyRecheck(
   return { ...writes, fixed: ours };
 }
 
+/** Clears the fix claims the run's recheck looked at (NIC-1140); a failure is only logged. */
+async function clearFixClaims(
+  deps: ControlDeps,
+  runId: string,
+  manifest: RunManifest,
+): Promise<void> {
+  const claims = (manifest.recheck?.targets ?? []).flatMap((target) =>
+    target.fixClaimedAt === undefined
+      ? []
+      : [{ findingId: target.findingId, fixClaimedAt: target.fixClaimedAt }],
+  );
+  const clear = deps.findings.clearFixClaims?.bind(deps.findings);
+  if (claims.length === 0 || clear === undefined) return;
+  try {
+    await clear(claims);
+  } catch (error) {
+    deps.log("fix claims not cleared", {
+      runId,
+      count: claims.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 /**
  * Whether a GitHub write failed for now (a 5xx, a rate limit, the network) rather than for good
  * (the comment is gone, the conversation is locked: a 403, 404 or 422). A write that failed for
@@ -2265,6 +2289,12 @@ export async function post(
       !progress.rechecks
     ) {
       recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
+    }
+    // The fix claims the recheck looked at (NIC-1140), whatever it found: a finding still there
+    // goes back to its usual place in the order. Only once it gave verdicts and the run counts;
+    // each claim only while it's the one the run saw. Never fails the post.
+    if (progress.coveredBy === undefined && recheckPlan !== undefined) {
+      await clearFixClaims(deps, runId, manifest);
     }
     // What the judged replies led to, now that this attempt holds the run's claim.
     if (replyWrites !== undefined && !progress.replies) {

@@ -86,6 +86,11 @@ export interface FindingRecord {
    * line is in. Undefined for rows recorded before it was kept.
    */
   basePath: string | undefined;
+  /**
+   * When a person said it's fixed, from the CLI or the dashboard (NIC-1140), as an ISO time: the
+   * recheck takes it first. Left out when nobody has, or the recheck has looked since.
+   */
+  fixClaimedAt?: string;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -160,6 +165,12 @@ export interface FindingStore {
    * it was closed some other way (a person resolved or declined it, say).
    */
   closeFixed?(findingId: string, sha: string): Promise<"closed" | "ours" | "theirs">;
+  /**
+   * Clears the fix claims (NIC-1140) the run's recheck looked at, each only while it's still the
+   * claim the run saw (`fixClaimedAt`, an ISO time): a person who says it again meanwhile keeps
+   * theirs for the next run. Optional: without it, a claim stays until the finding closes.
+   */
+  clearFixClaims?(claims: readonly { findingId: string; fixClaimedAt: string }[]): Promise<void>;
   /** Records that we replied on a finding's thread (`replied` or `dispute_answered`). */
   recordReply?(
     findingId: string,

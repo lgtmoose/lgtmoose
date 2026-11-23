@@ -57,12 +57,13 @@ The dashboard learns your access when you sign in: the repositories listing GitH
 ## Security
 
 - The dashboard API is its own Lambda, separate from the internet-facing webhook gateway. It can read the database, `lgtmoose/github-app-oauth`, a signing key the stack generates, and one object in the artifact bucket: the feedback report, `reports/feedback/latest.json`. It can't read the App's private key, the webhook secret, any model credential, transcripts or anything else in that bucket.
-- Requests that change anything (signing out, approving and rejecting learnings) must be POSTs from the dashboard's own origin (`Origin`, and `Sec-Fetch-Site` when the browser sends it), with the session cookie.
+- Requests that change anything (signing out, approving and rejecting learnings, answering a finding) must be POSTs from the dashboard's own origin (`Origin`, and `Sec-Fetch-Site` when the browser sends it), with the session cookie.
+- The API also serves [`lgtmoose findings`](commands.md#findings-outside-github-lgtmoose-findings): a pull request's findings list and answers to them, with the person's GitHub token in an `x-lgtmoose-github-token` header instead of a session. Only those two endpoints take one, and a request with a token never reads the session cookie. GitHub says whose token it is and what they can do on the repository; the API keeps that answer for a minute, keyed by the token's hash, and never stores or logs the token.
 - A learning outside your repositories and orgs answers "not found", whether or not it exists.
 - CloudFront sends these headers on every response: a Content-Security-Policy that allows scripts, styles and connections only from the dashboard itself and no framing, HSTS for two years, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 - The API is throttled to 10 requests a second (bursts of 20).
 
-Under docker compose, one Node server sends the same headers and does the same checks, with the same rate limit per client address. It holds a database login of its own, which can read reviews and change only its sessions and learnings' status, and reads the feedback report through a view of that one artifact. It has the OAuth client and its signing key, in a secrets directory of its own, and no Docker socket or App private key. See [The dashboard](compose.md#the-dashboard).
+Under docker compose, one Node server sends the same headers and does the same checks, with the same rate limit per client address. It holds a database login of its own, which can read reviews and change only its sessions, learnings' status and the answers to findings, and reads the feedback report through a view of that one artifact. It has the OAuth client and its signing key, in a secrets directory of its own, and no Docker socket or App private key. See [The dashboard](compose.md#the-dashboard).
 
 See [Security](security.md) and the threat model in `SECURITY.md`.
 

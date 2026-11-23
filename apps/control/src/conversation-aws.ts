@@ -277,24 +277,28 @@ export function drizzleConversationStore(
     },
     async declineReason(findingId) {
       const [row] = await db
-        .select({ author: findingEvents.actorLogin, body: pendingReplies.body })
+        .select({
+          author: findingEvents.actorLogin,
+          body: pendingReplies.body,
+          // A decline from the CLI or the dashboard (NIC-1140): its reason, with no reply.
+          reason: findingEvents.reason,
+        })
         .from(findingEvents)
-        .innerJoin(
-          pendingReplies,
-          eq(pendingReplies.githubCommentId, findingEvents.githubCommentId),
-        )
+        .leftJoin(pendingReplies, eq(pendingReplies.githubCommentId, findingEvents.githubCommentId))
         .where(
           and(
             eq(findingEvents.findingId, findingId),
             inArray(findingEvents.type, ["declined", "dispute_answered"]),
             isNotNull(findingEvents.actorLogin),
+            or(isNotNull(pendingReplies.body), isNotNull(findingEvents.reason)),
           ),
         )
         .orderBy(desc(findingEvents.createdAt))
         .limit(1);
-      return row === undefined || row.author === null
+      const body = row?.body ?? row?.reason ?? undefined;
+      return row === undefined || row.author === null || body === undefined
         ? undefined
-        : { author: row.author, body: row.body };
+        : { author: row.author, body };
     },
     async commentsThrough(repo, number, at) {
       await db

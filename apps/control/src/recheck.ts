@@ -76,6 +76,11 @@ export const recheckEntrySchema = z.object({
    * when the recheck shows it's fixed. Left out: an open finding whose line is there.
    */
   outdated: z.boolean().optional(),
+  /**
+   * When a person said it's fixed (NIC-1140), as the run saw it: the post step clears that claim
+   * once the recheck has looked, whatever it found. Left out: nobody had.
+   */
+  fixClaimedAt: z.string().optional(),
 });
 
 export type RecheckEntry = z.infer<typeof recheckEntrySchema>;
@@ -158,6 +163,8 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
  * Where a finding comes in the recheck's order, or undefined when the recheck doesn't check it.
  * New side only:
  *
+ * - -1 (NIC-1140): someone said it's fixed, from the CLI or the dashboard: first, whatever its
+ *   severity or line. It still closes only by the recheck's rules;
  * - 0, 1: open blocking, then open should-fix, with its cited line still there;
  * - 2 to 4 (NIC-1124): open, any severity, nits included, its cited line gone at head
  *   (`lines`: edited or deleted, a committed suggestion among them), so it goes `outdated`
@@ -172,6 +179,7 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
 function tier(record: FindingRecord, lines: LineStates): number | undefined {
   if (record.side !== "RIGHT") return undefined;
   if (record.status !== "open" && record.status !== "outdated") return undefined;
+  if (record.fixClaimedAt !== undefined) return -1;
   const severity = SEVERITY_RANK[record.severity];
   if (lineGone(record, lines)) return (record.status === "outdated" ? 5 : 2) + severity;
   return severity < 2 ? severity : undefined;
@@ -275,6 +283,8 @@ export function selectRechecks(
   if (changed.length === 0 || limit <= 0) return [];
   const affected = records.filter((record) => {
     if (tier(record, lines) === undefined) return false;
+    // Someone said it's fixed (NIC-1140): the fix may be anywhere the commits changed.
+    if (record.fixClaimedAt !== undefined) return true;
     if (lineGone(record, lines)) return changed.includes(record.path);
     return changed.some((path) => isRelated(record.path, path, imports));
   });
@@ -484,11 +494,12 @@ export async function recheckJob(input: {
     await readImports(pool.map((record) => record.path));
     await readImports([...new Set([...ownChanged.values()].flat())].slice(0, MAX_IMPORT_FILES));
     picked = rankRechecks(
-      pool.filter((record) =>
-        (ownChanged.get(record.raisedAtSha) ?? []).some((path) =>
-          isRelated(record.path, path, imports),
-        ),
-      ),
+      pool.filter((record) => {
+        const since = ownChanged.get(record.raisedAtSha) ?? [];
+        // Someone said it's fixed (NIC-1140): any change since it was raised may hold the fix.
+        if (record.fixClaimedAt !== undefined) return since.length > 0;
+        return since.some((path) => isRelated(record.path, path, imports));
+      }),
       limit,
       raisedAt,
       lines,
@@ -624,12 +635,14 @@ export async function recheckJob(input: {
           : { githubCommentId: record.githubCommentId }),
         related: relatedOf(record),
         ...(lineGone(record, lines) ? { outdated: true } : {}),
+        ...(record.fixClaimedAt === undefined ? {} : { fixClaimedAt: record.fixClaimedAt }),
       },
     });
   }
   input.log("findings to recheck", {
     count: targets.length,
     outdated: targets.filter((target) => target.entry.outdated === true).length,
+    claimedFixed: targets.filter((target) => target.entry.fixClaimedAt !== undefined).length,
     changed: changed.length,
     mode,
   });
