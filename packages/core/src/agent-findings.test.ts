@@ -142,6 +142,12 @@ describe("answerRequestSchema", () => {
     });
   });
 
+  it("refuses a reason with a NUL, which Postgres can't store", () => {
+    expect(
+      answerRequestSchema.safeParse({ outcome: "declined", reason: "ok\u0000then" }).success,
+    ).toBe(false);
+  });
+
   it("refuses any other outcome", () => {
     expect(answerRequestSchema.safeParse({ outcome: "resolved" }).success).toBe(false);
   });

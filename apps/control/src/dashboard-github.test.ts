@@ -136,8 +136,24 @@ describe("membership (NIC-1140)", () => {
     expect(await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo" } })).toBe(
       "unreadable",
     );
-    // A fine-grained token without Members read.
-    expect(await ask({ status: 403, body: {} })).toBe("unreadable");
+    // A 403 to a classic token whose scopes lack an org scope.
+    expect(await ask({ status: 403, body: {}, headers: { "x-oauth-scopes": "repo" } })).toBe(
+      "unreadable",
+    );
+  });
+
+  it("passes on any other 403 as GitHub's refusal, with its message", async () => {
+    const allowList = {
+      status: 403,
+      body: { message: "the `acme` organization has an IP allow list enabled" },
+    };
+    // A fine-grained token (no scopes header), or a classic one that has read:org.
+    for (const headers of [{}, { "x-oauth-scopes": "repo, read:org" }]) {
+      await expect(ask({ ...allowList, headers })).rejects.toMatchObject({
+        status: 403,
+        githubMessage: "the `acme` organization has an IP allow list enabled",
+      });
+    }
   });
 
   it("is none when the token could see a membership and there isn't one", async () => {

@@ -48,9 +48,10 @@ export interface DashboardGitHub {
   repoAccess(token: string, repo: string): Promise<RepoAccess>;
   /**
    * Whether the token's person is an active member of `org` (NIC-1140), as sign-in asks:
-   * `unreadable` when the token can't be shown membership. That's a classic token without
-   * `read:org` (GitHub answers 403, or 404 with `X-OAuth-Scopes` lacking an org scope), or a
-   * fine-grained token without the organization's Members permission (403).
+   * `unreadable` when the token can't be shown membership: a classic token whose
+   * `X-OAuth-Scopes` lack an org scope (GitHub answers 403 or 404). Any other 403 (a
+   * fine-grained token without the Members permission, an IP allow list, an OAuth app
+   * restriction) is thrown, with GitHub's message.
    */
   membership(token: string, org: string): Promise<"member" | "none" | "unreadable">;
 }
@@ -121,7 +122,20 @@ export class DashboardGitHubError extends Error {
   readonly sso: boolean;
   /** GitHub's rate limit, not a refusal: a 403 or 429 with no requests left or a Retry-After. */
   readonly rateLimited: boolean;
-  constructor(what: string, status: number, sso = false, rateLimited = false) {
+  /** The token's scopes from `X-OAuth-Scopes`, for a classic or OAuth token; null otherwise. */
+  readonly oauthScopes: string | null;
+  /**
+   * GitHub's own `message` for a refusal (an IP allow list, an OAuth app restriction), at most
+   * 200 characters: for the person to read, kept out of the error's message.
+   */
+  readonly githubMessage: string | undefined;
+  constructor(
+    what: string,
+    status: number,
+    sso = false,
+    rateLimited = false,
+    details: { oauthScopes?: string | null; githubMessage?: string } = {},
+  ) {
     super(
       status === 0
         ? `GitHub couldn't be reached for ${what}.`
@@ -131,8 +145,21 @@ export class DashboardGitHubError extends Error {
     this.status = status;
     this.sso = sso;
     this.rateLimited = rateLimited;
+    this.oauthScopes = details.oauthScopes ?? null;
+    this.githubMessage = details.githubMessage;
   }
 }
+
+/** The classic token scopes that let GitHub show org memberships. */
+const ORG_SCOPES = ["read:org", "write:org", "admin:org"];
+
+/** Whether `X-OAuth-Scopes` (a classic or OAuth token's) has an org scope. */
+function hasOrgScope(scopes: string): boolean {
+  const granted = new Set(scopes.split(",").map((scope) => scope.trim()));
+  return ORG_SCOPES.some((scope) => granted.has(scope));
+}
+
+const messageReply = z.object({ message: z.string() });
 
 const PAGE = 100;
 
@@ -182,11 +209,16 @@ export function githubDashboard(
         (response.status === 403 || response.status === 429) &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
           response.headers.has("retry-after"));
+      const message = messageReply.safeParse(await response.json().catch(() => undefined));
       throw new DashboardGitHubError(
         what,
         response.status,
         response.headers.has("x-github-sso"),
         limited,
+        {
+          oauthScopes: response.headers.get("x-oauth-scopes"),
+          ...(message.success ? { githubMessage: message.data.message.slice(0, 200) } : {}),
+        },
       );
     }
     return response;
@@ -240,12 +272,15 @@ export function githubDashboard(
           "reading an org membership",
         );
       } catch (error) {
-        // Refused, not rate-limited or SSO: the token may not read memberships.
+        // A classic token whose scopes lack an org scope: it can't be shown memberships. Any
+        // other 403 (an IP allow list, an OAuth app restriction) is GitHub refusing: passed on.
         if (
           error instanceof DashboardGitHubError &&
           error.status === 403 &&
           !error.sso &&
-          !error.rateLimited
+          !error.rateLimited &&
+          error.oauthScopes !== null &&
+          !hasOrgScope(error.oauthScopes)
         ) {
           return "unreadable";
         }
@@ -255,10 +290,7 @@ export function githubDashboard(
         // Not a member, or a classic token GitHub won't show it to: its scopes say which.
         const scopes = response.headers.get("x-oauth-scopes");
         if (scopes === null) return "none";
-        const granted = new Set(scopes.split(",").map((scope) => scope.trim()));
-        return ["read:org", "write:org", "admin:org"].some((scope) => granted.has(scope))
-          ? "none"
-          : "unreadable";
+        return hasOrgScope(scopes) ? "none" : "unreadable";
       }
       const reply = membershipReply.safeParse(await response.json());
       return reply.success && reply.data.state === "active" ? "member" : "none";

@@ -18,7 +18,13 @@ export const answerRequestSchema = z.discriminatedUnion("outcome", [
   z.object({ outcome: z.literal("fixed") }),
   z.object({
     outcome: z.literal("declined"),
-    reason: z.string().trim().min(1, "a decline needs a reason").max(MAX_DECLINE_REASON),
+    reason: z
+      .string()
+      .trim()
+      .min(1, "a decline needs a reason")
+      .max(MAX_DECLINE_REASON)
+      // Postgres can't store a NUL in text: refused here, not a server error later.
+      .refine((reason) => !reason.includes("\u0000"), "a reason can't contain a NUL character"),
   }),
 ]);
 export type AnswerRequest = z.infer<typeof answerRequestSchema>;

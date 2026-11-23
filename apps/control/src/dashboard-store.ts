@@ -138,7 +138,11 @@ async function answerCall<T>(run: () => Promise<T>): Promise<T> {
     const code = raised.code ?? cause?.code;
     const message = cause?.message ?? raised.message;
     if (code === "P0001" && typeof message === "string") throw new AnswerRefusedError(message);
-    throw error;
+    // Anything else is rethrown without the query or its parameters (a decline's reason, the
+    // login): a logged error never carries them.
+    throw new Error(
+      `answering a finding failed${typeof code === "string" ? ` (SQLSTATE ${code})` : ""}`,
+    );
   }
 }
 

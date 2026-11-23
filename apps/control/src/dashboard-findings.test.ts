@@ -89,7 +89,12 @@ const github: DashboardGitHub = {
   async repoAccess(token, repo) {
     lookups.push(`access:${token}:${repo}`);
     if (token === SSO) throw new DashboardGitHubError("reading a repository", 403, true);
-    if (token === FORBIDDEN) throw new DashboardGitHubError("reading a repository", 403);
+    if (token === FORBIDDEN) {
+      throw new DashboardGitHubError("reading a repository", 403, false, false, {
+        githubMessage:
+          "Although you appear to have the correct authorization credentials, the `acme` organization has an IP allow list enabled",
+      });
+    }
     if (token === DOWN) throw new DashboardGitHubError("reading a repository", 0);
     if (token === MOVED) throw new DashboardGitHubError("reading a repository", 301);
     if (token === LIMITED_RATE) {
@@ -385,6 +390,19 @@ describe("answering a finding with a token", () => {
     await expect(deps.store.claimFix(id, "")).rejects.toThrow(/login/);
   });
 
+  it("refuses a NUL in a reason with 400, and never puts a reason in a database error", async () => {
+    const id = await finding({ fingerprint: "nul" });
+    const answered = await ack(id, WRITER, { outcome: "declined", reason: "a\u0000b" });
+    expect(answered.status).toBe(400);
+    // Any other database failure is rethrown without the query's parameters.
+    const failure = await deps.store
+      .declineFinding("not-a-uuid", "secret-login", "a secret reason")
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(String((failure as Error).message)).not.toMatch(/secret/);
+    expect(JSON.stringify(failure)).not.toMatch(/secret/);
+  });
+
   it("says a renamed or transferred repository has moved", async () => {
     const response = await handleDashboardRequest(
       deps,
@@ -574,7 +592,7 @@ describe("review round 1 (NIC-1140)", () => {
     const id = await finding();
     for (const [token, status, text] of [
       [SSO, 403, "single sign-on"],
-      [FORBIDDEN, 403, "refused this token"],
+      [FORBIDDEN, 403, "IP allow list"],
       [DOWN, 503, "couldn't be asked"],
       [LIMITED_RATE, 503, "rate limit"],
     ] as const) {

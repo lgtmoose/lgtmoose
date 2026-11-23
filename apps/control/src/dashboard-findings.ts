@@ -1,5 +1,5 @@
 import { DASHBOARD_TOKEN_HEADER } from "@lgtmoose/config";
-import { answerRequestSchema } from "@lgtmoose/core";
+import { answerRequestSchema, plainLine } from "@lgtmoose/core";
 import { DashboardGitHubError, type RepoAccess } from "./dashboard-github.js";
 import {
   json,
@@ -23,7 +23,8 @@ import { resolutionHeld } from "./thread-policy.js";
  * - **Who may see:** as at sign-in, only an active member of the allowed org that owns the
  *   repository (or that account itself), so a public repository's `pull` for everyone lists
  *   nothing. Reading membership needs `read:org` on a classic token, or the organization's
- *   Members permission (read) on a fine-grained one; without it the token is told so.
+ *   Members permission (read) on a fine-grained one. A classic token without it is told so;
+ *   for any other refusal, GitHub's own message is passed on.
  * - **Who may answer:** write access (push, maintain or admin) **and** a token GitHub shows can
  *   write: a classic or OAuth token with the `repo` scope (`public_repo` on a public repository),
  *   such as `gh auth token`. GitHub doesn't report a fine-grained token's permissions, so one
@@ -148,7 +149,9 @@ function githubFailure(error: unknown): DashboardResponse | undefined {
     });
   }
   if (error.status === 403) {
-    return json(403, { error: "GitHub refused this token access to the repository" });
+    // GitHub's own reason (an IP allow list, an OAuth app restriction), as plain text.
+    const why = error.githubMessage === undefined ? "" : `: ${plainLine(error.githubMessage)}`;
+    return json(403, { error: `GitHub refused this token${why}` });
   }
   // 0 (unreachable), 429 or 5xx: for now.
   return json(503, { error: "GitHub couldn't be asked about your access just now" });
