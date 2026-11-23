@@ -571,6 +571,185 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["blocking", 503]]);
   });
 
+  describe("findings raised in shadow mode (NIC-1141)", () => {
+    const number = 47;
+    const run = async (arn: string, shadow: boolean) => {
+      const started = await store.startRun({
+        installationId: 5,
+        repo: "acme/shop",
+        number,
+        author: "dev",
+        headSha: sha("1"),
+        baseSha: sha("b"),
+        executionArn: arn,
+      });
+      await store.recordShadow?.(started.runId, shadow);
+      return started;
+    };
+    const save = (runId: string, pr: string, title: string, githubCommentId?: number) =>
+      findingStore.saveFindings(pr, runId, sha("1"), [
+        {
+          finding: finding(title),
+          fingerprint: `fp:${title}`,
+          ...(githubCommentId === undefined ? {} : { githubCommentId }),
+        },
+      ]);
+    const row = async (title: string) =>
+      (
+        await db
+          .select()
+          .from(findings)
+          .where(eq(findings.fingerprint, `fp:${title}`))
+      )[0];
+    const answer = (findingId: string, at: Date) =>
+      db.insert(findingEvents).values({
+        findingId,
+        type: "replied",
+        actor: "human",
+        actorLogin: "dev",
+        sha: sha("2"),
+        createdAt: at,
+      });
+
+    it("records a run's mode, the latest attempt's", async () => {
+      // Shadow until its post says otherwise: older code finishing a run never records it.
+      const unrecorded = await store.startRun({
+        installationId: 5,
+        repo: "acme/shop",
+        number: 48,
+        author: "dev",
+        headSha: sha("1"),
+        baseSha: sha("b"),
+        executionArn: "arn:exec:shadow:default",
+      });
+      expect((await runRow(unrecorded.runId))?.shadow).toBe(true);
+      const started = await run("arn:exec:shadow:mode", true);
+      // A later attempt, before the review is out, records its own (a deploy changed it).
+      await store.recordShadow?.(started.runId, false);
+      expect((await runRow(started.runId))?.shadow).toBe(false);
+    });
+
+    it("retires unposted, unanswered ones, and leaves the rest", async () => {
+      const shadowRun = await run("arn:exec:shadow:1", true);
+      const pr = shadowRun.pullRequestId;
+      await save(shadowRun.runId, pr, "Shadow");
+      await save(shadowRun.runId, pr, "Shadow outdated");
+      await save(shadowRun.runId, pr, "Shadow answered");
+      // Answered, then raised again in shadow mode: the answer was about the earlier finding.
+      await save(shadowRun.runId, pr, "Answered before");
+      // Live: outside the diff (no comment), or with one deleted on GitHub since (ID kept).
+      const liveRun = await run("arn:exec:shadow:live", false);
+      await save(liveRun.runId, pr, "Live outside diff");
+      await save(liveRun.runId, pr, "Live", 901);
+
+      const id = async (title: string) => (await row(title))?.id ?? "";
+      await findingStore.markOutdated([await id("Shadow outdated")], sha("2"));
+      await answer(await id("Shadow answered"), new Date(Date.now() + 60_000));
+      await answer(await id("Answered before"), new Date(Date.now() - 60_000));
+
+      const unposted = async () =>
+        (await findingStore.trackedFindings(pr))
+          .filter((record) => record.unpostedShadow === true)
+          .map((record) => record.title)
+          .toSorted();
+      expect(await unposted()).toEqual(["Answered before", "Shadow", "Shadow outdated"]);
+
+      expect(await findingStore.retireShadowFindings?.(pr, sha("3"))).toBe(3);
+      // A retry retires none.
+      expect(await findingStore.retireShadowFindings?.(pr, sha("3"))).toBe(0);
+      // The note's count comes from what's stored: the same however often it's asked.
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(3);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(3);
+
+      for (const title of ["Shadow", "Shadow outdated", "Answered before"]) {
+        expect((await row(title))?.status).toBe("shadow");
+      }
+      for (const title of ["Shadow answered", "Live outside diff", "Live"]) {
+        expect((await row(title))?.status).toBe("open");
+      }
+      const events = await db
+        .select({ type: findingEvents.type })
+        .from(findingEvents)
+        .where(eq(findingEvents.findingId, await id("Shadow")));
+      expect(events.map((event) => event.type).toSorted()).toEqual(["raised", "shadow_retired"]);
+      // The answered one is still tracked, and a recheck may close it.
+      expect(await unposted()).toEqual([]);
+      expect((await findingStore.trackedFindings(pr)).map((record) => record.title)).toContain(
+        "Shadow answered",
+      );
+      // Retired isn't closed by a person: a review raising one again isn't dropped.
+      expect(await findingStore.closedFindings(pr)).toEqual([]);
+
+      // Raised again by a live run: open, with its comment, and no longer counted in the note.
+      await save(liveRun.runId, pr, "Shadow", 902);
+      expect(await row("Shadow")).toMatchObject({ status: "open", githubCommentId: 902 });
+      expect(await unposted()).toEqual([]);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(2);
+      // A retired one was never shown: raised again less severely, it takes the new severity.
+      await findingStore.saveFindings(pr, liveRun.runId, sha("3"), [
+        {
+          finding: { ...finding("Shadow outdated"), severity: "nit" },
+          fingerprint: "fp:Shadow outdated",
+          githubCommentId: 903,
+        },
+      ]);
+      expect(await row("Shadow outdated")).toMatchObject({ status: "open", severity: "nit" });
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
+
+      // A full review that didn't review everything (a failed or capped batch, files left
+      // unreviewed) doesn't count as one.
+      const partial = await run("arn:exec:shadow:partial", false);
+      await db
+        .update(reviewRuns)
+        .set({
+          kind: "full",
+          status: "succeeded",
+          complete: false,
+          finishedAt: new Date(Date.now() + 120_000),
+        })
+        .where(eq(reviewRuns.id, partial.runId));
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
+      // A complete full review that finished since: none left to mention.
+      const full = await run("arn:exec:shadow:full", false);
+      await db
+        .update(reviewRuns)
+        .set({
+          kind: "full",
+          status: "succeeded",
+          complete: true,
+          finishedAt: new Date(Date.now() + 120_000),
+        })
+        .where(eq(reviewRuns.id, full.runId));
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(0);
+    });
+
+    it("records whether the PR's review came from a live run", async () => {
+      const shadowRun = await run("arn:exec:shadow:review", true);
+      const succeed = (runId: string) =>
+        store.succeedRun(runId, {
+          filesDone: 0,
+          costUsd: undefined,
+          headSha: sha("1"),
+          statusLabel: "LGTMoose: approved",
+          summaryCommentId: undefined,
+          review: { event: "APPROVE", id: undefined },
+        });
+      await succeed(shadowRun.runId);
+      expect((await loaded(shadowRun.runId)).reviewLive).toBeUndefined();
+      const liveRun = await run("arn:exec:live:review", false);
+      await succeed(liveRun.runId);
+      expect((await loaded(liveRun.runId)).reviewLive).toBe(true);
+      // A label-only write (a covered run's) leaves it as the review it goes with.
+      const covered = await run("arn:exec:shadow:covered-label", true);
+      await store.coverRun(covered.runId, {
+        filesDone: 0,
+        costUsd: undefined,
+        pr: { headSha: sha("1"), statusLabel: "LGTMoose: approved", summaryCommentId: undefined },
+      });
+      expect((await loaded(covered.runId)).reviewLive).toBe(true);
+    });
+  });
+
   it("keeps a finding's base-side name, unless a new one is given", async () => {
     const run = await start("arn:exec:findings:5", 44);
     const save = (basePath?: string) =>

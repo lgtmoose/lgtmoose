@@ -93,6 +93,11 @@ export interface RecordedPull {
   lastReviewedSha: string | undefined;
   statusLabel: string | undefined;
   commentsThrough: Date | undefined;
+  /**
+   * The recorded review and label came from a live run, so they're GitHub's (NIC-1141). Left out
+   * for a shadow run's, or when it isn't known.
+   */
+  reviewLive?: boolean;
 }
 
 /** A run that wrote a PR's state (it posted, or it was covered and wrote the PR's outputs). */
@@ -102,6 +107,11 @@ export interface PostedRun {
   statusLabel: string | undefined;
   reviewEvent: string | undefined;
   reviewId: number | undefined;
+  /**
+   * Whether that run was in shadow mode, so its review and label were never on GitHub
+   * (NIC-1141). Undefined (a store that doesn't keep it) counts as shadow.
+   */
+  shadow?: boolean;
 }
 
 export interface ReconcileStore {
@@ -357,7 +367,10 @@ async function reconcilePull(
     return;
   }
   if (record.lastReviewedSha === pull.headSha) {
-    if (record.statusLabel !== undefined) await resyncLabel(context, pull, record.statusLabel);
+    // A shadow run's label was never on GitHub (NIC-1141): once live, it isn't put there.
+    if (record.statusLabel !== undefined && record.reviewLive === true) {
+      await resyncLabel(context, pull, record.statusLabel);
+    }
   } else {
     const posted = await deps.store.postedRunAt(record.id, pull.headSha);
     if (posted !== undefined) {
@@ -368,8 +381,9 @@ async function reconcilePull(
           runId: posted.runId,
         });
         // Only the run's own label: the record's is the later head's. A run recorded before runs
-        // kept their label leaves the PR's label to the next review.
-        if (posted.statusLabel !== undefined) {
+        // kept their label leaves the PR's label to the next review, and a shadow run's was never
+        // on GitHub (NIC-1141).
+        if (posted.statusLabel !== undefined && posted.shadow === false) {
           await resyncLabel(context, pull, posted.statusLabel);
         }
       }

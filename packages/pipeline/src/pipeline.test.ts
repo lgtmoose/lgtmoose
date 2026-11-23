@@ -1063,6 +1063,36 @@ describe("prepareReview and finishReview with earlier runs", () => {
     expect(report.summary).toContain("with write access");
   });
 
+  it("notes findings retired from shadow mode this run didn't raise again (NIC-1141)", async () => {
+    const { repo, prepare } = await setUp();
+    const prepared = await prepare({});
+    const outcome = (findings: Finding[]) => [{ index: 0, findings, transcriptKeys: [] }];
+    const first = await finishReview(repo, prepared, outcome([finding()]), headSha);
+    const raised = first.posted[0]?.fingerprint ?? "";
+    const retired = [raised, "fp:not-raised-again"];
+    const note = (kind: "full" | "incremental", options: Parameters<typeof finishReview>[4] = {}) =>
+      finishReview(repo, { ...prepared, kind }, outcome([finding()]), headSha, {
+        ...options,
+        shadowRetired: retired,
+      });
+    // Raised again by this run, it's posted now: only the other one counts.
+    expect((await note("incremental")).summary).toContain(
+      "1 finding from shadow mode was never posted and no longer counts",
+    );
+    // The full review the note asks for says nothing, unless a spend cap cut it short.
+    expect((await note("full")).summary).not.toContain("from shadow mode");
+    expect(
+      (await note("full", { spendCap: { batches: [1], reason: "a spend cap was reached" } }))
+        .summary,
+    ).toContain("from shadow mode");
+    // Nor one whose batch failed: it didn't review everything.
+    const failed = await finishReview(repo, { ...prepared, kind: "full" }, [], headSha, {
+      shadowRetired: retired,
+    });
+    expect(failed.complete).toBe(false);
+    expect(failed.summary).toContain("2 findings from shadow mode were never posted");
+  });
+
   it("counts another reviewer's finding in the decision without posting it, and notes a miss", async () => {
     const { repo, prepare } = await setUp();
     const prepared = await prepare({});
