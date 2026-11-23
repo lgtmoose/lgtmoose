@@ -199,25 +199,31 @@ export function outcomeLearner(input: {
         : { maxPendingPerAuthor: input.maxPendingPerAuthor }),
     };
   };
+  const rejectedResults = async (
+    installationId: number,
+    repo: string,
+    rejected: readonly { findingId: string; commentId?: number }[],
+  ) => {
+    return learnFromRejections(
+      {
+        store,
+        learnings: policy(installationId, repo),
+        ...(input.repeatThreshold === undefined ? {} : { repeatThreshold: input.repeatThreshold }),
+        log,
+      },
+      rejected.map((entry) => entry.findingId),
+      new Map(
+        rejected.flatMap((entry) =>
+          entry.commentId === undefined ? [] : [[entry.findingId, entry.commentId] as const],
+        ),
+      ),
+    );
+  };
   return {
     async rejected(installationId, repo, rejected) {
-      await learnFromRejections(
-        {
-          store,
-          learnings: policy(installationId, repo),
-          ...(input.repeatThreshold === undefined
-            ? {}
-            : { repeatThreshold: input.repeatThreshold }),
-          log,
-        },
-        rejected.map((entry) => entry.findingId),
-        new Map(
-          rejected.flatMap((entry) =>
-            entry.commentId === undefined ? [] : [[entry.findingId, entry.commentId] as const],
-          ),
-        ),
-      );
+      await rejectedResults(installationId, repo, rejected);
     },
+    rejectedResults,
     async fixed(fixes) {
       await learnFromFixes({ store, learnings: { store: input.learnings }, log }, fixes);
     },

@@ -39,6 +39,7 @@ const github: DashboardGitHub = {
   // Write on acme/api only; acme/web is read only.
   visibleRepos: async () => ({ repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] }),
   repoAccess: async () => "none",
+  membership: async () => "none",
 };
 
 const deps: DashboardDeps = {

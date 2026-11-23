@@ -317,6 +317,7 @@ async function main(): Promise<void> {
       await learnFromAnswers({
         store: drizzleAnswerLearningStore(db),
         rejected: (installationId, repo, rejected) =>
+          outcomes.rejectedResults?.(installationId, repo, rejected) ??
           outcomes.rejected(installationId, repo, rejected),
         log,
       }).catch((error: unknown) => {

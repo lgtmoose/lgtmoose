@@ -121,6 +121,42 @@ describe("githubDashboard", () => {
   });
 });
 
+describe("membership (NIC-1140)", () => {
+  const PATH = "/user/memberships/orgs/acme";
+  const ask = (route: { status?: number; body: unknown; headers?: Record<string, string> }) =>
+    githubDashboard({ fetch: fakeFetch({ [PATH]: route }).fetch }).membership("t", "acme");
+
+  it("reads an active membership", async () => {
+    expect(await ask({ body: { state: "active", role: "member" } })).toBe("member");
+    expect(await ask({ body: { state: "pending", role: "member" } })).toBe("none");
+  });
+
+  it("says when the token can't be shown membership", async () => {
+    // A classic token with only repo: GitHub hides the membership.
+    expect(await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo" } })).toBe(
+      "unreadable",
+    );
+    // A fine-grained token without Members read.
+    expect(await ask({ status: 403, body: {} })).toBe("unreadable");
+  });
+
+  it("is none when the token could see a membership and there isn't one", async () => {
+    expect(
+      await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo, read:org" } }),
+    ).toBe("none");
+    expect(await ask({ status: 404, body: {} })).toBe("none");
+  });
+
+  it("passes on SAML single sign-on and rate limits", async () => {
+    await expect(
+      ask({ status: 403, body: {}, headers: { "x-github-sso": "required" } }),
+    ).rejects.toMatchObject({ sso: true });
+    await expect(
+      ask({ status: 403, body: {}, headers: { "x-ratelimit-remaining": "0" } }),
+    ).rejects.toMatchObject({ rateLimited: true });
+  });
+});
+
 describe("repoAccess", () => {
   const reply = (
     permissions: Record<string, boolean>,

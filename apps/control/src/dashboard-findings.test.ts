@@ -47,6 +47,8 @@ const DOWN = "ghp_down_token_iiiiiiiiiiiiiiii";
 const LIMITED_RATE = "ghp_rate_token_jjjjjjjjjjjjjjj";
 /** Someone outside the org: GitHub shows them `pull` on a public repository. */
 const OUTSIDER = "ghp_outsider_token_kkkkkkkkkkk";
+/** A classic token without read:org: its membership can't be read. */
+const NO_READ_ORG = "ghp_no_read_org_mmmmmmmmmmmm";
 
 const people: Record<string, { login: string; access: RepoAccess }> = {
   [WRITER]: { login: "Carol", access: "write" },
@@ -59,6 +61,7 @@ const people: Record<string, { login: string; access: RepoAccess }> = {
   [DOWN]: { login: "Ivy", access: "write" },
   [LIMITED_RATE]: { login: "Jo", access: "write" },
   [OUTSIDER]: { login: "Kim", access: "read" },
+  [NO_READ_ORG]: { login: "Lee", access: "write" },
   // The dashboard session's own sign-in token.
   gho_user: { login: "Alice", access: "write" },
 };
@@ -73,8 +76,10 @@ const github: DashboardGitHub = {
     if (person === undefined) throw new DashboardGitHubError("reading the signed-in user", 401);
     return person.login;
   },
-  async orgRole(token, org) {
+  orgRole: async (_token, org) => (org === "acme" ? "member" : "none"),
+  async membership(token, org) {
     lookups.push(`member:${token}:${org}`);
+    if (token === NO_READ_ORG) return "unreadable";
     return org === "acme" && token !== OUTSIDER ? "member" : "none";
   },
   visibleRepos: async () => ({ repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] }),
@@ -101,7 +106,7 @@ const deps: DashboardDeps = {
   signingKey: async () => Buffer.from("k".repeat(64)),
   origin: async () => ORIGIN,
   allowedOrgs: ["acme"],
-  now: () => NOW,
+  now: () => now,
   log: (message, fields) => logged.push({ message, ...(fields === undefined ? {} : { fields }) }),
 };
 
@@ -146,7 +151,10 @@ async function finding(values: Partial<typeof findings.$inferInsert> = {}): Prom
   return row?.id ?? "";
 }
 
+let now = NOW;
+
 beforeEach(async () => {
+  now = NOW;
   clearTokenCache();
   lookups.length = 0;
   logged.length = 0;
@@ -339,6 +347,24 @@ describe("answering a finding with a token", () => {
     expect(rejected).toEqual([{ repo: "acme/api", ids: [id] }]);
   });
 
+  it("keeps a decline pending when learning failed on it, and gives it up after five", async () => {
+    const id = await finding({ fingerprint: "half" });
+    await ack(id, WRITER, { outcome: "declined", reason: "nope" });
+    // Learning doesn't throw: it says it failed on this finding.
+    const failingOne = {
+      store: drizzleAnswerLearningStore(db),
+      rejected: async (_i: number, _r: string, list: readonly { findingId: string }[]) =>
+        list.map((entry) => ({ findingId: entry.findingId, skipped: "failed" })),
+      log: () => undefined,
+    };
+    expect(await learnFromAnswers(failingOne)).toBe(0);
+    let [event] = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect([event?.learnPending, event?.learnAttempts]).toEqual([true, 1]);
+    for (let i = 0; i < 4; i += 1) await learnFromAnswers(failingOne);
+    [event] = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect([event?.learnPending, event?.learnAttempts]).toEqual([false, 5]);
+  });
+
   it("gives up on a decline whose learning keeps failing, without holding up the rest", async () => {
     const stuck = await finding({ fingerprint: "stuck" });
     await ack(stuck, WRITER, { outcome: "declined", reason: "uninstalled" });
@@ -423,69 +449,58 @@ describe("review round 1 (NIC-1140)", () => {
     expect(answered.body).toContain("can't write");
   });
 
-  it("remembers a refused token, and limits failed sign-ins per client", async () => {
-    const bad = "ghp_unknown_token_eeeeeeeeeeee";
-    const list = (token: string, clientIp: string) =>
-      handleDashboardRequest(
-        deps,
-        request(
-          "GET",
-          "/api/findings",
-          withToken(token, { query: { repo: "acme/api", pr: "232" }, clientIp }),
-        ),
-      );
-    expect((await list(bad, "203.0.113.1")).status).toBe(401);
-    expect((await list(bad, "203.0.113.1")).status).toBe(401);
+  const list = (token: string) =>
+    handleDashboardRequest(
+      deps,
+      request("GET", "/api/findings", withToken(token, { query: { repo: "acme/api", pr: "232" } })),
+    );
+
+  it("remembers a refused token, and caps failed lookups of new tokens only", async () => {
+    const bad = (i: number) => `ghp_unknown_token_${String(i).padStart(12, "0")}`;
+    // A token people already use, verified before the attack.
+    expect((await list(READER)).status).toBe(200);
+    expect((await list(bad(0))).status).toBe(401);
+    expect((await list(bad(0))).status).toBe(401);
     // GitHub was asked once: the refusal is remembered by the token's hash.
-    expect(lookups.filter((entry) => entry === `login:${bad}`)).toHaveLength(1);
-    // A known token is never held up by the limit, from any client.
-    expect((await list(READER, "203.0.113.1")).status).toBe(200);
-    for (let i = 0; i < 10; i += 1) await list(bad, "203.0.113.1");
-    expect((await list(bad, "203.0.113.1")).status).toBe(401);
-    // A token we don't know yet, from that client, isn't asked about until the window ends.
-    expect((await list(WRITER, "203.0.113.1")).status).toBe(429);
-    expect(lookups.some((entry) => entry === `login:${WRITER}`)).toBe(false);
-    expect((await list(READER, "203.0.113.1")).status).toBe(200);
-    expect((await list(WRITER, "203.0.113.2")).status).toBe(200);
+    expect(lookups.filter((entry) => entry === `login:${bad(0)}`)).toHaveLength(1);
+    for (let i = 1; i < 100; i += 1) await list(bad(i));
+    // The cap is reached: a token we haven't verified waits, and GitHub isn't asked about it.
+    expect((await list(WRITER)).status).toBe(429);
+    expect(lookups).not.toContain(`login:${WRITER}`);
+    // One verified already is never held up.
+    expect((await list(READER)).status).toBe(200);
+    // Once the window ends, new tokens are looked up again.
+    now = new Date(NOW.getTime() + 11 * 60_000);
+    expect((await list(WRITER)).status).toBe(200);
   });
 
-  it("rejects a malformed token cheaply, without counting it against everyone", async () => {
-    for (let i = 0; i < 150; i += 1) {
-      const response = await handleDashboardRequest(
-        deps,
-        request(
-          "GET",
-          "/api/findings",
-          withToken("not a token", {
-            query: { repo: "acme/api", pr: "232" },
-            clientIp: `198.51.100.${i % 200}`,
-          }),
-        ),
-      );
-      expect(response.status).toBe(401);
-    }
+  it("keeps a verified login for an hour, and permissions for a minute", async () => {
+    await list(READER);
+    now = new Date(NOW.getTime() + 2 * 60_000);
+    await list(READER);
+    // Membership and access read again after a minute; the login isn't.
+    expect(lookups.filter((entry) => entry === `login:${READER}`)).toHaveLength(1);
+    expect(lookups.filter((entry) => entry === `access:${READER}:acme/api`)).toHaveLength(2);
+    now = new Date(NOW.getTime() + 61 * 60_000);
+    await list(READER);
+    expect(lookups.filter((entry) => entry === `login:${READER}`)).toHaveLength(2);
+  });
+
+  it("rejects a malformed token cheaply, counting it nowhere", async () => {
+    for (let i = 0; i < 150; i += 1) expect((await list("not a token")).status).toBe(401);
     expect(lookups).toEqual([]);
-    // Everyone else still signs in.
-    const fresh = await handleDashboardRequest(
-      deps,
-      request(
-        "GET",
-        "/api/findings",
-        withToken(WRITER, { query: { repo: "acme/api", pr: "232" }, clientIp: "192.0.2.9" }),
-      ),
-    );
-    expect(fresh.status).toBe(200);
+    expect((await list(WRITER)).status).toBe(200);
+  });
+
+  it("says when a token can't read org membership", async () => {
+    const response = await list(NO_READ_ORG);
+    expect(response.status).toBe(403);
+    expect(response.body).toContain("read:org");
+    expect(response.body).toContain("Members permission");
   });
 
   it("tells an installation token to use a person's", async () => {
-    const response = await handleDashboardRequest(
-      deps,
-      request(
-        "GET",
-        "/api/findings",
-        withToken("ghs_installation_token_llllllll", { query: { repo: "acme/api", pr: "232" } }),
-      ),
-    );
+    const response = await list("ghs_installation_token_llllllll");
     expect(response.status).toBe(401);
     expect(response.body).toContain("installation token");
     expect(lookups).toEqual([]);

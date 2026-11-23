@@ -118,7 +118,6 @@ describe("the compose dashboard server", () => {
     expect(seen.at(-1)).toMatchObject({
       method: "POST",
       body: '{"outcome":"fixed"}',
-      clientIp: "198.51.100.7",
     });
   });
 

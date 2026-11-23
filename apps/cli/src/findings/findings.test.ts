@@ -156,7 +156,12 @@ describe("lgtmoose findings <repo>#<pr>", () => {
       findingsDeps: async () =>
         deps({ reply: { status: 429, body: { error: "too-many-failures" } } }).deps,
     });
-    expect(slow.stderr).toContain("Too many failed sign-ins");
+    expect(slow.stderr).toContain("Too many unknown tokens were refused lately");
+    // The compose server's own rate limit says something else.
+    const busy = await run(["findings", "acme/app#1"], {
+      findingsDeps: async () => deps({ reply: { status: 429, body: { error: "slow-down" } } }).deps,
+    });
+    expect(busy.stderr).toContain("The dashboard is busy");
   });
 });
 

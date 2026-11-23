@@ -64,6 +64,15 @@ export interface FileRecord {
 }
 
 /** One of our findings recorded on a PR. */
+/**
+ * What outcome learning did for one rejected finding: `skipped: "failed"` when it failed on it
+ * and should be tried again (NIC-1140); any other skip, or a proposal, counts as done.
+ */
+export interface RejectionResult {
+  findingId: string;
+  skipped?: string;
+}
+
 export interface FindingRecord {
   id: string;
   fingerprint: string;
@@ -376,6 +385,15 @@ export interface ControlDeps {
       repo: string,
       rejected: readonly { findingId: string; commentId?: number }[],
     ): Promise<void>;
+    /**
+     * `rejected`, with what it did for each finding (NIC-1140), so a caller can try again the
+     * ones it failed on. Optional: without it, every finding counts as done.
+     */
+    rejectedResults?(
+      installationId: number,
+      repo: string,
+      rejected: readonly { findingId: string; commentId?: number }[],
+    ): Promise<readonly RejectionResult[]>;
     fixed(fixes: readonly { findingId: string; commentId?: number }[]): Promise<void>;
   };
   /**

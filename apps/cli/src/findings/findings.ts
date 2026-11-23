@@ -33,8 +33,11 @@ This works in shadow mode too, where findings aren't on GitHub. Nothing is poste
                     protected finding. Needs write access to the repository.
 
 Your GitHub token comes from GITHUB_TOKEN, GH_TOKEN or \`gh auth token\`. GitHub says who you are
-and what you can do on the repository; the token isn't kept. Answering needs a token that can
-write: \`gh auth token\`, or a classic token with the repo scope. A fine-grained token can list only.
+and what you can do on the repository; the token isn't kept. You must be a member of the org that
+owns it, so the token must be able to read your membership: \`gh auth token\` can, or a classic
+token with read:org. Answering also needs one that can write: repo (public_repo on a public
+repository). A fine-grained token needs the org's Members permission (read) to list, and can't
+answer, because GitHub doesn't report its permissions.
 
 Options:
   --format <f>   md (default), json or text
@@ -152,7 +155,11 @@ async function call(
       throw new UsageError(`GitHub didn't accept your token (${why}).`);
     }
     if (response.status === 429) {
-      throw new UsageError(`Too many failed sign-ins from here: wait a few minutes (${why}).`);
+      throw new UsageError(
+        why === "too-many-failures"
+          ? "Too many unknown tokens were refused lately: a token the dashboard hasn't seen yet has to wait a few minutes."
+          : `The dashboard is busy: wait a moment and try again (${why}).`,
+      );
     }
     if (response.status === 503) {
       throw new UsageError(

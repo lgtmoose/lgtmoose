@@ -1,3 +1,5 @@
+import type { RejectionResult } from "./ports.js";
+
 /**
  * Outcome learning from findings declined through the CLI or the dashboard (NIC-1140). The
  * dashboard records the decline (with `learn_pending`) but holds no GitHub App access, which the
@@ -35,11 +37,15 @@ export const MAX_ANSWER_ATTEMPTS = 5;
 
 export interface AnswerLearningDeps {
   store: AnswerLearningStore;
+  /**
+   * Outcome learning for one repository's declines, with what it did for each: a finding it
+   * failed on (`skipped: "failed"`) is tried again on a later run. Throwing fails them all.
+   */
   rejected(
     installationId: number,
     repo: string,
     rejected: readonly { findingId: string }[],
-  ): Promise<void>;
+  ): Promise<readonly RejectionResult[] | void>;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -62,22 +68,36 @@ export async function learnFromAnswers(
   for (const answers of byRepo.values()) {
     const [first] = answers;
     if (first === undefined) continue;
+    let failed: PendingAnswer[];
     try {
-      await deps.rejected(
+      const results = await deps.rejected(
         first.installationId,
         first.repo,
         answers.map((answer) => ({ findingId: answer.findingId })),
       );
-      await deps.store.answersLearned(answers.map((answer) => answer.eventId));
-      read += answers.length;
+      // Learning never throws for one finding: it says which it failed on.
+      const failedIds = new Set(
+        (results ?? [])
+          .filter((result) => result.skipped === "failed")
+          .map((result) => result.findingId),
+      );
+      failed = answers.filter((answer) => failedIds.has(answer.findingId));
     } catch (error) {
       deps.log("answers not learned from", {
         repo: first.repo,
         count: answers.length,
         error: error instanceof Error ? error.message : String(error),
       });
+      failed = answers;
+    }
+    const learned = answers.filter((answer) => !failed.includes(answer));
+    if (learned.length > 0) {
+      await deps.store.answersLearned(learned.map((answer) => answer.eventId));
+      read += learned.length;
+    }
+    if (failed.length > 0) {
       const given = await deps.store.answersFailed(
-        answers.map((answer) => answer.eventId),
+        failed.map((answer) => answer.eventId),
         MAX_ANSWER_ATTEMPTS,
       );
       if (given.length > 0) {

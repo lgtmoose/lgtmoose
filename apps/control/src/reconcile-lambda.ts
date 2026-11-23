@@ -200,6 +200,7 @@ function reconcileDeps(): Promise<LambdaDeps> {
       answers: {
         store: drizzleAnswerLearningStore(db),
         rejected: (installationId: number, repo: string, rejected) =>
+          outcomes.rejectedResults?.(installationId, repo, rejected) ??
           outcomes.rejected(installationId, repo, rejected),
         log,
       } satisfies AnswerLearningDeps,

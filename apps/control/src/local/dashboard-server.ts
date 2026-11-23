@@ -148,7 +148,6 @@ export function toDashboardRequest(
   request: IncomingMessage,
   url: URL,
   body?: string,
-  clientIp?: string,
 ): DashboardRequest {
   const headers: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(request.headers)) {
@@ -165,7 +164,6 @@ export function toDashboardRequest(
     headers,
     cookies: parseCookies(headers.cookie === undefined ? [] : [headers.cookie]),
     ...(body === undefined ? {} : { body }),
-    ...(clientIp === undefined ? {} : { clientIp }),
   };
 }
 
@@ -207,7 +205,7 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
         sendResult(response, json(413, { error: "too-large" }));
         return;
       }
-      sendResult(response, await options.handle(toDashboardRequest(request, url, body, caller)));
+      sendResult(response, await options.handle(toDashboardRequest(request, url, body)));
       return;
     }
 

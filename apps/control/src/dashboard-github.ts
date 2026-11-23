@@ -46,6 +46,13 @@ export interface DashboardGitHub {
    * - `read`: the person can see the repository and no more. `none`: GitHub answers 404.
    */
   repoAccess(token: string, repo: string): Promise<RepoAccess>;
+  /**
+   * Whether the token's person is an active member of `org` (NIC-1140), as sign-in asks:
+   * `unreadable` when the token can't be shown membership. That's a classic token without
+   * `read:org` (GitHub answers 403, or 404 with `X-OAuth-Scopes` lacking an org scope), or a
+   * fine-grained token without the organization's Members permission (403).
+   */
+  membership(token: string, org: string): Promise<"member" | "none" | "unreadable">;
 }
 
 /** What a token may do on a repository (see `DashboardGitHub.repoAccess`). */
@@ -219,6 +226,38 @@ export function githubDashboard(
       const reply = membershipReply.safeParse(await response.json());
       if (!reply.success || reply.data.state !== "active") return "none";
       return reply.data.role === "admin" ? "admin" : "member";
+    },
+    async membership(token, org) {
+      let response: Response;
+      try {
+        response = await get(
+          token,
+          `/user/memberships/orgs/${encodeURIComponent(org)}`,
+          "reading an org membership",
+        );
+      } catch (error) {
+        // Refused, not rate-limited or SSO: the token may not read memberships.
+        if (
+          error instanceof DashboardGitHubError &&
+          error.status === 403 &&
+          !error.sso &&
+          !error.rateLimited
+        ) {
+          return "unreadable";
+        }
+        throw error;
+      }
+      if (response.status === 404) {
+        // Not a member, or a classic token GitHub won't show it to: its scopes say which.
+        const scopes = response.headers.get("x-oauth-scopes");
+        if (scopes === null) return "none";
+        const granted = new Set(scopes.split(",").map((scope) => scope.trim()));
+        return ["read:org", "write:org", "admin:org"].some((scope) => granted.has(scope))
+          ? "none"
+          : "unreadable";
+      }
+      const reply = membershipReply.safeParse(await response.json());
+      return reply.success && reply.data.state === "active" ? "member" : "none";
     },
     async repoAccess(token, repo) {
       const [owner = "", name = ""] = repo.split("/");

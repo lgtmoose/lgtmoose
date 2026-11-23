@@ -7,13 +7,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import { githubDashboard } from "./dashboard-github.js";
-import {
-  fromHttpApiEvent,
-  json,
-  throughCloudFront,
-  toHttpApiResult,
-  type HttpApiEvent,
-} from "./dashboard-http.js";
+import { fromHttpApiEvent, json, toHttpApiResult, type HttpApiEvent } from "./dashboard-http.js";
 import { drizzleDashboardStore } from "./dashboard-store.js";
 import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
@@ -32,7 +26,6 @@ const REQUIRED = [
   "DATABASE_NAME",
   "OAUTH_SECRET_ID",
   "SIGNING_KEY_SECRET_ARN",
-  "ORIGIN_SECRET_ARN",
   "ORIGIN_PARAMETER_NAME",
   "ALLOWED_ORGS",
   "ARTIFACT_BUCKET",
@@ -43,8 +36,6 @@ export interface DashboardEnv {
   databaseName: string;
   oauthSecretId: string;
   signingKeySecretArn: string;
-  /** The secret CloudFront sends in `DASHBOARD_ORIGIN_HEADER` (NIC-1140). */
-  originSecretArn: string;
   originParameterName: string;
   allowedOrgs: string[];
   /** Where the feedback report is (`FEEDBACK_REPORT_KEY`); the Lambda may read that key only. */
@@ -68,7 +59,6 @@ export function readDashboardEnv(
     databaseName: value("DATABASE_NAME"),
     oauthSecretId: value("OAUTH_SECRET_ID"),
     signingKeySecretArn: value("SIGNING_KEY_SECRET_ARN"),
-    originSecretArn: value("ORIGIN_SECRET_ARN"),
     originParameterName: value("ORIGIN_PARAMETER_NAME"),
     allowedOrgs,
     artifactBucket: value("ARTIFACT_BUCKET"),
@@ -89,9 +79,9 @@ function cached<T>(read: () => Promise<T>): () => Promise<T> {
   };
 }
 
-let deps: Promise<DashboardDeps & { originSecret(): Promise<string> }> | undefined;
+let deps: Promise<DashboardDeps> | undefined;
 
-function dashboardDeps(): Promise<DashboardDeps & { originSecret(): Promise<string> }> {
+function dashboardDeps(): Promise<DashboardDeps> {
   deps ??= (async () => {
     const env = readDashboardEnv(process.env);
     if ("missing" in env) {
@@ -156,15 +146,6 @@ function dashboardDeps(): Promise<DashboardDeps & { originSecret(): Promise<stri
         return value;
       }),
       allowedOrgs: env.allowedOrgs,
-      originSecret: cached(async () => {
-        const { SecretString } = await secrets.send(
-          new GetSecretValueCommand({ SecretId: env.originSecretArn }),
-        );
-        if (!SecretString || SecretString.length < 32) {
-          throw new Error("The dashboard origin secret is missing or too short.");
-        }
-        return SecretString;
-      }),
       now: () => new Date(),
       log,
     };
@@ -177,12 +158,9 @@ function dashboardDeps(): Promise<DashboardDeps & { originSecret(): Promise<stri
 
 export async function handler(event: HttpApiEvent) {
   try {
-    const ready = await dashboardDeps();
-    // Only through CloudFront (NIC-1140): the API's own URL answers nothing, and the secret
-    // header is taken off before anything else reads the request.
-    const request = throughCloudFront(fromHttpApiEvent(event), await ready.originSecret());
-    if (request === undefined) return toHttpApiResult(json(403, { error: "forbidden" }));
-    return toHttpApiResult(await handleDashboardRequest(ready, request));
+    return toHttpApiResult(
+      await handleDashboardRequest(await dashboardDeps(), fromHttpApiEvent(event)),
+    );
   } catch (error) {
     log("dashboard request failed", {
       error: error instanceof Error ? error.message : String(error),
