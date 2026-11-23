@@ -50,6 +50,8 @@ export const agentFindingSchema = z.object({
   fixClaimedBy: z.string().optional(),
   /** Who raised it: LGTMoose (`self`), or another reviewer, whose findings are on GitHub. */
   source: z.enum(["self", "bot", "human"]).optional(),
+  /** Whether it can be marked fixed: on a line of the new code, which a recheck can check. */
+  recheckable: z.boolean().optional(),
 });
 
 // The schema and the plain `AgentFinding` (which the browser bundle uses) must describe the same

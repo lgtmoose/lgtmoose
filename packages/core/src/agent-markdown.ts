@@ -26,6 +26,11 @@ export interface AgentFinding {
   fixClaimedBy?: string | undefined;
   /** Who raised it: LGTMoose (`self`), or another reviewer, whose findings are on GitHub. */
   source?: "self" | "bot" | "human" | undefined;
+  /**
+   * Whether it can be marked fixed: on a line of the new code, which a recheck can check. False
+   * for one that isn't (it can only be declined); left out, the markdown offers both.
+   */
+  recheckable?: boolean | undefined;
 }
 
 const SEVERITY_LABEL = { blocking: "Blocking", should_fix: "Should fix", nit: "Nit" } as const;
@@ -102,6 +107,11 @@ export function agentFindingsMarkdown(input: {
     lines.push(
       `- Category: ${plainLine(finding.ruleCategory)}${isProtectedCategory(finding.ruleCategory) ? " (protected: closes only when the fix is confirmed in a changed file)" : ""}`,
     );
+    if (finding.recheckable === false) {
+      lines.push(
+        "- Answer: this one can't be marked fixed (it isn't on a line of the pull request's new code, so a review can't check it again). If it doesn't apply, decline it with a reason; otherwise fix it and leave it for a review to raise again or not",
+      );
+    }
     if (finding.fixClaimedAt !== undefined) {
       lines.push(
         `- Answered: fixed${finding.fixClaimedBy === undefined ? "" : ` by ${plainLine(finding.fixClaimedBy)}`}, waiting for the next review to check it`,

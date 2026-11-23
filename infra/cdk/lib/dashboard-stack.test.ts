@@ -1,3 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { AssetHashType } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import {
   FEEDBACK_REPORT_KEY,
@@ -7,8 +13,12 @@ import {
 } from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
-import { DASHBOARD_CSP, ORIGIN_PARAMETER_NAME } from "./dashboard-stack.js";
+import { DASHBOARD_CSP, ORIGIN_PARAMETER_NAME, SITE_ASSET } from "./dashboard-stack.js";
 import { appWithoutBundling } from "./test-utils.js";
+
+const SITE_BUILD_SCRIPT = fileURLToPath(
+  new URL("../../../apps/dashboard/scripts/build.mjs", import.meta.url),
+);
 
 function synth(dashboard?: boolean) {
   const config = parseDeployConfig({
@@ -34,6 +44,26 @@ function apiRolePolicies(): string {
 }
 
 describe("DashboardStack", () => {
+  it("hashes the site by its built output, which is the same build to build (NIC-1142)", async () => {
+    // The bundle takes in @lgtmoose/core's agent markdown: a source hash of apps/dashboard alone
+    // wouldn't change when that does, and the site wouldn't redeploy.
+    expect(SITE_ASSET.assetHashType).toBe(AssetHashType.OUTPUT);
+    const root = await mkdtemp(join(tmpdir(), "lgtmoose-site-"));
+    try {
+      const build = async (name: string) => {
+        const out = join(root, name);
+        execFileSync(process.execPath, [SITE_BUILD_SCRIPT, out], { stdio: "ignore" });
+        return readFile(join(out, "app.js"), "utf8");
+      };
+      const first = await build("a");
+      expect(await build("b")).toBe(first);
+      // The core formatter is in the bundle, so a change to it changes the output.
+      expect(first).toContain("findings ack");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("is part of the app by default, and left out with dashboard: false", () => {
     expect(built.dashboard).toBeDefined();
     expect(synth(false).dashboard).toBeUndefined();

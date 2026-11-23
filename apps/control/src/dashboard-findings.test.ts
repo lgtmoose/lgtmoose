@@ -657,6 +657,25 @@ describe("review round 1 (NIC-1140)", () => {
     );
     expect(JSON.parse(response.body)).toMatchObject({ findings: [{ status: "outdated" }] });
   });
+
+  it("says which findings can be marked fixed, so the CLI's markdown can say so (NIC-1142)", async () => {
+    const right = await finding({ fingerprint: "right" });
+    const left = await finding({ side: "LEFT", fingerprint: "left-listed" });
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(READER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    const { findings: listed } = JSON.parse(response.body) as {
+      findings: { id: string; recheckable: boolean }[];
+    };
+    const flag = (id: string) => listed.find((entry) => entry.id === id)?.recheckable;
+    expect(flag(right)).toBe(true);
+    expect(flag(left)).toBe(false);
+  });
 });
 
 describe("answering a finding with the dashboard's session", () => {
