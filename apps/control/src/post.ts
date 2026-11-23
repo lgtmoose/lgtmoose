@@ -1317,6 +1317,18 @@ async function standing(
   return { open, outdated, reopened };
 }
 
+/**
+ * The summary's note on findings retired from shadow mode (NIC-1141): they never had a comment,
+ * so a full review is how any still there get raised again, this time posted.
+ */
+export function shadowRetiredNotice(retired: number, handle: string | undefined): string {
+  const which =
+    retired === 1
+      ? "1 finding from shadow mode was retired: it was never posted, so it doesn't count"
+      : `${retired} findings from shadow mode were retired: they were never posted, so they don't count`;
+  return `${which}. Comment "@${handle ?? "lgtmoose"} full review" to raise any that are still there.`;
+}
+
 function withoutId({ id: _id, ...entry }: EarlierFinding & { id: string }): EarlierFinding {
   return entry;
 }
@@ -1465,6 +1477,14 @@ export async function post(
     pullRequestId: run.pullRequestId,
     ...(await slugOf(github)),
   });
+  // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
+  // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
+  // review that raises one again posts it as new. Idempotent: a retry finds none left.
+  const shadowRetired =
+    deps.shadow === true || deps.findings.retireShadowFindings === undefined
+      ? 0
+      : await deps.findings.retireShadowFindings(run.pullRequestId, pr.headSha);
+  if (shadowRetired > 0) deps.log("shadow findings retired", { runId, count: shadowRetired });
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -1609,7 +1629,14 @@ export async function post(
           : {
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
-        ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
+        ...(manifest.notices === undefined && shadowRetired === 0
+          ? {}
+          : {
+              notices: [
+                ...(manifest.notices ?? []),
+                ...(shadowRetired > 0 ? [shadowRetiredNotice(shadowRetired, handle)] : []),
+              ],
+            }),
         ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,
@@ -1882,6 +1909,8 @@ export async function post(
           ...(learningIds.length === 0 ? {} : { learningIds }),
         };
       }),
+      // In shadow mode none of them was posted: a live run retires those left unanswered.
+      { shadow: deps.shadow === true },
     );
     // A failed batch's files have no record at this head, so the next run reviews them however
     // far the incremental range has moved on.

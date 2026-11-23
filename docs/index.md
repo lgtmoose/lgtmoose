@@ -49,7 +49,12 @@ pnpm lgtmoose deploy
 2. **`auth`** stores or checks a model provider's credential: `bedrock`, `claude`, `codex`, `cursor`, `api-key` or `vertex`. See [Providers and auth](credentials.md).
 3. **`deploy`** bootstraps the AWS CDK the first time, deploys every stack, points the App's webhook at the gateway and prints the App's install link.
 
-Install the App on the repositories you want reviewed. Reviews start in shadow mode; when you've checked a few in the artifact bucket's `shadow/` folder, set `shadow: false` in `lgtmoose.config.ts` and deploy again.
+Install the App on the repositories you want reviewed. Reviews start in shadow mode; when you've checked a few in the artifact bucket's `shadow/` folder, go live:
+
+1. Set `shadow: false` in `lgtmoose.config.ts` and deploy again.
+2. On each PR that's still open from shadow mode, comment `@lgtmoose full review` once.
+
+Findings raised in shadow mode were never posted, so they have no comment anyone could see, reply to or resolve. The first live run on a PR retires those nobody answered: they stop counting towards its decision, and its summary says how many. A full review then raises any that are still there, this time posted. Retired findings stay in the database with the status `shadow`, for the shadow period's figures; they count as neither fixed nor declined.
 
 Each command takes `--help`. To try a review on one PR without deploying, run `pnpm lgtmoose review owner/repo#123 --dry-run` with a Claude Code credential in the environment.
 

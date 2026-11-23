@@ -45,6 +45,9 @@ export const findingStatus = pgEnum("finding_status", [
   "disputed",
   "resolved_by_human",
   "outdated",
+  // Raised in shadow mode and never answered: retired by the first live run (NIC-1141), since it
+  // has no thread anyone could see, reply to or resolve. Neither fixed nor declined.
+  "shadow",
 ]);
 export const findingEventType = pgEnum("finding_event_type", [
   "raised",
@@ -58,6 +61,8 @@ export const findingEventType = pgEnum("finding_event_type", [
   "escalated",
   // A person unresolved the finding's review thread after resolving it: open again.
   "unresolved",
+  // Raised in shadow mode, unanswered, and retired by the first live run (NIC-1141).
+  "shadow_retired",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [
@@ -218,6 +223,12 @@ export const findings = pgTable(
     status: findingStatus("status").notNull().default("open"),
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
     githubThreadId: text("github_thread_id"),
+    /**
+     * Raised by a run in shadow mode, so it was never posted (NIC-1141). A live run retires such a
+     * finding while it has no comment: nobody could see it, so it can't count towards a decision.
+     * Not the same as having no comment: a live finding outside the diff has none either.
+     */
+    raisedInShadow: boolean("raised_in_shadow").notNull().default(false),
     /**
      * When the reactions on this finding's inline comment were last read into `feedback`
      * (NIC-841). The reconciler reads the least recently checked first, a few per run.

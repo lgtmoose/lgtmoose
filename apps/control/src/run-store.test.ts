@@ -571,6 +571,83 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["blocking", 503]]);
   });
 
+  it("retires unanswered shadow findings without a comment, once, and posts one raised again", async () => {
+    const run = await start("arn:exec:findings:shadow", 47);
+    const save = (title: string, fingerprint: string, shadow: boolean, githubCommentId?: number) =>
+      findingStore.saveFindings(
+        run.pullRequestId,
+        run.runId,
+        sha("1"),
+        [
+          {
+            finding: finding(title),
+            fingerprint,
+            ...(githubCommentId === undefined ? {} : { githubCommentId }),
+          },
+        ],
+        { shadow },
+      );
+    await save("Shadow", "fp:shadow", true);
+    await save("Shadow outdated", "fp:shadow-outdated", true);
+    await save("Shadow answered", "fp:shadow-answered", true);
+    // Live, outside the diff (no comment), or with a comment deleted on GitHub since: not shadow.
+    await save("Live without comment", "fp:live", false);
+    await save("Live", "fp:live-comment", false, 901);
+    const tracked = await findingStore.trackedFindings(run.pullRequestId);
+    const id = (fingerprint: string) =>
+      tracked.find((record) => record.fingerprint === fingerprint)?.id ?? "";
+    expect(
+      tracked.filter((record) => record.raisedInShadow === true).map((r) => r.fingerprint),
+    ).toEqual(["fp:shadow", "fp:shadow-outdated", "fp:shadow-answered"]);
+    await findingStore.markOutdated([id("fp:shadow-outdated")], sha("2"));
+    // A person's event on it: their answer stands.
+    await db.insert(findingEvents).values({
+      findingId: id("fp:shadow-answered"),
+      type: "replied",
+      actor: "human",
+      actorLogin: "dev",
+      sha: sha("2"),
+    });
+
+    expect(await findingStore.retireShadowFindings?.(run.pullRequestId, sha("3"))).toBe(2);
+    // A retry retires nothing more and reports the same.
+    expect(await findingStore.retireShadowFindings?.(run.pullRequestId, sha("3"))).toBe(2);
+    const status = async (fingerprint: string) =>
+      (await db.select().from(findings).where(eq(findings.fingerprint, fingerprint)))[0]?.status;
+    expect(await status("fp:shadow")).toBe("shadow");
+    expect(await status("fp:shadow-outdated")).toBe("shadow");
+    expect(await status("fp:shadow-answered")).toBe("open");
+    expect(await status("fp:live")).toBe("open");
+    expect(await status("fp:live-comment")).toBe("open");
+    const events = await db
+      .select({ type: findingEvents.type })
+      .from(findingEvents)
+      .where(eq(findingEvents.findingId, id("fp:shadow")));
+    expect(events.map((event) => event.type).toSorted()).toEqual(["raised", "shadow_retired"]);
+    expect(
+      (await findingStore.trackedFindings(run.pullRequestId)).map((r) => r.fingerprint),
+    ).toEqual(["fp:shadow-answered", "fp:live", "fp:live-comment"]);
+    // Retired findings aren't closed by a person: a review raising one again isn't dropped.
+    expect(
+      (await findingStore.closedFindings(run.pullRequestId)).map((r) => r.fingerprint),
+    ).toEqual([]);
+
+    // Raised again by a live run: open, posted, and no longer a shadow finding.
+    await save("Shadow", "fp:shadow", false, 902);
+    const [again] = (await findingStore.trackedFindings(run.pullRequestId)).filter(
+      (record) => record.fingerprint === "fp:shadow",
+    );
+    expect(again).toMatchObject({ status: "open", githubCommentId: 902 });
+    expect(again?.raisedInShadow).toBeUndefined();
+    // Still open in shadow mode and then posted live: it has its comment now.
+    await save("Shadow answered", "fp:shadow-answered", false, 903);
+    const [posted] = (await findingStore.trackedFindings(run.pullRequestId)).filter(
+      (record) => record.fingerprint === "fp:shadow-answered",
+    );
+    expect(posted).toMatchObject({ githubCommentId: 903 });
+    expect(posted?.raisedInShadow).toBeUndefined();
+  });
+
   it("keeps a finding's base-side name, unless a new one is given", async () => {
     const run = await start("arn:exec:findings:5", 44);
     const save = (basePath?: string) =>

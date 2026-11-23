@@ -86,6 +86,11 @@ export interface FindingRecord {
    * line is in. Undefined for rows recorded before it was kept.
    */
   basePath: string | undefined;
+  /**
+   * Raised in shadow mode, so never posted (NIC-1141). With no comment, a live run retires it
+   * (`retireShadowFindings`); left out, it counts as raised live.
+   */
+  raisedInShadow?: boolean;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -118,7 +123,17 @@ export interface FindingStore {
     runId: string,
     headSha: string,
     findings: readonly FindingToSave[],
+    /** `shadow`: the run is in shadow mode, so these findings weren't posted (NIC-1141). */
+    options?: { shadow?: boolean },
   ): Promise<void>;
+  /**
+   * Retires the PR's open and outdated findings raised in shadow mode that have no comment and
+   * no person's answer (NIC-1141): status `shadow`, with a `shadow_retired` event at `sha`.
+   * Nobody could see them, so on a live run they don't count. Returns how many of the PR's
+   * findings are retired at `sha`, by this call or an earlier one, so a retried post reports the
+   * same number. Without it, nothing is retired.
+   */
+  retireShadowFindings?(pullRequestId: string, sha: string): Promise<number>;
   /**
    * Follows what people did to our comments' review threads: an open or outdated finding whose
    * thread is resolved becomes `resolved_by_human`, and one resolved that way whose thread was

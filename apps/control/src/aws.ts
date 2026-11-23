@@ -29,7 +29,21 @@ import {
   appJwt,
   repoPath,
 } from "@lgtmoose/poster";
-import { and, asc, count, desc, eq, gt, inArray, isNull, max, ne, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  max,
+  ne,
+  notExists,
+  sql,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
@@ -566,11 +580,13 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
+                ...(row.raisedInShadow ? { raisedInShadow: true } : {}),
               },
             ],
       );
     },
-    async saveFindings(pullRequestId, runId, headSha, posted) {
+    async saveFindings(pullRequestId, runId, headSha, posted, options) {
+      const raisedInShadow = options?.shadow === true;
       if (posted.length === 0) return;
       await db.transaction(async (tx) => {
         for (let i = 0; i < posted.length; i += INSERT_CHUNK) {
@@ -596,6 +612,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   basePath: basePath ?? null,
                   learningIds:
                     learningIds === undefined || learningIds.length === 0 ? null : [...learningIds],
+                  raisedInShadow,
                 })),
             )
             .onConflictDoUpdate({
@@ -609,6 +626,10 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 // inline, since the old comment is on code that's gone. Still open: kept unless
                 // there's a new one.
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
+                // Like the comment ID: raised again from closed or outdated, the run raising it
+                // now says whether it was posted (NIC-1141). Still open, it stays a shadow one
+                // until a live run gives it a comment.
+                raisedInShadow: sql`case when ${findings.status} = 'open' then ${findings.raisedInShadow} and excluded.github_comment_id is null and ${findings.githubCommentId} is null else excluded.raised_in_shadow end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
                 // The batch that raised it this time: its learnings are the ones that count.
@@ -622,8 +643,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: "open",
                 updatedAt: now(),
               },
-              // A finding someone declined, disputed or resolved stays that way.
-              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
+              // A finding someone declined, disputed or resolved stays that way. One retired from
+              // shadow mode (NIC-1141) is raised again, now as a posted finding.
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed", "shadow"]),
             })
             .returning({ id: findings.id });
           // Every row may have hit a declined, disputed or resolved finding, left as it was.
@@ -637,6 +659,59 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             })),
           );
         }
+      });
+    },
+    async retireShadowFindings(pullRequestId, sha) {
+      return db.transaction(async (tx) => {
+        const rows = await tx
+          .update(findings)
+          .set({ status: "shadow", updatedAt: now() })
+          .where(
+            and(
+              eq(findings.pullRequestId, pullRequestId),
+              eq(findings.source, "self"),
+              inArray(findings.status, ["open", "outdated"]),
+              eq(findings.raisedInShadow, true),
+              isNull(findings.githubCommentId),
+              // A person answered it: their answer stands.
+              notExists(
+                tx
+                  .select({ id: findingEvents.id })
+                  .from(findingEvents)
+                  .where(
+                    and(
+                      eq(findingEvents.findingId, findings.id),
+                      isNotNull(findingEvents.actorLogin),
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .returning({ id: findings.id });
+        if (rows.length > 0) {
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: "shadow_retired" as const,
+              actor: "self",
+              sha,
+            })),
+          );
+        }
+        // All retired at `sha`, by this call or an earlier one: a retried post says the same.
+        const [retired] = await tx
+          .select({ n: count() })
+          .from(findingEvents)
+          .innerJoin(findings, eq(findings.id, findingEvents.findingId))
+          .where(
+            and(
+              eq(findings.pullRequestId, pullRequestId),
+              eq(findings.status, "shadow"),
+              eq(findingEvents.type, "shadow_retired"),
+              eq(findingEvents.sha, sha),
+            ),
+          );
+        return retired?.n ?? 0;
       });
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),

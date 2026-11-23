@@ -14,7 +14,7 @@
 
 Check these in order:
 
-1. **Shadow mode.** `shadow: true`, the default, records reviews to `shadow/` in the artifact bucket and the log instead of posting them. Set `shadow: false` and deploy again to post.
+1. **Shadow mode.** `shadow: true`, the default, records reviews to `shadow/` in the artifact bucket and the log instead of posting them. Set `shadow: false` and deploy again to post. Findings from shadow mode are retired on each PR's first live run; comment `@lgtmoose full review` to raise those still there (see [Quickstart](index.md#quickstart)).
 2. **The PR is one LGTMoose ignores.** The gateway drops drafts, PRs opened by bots, PRs labelled `skip-lgtmoose`, and repositories whose owner isn't in `allowedOrgs`.
 3. **The PR is paused.** Someone ran `@lgtmoose pause`. `@lgtmoose resume` (write access) starts automatic reviews again; `@lgtmoose review` runs one anyway.
 4. **The webhook didn't arrive.** In the GitHub App's settings, under Advanced, check recent deliveries. `deploy` points the webhook at the gateway; run it again if the URL is wrong. The reconciler queues reviews that a missed webhook lost, for PRs updated within `reconcileLookbackHours` (24 by default).

@@ -39,6 +39,7 @@ Migrations only add to the schema, so a review that's running while the Data sta
 - **Alarms can notify you.** Set `alarms.email` (LGTMoose creates an SNS topic and subscribes the address; confirm the email AWS sends) or `alarms.topicArn` (an existing topic). Every alarm in every stack then notifies it.
 - **Release images.** `images: { source: "release", … }` deploys a release's published images, pinned by digest, instead of building them. The default, `build`, is unchanged. See [Releasing](releasing.md#deploying-a-release).
 - **Shadow mode.** `shadow: true` is the default. Upgrading never turns it off; set `shadow: false` yourself when you want reviews posted.
+- **Going live retires shadow findings.** Once `shadow` is `false`, the first run on a PR retires the findings raised in shadow mode that have no comment and nobody answered (status `shadow`): they were never posted, so they no longer count towards the decision. Comment `@lgtmoose full review` on PRs still open from shadow mode to raise any that are still there. The migration marks findings already stored as raised in shadow mode when their run posted no review and they have no comment; a live run that raised a finding posted a review.
 
 ## Switching profile
 
