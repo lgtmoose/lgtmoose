@@ -179,7 +179,12 @@ async function call(
 export function terminalSafeJson(json: string): string {
   return json.replace(
     /[^\P{Cc}\n]|[\p{Cf}\u2028\u2029]/gu,
-    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    // Each UTF-16 half: one above U+FFFF (a tag character) is a surrogate pair, two escapes.
+    (char) =>
+      Array.from(
+        { length: char.length },
+        (_, i) => `\\u${char.charCodeAt(i).toString(16).padStart(4, "0")}`,
+      ).join(""),
   );
 }
 

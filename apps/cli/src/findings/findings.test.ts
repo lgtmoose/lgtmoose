@@ -125,6 +125,16 @@ describe("lgtmoose findings <repo>#<pr>", () => {
     expect(JSON.parse(json.stdout)).toMatchObject([{ title }]);
   });
 
+  it("escapes both halves of a format character above U+FFFF", async () => {
+    const title = "ok\u{E0041}\u{E0042}x";
+    const { deps: d } = deps({ reply: { body: { findings: [{ ...finding, title }] } } });
+    const json = await run(["findings", "acme/app#232", "--format", "json"], {
+      findingsDeps: async () => d,
+    });
+    expect(json.stdout).toContain("ok\\udb40\\udc41\\udb40\\udc42x");
+    expect(JSON.parse(json.stdout)).toMatchObject([{ title }]);
+  });
+
   it("takes the dashboard's URL from --url or the environment, localhost for compose", async () => {
     const { deps: d, calls } = deps({ env: { LGTMOOSE_DASHBOARD_URL: "http://localhost:8080/" } });
     await run(["findings", "acme/app#232"], { findingsDeps: async () => d });
