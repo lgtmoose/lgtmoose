@@ -329,11 +329,14 @@ describe("classification cost", () => {
   };
   const classifiers = { classifyFailure, classifyCursorFailure, classifyMachineSignals };
 
-  // A linear pass over 1 MB takes milliseconds; a quadratic pattern takes seconds. The best of
-  // five runs, and a retry, keep a machine busy with other test files from failing it.
+  // A linear pass over 1 MB takes a few milliseconds alone, and has taken up to about 110 ms on a
+  // CI runner busy with other test files. A quadratic pattern takes seconds or more. 500 ms is
+  // well above the first and far below the second, so the test catches backtracking without
+  // failing on a slow runner. The best of five runs, and a retry, absorb one-off pauses.
+  const LIMIT_MS = 500;
   for (const [name, classify] of Object.entries(classifiers)) {
     it.each(Object.entries(inputs))(
-      `${name} classifies %s in under 50 ms`,
+      `${name} classifies %s in under ${LIMIT_MS} ms`,
       { retry: 2 },
       (_input, text) => {
         classify("x");
@@ -343,7 +346,7 @@ describe("classification cost", () => {
           classify(text);
           best = Math.min(best, performance.now() - started);
         }
-        expect(best).toBeLessThan(50);
+        expect(best).toBeLessThan(LIMIT_MS);
       },
     );
   }
