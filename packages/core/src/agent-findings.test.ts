@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentFindingSchema,
   agentFindingsMarkdown,
   answerRequestSchema,
   plainLine,
@@ -120,6 +121,14 @@ describe("plainLine", () => {
     });
     expect(text).toContain("line one\nline [2J two ");
     expect(text).not.toContain("\u001b");
+  });
+});
+
+describe("agentFindingSchema", () => {
+  it("takes only a UUID for a finding's ID", () => {
+    const base = { ...finding(), source: "self" as const };
+    expect(agentFindingSchema.safeParse(base).success).toBe(true);
+    expect(agentFindingSchema.safeParse({ ...base, id: "x` # injected" }).success).toBe(false);
   });
 });
 

@@ -31,7 +31,8 @@ export type AnswerRequest = z.infer<typeof answerRequestSchema>;
 
 /** One open finding, as the findings API lists it. */
 export const agentFindingSchema = z.object({
-  id: z.string(),
+  /** The finding's ID: a UUID, so it can't carry anything else into the markdown. */
+  id: z.uuid(),
   repo: z.string(),
   number: z.number().int(),
   severity: z.enum(["blocking", "should_fix", "nit"]),
@@ -117,7 +118,7 @@ export function agentFindingsMarkdown(input: {
         : `\`${plainLine(finding.path)}${finding.line === undefined ? "" : `:${finding.line}`}\``;
     lines.push(`## ${index + 1}. ${SEVERITY_LABEL[finding.severity]}: ${plainLine(finding.title)}`);
     lines.push("");
-    lines.push(`- ID: \`${finding.id}\``);
+    lines.push(`- ID: \`${plainLine(finding.id)}\``);
     lines.push(
       `- Where: ${where}${finding.status === "outdated" ? " (that line has changed since)" : ""}`,
     );

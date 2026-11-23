@@ -645,24 +645,30 @@ async function applyRecheck(
 }
 
 /** Clears the fix claims the run's recheck looked at (NIC-1140); a failure is only logged. */
-async function clearFixClaims(
+export async function clearFixClaims(
   deps: ControlDeps,
   runId: string,
   manifest: RunManifest,
 ): Promise<void> {
-  const claims = (manifest.recheck?.targets ?? []).flatMap((target) =>
-    target.fixClaimedAt === undefined
-      ? []
-      : [{ findingId: target.findingId, fixClaimedAt: target.fixClaimedAt }],
-  );
+  const job = manifest.recheck;
   const clear = deps.findings.clearFixClaims?.bind(deps.findings);
-  if (claims.length === 0 || clear === undefined) return;
+  if (job === undefined || clear === undefined) return;
   try {
+    // Only the targets the recheck gave a verdict on: one it skipped hasn't been looked at, so
+    // its claim waits for the next run.
+    const answered = new Set(
+      ((await readVerdicts(deps.store, runId, job.index)) ?? []).map((verdict) => verdict.id),
+    );
+    const claims = job.targets.flatMap((target) =>
+      target.fixClaimedAt === undefined || !answered.has(target.id)
+        ? []
+        : [{ findingId: target.findingId, fixClaimedAt: target.fixClaimedAt }],
+    );
+    if (claims.length === 0) return;
     await clear(claims);
   } catch (error) {
     deps.log("fix claims not cleared", {
       runId,
-      count: claims.length,
       error: error instanceof Error ? error.message : String(error),
     });
   }
