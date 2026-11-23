@@ -269,6 +269,10 @@ describe("credential broker", () => {
     expect(alarms.map((alarm) => alarm.Properties.Dimensions)).toEqual([
       [{ Name: "Provider", Value: "bedrock" }],
     ]);
+    // Named, so `describe-alarms --alarm-name-prefix <stack>-ModelAlarm` finds it.
+    expect(alarms.map((alarm) => alarm.Properties.AlarmName)).toEqual([
+      `${pinned.workflow.stackName}-ModelAlarm-bedrock`,
+    ]);
     // Exposed like the credential alarms, and notified through the same topic.
     expect([...pinned.workflow.modelAlarms.keys()]).toEqual(["bedrock"]);
     expect([...pinned.workflow.credentialAlarms.keys()]).toEqual([]);

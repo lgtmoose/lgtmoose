@@ -406,6 +406,11 @@ export interface ControlDeps {
    * slug, or the first alias when the slug can't be read, or no handle at all.
    */
   commandAliases?: readonly string[];
+  /**
+   * Shadow mode: nothing is written to GitHub. A recheck's fixes are logged with the reply each
+   * would have had (NIC-1125), since shadow findings have no thread to write it in.
+   */
+  shadow?: boolean;
 }
 
 /** A PR waiting for its CI: the head, since when, and what its check run last said. */

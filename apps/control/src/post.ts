@@ -2112,7 +2112,18 @@ export async function post(
       await mark(what === "reply" ? replied : resolved, findingId);
       return false;
     };
-    if (writer !== undefined) {
+    if (deps.shadow === true) {
+      // Shadow findings have no thread, so there is nothing to reply in or resolve. What would
+      // have been written is logged instead, so a shadow run shows this path (NIC-1125).
+      for (const fixed of recheckWrites.fixed) {
+        deps.log("shadow: would reply and resolve", {
+          runId,
+          findingId: fixed.findingId,
+          sha: pr.headSha,
+          reply: recheckReply(pr.headSha, fixed.reason),
+        });
+      }
+    } else if (writer !== undefined) {
       for (const fixed of recheckWrites.fixed) {
         const root = fixed.githubCommentId;
         if (root === undefined) continue;

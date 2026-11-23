@@ -806,6 +806,9 @@ export class WorkflowStack extends Stack {
     }
     for (const providerId of new Set(modelChecks.map((check) => check.providerId))) {
       const alarm = new Alarm(this, `ModelAlarm-${providerId}`, {
+        // A fixed name, so the docs' `<stack>-ModelAlarm-<provider>` finds it: at most
+        // 128 + 12 + 32 characters, within CloudWatch's 255 (NIC-1125).
+        alarmName: `${this.stackName}-ModelAlarm-${providerId}`,
         alarmDescription: `A model the ${providerId} provider is pinned to can't be called in ${this.region}: model access, an agreement, or a profile ID. The health check's log says which, and ${CLI_COMMAND} auth bedrock --id ${providerId} checks it.`,
         metric: new Metric({
           namespace: "LGTMoose",

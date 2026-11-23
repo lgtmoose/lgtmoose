@@ -4156,6 +4156,44 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
     expect(writes[1]).toBe("resolve PRRT_1");
   });
 
+  it("in shadow mode, logs the reply and resolve a fixed finding would get, and writes neither", async () => {
+    const { h, writes } = rechecking();
+    await run(h, 1, [finding()]);
+    await fixElsewhere();
+    h.deps.shadow = true;
+
+    const { posted } = await run(
+      h,
+      2,
+      [],
+      [
+        {
+          id: "F1",
+          confirmed: false,
+          reason: "src/checkout.ts line 1 adds the item the loop skips.",
+        },
+      ],
+    );
+
+    expect(h.findings.rows).toMatchObject([{ status: "fixed" }]);
+    expect(posted).toMatchObject({ event: "APPROVE" });
+    expect(writes).toEqual([]);
+    const logged = h.logFields.filter(
+      (entry) => entry.message === "shadow: would reply and resolve",
+    );
+    expect(logged).toEqual([
+      {
+        message: "shadow: would reply and resolve",
+        runId: expect.any(String),
+        findingId: "f0",
+        sha: headSha,
+        reply: expect.stringMatching(/^This looks fixed at [0-9a-f]{7}, /),
+      },
+    ]);
+    // The reply carries the recheck's reason, never the finding's own text.
+    expect(JSON.stringify(logged)).not.toContain(finding().body);
+  });
+
   it("keeps a finding the recheck still finds, or gave no verdict for, open", async () => {
     const { h, writes } = rechecking();
     await run(h, 1, [finding()]);
