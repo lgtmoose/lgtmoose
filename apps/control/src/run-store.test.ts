@@ -611,13 +611,10 @@ describe("drizzleFindingStore", () => {
         createdAt: at,
       });
 
-    it("records a run's mode until its review is out, then keeps it", async () => {
+    it("records a run's mode, the latest attempt's", async () => {
       const started = await run("arn:exec:shadow:mode", true);
-      // A later attempt that posted nothing yet records its own (a deploy changed it).
+      // A later attempt, before the review is out, records its own (a deploy changed it).
       await store.recordShadow?.(started.runId, false);
-      expect((await runRow(started.runId))?.shadow).toBe(false);
-      // Once the review is out, the mode it was posted in stays.
-      await store.recordShadow?.(started.runId, true, { final: true });
       expect((await runRow(started.runId))?.shadow).toBe(false);
     });
 

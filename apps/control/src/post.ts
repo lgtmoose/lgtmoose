@@ -1465,11 +1465,6 @@ export async function post(
     pullRequestId: run.pullRequestId,
     ...(await slugOf(github)),
   });
-  // The mode this post runs in decides whether its findings reach GitHub (NIC-1141): recorded
-  // before they're saved. Until an attempt has posted its review, each records its own (a deploy
-  // may have changed it); after, the mode it posted in stays.
-  const reviewOut = readProgress(await deps.store.getText(keys.posted)).review === true;
-  await deps.runs.recordShadow?.(runId, deps.shadow === true, { final: reviewOut });
   // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
   // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
   // review that raises one again posts it as new. A retry finds none left to retire.
@@ -2215,6 +2210,10 @@ export async function post(
   };
   try {
     if (!progress.review) {
+      // The mode this post runs in decides whether its findings reach GitHub (NIC-1141):
+      // recorded holding the claims, before the review is written and the findings saved. Once
+      // the review is out, no attempt records it again, so it stays the mode it was posted in.
+      await deps.runs.recordShadow?.(runId, deps.shadow === true);
       // Our review on the head covers this run when it's complete, or when this run wouldn't
       // be complete either (see `coveringReviews`), and its run finished the head. A run that
       // didn't (it died after its review) leaves the head to this one, which posts a review

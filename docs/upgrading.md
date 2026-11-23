@@ -40,21 +40,25 @@ Migrations only add to the schema, so a review that's running while the Data sta
 - **Release images.** `images: { source: "release", … }` deploys a release's published images, pinned by digest, instead of building them. The default, `build`, is unchanged. See [Releasing](releasing.md#deploying-a-release).
 - **Shadow mode.** `shadow: true` is the default. Upgrading never turns it off; set `shadow: false` yourself when you want reviews posted.
 - **Going live retires shadow findings.** Once `shadow` is `false`, the first run on a PR retires the findings raised in shadow mode that have no comment and nobody answered (status `shadow`): they were never posted, so they no longer count towards the decision. Comment `@lgtmoose full review` on PRs still open from shadow mode to raise any that are still there. A finding someone answered after it was last raised (a reply, a resolve, an answer from the findings CLI or dashboard) isn't retired. Each PR's summary says how many were retired, until a full review runs. Once shadow mode is off, the dashboard also stops counting unanswered shadow findings on PRs that never get a live run, such as those merged during the shadow period; they stay in the database.
-- **Runs record whether they were in shadow mode.** The migration that adds this marks every finished run as a shadow run: LGTMoose is alpha, shadow mode is the default, and no install is known to have run live. If yours did run live before this version, every run it made was live, and you need to say so before any review runs on the new version. Otherwise the first live run on each PR retires that PR's findings. Pause the GitHub App's webhook (its settings, Advanced) before you deploy, run these two statements once the deploy's migration has finished, with the time you deployed in place of the placeholder, and then turn the webhook back on:
+- **Runs record whether they were in shadow mode.** The migration that adds this marks every finished run as a shadow run: LGTMoose is alpha, shadow mode is the default, and no install is known to have run live. If yours did go live (`shadow: false`) before this version, say which runs were live before any review runs on the new version. Otherwise the first live run on each PR retires that PR's findings from those runs.
+
+  Pause the GitHub App's webhook (its settings, Advanced) before you deploy. Once the deploy's migration has finished, run these two statements, then turn the webhook back on. In the first, put the time you first deployed with `shadow: false`: runs from your shadow period before that stay shadow runs.
 
   ```sql
-  UPDATE review_runs SET shadow = false WHERE created_at < '<upgrade time>';
+  UPDATE review_runs SET shadow = false WHERE created_at >= '<time you went live>';
   ```
 
   ```sql
   UPDATE pull_requests SET review_shadow = false WHERE last_review_id IS NOT NULL;
   ```
 
-  If a review ran before you did, it may have retired findings it shouldn't have. This reopens the findings retired since the upgrade:
+  If a review ran on the new version before you did, it may have retired findings it shouldn't have. This reopens the findings retired since the upgrade, after you've run the two statements above:
 
   ```sql
   UPDATE findings SET status = 'open' WHERE status = 'shadow' AND id IN (SELECT finding_id FROM finding_events WHERE type = 'shadow_retired' AND created_at >= '<upgrade time>');
   ```
+
+  A finding that was outdated (its line gone) comes back open, and the PR's next review marks it outdated again. The review and label that run already posted stay on the PR until its next review.
 
 ## Switching profile
 

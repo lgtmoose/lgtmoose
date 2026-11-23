@@ -299,11 +299,10 @@ export interface RunStore {
   supersedeRun(runId: string): Promise<void>;
   /**
    * Records whether the run's post is in shadow mode (NIC-1141), which decides whether its
-   * findings were posted. `final`: the post has written its review, so the mode is set only if
-   * none is recorded yet; otherwise an attempt that posted nothing yet records its own mode, so
-   * a retry after a deploy changed it goes by the mode it posts in.
+   * findings were posted. The post step calls it holding its claims, before it writes its review;
+   * once the review is out, no attempt calls it again.
    */
-  recordShadow?(runId: string, shadow: boolean, options?: { final?: boolean }): Promise<void>;
+  recordShadow?(runId: string, shadow: boolean): Promise<void>;
   /**
    * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
    * and not one a spend cap stopped) that started after `resume` or a review someone asked for.

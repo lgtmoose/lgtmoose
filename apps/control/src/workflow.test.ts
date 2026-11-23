@@ -275,9 +275,12 @@ function memoryRuns(): RunStore & {
       const run = runs.get(id);
       if (!run) return;
       Object.assign(run, { status: "succeeded", result, finishedAt: tick() });
-      // A shadow run's review and label were never on GitHub (NIC-1141).
-      if (run.shadow === false) pr.reviewLive = true;
-      else delete pr.reviewLive;
+      // A shadow run's review was never on GitHub (NIC-1141): changed only with a review, as the
+      // drizzle store does.
+      if (result.review !== undefined) {
+        if (run.shadow === false) pr.reviewLive = true;
+        else delete pr.reviewLive;
+      }
       Object.assign(pr, {
         lastReviewedSha: result.headSha,
         ...(result.review === undefined
@@ -317,11 +320,9 @@ function memoryRuns(): RunStore & {
       pause.noted.push(runId);
       pause.head = undefined;
     },
-    async recordShadow(runId, shadow, options) {
+    async recordShadow(runId, shadow) {
       const run = runs.get(runId);
-      if (run === undefined) return;
-      if (options?.final === true) run.shadow ??= shadow;
-      else run.shadow = shadow;
+      if (run !== undefined) run.shadow = shadow;
     },
     async supersedeRun(runId) {
       const run = runs.get(runId);

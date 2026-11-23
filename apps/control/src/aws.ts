@@ -430,16 +430,8 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           ),
         );
     },
-    async recordShadow(runId, shadow, options) {
-      // Once its review is out, kept: the mode it posted (and saves findings) in.
-      await db
-        .update(reviewRuns)
-        .set({ shadow })
-        .where(
-          options?.final === true
-            ? and(eq(reviewRuns.id, runId), isNull(reviewRuns.shadow))
-            : eq(reviewRuns.id, runId),
-        );
+    async recordShadow(runId, shadow) {
+      await db.update(reviewRuns).set({ shadow }).where(eq(reviewRuns.id, runId));
     },
     async supersedeRun(runId) {
       // A run that already finished (or failed) keeps its status.
