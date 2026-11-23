@@ -160,7 +160,7 @@ export interface DashboardStore {
    * (NIC-1140), only that PR's, and its outdated ones too.
    */
   openFindings(repos: readonly string[], limit: number, number?: number): Promise<OpenFinding[]>;
-  /** A finding by ID, for an answer (NIC-1140); undefined when there's none. */
+  /** A finding by ID, for an answer (NIC-1140); undefined when there's none, or the list hides it. */
   answerTarget(id: string): Promise<AnswerTarget | undefined>;
   /**
    * Records that `login` says an open or outdated finding of ours is fixed (NIC-1140): it's
@@ -332,7 +332,8 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
-        .where(eq(findings.id, id))
+        // Live, one the list hides (an unposted shadow finding) isn't there to answer either.
+        .where(and(eq(findings.id, id), visible))
         .limit(1);
       if (row === undefined) return undefined;
       const { side, path, line, ...target } = row;

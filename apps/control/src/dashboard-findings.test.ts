@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { drizzleFindingStore } from "./aws.js";
+import { drizzleFindingStore, drizzleRunStore } from "./aws.js";
 import { CALLBACK_PATH, handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import { TOKEN_HEADER, clearTokenCache } from "./dashboard-findings.js";
 import { DashboardGitHubError, type DashboardGitHub, type RepoAccess } from "./dashboard-github.js";
@@ -674,5 +674,136 @@ describe("answering a finding with the dashboard's session", () => {
     );
     const body = JSON.parse(listed.body) as { findings: { id: string; fixClaimedBy?: string }[] };
     expect(body.findings).toMatchObject([{ id, fixClaimedBy: "Alice" }]);
+  });
+});
+
+describe("fix claims and shadow mode (NIC-1140, NIC-1141)", () => {
+  const sha = (c: string) => c.repeat(40);
+  const runs = drizzleRunStore(db);
+  const startRun = (arn: string) =>
+    runs.startRun({
+      installationId: 1,
+      repo: "acme/api",
+      number: 232,
+      author: "bob",
+      headSha: sha("a"),
+      baseSha: sha("b"),
+      executionArn: arn,
+    });
+  /** A finding raised by a run in shadow mode, never posted. */
+  async function shadowFinding(fingerprint: string): Promise<string> {
+    const run = await startRun(`arn:exec:${fingerprint}`);
+    await runs.recordShadow?.(run.runId, true);
+    return finding({ runId: run.runId, fingerprint });
+  }
+  const live: DashboardDeps = { ...deps, store: drizzleDashboardStore(db, { live: true }) };
+  const list = async (with_: DashboardDeps) => {
+    const response = await handleDashboardRequest(
+      with_,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(READER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    return (JSON.parse(response.body) as { findings: { id: string }[] }).findings.map(
+      (listed) => listed.id,
+    );
+  };
+
+  it("retires a shadow finding whose fix claim the recheck rejected, once live", async () => {
+    const id = await shadowFinding("claimed");
+    // Claimed in shadow mode.
+    expect((await ack(id, WRITER, { outcome: "fixed" })).status).toBe(200);
+    // The recheck found it still there: the claim is cleared, and the finding stays open.
+    const store = drizzleFindingStore(db);
+    const claimedAt = (await store.trackedFindings(pullId))[0]?.fixClaimedAt ?? "";
+    await store.clearFixClaims?.([{ findingId: id, fixClaimedAt: claimedAt }]);
+    // A claim isn't an answer: still unposted and unanswered, so live, it's retired.
+    expect((await store.trackedFindings(pullId))[0]?.unpostedShadow).toBe(true);
+    expect(await store.retireShadowFindings?.(pullId, sha("c"))).toBe(1);
+    const [row] = await db.select().from(findings).where(eq(findings.id, id));
+    expect(row?.status).toBe("shadow");
+  });
+
+  it("live, won't answer an unposted shadow finding the list hides", async () => {
+    const id = await shadowFinding("hidden");
+    const posted = await finding({ fingerprint: "posted", githubCommentId: 77 });
+    expect(await list(deps)).toEqual(expect.arrayContaining([id, posted]));
+    expect(await list(live)).toEqual([posted]);
+    for (const body of [{ outcome: "fixed" }, { outcome: "declined", reason: "intended" }]) {
+      const response = await handleDashboardRequest(
+        live,
+        request(
+          "POST",
+          `/api/findings/${id}/ack`,
+          withToken(WRITER, { body: JSON.stringify(body) }),
+        ),
+      );
+      expect(response.status).toBe(404);
+    }
+    const [row] = await db.select().from(findings).where(eq(findings.id, id));
+    expect([row?.status, row?.fixClaimedAt]).toEqual(["open", null]);
+  });
+
+  it("drops a fix claim when the finding is raised again after closing, or unresolved", async () => {
+    const store = drizzleFindingStore(db);
+    const { runId } = await startRun("arn:exec:raised-again");
+    const claimed = async (id: string) =>
+      (await db.select().from(findings).where(eq(findings.id, id)))[0];
+    // Closed as fixed with a claim still on it, then raised again: a new finding, unclaimed.
+    const raised = await finding({ fingerprint: "fp:raised" });
+    expect((await ack(raised, WRITER, { outcome: "fixed" })).status).toBe(200);
+    await store.closeFixed?.(raised, sha("c"));
+    await store.saveFindings(pullId, runId, sha("d"), [
+      {
+        finding: {
+          rule_category: "correctness",
+          severity: "should_fix",
+          path: "src/cart.ts",
+          line: 4,
+          side: "RIGHT",
+          title: "Quantity drops the note",
+          body: "The merge loses the note.",
+          evidence: "code",
+        },
+        fingerprint: "fp:raised",
+      },
+    ]);
+    expect(await claimed(raised)).toMatchObject({
+      status: "open",
+      fixClaimedAt: null,
+      fixClaimedBy: null,
+    });
+    // Still open when raised again: the claim stands, for the recheck.
+    expect((await ack(raised, WRITER, { outcome: "fixed" })).status).toBe(200);
+    await store.saveFindings(pullId, runId, sha("e"), [
+      {
+        finding: {
+          rule_category: "correctness",
+          severity: "should_fix",
+          path: "src/cart.ts",
+          line: 4,
+          side: "RIGHT",
+          title: "Quantity drops the note",
+          body: "The merge loses the note.",
+          evidence: "code",
+        },
+        fingerprint: "fp:raised",
+      },
+    ]);
+    expect((await claimed(raised))?.fixClaimedBy).toBe("Carol");
+
+    // Resolved by a person with a claim on it, then unresolved: open again, unclaimed.
+    const resolved = await finding({ fingerprint: "fp:resolved", githubCommentId: 88 });
+    expect((await ack(resolved, WRITER, { outcome: "fixed" })).status).toBe(200);
+    await store.syncThreads(pullId, [{ resolved: true, firstCommentId: 88 }], sha("c"));
+    expect((await claimed(resolved))?.status).toBe("resolved_by_human");
+    await store.syncThreads(pullId, [{ resolved: false, firstCommentId: 88 }], sha("d"));
+    expect(await claimed(resolved)).toMatchObject({
+      status: "open",
+      fixClaimedAt: null,
+      fixClaimedBy: null,
+    });
   });
 });

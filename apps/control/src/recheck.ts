@@ -739,6 +739,29 @@ export function fixedByRecheck(
   return fixes;
 }
 
+/**
+ * The fix claims (NIC-1140) the recheck settled, by finding ID: a claimed finding it closed
+ * (`fixed`), or one whose verdict says the problem is still there, on a file this review read
+ * well enough to trust it (`readEnough`). Pure. A claim whose finding the plan didn't close for
+ * another reason (its file unreviewed, its batch failed), or that got no verdict, isn't settled:
+ * it stays first in the next run's recheck.
+ */
+export function settledFixClaims(
+  targets: readonly RecheckEntry[],
+  verdicts: readonly Verdict[],
+  fixed: ReadonlySet<string>,
+  readEnough: (entry: RecheckEntry) => boolean,
+): string[] {
+  const byId = new Map<string, Verdict>();
+  for (const verdict of verdicts) if (!byId.has(verdict.id)) byId.set(verdict.id, verdict);
+  return targets.flatMap((entry) =>
+    entry.fixClaimedAt !== undefined &&
+    (fixed.has(entry.findingId) || (byId.get(entry.id)?.confirmed === true && readEnough(entry)))
+      ? [entry.findingId]
+      : [],
+  );
+}
+
 /** What the post step decided about the run's recheck, saved once so a retry writes the same. */
 export const recheckWritesSchema = z.object({
   version: z.literal(1),
@@ -749,6 +772,8 @@ export const recheckWritesSchema = z.object({
       reason: z.string(),
     }),
   ),
+  /** The fix claims it settled (`settledFixClaims`). Left out by attempts from before it was kept. */
+  settledClaims: z.array(z.string()).optional(),
 });
 
 export type RecheckWrites = z.infer<typeof recheckWritesSchema>;

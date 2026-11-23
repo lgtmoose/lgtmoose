@@ -10,9 +10,11 @@ import { sql, type SQL } from "drizzle-orm";
  *   GitHub since keeps its ID here, so a live finding whose comment is gone doesn't match.
  * - **Raised in shadow mode:** the run that last raised it (`findings.run_id`) was a shadow run
  *   (`review_runs.shadow`: set by its post step, shadow by default).
- * - **Unanswered:** no event by a person (one with a login: a reply on its thread, a resolve, an
- *   answer from the findings CLI or dashboard) after its latest `raised` event. An answer from
- *   before it was raised again was about the earlier finding.
+ * - **Unanswered:** no event by a person (one with a login: a reply on its thread, a resolve, a
+ *   decline from the findings CLI or dashboard) after its latest `raised` event. An answer from
+ *   before it was raised again was about the earlier finding. A fix claim (NIC-1140) isn't an
+ *   answer: only the recheck's word closes the finding, and a claim it rejects leaves it as
+ *   unanswered as before.
  */
 export function unpostedShadow(): SQL {
   // Columns are written out with their table: in a correlated subquery, drizzle's unqualified
@@ -29,6 +31,7 @@ export function unpostedShadow(): SQL {
       select 1 from "finding_events" as answer
       where answer.finding_id = "findings"."id"
         and answer.human
+        and answer.type <> 'fix_claimed'
         and answer.created_at > coalesce(
           (
             select max(raise.created_at) from "finding_events" as raise

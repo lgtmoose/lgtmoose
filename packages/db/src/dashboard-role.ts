@@ -83,7 +83,7 @@ export async function ensureDashboardRole(
     `grant select (finding_id, type, human, created_at) on table finding_events to ${name}`,
   );
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
-  // Answering a finding (NIC-1140): only through these two functions (migration 0025), which
+  // Answering a finding (NIC-1140): only through these two functions (migration 0026), which
   // allow one transition each on LGTMoose's own open or outdated findings and write its event.
   // No write on `findings` or `finding_events` itself. Whether a person may answer is decided
   // from GitHub before they're called.

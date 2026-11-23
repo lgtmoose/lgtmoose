@@ -657,6 +657,10 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 body: sql`excluded.body`,
                 raisedAtSha: headSha,
                 status: "open",
+                // A fix claim (NIC-1140) is about the finding as it stood: raised again from fixed
+                // or retired, it's a new finding nobody has said is fixed.
+                fixClaimedAt: sql`case when ${findings.status} in ('open', 'outdated') then ${findings.fixClaimedAt} end`,
+                fixClaimedBy: sql`case when ${findings.status} in ('open', 'outdated') then ${findings.fixClaimedBy} end`,
                 updatedAt: now(),
               },
               // A finding someone declined, disputed or resolved stays that way. One retired from
@@ -723,7 +727,12 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         return db.transaction(async (tx) => {
           const rows = await tx
             .update(findings)
-            .set({ status: to, updatedAt: now() })
+            .set({
+              status: to,
+              // Open again after a person resolved it (NIC-1140): any earlier fix claim is spent.
+              ...(to === "open" ? { fixClaimedAt: null, fixClaimedBy: null } : {}),
+              updatedAt: now(),
+            })
             .where(
               and(
                 eq(findings.pullRequestId, pullRequestId),
