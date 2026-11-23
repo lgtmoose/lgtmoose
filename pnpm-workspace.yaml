@@ -11,3 +11,9 @@ onlyBuiltDependencies:
 # with the same JavaScript output. Each package depends on it too, so its own `tsc` is pinned.
 catalog:
   typescript: 7.0.2
+
+# Don't resolve a package version until it has been published for 3 days (in minutes), the same
+# window Dependabot uses. A malicious release is usually caught and pulled within that time.
+# Installs from the lockfile (--frozen-lockfile, as CI and the images do) aren't affected; this
+# applies when versions are resolved: `pnpm add`, `pnpm update`, or a lockfile change.
+minimumReleaseAge: 4320
