@@ -45,6 +45,9 @@ export const findingStatus = pgEnum("finding_status", [
   "disputed",
   "resolved_by_human",
   "outdated",
+  // Raised in shadow mode and never answered: retired by the first live run (NIC-1141), since it
+  // has no thread anyone could see, reply to or resolve. Neither fixed nor declined.
+  "shadow",
 ]);
 export const findingEventType = pgEnum("finding_event_type", [
   "raised",
@@ -61,6 +64,8 @@ export const findingEventType = pgEnum("finding_event_type", [
   // A person said it's fixed, from the CLI or the dashboard (NIC-1140): rechecked first, and
   // closed only on the recheck's word.
   "fix_claimed",
+  // Raised in shadow mode, unanswered, and retired by the first live run (NIC-1141).
+  "shadow_retired",
 ]);
 export const runKind = pgEnum("run_kind", ["first", "incremental", "comments", "full"]);
 export const runStatus = pgEnum("run_status", [
@@ -121,6 +126,12 @@ export const pullRequests = pgTable(
     /** That review's GitHub ID, to tell whether an approval was dismissed since. */
     lastReviewId: bigint("last_review_id", { mode: "number" }),
     paused: boolean("paused").notNull().default(false),
+    /**
+     * Whether the review and label recorded above came from a run in shadow mode (NIC-1141):
+     * then they were never on GitHub, and a live run doesn't go by them. Null: not known, so
+     * not trusted either.
+     */
+    reviewShadow: boolean("review_shadow"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -167,6 +178,21 @@ export const reviewRuns = pgTable(
      * `@lgtmoose review` or the next push reviews it.
      */
     spendCap: text("spend_cap"),
+    /**
+     * Whether the run's post was in shadow mode, so wrote nothing to GitHub (NIC-1141). The post
+     * step sets it, holding its claims, before it writes its review and saves findings. Shadow by
+     * default: runs from before it was kept, and runs of older control code still finishing during
+     * a deploy, were all in shadow mode (an install that went live sets its live ones, see
+     * docs/upgrading.md).
+     */
+    shadow: boolean("shadow").notNull().default(true),
+    /**
+     * The run reviewed everything it set out to (NIC-1141): no failed or spend-capped batch and
+     * no file left unreviewed. Set when it succeeds; null for runs from before it was kept. Only
+     * a complete full review counts as the full review that clears findings retired from shadow
+     * mode.
+     */
+    complete: boolean("complete"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -260,6 +286,11 @@ export const findingEvents = pgTable(
     actor: text("actor").notNull(),
     /** For a person's event: their GitHub login, when it's known (who resolved a thread, say). */
     actorLogin: text("actor_login"),
+    /**
+     * A person's event (it has a login), worked out by the database (NIC-1141): what the
+     * dashboard reads to tell an answered finding, without reading who answered it.
+     */
+    human: boolean("human").generatedAlwaysAs(sql`actor_login is not null`),
     /**
      * For a `resolved` event: false when the resolution didn't count, and the finding stayed
      * open (a blocking or protected finding resolved by the PR's author, or by someone whose

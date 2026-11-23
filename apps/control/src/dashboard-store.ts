@@ -11,6 +11,7 @@ import { MAX_DECLINE_REASON } from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
+import { unpostedShadow } from "./shadow-findings.js";
 
 /**
  * The dashboard's reads and its sessions (NIC-840). Every read takes the repositories the
@@ -193,7 +194,16 @@ const SEVERITY_ORDER = sql`case ${findings.severity} when 'blocking' then 0 when
 
 const iso = (value: Date | null): string | undefined => value?.toISOString();
 
-export function drizzleDashboardStore(db: Db): DashboardStore {
+/**
+ * `live`: the deployment is out of shadow mode. Then findings raised in shadow mode that were never
+ * posted and nobody answered (`unpostedShadow`) don't count as open: nobody can see them, and a
+ * PR that never gets a live run (merged during the shadow period, say) never retires them. They
+ * stay in the database, so the shadow period's figures can still be read.
+ */
+export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}): DashboardStore {
+  // Live, an unposted shadow finding isn't listed, open or outdated.
+  const visible = options.live === true ? sql`not ${unpostedShadow()}` : sql`true`;
+  const open = sql`${findings.status} = 'open' and ${visible}`;
   const inRepos = (repos: readonly string[]) =>
     inArray(sql`lower(${pullRequests.repo})`, [...repos]);
   return {
@@ -235,8 +245,8 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
       const counts = await db
         .select({
           repo,
-          openFindings: sql<number>`count(${findings.id}) filter (where ${findings.status} = 'open')`,
-          blocking: sql<number>`count(${findings.id}) filter (where ${findings.status} = 'open' and ${findings.severity} = 'blocking')`,
+          openFindings: sql<number>`count(${findings.id}) filter (where ${open})`,
+          blocking: sql<number>`count(${findings.id}) filter (where ${open} and ${findings.severity} = 'blocking')`,
         })
         .from(pullRequests)
         .leftJoin(findings, eq(findings.pullRequestId, pullRequests.id))
@@ -286,8 +296,8 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         .where(
           and(
             number === undefined
-              ? eq(findings.status, "open")
-              : inArray(findings.status, ["open", "outdated"]),
+              ? open
+              : and(inArray(findings.status, ["open", "outdated"]), visible),
             inRepos(repos),
             ...(number === undefined ? [] : [eq(pullRequests.number, number)]),
           ),
@@ -329,7 +339,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
       return { ...target, recheckable: side === "RIGHT" && path !== null && line !== null };
     },
     async claimFix(id, login) {
-      // Through `lgtmoose_claim_fix` (migration 0025): the dashboard's login may call it, not
+      // Through `lgtmoose_claim_fix` (migration 0026): the dashboard's login may call it, not
       // write findings or events itself. Null when the finding can't take a claim.
       const result = (await answerCall(() =>
         db.execute(sql`select lgtmoose_claim_fix(${id}::uuid, ${login}) as at`),
@@ -337,7 +347,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
       return result.rows[0]?.at !== null && result.rows[0]?.at !== undefined;
     },
     async declineFinding(id, login, reason) {
-      // Through `lgtmoose_decline_finding` (migration 0025), which also writes the `declined`
+      // Through `lgtmoose_decline_finding` (migration 0026), which also writes the `declined`
       // event with the reason and `learn_pending`, for the reconciler's outcome learning. The
       // reason is kept as a reply's body is, with secrets redacted, then capped to what the
       // function takes: redaction can make it longer.

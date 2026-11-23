@@ -44,6 +44,8 @@ async function startRun(number: number, headSha: string, executionArn: string, e
 describe("drizzleReconcileStore", () => {
   it("restores a PR's record to the run posted at a head it went back to", async () => {
     const x = await startRun(1, X, "arn:x", new Date("2026-11-14T10:00:00Z"));
+    // X was reviewed live, Y in shadow mode (NIC-1141).
+    await runs.recordShadow?.(x.runId, false);
     await runs.succeedRun(x.runId, {
       filesDone: 1,
       costUsd: undefined,
@@ -53,6 +55,7 @@ describe("drizzleReconcileStore", () => {
       review: { event: "APPROVE", id: 100 },
     });
     const y = await startRun(1, Y, "arn:y", new Date("2026-11-14T11:00:00Z"));
+    await runs.recordShadow?.(y.runId, true);
     await runs.succeedRun(y.runId, {
       filesDone: 1,
       costUsd: undefined,
@@ -69,6 +72,11 @@ describe("drizzleReconcileStore", () => {
       lastReviewedSha: Y,
       statusLabel: "Requires Changes",
     });
+    const before = await db
+      .select()
+      .from(pullRequests)
+      .where(eq(pullRequests.id, recorded?.id ?? ""));
+    expect(before[0]?.reviewShadow).toBe(true);
     const posted = await store.postedRunAt(recorded?.id ?? "", X);
     expect(posted).toEqual({
       runId: x.runId,
@@ -76,6 +84,7 @@ describe("drizzleReconcileStore", () => {
       statusLabel: "LGTM",
       reviewEvent: "APPROVE",
       reviewId: 100,
+      shadow: false,
     });
     if (posted === undefined || recorded === undefined) throw new Error("not found");
 
@@ -90,6 +99,8 @@ describe("drizzleReconcileStore", () => {
       lastReviewEvent: "APPROVE",
       lastReviewId: 100,
       summaryCommentId: 10,
+      // X's review was live, so it's on GitHub and a live run may go by it.
+      reviewShadow: false,
     });
   });
 

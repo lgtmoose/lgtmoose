@@ -1,5 +1,5 @@
 {
-  "id": "3e14b0b2-e4f3-40d1-911a-42da0dc13ec3",
+  "id": "e4ec25da-3755-4f96-a506-aa28711853f2",
   "prevId": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "version": "7",
   "dialect": "postgresql",
@@ -418,6 +418,16 @@
           "primaryKey": false,
           "notNull": false
         },
+        "human": {
+          "name": "human",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "actor_login is not null",
+            "type": "stored"
+          }
+        },
         "counted": {
           "name": "counted",
           "type": "boolean",
@@ -435,25 +445,6 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": false
-        },
-        "reason": {
-          "name": "reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "learn_pending": {
-          "name": "learn_pending",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "learn_attempts": {
-          "name": "learn_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
         },
         "created_at": {
           "name": "created_at",
@@ -481,22 +472,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "finding_events_learn_pending_idx": {
-          "name": "finding_events_learn_pending_idx",
-          "columns": [
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"finding_events\".\"learn_pending\"",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -653,18 +628,6 @@
         "learning_ids": {
           "name": "learning_ids",
           "type": "text[]",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fix_claimed_at": {
-          "name": "fix_claimed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fix_claimed_by": {
-          "name": "fix_claimed_by",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -2108,6 +2071,12 @@
           "notNull": true,
           "default": false
         },
+        "review_shadow": {
+          "name": "review_shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2262,6 +2231,19 @@
         "spend_cap": {
           "name": "spend_cap",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shadow": {
+          "name": "shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "complete": {
+          "name": "complete",
+          "type": "boolean",
           "primaryKey": false,
           "notNull": false
         },
@@ -2513,7 +2495,7 @@
         "outdated",
         "escalated",
         "unresolved",
-        "fix_claimed"
+        "shadow_retired"
       ]
     },
     "public.finding_source": {
@@ -2524,7 +2506,7 @@
     "public.finding_status": {
       "name": "finding_status",
       "schema": "public",
-      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
+      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated", "shadow"]
     },
     "public.learning_bootstrap_status": {
       "name": "learning_bootstrap_status",

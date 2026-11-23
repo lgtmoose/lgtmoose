@@ -232,6 +232,13 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       [findingId],
     );
     expect(claims.rows).toEqual([{ fix_claimed_by: "dev", type: "fix_claimed" }]);
+    // Live (shadow off), the counts leave out unposted shadow findings (NIC-1141): that reads
+    // review runs and finding events, as the dashboard's login.
+    const live = drizzleDashboardStore(drizzle({ client: dashboard }), { live: true });
+    expect(await live.repoSummaries(["acme/shop"])).toMatchObject([
+      { repo: "acme/shop", openFindings: 1, blocking: 1 },
+    ]);
+    expect(await live.openFindings(["acme/shop"], 10)).toMatchObject([{ title: "Off by one" }]);
     expect(await get("/api/runs")).toMatchObject({ runs: [{ status: "succeeded" }] });
     expect(await get("/api/usage")).toMatchObject({
       providers: [{ providerId: "claude" }],
@@ -370,6 +377,9 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "delete from learnings",
       // Only which learning, what happened and when: not who.
       "select actor from learning_events",
+      // Finding events: whether a person answered, never who or what they wrote.
+      "select actor_login from finding_events",
+      "select actor, github_comment_id from finding_events",
       "update learning_events set actor = 'mallory'",
       "delete from learning_events",
       // An answer to a finding (NIC-1140) goes through its two functions only.

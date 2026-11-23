@@ -159,6 +159,43 @@ describe("drizzleDashboardStore", () => {
     expect(await store.openFindings([], 10)).toEqual([]);
   });
 
+  it("stops counting unposted shadow findings once live, and keeps them stored (NIC-1141)", async () => {
+    const pr = await pullRequest("Acme/Shadowed", 3);
+    const [shadowRun] = await db
+      .insert(reviewRuns)
+      .values({
+        pullRequestId: pr,
+        headSha: "a".repeat(40),
+        kind: "first",
+        status: "succeeded",
+        shadow: true,
+      })
+      .returning({ id: reviewRuns.id });
+    await finding(pr, "s1", "blocking");
+    await finding(pr, "s2", "nit");
+    // s1 was raised by the shadow run and never posted; s2 by a run we know nothing about.
+    await db
+      .update(findings)
+      .set({ runId: shadowRun?.id ?? null })
+      .where(eq(findings.fingerprint, "s1"));
+    const live = drizzleDashboardStore(db, { live: true });
+
+    expect(await store.repoSummaries(["acme/shadowed"])).toEqual([
+      { repo: "acme/shadowed", openFindings: 2, blocking: 1, lastRunAt: expect.any(String) },
+    ]);
+    expect(await live.repoSummaries(["acme/shadowed"])).toEqual([
+      { repo: "acme/shadowed", openFindings: 1, blocking: 0, lastRunAt: expect.any(String) },
+    ]);
+    expect((await live.openFindings(["acme/shadowed"], 10)).map((row) => row.severity)).toEqual([
+      "nit",
+    ]);
+    // Still stored and open, for the shadow period's figures.
+    expect((await store.openFindings(["acme/shadowed"], 10)).map((row) => row.severity)).toEqual([
+      "blocking",
+      "nit",
+    ]);
+  });
+
   it("lists runs in scope with their cost and providers", async () => {
     const runs = await store.recentRuns(["acme/api"], 10);
     expect(runs).toHaveLength(1);

@@ -77,6 +77,11 @@ export async function ensureDashboardRole(
   await client.query(
     `grant select (learning_id, type, created_at) on table learning_events to ${name}`,
   );
+  // Whether a finding raised in shadow mode was answered since (NIC-1141): its events' kind,
+  // time, and whether a person was behind one (`human`). Not who, nor what they said.
+  await client.query(
+    `grant select (finding_id, type, human, created_at) on table finding_events to ${name}`,
+  );
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
   // Answering a finding (NIC-1140): only through these two functions (migration 0025), which
   // allow one transition each on LGTMoose's own open or outdated findings and write its event.

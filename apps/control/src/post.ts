@@ -1495,6 +1495,18 @@ export async function post(
     pullRequestId: run.pullRequestId,
     ...(await slugOf(github)),
   });
+  // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
+  // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
+  // review that raises one again posts it as new. A retry finds none left to retire.
+  const retiredNow =
+    deps.shadow === true || deps.findings.retireShadowFindings === undefined
+      ? 0
+      : await deps.findings.retireShadowFindings(run.pullRequestId, pr.headSha);
+  if (retiredNow > 0) deps.log("shadow findings retired", { runId, count: retiredNow });
+  // The summary's note: those retired since the PR's last full review, from the stored state.
+  // `finishReview` leaves out those this run raises again, so every summary says the same until
+  // a full review runs or they're raised again.
+  const shadowRetired = (await deps.findings.retiredShadowFindings?.(run.pullRequestId)) ?? [];
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -1640,6 +1652,7 @@ export async function post(
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
         ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
+        ...(shadowRetired.length > 0 ? { shadowRetired } : {}),
         ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,
@@ -1851,6 +1864,9 @@ export async function post(
     ? progress.quiet === true
     : report.kind === "incremental" &&
       fresh === 0 &&
+      // A shadow run's review and label were never on GitHub (NIC-1141): a live run posts its
+      // own. In shadow mode, nothing is posted either way, so the record is all there is.
+      (deps.shadow === true || run.reviewLive === true) &&
       decision.label !== undefined &&
       decision.label === run.statusLabel &&
       decision.event === run.lastReviewEvent &&
@@ -1877,6 +1893,9 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
       // The review it posted; a quiet run leaves the PR's last review as it is.
       review: quiet ? undefined : { event: decision.event, id: progress.reviewId },
+      // Whether it reviewed everything (NIC-1141): a complete full review clears the summary's
+      // note on findings retired from shadow mode, by the same test `finishReview` uses.
+      complete: report.complete && manifest.spendCap === undefined,
     });
   /**
    * Records the run's findings once its review is out (or skipped as quiet): outdated first (a
@@ -2221,6 +2240,10 @@ export async function post(
   };
   try {
     if (!progress.review) {
+      // The mode this post runs in decides whether its findings reach GitHub (NIC-1141):
+      // recorded holding the claims, before the review is written and the findings saved. Once
+      // the review is out, no attempt records it again, so it stays the mode it was posted in.
+      await deps.runs.recordShadow?.(runId, deps.shadow === true);
       // Our review on the head covers this run when it's complete, or when this run wouldn't
       // be complete either (see `coveringReviews`), and its run finished the head. A run that
       // didn't (it died after its review) leaves the head to this one, which posts a review

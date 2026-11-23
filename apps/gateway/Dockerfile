@@ -5,9 +5,12 @@ FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23f
 RUN corepack enable
 WORKDIR /repo
 COPY . .
-RUN pnpm install --frozen-lockfile --filter "@lgtmoose/gateway..." \
+# The deploy step installs prod dependencies from the lockfile. A filtered install leaves some of
+# those packages out of the store, and the deploy then resolves them again, which minimumReleaseAge
+# rejects for a locked version still under 3 days old. So install everything, as the sandbox does.
+RUN pnpm install --frozen-lockfile \
   && pnpm --filter "@lgtmoose/gateway..." run build \
-  && pnpm --filter @lgtmoose/gateway deploy --legacy --prod /out
+  && pnpm --filter @lgtmoose/gateway --frozen-lockfile deploy --legacy --prod /out
 
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 

@@ -48,6 +48,11 @@ export interface RunRecord {
   lastReviewEvent: ReviewEvent | undefined;
   /** That review's GitHub ID; undefined in shadow mode. */
   lastReviewId: number | undefined;
+  /**
+   * The review and label above came from a live run, so they're on GitHub (NIC-1141). Left out
+   * when they came from a shadow run, or it isn't known: a live run doesn't go by them then.
+   */
+  reviewLive?: boolean;
   /** The head the run reviews. */
   headSha: string;
   /** The execution the run belongs to. */
@@ -100,6 +105,11 @@ export interface FindingRecord {
    * recheck takes it first. Left out when nobody has, or the recheck has looked since.
    */
   fixClaimedAt?: string;
+  /**
+   * Raised in shadow mode, never posted, and unanswered since (NIC-1141, `unpostedShadow`): a
+   * live run retires it (`retireShadowFindings`). Left out when it isn't.
+   */
+  unpostedShadow?: boolean;
 }
 
 /** A finding to record, with its inline comment's ID when it was posted inline. */
@@ -133,6 +143,18 @@ export interface FindingStore {
     headSha: string,
     findings: readonly FindingToSave[],
   ): Promise<void>;
+  /**
+   * Retires the PR's findings raised in shadow mode, never posted and unanswered since
+   * (NIC-1141, `unpostedShadow`): status `shadow`, with a `shadow_retired` event at `sha`.
+   * Nobody could see them, so on a live run they don't count. Returns how many this call retired;
+   * a second call retires none. Without it, nothing is retired.
+   */
+  retireShadowFindings?(pullRequestId: string, sha: string): Promise<number>;
+  /**
+   * The fingerprints of the PR's findings retired from shadow mode since its last full review
+   * (`retiredSinceFullReview`), for the summary's note. Without it, no note.
+   */
+  retiredShadowFindings?(pullRequestId: string): Promise<string[]>;
   /**
    * Follows what people did to our comments' review threads: an open or outdated finding whose
    * thread is resolved becomes `resolved_by_human`, and one resolved that way whose thread was
@@ -257,6 +279,11 @@ export interface RunStore {
       summaryCommentId: number | undefined;
       /** The review this run posted: its event and ID. Undefined when it posted none. */
       review?: { event: ReviewEvent; id: number | undefined } | undefined;
+      /**
+       * It reviewed everything it set out to (NIC-1141): no failed or spend-capped batch, no
+       * file left unreviewed, no spend cap from the prepare step.
+       */
+      complete?: boolean;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */
@@ -290,6 +317,12 @@ export interface RunStore {
   ): Promise<void>;
   /** Marks a queued or running run superseded: a newer head or a close made it moot. */
   supersedeRun(runId: string): Promise<void>;
+  /**
+   * Records whether the run's post is in shadow mode (NIC-1141), which decides whether its
+   * findings were posted. The post step calls it holding its claims, before it writes its review;
+   * once the review is out, no attempt calls it again.
+   */
+  recordShadow?(runId: string, shadow: boolean): Promise<void>;
   /**
    * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
    * and not one a spend cap stopped) that started after `resume` or a review someone asked for.

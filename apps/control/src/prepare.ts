@@ -754,7 +754,11 @@ export async function prepare(
     const recheckFor = async (mode: RecheckMode) =>
       recheckJob({
         repo,
-        records: await deps.findings.trackedFindings(run.pullRequestId),
+        // A live run's post retires unanswered shadow findings (NIC-1141): not worth a recheck.
+        // One someone answered stays, so the recheck can still close it.
+        records: (await deps.findings.trackedFindings(run.pullRequestId)).filter(
+          (record) => deps.shadow === true || record.unpostedShadow !== true,
+        ),
         skip: new Set(taken.pending.map((reply) => reply.findingId)),
         sinceSha: lastReviewed,
         headSha: pr.headSha,

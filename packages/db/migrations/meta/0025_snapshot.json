@@ -1,6 +1,6 @@
 {
-  "id": "4dd80b7e-2c14-4a28-82ef-d77716180619",
-  "prevId": "3e14b0b2-e4f3-40d1-911a-42da0dc13ec3",
+  "id": "566f6259-7137-4b54-bcba-80f767fabbe6",
+  "prevId": "e4ec25da-3755-4f96-a506-aa28711853f2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -117,9 +117,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -195,10 +195,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"dispatched_executions\".\"stopped_at\" is null",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -270,20 +270,20 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "feedback_finding_id_findings_id_fk": {
           "name": "feedback_finding_id_findings_id_fk",
           "tableFrom": "feedback",
-          "columnsFrom": ["finding_id"],
           "tableTo": "findings",
+          "columnsFrom": ["finding_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -360,20 +360,20 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "files_reviewed_run_id_review_runs_id_fk": {
           "name": "files_reviewed_run_id_review_runs_id_fk",
           "tableFrom": "files_reviewed",
-          "columnsFrom": ["run_id"],
           "tableTo": "review_runs",
+          "columnsFrom": ["run_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -417,6 +417,16 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "human": {
+          "name": "human",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "actor_login is not null",
+            "type": "stored"
+          }
         },
         "counted": {
           "name": "counted",
@@ -481,9 +491,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "finding_events_learn_pending_idx": {
           "name": "finding_events_learn_pending_idx",
@@ -496,21 +506,21 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"finding_events\".\"learn_pending\"",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "finding_events_finding_id_findings_id_fk": {
           "name": "finding_events_finding_id_findings_id_fk",
           "tableFrom": "finding_events",
-          "columnsFrom": ["finding_id"],
           "tableTo": "findings",
+          "columnsFrom": ["finding_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -701,9 +711,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "findings_open_idx": {
           "name": "findings_open_idx",
@@ -716,30 +726,30 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"findings\".\"status\" = 'open'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "findings_pull_request_id_pull_requests_id_fk": {
           "name": "findings_pull_request_id_pull_requests_id_fk",
           "tableFrom": "findings",
-          "columnsFrom": ["pull_request_id"],
           "tableTo": "pull_requests",
+          "columnsFrom": ["pull_request_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "findings_run_id_review_runs_id_fk": {
           "name": "findings_run_id_review_runs_id_fk",
           "tableFrom": "findings",
-          "columnsFrom": ["run_id"],
           "tableTo": "review_runs",
+          "columnsFrom": ["run_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "set null"
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -827,9 +837,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "job_queue_waiting_idx": {
           "name": "job_queue_waiting_idx",
@@ -854,10 +864,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"job_queue\".\"done_at\" is null",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -909,29 +919,29 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "learning_bootstrap_items_learning_id_learnings_id_fk": {
           "name": "learning_bootstrap_items_learning_id_learnings_id_fk",
           "tableFrom": "learning_bootstrap_items",
-          "columnsFrom": ["learning_id"],
           "tableTo": "learnings",
+          "columnsFrom": ["learning_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "learning_bootstrap_items_bootstrap_id_learning_bootstraps_id_fk": {
           "name": "learning_bootstrap_items_bootstrap_id_learning_bootstraps_id_fk",
           "tableFrom": "learning_bootstrap_items",
-          "columnsFrom": ["bootstrap_id"],
           "tableTo": "learning_bootstraps",
+          "columnsFrom": ["bootstrap_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1081,9 +1091,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "learning_bootstraps_active_key": {
           "name": "learning_bootstraps_active_key",
@@ -1096,10 +1106,10 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "\"learning_bootstraps\".\"status\" in ('requested', 'running')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -1163,15 +1173,15 @@
           "primaryKey": false,
           "notNull": true,
           "identity": {
+            "type": "always",
             "name": "learning_events_seq_seq",
+            "schema": "public",
             "increment": "1",
+            "startWith": "1",
             "minValue": "1",
             "maxValue": "9223372036854775807",
-            "startWith": "1",
             "cache": "1",
-            "cycle": false,
-            "schema": "public",
-            "type": "always"
+            "cycle": false
           }
         },
         "created_at": {
@@ -1200,29 +1210,29 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "learning_events_learning_id_learnings_id_fk": {
           "name": "learning_events_learning_id_learnings_id_fk",
           "tableFrom": "learning_events",
-          "columnsFrom": ["learning_id"],
           "tableTo": "learnings",
+          "columnsFrom": ["learning_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "learning_events_finding_id_findings_id_fk": {
           "name": "learning_events_finding_id_findings_id_fk",
           "tableFrom": "learning_events",
-          "columnsFrom": ["finding_id"],
           "tableTo": "findings",
+          "columnsFrom": ["finding_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "set null"
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1393,9 +1403,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "learnings_embedding_idx": {
           "name": "learnings_embedding_idx",
@@ -1409,9 +1419,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "hnsw",
-          "concurrently": false
+          "with": {}
         },
         "learnings_source_comment_key": {
           "name": "learnings_source_comment_key",
@@ -1430,9 +1440,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -1509,9 +1519,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "local_executions_running_idx": {
           "name": "local_executions_running_idx",
@@ -1524,10 +1534,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"local_executions\".\"status\" = 'RUNNING'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -1692,9 +1702,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "pending_replies_pull_request_idx": {
           "name": "pending_replies_pull_request_idx",
@@ -1719,29 +1729,29 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "pending_replies_pull_request_id_pull_requests_id_fk": {
           "name": "pending_replies_pull_request_id_pull_requests_id_fk",
           "tableFrom": "pending_replies",
-          "columnsFrom": ["pull_request_id"],
           "tableTo": "pull_requests",
+          "columnsFrom": ["pull_request_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "pending_replies_finding_id_findings_id_fk": {
           "name": "pending_replies_finding_id_findings_id_fk",
           "tableFrom": "pending_replies",
-          "columnsFrom": ["finding_id"],
           "tableTo": "findings",
+          "columnsFrom": ["finding_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1880,20 +1890,20 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "provider_usage_run_id_review_runs_id_fk": {
           "name": "provider_usage_run_id_review_runs_id_fk",
           "tableFrom": "provider_usage",
-          "columnsFrom": ["run_id"],
           "tableTo": "review_runs",
+          "columnsFrom": ["run_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2108,6 +2118,12 @@
           "notNull": true,
           "default": false
         },
+        "review_shadow": {
+          "name": "review_shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2141,9 +2157,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2265,6 +2281,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "shadow": {
+          "name": "shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "complete": {
+          "name": "complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "started_at": {
           "name": "started_at",
           "type": "timestamp with time zone",
@@ -2303,20 +2332,20 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "review_runs_pull_request_id_pull_requests_id_fk": {
           "name": "review_runs_pull_request_id_pull_requests_id_fk",
           "tableFrom": "review_runs",
-          "columnsFrom": ["pull_request_id"],
           "tableTo": "pull_requests",
+          "columnsFrom": ["pull_request_id"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2412,9 +2441,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "spend_ledger_repo_month_idx": {
           "name": "spend_ledger_repo_month_idx",
@@ -2433,9 +2462,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "spend_ledger_pr_day_idx": {
           "name": "spend_ledger_pr_day_idx",
@@ -2460,9 +2489,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "spend_ledger_unsettled_idx": {
           "name": "spend_ledger_unsettled_idx",
@@ -2481,9 +2510,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2513,7 +2542,8 @@
         "outdated",
         "escalated",
         "unresolved",
-        "fix_claimed"
+        "fix_claimed",
+        "shadow_retired"
       ]
     },
     "public.finding_source": {
@@ -2524,7 +2554,7 @@
     "public.finding_status": {
       "name": "finding_status",
       "schema": "public",
-      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated"]
+      "values": ["open", "fixed", "declined", "disputed", "resolved_by_human", "outdated", "shadow"]
     },
     "public.learning_bootstrap_status": {
       "name": "learning_bootstrap_status",
@@ -2583,10 +2613,10 @@
     }
   },
   "schemas": {},
-  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
+  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

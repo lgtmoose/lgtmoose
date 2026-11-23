@@ -10,10 +10,13 @@ WORKDIR /repo
 COPY . .
 # The dashboard's static page too, for the docker compose dashboard service (dist/local/
 # dashboard-main.js serves it from /app/site); unused on AWS, where CloudFront serves it.
-RUN pnpm install --frozen-lockfile --filter "@lgtmoose/control..." --filter @lgtmoose/dashboard \
+# The deploy step installs prod dependencies from the lockfile. A filtered install leaves some of
+# those packages out of the store, and the deploy then resolves them again, which minimumReleaseAge
+# rejects for a locked version still under 3 days old. So install everything, as the sandbox does.
+RUN pnpm install --frozen-lockfile \
   && pnpm --filter "@lgtmoose/control..." run build \
   && pnpm --filter @lgtmoose/dashboard run build \
-  && pnpm --filter @lgtmoose/control deploy --legacy --prod /out \
+  && pnpm --filter @lgtmoose/control --frozen-lockfile deploy --legacy --prod /out \
   && cp -r apps/dashboard/dist /out/site
 
 FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54

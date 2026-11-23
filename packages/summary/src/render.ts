@@ -103,6 +103,11 @@ export interface SummaryInput {
    * out: no pointer.
    */
   commandHandle?: string;
+  /**
+   * How many of the PR's findings were retired from shadow mode since its last full review
+   * (NIC-1141): never posted, so they no longer count. The note asks for a full review.
+   */
+  shadowRetired?: number;
 }
 
 /** A GitHub App slug: what `commandHandle` must look like to be shown as code. */
@@ -112,6 +117,26 @@ const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/i;
 function renderCommandHandle(slug: string | undefined): string | undefined {
   if (slug === undefined || !SLUG.test(slug)) return undefined;
   return `_Commands: \`@${slug} help\` lists them._`;
+}
+
+/**
+ * The note on findings retired from shadow mode (NIC-1141), naming the command with the App's
+ * real handle, as the footer does; without a handle it names the command alone.
+ */
+function renderShadowRetired(
+  retired: number | undefined,
+  slug: string | undefined,
+): string | undefined {
+  if (retired === undefined || retired <= 0) return undefined;
+  const which =
+    retired === 1
+      ? "1 finding from shadow mode was never posted and no longer counts"
+      : `${retired} findings from shadow mode were never posted and no longer count`;
+  const command =
+    slug !== undefined && SLUG.test(slug)
+      ? `comment \`@${slug} full review\``
+      : "ask for a full review";
+  return `_${which}; ${command} to raise any that still apply._`;
 }
 
 /** The most learning IDs listed in the summary; the rest are counted. */
@@ -543,6 +568,8 @@ function renderAt(
   sections.push(renderChanges(input, ctx, detail));
   sections.push(renderStatus(input));
   for (const notice of input.notices ?? []) sections.push(`_${inline(clip(notice, 300))}_`);
+  const retired = renderShadowRetired(input.shadowRetired, input.commandHandle);
+  if (retired !== undefined) sections.push(retired);
   const findings = renderFindings(input.findings, detail.findingRows);
   if (findings !== undefined) sections.push(findings);
   if (input.tickets !== undefined) sections.push(renderTickets(input.tickets));

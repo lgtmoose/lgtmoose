@@ -40,6 +40,8 @@ function recorded(overrides: Partial<RecordedPull> = {}): RecordedPull {
     lastReviewedSha: HEAD,
     statusLabel: undefined,
     commentsThrough: undefined,
+    // A live install's record: its label is GitHub's (NIC-1141).
+    reviewLive: true,
     ...overrides,
   };
 }
@@ -176,6 +178,7 @@ describe("reconcile", () => {
         statusLabel: "Requires Changes",
         reviewEvent: undefined,
         reviewId: undefined,
+        shadow: false,
       },
     });
     expect(await reconcile(deps)).toMatchObject({
@@ -338,6 +341,7 @@ describe("reconcile", () => {
       statusLabel: "LGTM",
       reviewEvent: "APPROVE",
       reviewId: 99,
+      shadow: false,
     };
     const { deps, sent, restores, synced } = setup({
       pulls: [pull({ labels: ["Requires Changes"] })],
@@ -354,6 +358,37 @@ describe("reconcile", () => {
     expect(restores).toEqual([{ id: "pr-1", recordedHead: OLD, run: posted }]);
     expect(synced).toEqual([{ repo: "acme/shop", number: 7, target: "LGTM" }]);
     expect(sent).toEqual([]);
+  });
+
+  it("doesn't put a shadow run's label on GitHub (NIC-1141)", async () => {
+    // The record's label came from a shadow run: never on GitHub, so not synced to it.
+    const recordedShadow = setup({
+      pulls: [pull({ labels: ["Requires Changes"] })],
+      records: new Map([[7, { ...recorded({ statusLabel: "LGTM" }), reviewLive: false }]]),
+    });
+    expect(await reconcile(recordedShadow.deps)).toMatchObject({ labelsResynced: 0 });
+    expect(recordedShadow.synced).toEqual([]);
+
+    // Restored to a shadow run's record: restored, but its label isn't synced either.
+    const restoredShadow = setup({
+      pulls: [pull({ labels: ["Requires Changes"] })],
+      records: new Map([
+        [7, recorded({ headSha: OLD, lastReviewedSha: OLD, statusLabel: "Requires Changes" })],
+      ]),
+      posted: {
+        runId: "run-shadow",
+        headSha: HEAD,
+        statusLabel: "LGTM",
+        reviewEvent: "APPROVE",
+        reviewId: undefined,
+        shadow: true,
+      },
+    });
+    expect(await reconcile(restoredShadow.deps)).toMatchObject({
+      statesResynced: 1,
+      labelsResynced: 0,
+    });
+    expect(restoredShadow.synced).toEqual([]);
   });
 
   it("leaves the label alone when the restored run recorded none", async () => {

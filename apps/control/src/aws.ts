@@ -29,7 +29,20 @@ import {
   appJwt,
   repoPath,
 } from "@lgtmoose/poster";
-import { and, asc, count, desc, eq, gt, inArray, isNull, max, ne, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  inArray,
+  isNull,
+  max,
+  ne,
+  sql,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
@@ -41,6 +54,7 @@ import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { githubBootstrap } from "./bootstrap-github.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import { databaseTls } from "./database.js";
+import { retiredSinceFullReview, unpostedShadow } from "./shadow-findings.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -167,10 +181,20 @@ async function recordOnPr(
     .where(eq(pullRequests.id, run.pullRequestId))
     .for("update");
   if (await newerRunPosted(tx, run)) return;
+  // Whether the review it records was on GitHub (NIC-1141): a shadow run's wasn't. Only with a
+  // review: a label-only write (a covered run's) leaves it as the review it goes with.
+  const [mode] =
+    pr.review === undefined
+      ? []
+      : await tx
+          .select({ shadow: reviewRuns.shadow })
+          .from(reviewRuns)
+          .where(eq(reviewRuns.id, run.runId));
   await tx
     .update(pullRequests)
     .set({
       lastReviewedSha: pr.headSha,
+      ...(mode === undefined ? {} : { reviewShadow: mode.shadow }),
       ...(pr.review === undefined
         ? {}
         : { lastReviewEvent: pr.review.event, lastReviewId: pr.review.id ?? null }),
@@ -193,6 +217,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
         statusLabel: pullRequests.statusLabel,
         lastReviewEvent: pullRequests.lastReviewEvent,
         lastReviewId: pullRequests.lastReviewId,
+        reviewShadow: pullRequests.reviewShadow,
         headSha: reviewRuns.headSha,
         executionArn: reviewRuns.executionArn,
       })
@@ -209,6 +234,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           statusLabel: row.statusLabel ?? undefined,
           lastReviewEvent: REVIEW_EVENTS.find((event) => event === row.lastReviewEvent),
           lastReviewId: row.lastReviewId ?? undefined,
+          ...(row.reviewShadow === false ? { reviewLive: true } : {}),
           headSha: row.headSha,
           executionArn: row.executionArn ?? undefined,
         };
@@ -359,7 +385,10 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
               : { reviewEvent: result.review.event, reviewId: result.review.id ?? null }),
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
-            finishedAt: now(),
+            ...(result.complete === undefined ? {} : { complete: result.complete }),
+            // The database's clock, as the retire events' (NIC-1141): what a full review finished
+            // after is compared with when findings were retired.
+            finishedAt: sql`now()`,
           })
           .where(eq(reviewRuns.id, runId))
           .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });
@@ -402,6 +431,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             inArray(reviewRuns.status, ["queued", "running"]),
           ),
         );
+    },
+    async recordShadow(runId, shadow) {
+      await db.update(reviewRuns).set({ shadow }).where(eq(reviewRuns.id, runId));
     },
     async supersedeRun(runId) {
       // A run that already finished (or failed) keeps its status.
@@ -534,7 +566,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
     },
     async trackedFindings(pullRequestId) {
       const rows = await db
-        .select()
+        .select({ ...getTableColumns(findings), unpostedShadow: unpostedShadow() })
         .from(findings)
         .where(
           and(
@@ -569,6 +601,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 ...(row.fixClaimedAt === null
                   ? {}
                   : { fixClaimedAt: row.fixClaimedAt.toISOString() }),
+                ...(row.unpostedShadow === true ? { unpostedShadow: true } : {}),
               },
             ],
       );
@@ -606,8 +639,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
               set: {
                 runId,
                 // Never lowered: the enum runs from blocking to nit, so the least is the most
-                // severe.
-                severity: sql`least(${findings.severity}, excluded.severity)`,
+                // severe. One retired from shadow mode (NIC-1141) was never shown, so it's raised
+                // as new, at the severity raised now.
+                severity: sql`case when ${findings.status} = 'shadow' then excluded.severity else least(${findings.severity}, excluded.severity) end`,
                 // Reopened (from outdated): the new comment's ID, or none if it wasn't posted
                 // inline, since the old comment is on code that's gone. Still open: kept unless
                 // there's a new one.
@@ -625,8 +659,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: "open",
                 updatedAt: now(),
               },
-              // A finding someone declined, disputed or resolved stays that way.
-              setWhere: inArray(findings.status, ["open", "outdated", "fixed"]),
+              // A finding someone declined, disputed or resolved stays that way. One retired from
+              // shadow mode (NIC-1141) is raised again, now as a posted finding.
+              setWhere: inArray(findings.status, ["open", "outdated", "fixed", "shadow"]),
             })
             .returning({ id: findings.id });
           // Every row may have hit a declined, disputed or resolved finding, left as it was.
@@ -641,6 +676,33 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
           );
         }
       });
+    },
+    async retireShadowFindings(pullRequestId, sha) {
+      return db.transaction(async (tx) => {
+        const rows = await tx
+          .update(findings)
+          .set({ status: "shadow", updatedAt: now() })
+          .where(and(eq(findings.pullRequestId, pullRequestId), unpostedShadow()))
+          .returning({ id: findings.id });
+        if (rows.length > 0) {
+          await tx.insert(findingEvents).values(
+            rows.map((row) => ({
+              findingId: row.id,
+              type: "shadow_retired" as const,
+              actor: "self",
+              sha,
+            })),
+          );
+        }
+        return rows.length;
+      });
+    },
+    async retiredShadowFindings(pullRequestId) {
+      const rows = await db
+        .select({ fingerprint: findings.fingerprint })
+        .from(findings)
+        .where(and(eq(findings.pullRequestId, pullRequestId), retiredSinceFullReview()));
+      return rows.map((row) => row.fingerprint);
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),

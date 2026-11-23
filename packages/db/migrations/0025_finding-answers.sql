@@ -1,4 +1,4 @@
-ALTER TYPE "public"."finding_event_type" ADD VALUE 'fix_claimed';--> statement-breakpoint
+ALTER TYPE "public"."finding_event_type" ADD VALUE 'fix_claimed' BEFORE 'shadow_retired';--> statement-breakpoint
 ALTER TABLE "finding_events" ADD COLUMN "reason" text;--> statement-breakpoint
 ALTER TABLE "finding_events" ADD COLUMN "learn_pending" boolean;--> statement-breakpoint
 ALTER TABLE "finding_events" ADD COLUMN "learn_attempts" integer DEFAULT 0 NOT NULL;--> statement-breakpoint

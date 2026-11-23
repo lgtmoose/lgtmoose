@@ -29,6 +29,8 @@ export const FEEDBACK_STATUSES = [
   "disputed",
   "resolved_by_human",
   "outdated",
+  // Retired from shadow mode unanswered (NIC-1141): neither accepted nor rejected.
+  "shadow",
 ] as const;
 export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number];
 

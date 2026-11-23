@@ -70,6 +70,11 @@ export interface DashboardStackProps extends StackProps {
   /** The deploy config's `budgets` (NIC-1079), shown against spend on the Usage page. */
   budgets?: DeployConfig["budgets"];
   logRetention: RetentionDays;
+  /**
+   * Whether reviews are in shadow mode. Once it's off, the dashboard stops counting findings raised
+   * in shadow mode that were never posted and nobody answered (NIC-1141). Defaults to on.
+   */
+  shadow?: boolean;
 }
 
 /**
@@ -119,6 +124,7 @@ export class DashboardStack extends Stack {
         ARTIFACT_BUCKET: props.artifactBucket.bucketName,
         // The spend caps, for the Usage page (NIC-1079).
         LGTMOOSE_BUDGETS: JSON.stringify(props.budgets ?? {}),
+        LGTMOOSE_SHADOW: String(props.shadow ?? true),
         NODE_EXTRA_CA_CERTS: "/var/runtime/ca-cert.pem",
       },
       bundling: { externalModules: ["pg-native"] },

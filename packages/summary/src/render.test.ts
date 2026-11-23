@@ -182,6 +182,17 @@ describe("renderSummary", () => {
     expect(renderSummary(input())).not.toContain("didn");
   });
 
+  it("says how many findings from shadow mode no longer count, with the real handle (NIC-1141)", () => {
+    expect(renderSummary(input({ shadowRetired: 2, commandHandle: "lgtmoose-acme" }))).toContain(
+      "_2 findings from shadow mode were never posted and no longer count; comment `@lgtmoose-acme full review` to raise any that still apply._",
+    );
+    // Without a slug-shaped handle, the command alone.
+    expect(renderSummary(input({ shadowRetired: 1, commandHandle: "x` <b>" }))).toContain(
+      "_1 finding from shadow mode was never posted and no longer counts; ask for a full review to raise any that still apply._",
+    );
+    expect(renderSummary(input())).not.toContain("shadow mode");
+  });
+
   it("points at the commands with the App's real handle (NIC-1119)", () => {
     expect(renderSummary(input({ commandHandle: "lgtmoose-acme" }))).toContain(
       "_Commands: `@lgtmoose-acme help` lists them._",
