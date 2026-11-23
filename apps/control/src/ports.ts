@@ -63,7 +63,6 @@ export interface FileRecord {
   depth: "full" | "move" | "mechanical";
 }
 
-/** One of our findings recorded on a PR. */
 /**
  * What outcome learning did for one rejected finding: `skipped: "failed"` when it failed on it
  * and should be tried again (NIC-1140); any other skip, or a proposal, counts as done.
@@ -73,6 +72,7 @@ export interface RejectionResult {
   skipped?: string;
 }
 
+/** One of our findings recorded on a PR. */
 export interface FindingRecord {
   id: string;
   fingerprint: string;

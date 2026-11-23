@@ -2291,9 +2291,14 @@ export async function post(
       recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
     }
     // The fix claims the recheck looked at (NIC-1140), whatever it found: a finding still there
-    // goes back to its usual place in the order. Only once it gave verdicts and the run counts;
-    // each claim only while it's the one the run saw. Never fails the post.
-    if (progress.coveredBy === undefined && recheckPlan !== undefined) {
+    // goes back to its usual place in the order. Only once it gave verdicts and the run still
+    // counts (a stale run's recheck closed nothing, so its claims stay for the next run); each
+    // claim only while it's the one the run saw. Never fails the post.
+    if (
+      progress.coveredBy === undefined &&
+      recheckPlan !== undefined &&
+      staleReason(latest, pr.headSha) === undefined
+    ) {
       await clearFixClaims(deps, runId, manifest);
     }
     // What the judged replies led to, now that this attempt holds the run's claim.

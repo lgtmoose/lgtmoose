@@ -12,7 +12,7 @@ import { CALLBACK_PATH, handleDashboardRequest, type DashboardDeps } from "./das
 import { TOKEN_HEADER, clearTokenCache } from "./dashboard-findings.js";
 import { DashboardGitHubError, type DashboardGitHub, type RepoAccess } from "./dashboard-github.js";
 import { SESSION_COOKIE, SIGN_IN_COOKIE, type DashboardRequest } from "./dashboard-http.js";
-import { drizzleDashboardStore } from "./dashboard-store.js";
+import { AnswerRefusedError, drizzleDashboardStore } from "./dashboard-store.js";
 import { learnFromAnswers } from "./finding-answers.js";
 import { drizzleAnswerLearningStore } from "./outcome-learning-aws.js";
 
@@ -49,6 +49,8 @@ const LIMITED_RATE = "ghp_rate_token_jjjjjjjjjjjjjjj";
 const OUTSIDER = "ghp_outsider_token_kkkkkkkkkkk";
 /** A classic token without read:org: its membership can't be read. */
 const NO_READ_ORG = "ghp_no_read_org_mmmmmmmmmmmm";
+/** The repository was renamed: GitHub redirects. */
+const MOVED = "ghp_moved_token_nnnnnnnnnnnnnn";
 
 const people: Record<string, { login: string; access: RepoAccess }> = {
   [WRITER]: { login: "Carol", access: "write" },
@@ -62,6 +64,7 @@ const people: Record<string, { login: string; access: RepoAccess }> = {
   [LIMITED_RATE]: { login: "Jo", access: "write" },
   [OUTSIDER]: { login: "Kim", access: "read" },
   [NO_READ_ORG]: { login: "Lee", access: "write" },
+  [MOVED]: { login: "Max", access: "write" },
   // The dashboard session's own sign-in token.
   gho_user: { login: "Alice", access: "write" },
 };
@@ -88,6 +91,7 @@ const github: DashboardGitHub = {
     if (token === SSO) throw new DashboardGitHubError("reading a repository", 403, true);
     if (token === FORBIDDEN) throw new DashboardGitHubError("reading a repository", 403);
     if (token === DOWN) throw new DashboardGitHubError("reading a repository", 0);
+    if (token === MOVED) throw new DashboardGitHubError("reading a repository", 301);
     if (token === LIMITED_RATE) {
       throw new DashboardGitHubError("reading a repository", 403, false, true);
     }
@@ -359,6 +363,35 @@ describe("answering a finding with a token", () => {
     expect(event?.reason).not.toContain(token);
     expect(event?.reason).not.toContain("hunter22");
     expect(event?.reason).toContain("[redacted token]");
+  });
+
+  it("caps a reason redaction made longer, rather than failing the decline", async () => {
+    const id = await finding({ fingerprint: "long" });
+    // 90 secrets, each of which redaction lengthens: 1997 characters in, far more after.
+    const reason = 'password = "hunter22" '.repeat(90) + "x".repeat(17);
+    expect(reason.length).toBe(1997);
+    const answered = await ack(id, WRITER, { outcome: "declined", reason });
+    expect(answered.status).toBe(200);
+    const [event] = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
+    expect(event?.reason?.length).toBeLessThanOrEqual(2000);
+    expect(event?.reason).not.toContain("hunter22");
+  });
+
+  it("turns the database's own refusal of an answer into AnswerRefusedError", async () => {
+    const id = await finding({ fingerprint: "refused" });
+    await expect(deps.store.declineFinding(id, "", "a reason")).rejects.toBeInstanceOf(
+      AnswerRefusedError,
+    );
+    await expect(deps.store.claimFix(id, "")).rejects.toThrow(/login/);
+  });
+
+  it("says a renamed or transferred repository has moved", async () => {
+    const response = await handleDashboardRequest(
+      deps,
+      request("GET", "/api/findings", withToken(MOVED, { query: { repo: "acme/api", pr: "232" } })),
+    );
+    expect(response.status).toBe(404);
+    expect(response.body).toContain("has moved");
   });
 
   it("keeps a decline pending when learning failed on it, and gives it up after five", async () => {

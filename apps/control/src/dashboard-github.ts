@@ -165,13 +165,17 @@ export function githubDashboard(
           "x-github-api-version": "2022-11-28",
           "user-agent": "lgtmoose-dashboard",
         },
-        // A redirect would carry the token on; GitHub's API doesn't send one here.
-        redirect: "error",
+        // Never followed, so the token never goes on; a redirect is answered below.
+        redirect: "manual",
         signal: AbortSignal.timeout(timeout),
       });
     } catch {
       // A timeout or the network: GitHub couldn't be reached.
       throw new DashboardGitHubError(what, 0);
+    }
+    // GitHub redirects a renamed or transferred repository (301): it has moved.
+    if (response.status >= 300 && response.status < 400) {
+      throw new DashboardGitHubError(what, response.status);
     }
     if (!response.ok && response.status !== 404) {
       const limited =

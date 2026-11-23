@@ -7,10 +7,10 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
+import { MAX_DECLINE_REASON } from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
-import { MAX_REPLY_BODY } from "./replies-aws.js";
 
 /**
  * The dashboard's reads and its sessions (NIC-840). Every read takes the repositories the
@@ -115,6 +115,31 @@ export interface RunSummary {
   startedAt: string | undefined;
   finishedAt: string | undefined;
   createdAt: string;
+}
+
+/**
+ * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
+ * `lgtmoose_decline_finding` raised (SQLSTATE P0001) on its own checks. The API answers 400.
+ */
+export class AnswerRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AnswerRefusedError";
+  }
+}
+
+/** The answer functions' own refusals become `AnswerRefusedError`; anything else is rethrown. */
+async function answerCall<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const raised = error as { code?: unknown; message?: unknown; cause?: unknown };
+    const cause = raised.cause as { code?: unknown; message?: unknown } | undefined;
+    const code = raised.code ?? cause?.code;
+    const message = cause?.message ?? raised.message;
+    if (code === "P0001" && typeof message === "string") throw new AnswerRefusedError(message);
+    throw error;
+  }
 }
 
 export interface DashboardStore {
@@ -302,18 +327,19 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
     async claimFix(id, login) {
       // Through `lgtmoose_claim_fix` (migration 0025): the dashboard's login may call it, not
       // write findings or events itself. Null when the finding can't take a claim.
-      const result = (await db.execute(
-        sql`select lgtmoose_claim_fix(${id}::uuid, ${login}) as at`,
+      const result = (await answerCall(() =>
+        db.execute(sql`select lgtmoose_claim_fix(${id}::uuid, ${login}) as at`),
       )) as unknown as { rows: { at: unknown }[] };
       return result.rows[0]?.at !== null && result.rows[0]?.at !== undefined;
     },
     async declineFinding(id, login, reason) {
       // Through `lgtmoose_decline_finding` (migration 0025), which also writes the `declined`
       // event with the reason and `learn_pending`, for the reconciler's outcome learning. The
-      // reason is kept as a reply's body is: capped, and with secrets redacted.
-      const stored = redactSensitive(reason.slice(0, MAX_REPLY_BODY)).text;
-      const result = (await db.execute(
-        sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${stored}) as done`,
+      // reason is kept as a reply's body is, with secrets redacted, then capped to what the
+      // function takes: redaction can make it longer.
+      const stored = redactSensitive(reason).text.slice(0, MAX_DECLINE_REASON).trim();
+      const result = (await answerCall(() =>
+        db.execute(sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${stored}) as done`),
       )) as unknown as { rows: { done: unknown }[] };
       return result.rows[0]?.done === true;
     },

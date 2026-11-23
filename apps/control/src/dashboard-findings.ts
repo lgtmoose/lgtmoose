@@ -8,6 +8,7 @@ import {
   type DashboardResponse,
 } from "./dashboard-http.js";
 import type { DashboardDeps } from "./dashboard.js";
+import { AnswerRefusedError } from "./dashboard-store.js";
 import { resolutionHeld } from "./thread-policy.js";
 
 /**
@@ -134,6 +135,12 @@ function githubFailure(error: unknown): DashboardResponse | undefined {
     return json(503, { error: "GitHub's rate limit was reached: try again in a few minutes" });
   }
   if (error.status === 401) return json(401, { error: "bad-token" });
+  // A renamed or transferred repository: GitHub redirects, and the token isn't sent on.
+  if (error.status >= 300 && error.status < 400) {
+    return json(404, {
+      error: "the repository has moved (renamed or transferred): ask for it by its new owner/name",
+    });
+  }
   if (error.status === 403 && error.sso) {
     return json(403, {
       error:
@@ -295,10 +302,17 @@ export async function answerFinding(
       });
     }
   }
-  const done =
-    answer.outcome === "fixed"
-      ? await deps.store.claimFix(target.id, asker.login)
-      : await deps.store.declineFinding(target.id, asker.login, answer.reason);
+  let done: boolean;
+  try {
+    done =
+      answer.outcome === "fixed"
+        ? await deps.store.claimFix(target.id, asker.login)
+        : await deps.store.declineFinding(target.id, asker.login, answer.reason);
+  } catch (error) {
+    // The database's own checks refused it: the request was invalid, not the server.
+    if (error instanceof AnswerRefusedError) return json(400, { error: error.message });
+    throw error;
+  }
   if (!done) return json(409, { error: "already closed" });
   // Who answered what; never the reason's text or a token.
   deps.log("finding answered", {

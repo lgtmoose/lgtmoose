@@ -224,6 +224,21 @@ describe("repoAccess", () => {
     await expect(down.repoAccess("t", "acme/app")).rejects.toMatchObject({ status: 0 });
   });
 
+  it("doesn't follow a redirect, and says the repository moved", async () => {
+    const { fetch, calls } = fakeFetch({
+      "/repos/acme/app": {
+        status: 301,
+        body: {},
+        headers: { location: "https://api.github.com/repositories/1" },
+      },
+    });
+    await expect(githubDashboard({ fetch }).repoAccess("t", "acme/app")).rejects.toMatchObject({
+      status: 301,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.init.redirect).toBe("manual");
+  });
+
   it("tells GitHub's rate limit from a refusal", async () => {
     const limited = githubDashboard({
       fetch: fakeFetch({
