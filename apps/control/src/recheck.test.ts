@@ -265,16 +265,17 @@ describe("findings someone said are fixed (NIC-1140)", () => {
     expect(rankRechecks(records, 1).map((row) => row.id)).toEqual(["claimed-nit"]);
   });
 
-  it("count on an incremental review when anything changed, near the finding or not", () => {
+  it("only move up the order: an unrelated change doesn't make one checked", () => {
     const records = [
-      record({ id: "far", path: "docs/guide.md", severity: "nit", fixClaimedAt: claimed }),
-      record({ id: "unclaimed-far", path: "docs/other.md" }),
+      record({ id: "near", severity: "nit", fixClaimedAt: claimed }),
+      record({ id: "blocking" }),
+      // Claimed fixed, but only a README changed: not checked, so it can't close.
+      record({ id: "far", path: "src/other/far.ts", fixClaimedAt: claimed }),
     ];
     expect(
       selectRechecks(records, ["src/pay/usePayment.ts"], new Map()).map((row) => row.id),
-    ).toEqual(["far"]);
-    // Nothing changed: nothing could have fixed it.
-    expect(selectRechecks(records, [], new Map())).toEqual([]);
+    ).toEqual(["near", "blocking"]);
+    expect(selectRechecks(records, ["README.md"], new Map())).toEqual([]);
   });
 });
 

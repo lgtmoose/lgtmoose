@@ -34,13 +34,22 @@ export interface DashboardGitHub {
     limit: number,
   ): Promise<{ repos: string[]; writeRepos: string[] }>;
   /**
-   * The token's person's own permission on `repo` (owner/name), as GitHub reports it to them
-   * (NIC-1140): `write` for push, maintain or admin, `read` when they can see it, `none` when
-   * they can't (GitHub answers 404). Works with any token that can read the repository: a
-   * personal access token, `gh auth token`, or the App's user token.
+   * What the token may do on `repo` (owner/name) (NIC-1140): the person's own permission as
+   * GitHub reports it, limited by what the token itself can do.
+   *
+   * - `write`: the person has push, maintain or admin, and the token is a classic or OAuth token
+   *   whose scopes (`X-OAuth-Scopes`) include `repo`, or `public_repo` on a public repository.
+   *   `gh auth token` is one.
+   * - `token-read-only`: the person could write, but the token can't be shown to: a classic
+   *   token without those scopes, or a fine-grained or App token, whose permissions GitHub
+   *   doesn't report. Such a token can list, not answer.
+   * - `read`: the person can see the repository and no more. `none`: GitHub answers 404.
    */
-  repoAccess(token: string, repo: string): Promise<"write" | "read" | "none">;
+  repoAccess(token: string, repo: string): Promise<RepoAccess>;
 }
+
+/** What a token may do on a repository (see `DashboardGitHub.repoAccess`). */
+export type RepoAccess = "write" | "token-read-only" | "read" | "none";
 
 /** The URL GitHub's sign-in starts at. */
 export function authorizeUrl(input: {
@@ -95,17 +104,30 @@ const repositoriesReply = z.object({
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
-/** Raised when a GitHub call fails; its message never holds a token or the reply body. */
+/**
+ * Raised when a GitHub call fails; its message never holds a token or the reply body. `status`
+ * is 0 when GitHub couldn't be reached. `sso` is set when GitHub asks for the token to be
+ * authorized for an organization's SAML single sign-on (`X-GitHub-SSO`).
+ */
 export class DashboardGitHubError extends Error {
-  constructor(what: string, status: number) {
-    super(`GitHub refused ${what} (HTTP ${status}).`);
+  readonly status: number;
+  readonly sso: boolean;
+  constructor(what: string, status: number, sso = false) {
+    super(
+      status === 0
+        ? `GitHub couldn't be reached for ${what}.`
+        : `GitHub refused ${what} (HTTP ${status}).`,
+    );
     this.name = "DashboardGitHubError";
+    this.status = status;
+    this.sso = sso;
   }
 }
 
 const PAGE = 100;
 
 const repoReply = z.object({
+  private: z.boolean().optional(),
   permissions: z
     .object({
       admin: z.boolean().optional(),
@@ -124,17 +146,26 @@ export function githubDashboard(
   const fetchFn: Fetch = options.fetch ?? ((url, init) => fetch(url, init));
   const timeout = options.timeoutMs ?? 10_000;
   const get = async (token: string, path: string, what: string): Promise<Response> => {
-    const response = await fetchFn(`${api}${path}`, {
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "lgtmoose-dashboard",
-      },
-      signal: AbortSignal.timeout(timeout),
-    });
-    if (!response.ok && response.status !== 404)
-      throw new DashboardGitHubError(what, response.status);
+    let response: Response;
+    try {
+      response = await fetchFn(`${api}${path}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${token}`,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "lgtmoose-dashboard",
+        },
+        // A redirect would carry the token on; GitHub's API doesn't send one here.
+        redirect: "error",
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch {
+      // A timeout or the network: GitHub couldn't be reached.
+      throw new DashboardGitHubError(what, 0);
+    }
+    if (!response.ok && response.status !== 404) {
+      throw new DashboardGitHubError(what, response.status, response.headers.has("x-github-sso"));
+    }
     return response;
   };
   return {
@@ -188,15 +219,24 @@ export function githubDashboard(
       const can = repoReply.safeParse(await response.json());
       if (!can.success) return "none";
       const permissions = can.data.permissions;
+      // A public repository answers anyone; only a token GitHub says can pull it reads it.
+      if (permissions?.pull !== true) return "none";
       if (
-        permissions?.push === true ||
-        permissions?.maintain === true ||
-        permissions?.admin === true
+        permissions.push !== true &&
+        permissions.maintain !== true &&
+        permissions.admin !== true
       ) {
+        return "read";
+      }
+      // The person may write; may the token? Only a classic or OAuth token says (its scopes).
+      // A fine-grained or App token's permissions aren't reported, so it can't be shown to.
+      const scopes = response.headers.get("x-oauth-scopes");
+      if (scopes === null) return "token-read-only";
+      const granted = new Set(scopes.split(",").map((scope) => scope.trim()));
+      if (granted.has("repo") || (can.data.private === false && granted.has("public_repo"))) {
         return "write";
       }
-      // A public repository answers anyone; only a token GitHub says can pull it reads it.
-      return permissions?.pull === true ? "read" : "none";
+      return "token-read-only";
     },
     async visibleRepos(token, owners, limit) {
       const repos = new Set<string>();

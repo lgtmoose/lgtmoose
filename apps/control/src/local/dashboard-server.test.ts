@@ -115,7 +115,30 @@ describe("the compose dashboard server", () => {
       headers: { "x-forwarded-for": "198.51.100.7" },
     });
     expect(response.status).toBe(404);
-    expect(seen.at(-1)).toMatchObject({ method: "POST", body: '{"outcome":"fixed"}' });
+    expect(seen.at(-1)).toMatchObject({
+      method: "POST",
+      body: '{"outcome":"fixed"}',
+      clientIp: "198.51.100.7",
+    });
+  });
+
+  it("answers an oversized chunked body with 413, without handing it on", async () => {
+    const before = seen.length;
+    const big = new TextEncoder().encode("x".repeat(20 * 1024));
+    const response = await fetch(`${base}/api/findings/x/ack`, {
+      method: "POST",
+      // A stream: sent chunked, with no Content-Length to refuse it up front.
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(big);
+          controller.close();
+        },
+      }),
+      duplex: "half",
+      headers: { "x-forwarded-for": "198.51.100.8" },
+    } as RequestInit);
+    expect(response.status).toBe(413);
+    expect(seen.length).toBe(before);
   });
 
   it("allows only GET and POST on the API, and answers a handler's failure with 500", async () => {

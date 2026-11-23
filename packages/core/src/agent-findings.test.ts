@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { agentFindingsMarkdown, answerRequestSchema, type AgentFinding } from "./agent-findings.js";
+import {
+  agentFindingsMarkdown,
+  answerRequestSchema,
+  plainLine,
+  type AgentFinding,
+} from "./agent-findings.js";
 
 const finding = (over: Partial<AgentFinding> = {}): AgentFinding => ({
   id: "0b61857d-3dc4-43e5-9bb2-6eafd3446db7",
@@ -83,6 +88,34 @@ describe("agentFindingsMarkdown", () => {
     expect(text).toContain("## 2. Blocking:");
     expect(text).toContain("the pull request as a whole");
     expect(text).toContain("`npx lgtmoose findings ack <id> fixed`");
+  });
+});
+
+describe("plainLine", () => {
+  it("takes out control characters, ANSI escapes and Unicode line breaks", () => {
+    expect(plainLine("a\u001b[31mred\u001b[0m\u0085b\u2028c\u2029d\te\u0007")).toBe(
+      "a [31mred [0m b c d e",
+    );
+  });
+
+  it("keeps a body's newlines in the markdown, without its control characters", () => {
+    const text = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [
+        {
+          id: "x",
+          repo: "acme/app",
+          number: 7,
+          severity: "nit",
+          ruleCategory: "style",
+          title: "t",
+          body: "line one\r\nline\u001b[2J two\u2028",
+        },
+      ],
+    });
+    expect(text).toContain("line one\nline [2J two ");
+    expect(text).not.toContain("\u001b");
   });
 });
 

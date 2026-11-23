@@ -14,6 +14,12 @@ export interface DashboardRequest {
   cookies: Readonly<Record<string, string>>;
   /** The request's body as text, when it has one (NIC-1140: an answer to a finding). */
   body?: string;
+  /**
+   * The client's address, for limiting failed token sign-ins (NIC-1140): CloudFront's
+   * `CloudFront-Viewer-Address`, else the connection's. A caller can set the header when it goes
+   * to the API's own URL, so the limit also counts failures in all.
+   */
+  clientIp?: string;
 }
 
 export interface DashboardResponse {
@@ -30,7 +36,7 @@ export interface HttpApiEvent {
   headers?: Record<string, string | undefined>;
   cookies?: string[];
   queryStringParameters?: Record<string, string | undefined>;
-  requestContext?: { http?: { method?: string } };
+  requestContext?: { http?: { method?: string; sourceIp?: string } };
   body?: string;
   isBase64Encoded?: boolean;
 }
@@ -57,18 +63,33 @@ export function parseCookies(values: readonly string[]): Record<string, string> 
   return cookies;
 }
 
+/** The viewer's address from `CloudFront-Viewer-Address` (`ip:port`), else the source's. */
+function clientAddress(viewer: string | undefined, source: string | undefined): string | undefined {
+  if (viewer !== undefined) {
+    const colon = viewer.lastIndexOf(":");
+    const address = colon > 0 ? viewer.slice(0, colon) : viewer;
+    if (address !== "") return address;
+  }
+  return source === undefined || source === "" ? undefined : source;
+}
+
 export function fromHttpApiEvent(event: HttpApiEvent): DashboardRequest {
   const headers: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(event.headers ?? {})) {
     headers[name.toLowerCase()] = value;
   }
   const cookieValues = [...(event.cookies ?? []), ...(headers.cookie ? [headers.cookie] : [])];
+  const clientIp = clientAddress(
+    headers["cloudfront-viewer-address"],
+    event.requestContext?.http?.sourceIp,
+  );
   return {
     method: (event.requestContext?.http?.method ?? "GET").toUpperCase(),
     path: event.rawPath ?? "/",
     query: event.queryStringParameters ?? {},
     headers,
     cookies: parseCookies(cookieValues),
+    ...(clientIp === undefined ? {} : { clientIp }),
     ...(event.body === undefined
       ? {}
       : {

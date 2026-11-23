@@ -8,6 +8,7 @@ const DASHBOARD = "https://d123.cloudfront.net";
 
 interface Call {
   url: string;
+  redirect: string | undefined;
   method: string;
   headers: Record<string, string>;
   body: unknown;
@@ -47,6 +48,7 @@ function deps(
         calls.push({
           url,
           method: init.method ?? "GET",
+          redirect: init.redirect,
           headers: init.headers as Record<string, string>,
           body: init.body === undefined ? undefined : JSON.parse(init.body as string),
         });
@@ -81,6 +83,8 @@ describe("lgtmoose findings <repo>#<pr>", () => {
     expect(result.exitCode).toBe(0);
     expect(calls[0]?.url).toBe(`${DASHBOARD}/api/findings?repo=acme%2Fapp&pr=232`);
     expect(calls[0]?.headers[TOKEN_HEADER]).toBe("ghp_token_from_gh");
+    // A redirect is never followed with the token on it.
+    expect(calls[0]?.redirect).toBe("error");
     expect(result.stdout).toContain("# LGTMoose findings on acme/app#232");
     expect(result.stdout).toContain(`- ID: \`${ID}\``);
     expect(result.stdout).toContain("lgtmoose findings ack <id> fixed");
@@ -98,6 +102,14 @@ describe("lgtmoose findings <repo>#<pr>", () => {
       findingsDeps: async () => d,
     });
     expect(text.stdout).toBe(`${ID}  should_fix src/cart.ts:42  Quantity drops the note\n`);
+    const { deps: escaped } = deps({
+      reply: { body: { findings: [{ ...finding, title: "Bad\u001b[2J\u2028title" }] } },
+    });
+    const clean = await run(["findings", "acme/app#232", "--format", "text"], {
+      findingsDeps: async () => escaped,
+    });
+    expect(clean.stdout).toContain("Bad [2J title");
+    expect(clean.stdout).not.toContain("\u001b");
   });
 
   it("takes the dashboard's URL from --url or the environment, localhost for compose", async () => {
@@ -135,6 +147,16 @@ describe("lgtmoose findings <repo>#<pr>", () => {
         deps({ reply: { status: 404, body: { error: "no such repository" } } }).deps,
     });
     expect(hidden.stderr).toContain("The dashboard refused: no such repository.");
+    const down = await run(["findings", "acme/app#1"], {
+      findingsDeps: async () =>
+        deps({ reply: { status: 503, body: { error: "GitHub is unavailable" } } }).deps,
+    });
+    expect(down.stderr).toContain("couldn't be asked about your access just now");
+    const slow = await run(["findings", "acme/app#1"], {
+      findingsDeps: async () =>
+        deps({ reply: { status: 429, body: { error: "too-many-failures" } } }).deps,
+    });
+    expect(slow.stderr).toContain("Too many failed sign-ins");
   });
 });
 

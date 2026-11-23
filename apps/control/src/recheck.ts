@@ -164,7 +164,8 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
  * New side only:
  *
  * - -1 (NIC-1140): someone said it's fixed, from the CLI or the dashboard: first, whatever its
- *   severity or line. It still closes only by the recheck's rules;
+ *   severity or line. The claim changes only the order (a claimed nit is checked too): it's
+ *   picked by the same changed-file rules as the rest, and closes only by the recheck's rules;
  * - 0, 1: open blocking, then open should-fix, with its cited line still there;
  * - 2 to 4 (NIC-1124): open, any severity, nits included, its cited line gone at head
  *   (`lines`: edited or deleted, a committed suggestion among them), so it goes `outdated`
@@ -283,8 +284,8 @@ export function selectRechecks(
   if (changed.length === 0 || limit <= 0) return [];
   const affected = records.filter((record) => {
     if (tier(record, lines) === undefined) return false;
-    // Someone said it's fixed (NIC-1140): the fix may be anywhere the commits changed.
-    if (record.fixClaimedAt !== undefined) return true;
+    // A fix claim (NIC-1140) only moves a finding up the order: it's picked by the same
+    // changed-file rules as any other, so a claim and an unrelated push can't close it.
     if (lineGone(record, lines)) return changed.includes(record.path);
     return changed.some((path) => isRelated(record.path, path, imports));
   });
@@ -494,12 +495,11 @@ export async function recheckJob(input: {
     await readImports(pool.map((record) => record.path));
     await readImports([...new Set([...ownChanged.values()].flat())].slice(0, MAX_IMPORT_FILES));
     picked = rankRechecks(
-      pool.filter((record) => {
-        const since = ownChanged.get(record.raisedAtSha) ?? [];
-        // Someone said it's fixed (NIC-1140): any change since it was raised may hold the fix.
-        if (record.fixClaimedAt !== undefined) return since.length > 0;
-        return since.some((path) => isRelated(record.path, path, imports));
-      }),
+      pool.filter((record) =>
+        (ownChanged.get(record.raisedAtSha) ?? []).some((path) =>
+          isRelated(record.path, path, imports),
+        ),
+      ),
       limit,
       raisedAt,
       lines,

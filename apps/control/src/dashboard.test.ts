@@ -60,6 +60,7 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
         line: 1,
         source: "self" as const,
         sourceLogin: undefined,
+        status: "open" as const,
         fixClaimedAt: undefined,
         fixClaimedBy: undefined,
         createdAt: NOW.toISOString(),

@@ -58,11 +58,19 @@ function fenced(text: string): string {
 }
 
 /** One line of plain text: newlines and backticks out, so it can't break the list around it. */
-function oneLine(text: string): string {
+export function plainLine(text: string): string {
+  // Control characters (ANSI escapes and NEL included) and Unicode line and paragraph
+  // separators become spaces, so text can't move a terminal's cursor or start a new line.
   return text
-    .replace(/[\r\n]+/g, " ")
+    .replace(/[\p{Cc}\u2028\u2029]+/gu, " ")
     .replaceAll("`", "'")
+    .replace(/ {2,}/g, " ")
     .trim();
+}
+
+/** A block's text with control characters out, newlines and tabs kept. */
+function plainBlock(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/[^\P{Cc}\n\t]|[\u2028\u2029]/gu, " ");
 }
 
 /**
@@ -97,22 +105,22 @@ export function agentFindingsMarkdown(input: {
     const where =
       finding.path === undefined
         ? "the pull request as a whole"
-        : `\`${oneLine(finding.path)}${finding.line === undefined ? "" : `:${finding.line}`}\``;
-    lines.push(`## ${index + 1}. ${SEVERITY_LABEL[finding.severity]}: ${oneLine(finding.title)}`);
+        : `\`${plainLine(finding.path)}${finding.line === undefined ? "" : `:${finding.line}`}\``;
+    lines.push(`## ${index + 1}. ${SEVERITY_LABEL[finding.severity]}: ${plainLine(finding.title)}`);
     lines.push("");
     lines.push(`- ID: \`${finding.id}\``);
     lines.push(
       `- Where: ${where}${finding.status === "outdated" ? " (that line has changed since)" : ""}`,
     );
     lines.push(
-      `- Category: ${oneLine(finding.ruleCategory)}${isProtectedCategory(finding.ruleCategory) ? " (protected: closes only when the fix is confirmed in a changed file)" : ""}`,
+      `- Category: ${plainLine(finding.ruleCategory)}${isProtectedCategory(finding.ruleCategory) ? " (protected: closes only when the fix is confirmed in a changed file)" : ""}`,
     );
     if (finding.fixClaimedAt !== undefined) {
       lines.push(
-        `- Answered: fixed${finding.fixClaimedBy === undefined ? "" : ` by ${oneLine(finding.fixClaimedBy)}`}, waiting for the next review to check it`,
+        `- Answered: fixed${finding.fixClaimedBy === undefined ? "" : ` by ${plainLine(finding.fixClaimedBy)}`}, waiting for the next review to check it`,
       );
     }
-    lines.push("", fenced(finding.body), "");
+    lines.push("", fenced(plainBlock(finding.body)), "");
   });
   return lines.join("\n");
 }

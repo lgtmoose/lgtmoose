@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzleFindingStore } from "./aws.js";
 import { CALLBACK_PATH, handleDashboardRequest, type DashboardDeps } from "./dashboard.js";
 import { TOKEN_HEADER, clearTokenCache } from "./dashboard-findings.js";
-import { DashboardGitHubError, type DashboardGitHub } from "./dashboard-github.js";
+import { DashboardGitHubError, type DashboardGitHub, type RepoAccess } from "./dashboard-github.js";
 import { SESSION_COOKIE, SIGN_IN_COOKIE, type DashboardRequest } from "./dashboard-http.js";
 import { drizzleDashboardStore } from "./dashboard-store.js";
 import { learnFromAnswers } from "./finding-answers.js";
@@ -39,12 +39,21 @@ const WRITER = "ghp_writer_token_aaaaaaaaaaaa";
 const READER = "ghp_reader_token_bbbbbbbbbbbb";
 const AUTHOR = "ghp_author_token_cccccccccccc";
 const STRANGER = "ghp_stranger_token_dddddddddd";
+/** The person may write, but the token can't: a fine-grained or scopeless token. */
+const LIMITED = "github_pat_limited_ffffffffff";
+const SSO = "ghp_sso_token_gggggggggggggggg";
+const FORBIDDEN = "ghp_forbidden_token_hhhhhhhhhh";
+const DOWN = "ghp_down_token_iiiiiiiiiiiiiiii";
 
-const people: Record<string, { login: string; access: "write" | "read" | "none" }> = {
+const people: Record<string, { login: string; access: RepoAccess }> = {
   [WRITER]: { login: "Carol", access: "write" },
   [READER]: { login: "Dan", access: "read" },
   [AUTHOR]: { login: "bob", access: "write" },
   [STRANGER]: { login: "Eve", access: "none" },
+  [LIMITED]: { login: "Fay", access: "token-read-only" },
+  [SSO]: { login: "Gus", access: "write" },
+  [FORBIDDEN]: { login: "Hal", access: "write" },
+  [DOWN]: { login: "Ivy", access: "write" },
   // The dashboard session's own sign-in token.
   gho_user: { login: "Alice", access: "write" },
 };
@@ -63,6 +72,9 @@ const github: DashboardGitHub = {
   visibleRepos: async () => ({ repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] }),
   async repoAccess(token, repo) {
     lookups.push(`access:${token}:${repo}`);
+    if (token === SSO) throw new DashboardGitHubError("reading a repository", 403, true);
+    if (token === FORBIDDEN) throw new DashboardGitHubError("reading a repository", 403);
+    if (token === DOWN) throw new DashboardGitHubError("reading a repository", 0);
     return repo === "acme/api" ? (people[token]?.access ?? "none") : "none";
   },
 };
@@ -249,24 +261,28 @@ describe("answering a finding with a token", () => {
     const [row] = await db.select().from(findings).where(eq(findings.id, id));
     expect(row?.status).toBe("open");
     expect(row?.fixClaimedBy).toBe("Carol");
-    expect(row?.fixClaimedAt?.toISOString()).toBe(NOW.toISOString());
+    // The database's time, to the millisecond, so the recheck's copy of it matches exactly.
+    expect(row?.fixClaimedAt?.getUTCMilliseconds()).toBeTypeOf("number");
     const events = await db.select().from(findingEvents).where(eq(findingEvents.findingId, id));
     expect(events.map((event) => [event.type, event.actorLogin])).toEqual([
       ["fix_claimed", "Carol"],
     ]);
     // The recheck sees the claim.
     const tracked = await drizzleFindingStore(db).trackedFindings(pullId);
-    expect(tracked.find((record) => record.id === id)?.fixClaimedAt).toBe(NOW.toISOString());
+    expect(tracked.find((record) => record.id === id)?.fixClaimedAt).toBe(
+      row?.fixClaimedAt?.toISOString(),
+    );
   });
 
   it("keeps a claim made again after the run's recheck looked, and clears the one it saw", async () => {
     const id = await finding();
     await ack(id, WRITER, { outcome: "fixed" });
     const store = drizzleFindingStore(db);
+    const seen = (await store.trackedFindings(pullId))[0]?.fixClaimedAt ?? "";
     // The run saw an earlier claim: this one is newer, so it stays.
     await store.clearFixClaims?.([{ findingId: id, fixClaimedAt: "2026-11-23T09:00:00.000Z" }]);
-    expect((await store.trackedFindings(pullId))[0]?.fixClaimedAt).toBe(NOW.toISOString());
-    await store.clearFixClaims?.([{ findingId: id, fixClaimedAt: NOW.toISOString() }]);
+    expect((await store.trackedFindings(pullId))[0]?.fixClaimedAt).toBe(seen);
+    await store.clearFixClaims?.([{ findingId: id, fixClaimedAt: seen }]);
     const [row] = await db.select().from(findings).where(eq(findings.id, id));
     expect([row?.status, row?.fixClaimedAt, row?.fixClaimedBy]).toEqual(["open", null, null]);
   });
@@ -346,6 +362,84 @@ describe("answering a finding with a token", () => {
     expect(
       (await ack("00000000-0000-4000-8000-000000000000", WRITER, { outcome: "fixed" })).status,
     ).toBe(404);
+  });
+});
+
+describe("review round 1 (NIC-1140)", () => {
+  it("lets a token that can't write list, not answer", async () => {
+    const id = await finding();
+    const listed = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(LIMITED, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    expect(listed.status).toBe(200);
+    const answered = await ack(id, LIMITED, { outcome: "fixed" });
+    expect(answered.status).toBe(403);
+    expect(answered.body).toContain("can't write");
+  });
+
+  it("remembers a refused token, and limits failed sign-ins per client", async () => {
+    const bad = "ghp_unknown_token_eeeeeeeeeeee";
+    const list = (token: string, clientIp: string) =>
+      handleDashboardRequest(
+        deps,
+        request(
+          "GET",
+          "/api/findings",
+          withToken(token, { query: { repo: "acme/api", pr: "232" }, clientIp }),
+        ),
+      );
+    expect((await list(bad, "203.0.113.1")).status).toBe(401);
+    expect((await list(bad, "203.0.113.1")).status).toBe(401);
+    // GitHub was asked once: the refusal is remembered by the token's hash.
+    expect(lookups.filter((entry) => entry === `login:${bad}`)).toHaveLength(1);
+    for (let i = 0; i < 10; i += 1) await list(bad, "203.0.113.1");
+    expect((await list(bad, "203.0.113.1")).status).toBe(429);
+    // Even a good token, from that client, until the window ends; others go on.
+    expect((await list(READER, "203.0.113.1")).status).toBe(429);
+    expect((await list(READER, "203.0.113.2")).status).toBe(200);
+  });
+
+  it("says why GitHub refused, or that it couldn't be asked", async () => {
+    const id = await finding();
+    for (const [token, status, text] of [
+      [SSO, 403, "single sign-on"],
+      [FORBIDDEN, 403, "refused this token"],
+      [DOWN, 503, "couldn't be asked"],
+    ] as const) {
+      const response = await ack(id, token, { outcome: "fixed" });
+      expect(response.status).toBe(status);
+      expect(response.body).toContain(text);
+    }
+  });
+
+  it("won't take a fix claim the recheck can't check", async () => {
+    const left = await finding({ side: "LEFT", fingerprint: "left" });
+    const wide = await finding({ path: null, line: null, side: null, fingerprint: "wide" });
+    for (const id of [left, wide]) {
+      const response = await ack(id, WRITER, { outcome: "fixed" });
+      expect(response.status).toBe(409);
+      expect(response.body).toContain("a recheck can't check this finding");
+    }
+    // It can still be declined.
+    expect((await ack(left, WRITER, { outcome: "declined", reason: "old code" })).status).toBe(200);
+  });
+
+  it("lists a PR's outdated findings too, with their status", async () => {
+    await finding({ status: "outdated", fingerprint: "o" });
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(READER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    expect(JSON.parse(response.body)).toMatchObject({ findings: [{ status: "outdated" }] });
   });
 });
 

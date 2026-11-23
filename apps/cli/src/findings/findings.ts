@@ -1,6 +1,11 @@
 import { parseArgs } from "node:util";
 import { STACK_NAMES, STACK_OUTPUTS, type DeployConfig } from "@lgtmoose/config";
-import { agentFindingSchema, agentFindingsMarkdown, type AgentFinding } from "@lgtmoose/core";
+import {
+  agentFindingSchema,
+  agentFindingsMarkdown,
+  plainLine,
+  type AgentFinding,
+} from "@lgtmoose/core";
 import { z } from "zod";
 import type { StackLookup } from "../deploy/aws-cloudformation.js";
 import { errorMessage } from "../errors.js";
@@ -23,7 +28,8 @@ This works in shadow mode too, where findings aren't on GitHub. Nothing is poste
                     protected finding. Needs write access to the repository.
 
 Your GitHub token comes from GITHUB_TOKEN, GH_TOKEN or \`gh auth token\`. GitHub says who you are
-and what you can do on the repository; the token isn't kept.
+and what you can do on the repository; the token isn't kept. Answering needs a token that can
+write: \`gh auth token\`, or a classic token with the repo scope. A fine-grained token can list only.
 
 Options:
   --format <f>   md (default), json or text
@@ -123,6 +129,8 @@ async function call(
       ...(init.body === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    // Never followed: a redirect would carry the token header to another origin.
+    redirect: "error",
     signal: AbortSignal.timeout(30_000),
   });
   const text = await response.text();
@@ -138,6 +146,14 @@ async function call(
     if (response.status === 401) {
       throw new UsageError(`GitHub didn't accept your token (${why}).`);
     }
+    if (response.status === 429) {
+      throw new UsageError(`Too many failed sign-ins from here: wait a few minutes (${why}).`);
+    }
+    if (response.status === 503) {
+      throw new UsageError(
+        `GitHub couldn't be asked about your access just now: ${why}. Try again.`,
+      );
+    }
     throw new UsageError(`The dashboard refused: ${why}.`);
   }
   return body;
@@ -150,9 +166,9 @@ function formatText(repo: string, number: number, findings: readonly AgentFindin
     const where =
       finding.path === undefined
         ? ""
-        : ` ${finding.path}${finding.line === undefined ? "" : `:${finding.line}`}`;
+        : ` ${plainLine(finding.path)}${finding.line === undefined ? "" : `:${finding.line}`}`;
     const claimed = finding.fixClaimedAt === undefined ? "" : " (fixed: waiting for recheck)";
-    return `${finding.id}  ${finding.severity}${where}  ${finding.title.replace(/\s+/g, " ")}${claimed}`;
+    return `${plainLine(finding.id)}  ${finding.severity}${where}  ${plainLine(finding.title)}${claimed}`;
   });
   return `${lines.join("\n")}\n`;
 }

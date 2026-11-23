@@ -125,19 +125,22 @@ function sendResult(response: ServerResponse, result: DashboardResponse): void {
  * A request's body as text, at most `MAX_BODY_BYTES` (NIC-1140: an answer to a finding);
  * undefined when it's longer, which the handler then refuses.
  */
-async function readBody(request: IncomingMessage): Promise<string | undefined> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-    size += buffer.length;
-    if (size > MAX_BODY_BYTES) {
-      request.resume();
-      return undefined;
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
+function readBody(request: IncomingMessage): Promise<string | undefined> {
+  // Read to the end, keeping at most MAX_BODY_BYTES: a longer (chunked) body is drained, not
+  // cut off, so the client gets its 413 rather than a reset connection.
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size <= MAX_BODY_BYTES) chunks.push(buffer);
+    });
+    request.on("end", () =>
+      resolve(size > MAX_BODY_BYTES ? undefined : Buffer.concat(chunks).toString("utf8")),
+    );
+    request.on("error", reject);
+  });
 }
 
 /** The request as the dashboard handler takes it: lower-case headers, the first of a value. */
@@ -145,6 +148,7 @@ export function toDashboardRequest(
   request: IncomingMessage,
   url: URL,
   body?: string,
+  clientIp?: string,
 ): DashboardRequest {
   const headers: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(request.headers)) {
@@ -161,6 +165,7 @@ export function toDashboardRequest(
     headers,
     cookies: parseCookies(headers.cookie === undefined ? [] : [headers.cookie]),
     ...(body === undefined ? {} : { body }),
+    ...(clientIp === undefined ? {} : { clientIp }),
   };
 }
 
@@ -177,8 +182,8 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
       return;
     }
     const api = url.pathname === "/api" || url.pathname.startsWith("/api/");
-    // Only an API POST reads its body (an answer to a finding, NIC-1140); others drain it.
-    const body = api && method === "POST" ? await readBody(request) : undefined;
+    // Only an API POST reads its body (an answer to a finding, NIC-1140), and only once the
+    // caller is within the rate limit; everything else is drained.
     if (!(api && method === "POST")) request.resume();
 
     if (api) {
@@ -193,10 +198,16 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
         options.trustProxyHops,
       );
       if (!limited(caller)) {
+        if (method === "POST") request.resume();
         sendResult(response, json(429, { error: "slow-down" }));
         return;
       }
-      sendResult(response, await options.handle(toDashboardRequest(request, url, body)));
+      const body = method === "POST" ? await readBody(request) : undefined;
+      if (method === "POST" && body === undefined) {
+        sendResult(response, json(413, { error: "too-large" }));
+        return;
+      }
+      sendResult(response, await options.handle(toDashboardRequest(request, url, body, caller)));
       return;
     }
 

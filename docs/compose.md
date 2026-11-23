@@ -164,9 +164,11 @@ What it can do:
   new `learning_events` row). It can ask for a [bootstrap from review history](learning.md#starting-with-your-history)
   (SELECT and INSERT on `learning_bootstraps`, and SELECT on `learning_bootstrap_items`), but not
   change one once asked. It reads the feedback report through a view of that one artifact:
-  not the `artifacts` table, which holds transcripts and run data. It can answer a finding
-  (`status`, `updated_at`, `fix_claimed_at` and `fix_claimed_by` on `findings`, and a new
-  `finding_events` row) for [`lgtmoose findings ack`](commands.md#findings-outside-github-lgtmoose-findings).
+  not the `artifacts` table, which holds transcripts and run data. It can answer a finding for
+  [`lgtmoose findings ack`](commands.md#findings-outside-github-lgtmoose-findings) only through
+  two SECURITY DEFINER functions, `lgtmoose_claim_fix` and `lgtmoose_decline_finding`, which
+  allow just those transitions on LGTMoose's own open or outdated findings; it can't write
+  `findings` or `finding_events` itself.
   It can't read the job queue or executions, change runs, or delete anything but sessions.
 - **No Docker socket and no App private key.** The OAuth client and its signing key are the
   only secrets it holds. It also mounts `lgtmoose.config.json` read-only, for the

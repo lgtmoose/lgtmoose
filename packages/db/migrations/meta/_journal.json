@@ -169,6 +169,13 @@
       "when": 1795461727550,
       "tag": "0024_finding-answers",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795463697993,
+      "tag": "0025_finding-answer-functions",
+      "breakpoints": true
     }
   ]
 }

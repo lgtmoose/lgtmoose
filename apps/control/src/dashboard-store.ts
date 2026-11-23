@@ -1,6 +1,5 @@
 import {
   dashboardSessions,
-  findingEvents,
   findings,
   postgresSpend,
   providerCooldowns,
@@ -69,6 +68,11 @@ export interface OpenFinding {
   /** Who raised it: LGTMoose, or another reviewer's login. */
   source: "self" | "bot" | "human";
   sourceLogin: string | undefined;
+  /**
+   * `open`, or `outdated` (its cited line has changed): only one pull request's list has those
+   * (NIC-1140).
+   */
+  status: "open" | "outdated";
   /** When someone said it's fixed from the CLI or the dashboard (NIC-1140), and who. */
   fixClaimedAt: string | undefined;
   fixClaimedBy: string | undefined;
@@ -87,6 +91,11 @@ export interface AnswerTarget {
   source: "self" | "bot" | "human";
   /** The pull request's author. */
   prAuthor: string;
+  /**
+   * Whether the recheck can take it, so a fix claim means something: on a line (`path` and
+   * `line`) of the new side (RIGHT).
+   */
+  recheckable: boolean;
 }
 
 export interface RunSummary {
@@ -115,17 +124,18 @@ export interface DashboardStore {
   deleteExpired(now: Date): Promise<number>;
   repoSummaries(repos: readonly string[]): Promise<RepoSummary[]>;
   /**
-   * Open findings in `repos`, most severe first, at most `limit`; only pull request `number`'s
-   * when it's given (NIC-1140).
+   * Open findings in `repos`, most severe first, at most `limit`. With a pull request `number`
+   * (NIC-1140), only that PR's, and its outdated ones too.
    */
   openFindings(repos: readonly string[], limit: number, number?: number): Promise<OpenFinding[]>;
   /** A finding by ID, for an answer (NIC-1140); undefined when there's none. */
   answerTarget(id: string): Promise<AnswerTarget | undefined>;
   /**
    * Records that `login` says an open or outdated finding of ours is fixed (NIC-1140): it's
-   * rechecked first on the next run, which alone closes it. False when it isn't open or outdated.
+   * rechecked first on the next run, which alone closes it. False when it isn't open or
+   * outdated, or the recheck can't take it (not on a line of the new side).
    */
-  claimFix(id: string, login: string, at: Date): Promise<boolean>;
+  claimFix(id: string, login: string): Promise<boolean>;
   /**
    * Declines an open or outdated finding of ours for `login`, with their reason (NIC-1140), as an
    * accepted decline on its thread would: closed, with a `declined` event that outcome learning
@@ -235,6 +245,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
           line: findings.line,
           source: findings.source,
           sourceLogin: findings.sourceLogin,
+          status: findings.status,
           fixClaimedAt: findings.fixClaimedAt,
           fixClaimedBy: findings.fixClaimedBy,
           createdAt: findings.createdAt,
@@ -243,7 +254,9 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
         .where(
           and(
-            eq(findings.status, "open"),
+            number === undefined
+              ? eq(findings.status, "open")
+              : inArray(findings.status, ["open", "outdated"]),
             inRepos(repos),
             ...(number === undefined ? [] : [eq(pullRequests.number, number)]),
           ),
@@ -252,6 +265,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         .limit(limit);
       return rows.map((row) => ({
         ...row,
+        status: row.status === "outdated" ? ("outdated" as const) : ("open" as const),
         path: row.path ?? undefined,
         line: row.line ?? undefined,
         sourceLogin: row.sourceLogin ?? undefined,
@@ -271,63 +285,33 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
           ruleCategory: findings.ruleCategory,
           source: findings.source,
           prAuthor: pullRequests.author,
+          side: findings.side,
+          path: findings.path,
+          line: findings.line,
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
         .where(eq(findings.id, id))
         .limit(1);
-      return row;
+      if (row === undefined) return undefined;
+      const { side, path, line, ...target } = row;
+      return { ...target, recheckable: side === "RIGHT" && path !== null && line !== null };
     },
-    async claimFix(id, login, at) {
-      return db.transaction(async (tx) => {
-        const [row] = await tx
-          .update(findings)
-          .set({ fixClaimedAt: at, fixClaimedBy: login, updatedAt: at })
-          .where(
-            and(
-              eq(findings.id, id),
-              eq(findings.source, "self"),
-              inArray(findings.status, ["open", "outdated"]),
-            ),
-          )
-          .returning({ sha: findings.raisedAtSha });
-        if (row === undefined) return false;
-        await tx.insert(findingEvents).values({
-          findingId: id,
-          type: "fix_claimed",
-          actor: "human",
-          actorLogin: login,
-          sha: row.sha,
-        });
-        return true;
-      });
+    async claimFix(id, login) {
+      // Through `lgtmoose_claim_fix` (migration 0025): the dashboard's login may call it, not
+      // write findings or events itself. Null when the finding can't take a claim.
+      const result = (await db.execute(
+        sql`select lgtmoose_claim_fix(${id}::uuid, ${login}) as at`,
+      )) as unknown as { rows: { at: unknown }[] };
+      return result.rows[0]?.at !== null && result.rows[0]?.at !== undefined;
     },
     async declineFinding(id, login, reason) {
-      return db.transaction(async (tx) => {
-        const [row] = await tx
-          .update(findings)
-          .set({ status: "declined", updatedAt: sql`now()` })
-          .where(
-            and(
-              eq(findings.id, id),
-              eq(findings.source, "self"),
-              inArray(findings.status, ["open", "outdated"]),
-            ),
-          )
-          .returning({ sha: findings.raisedAtSha });
-        if (row === undefined) return false;
-        await tx.insert(findingEvents).values({
-          findingId: id,
-          type: "declined",
-          actor: "human",
-          actorLogin: login,
-          sha: row.sha,
-          reason,
-          // Outcome learning reads it on the reconciler's next run (`learnFromAnswers`).
-          learnPending: true,
-        });
-        return true;
-      });
+      // Through `lgtmoose_decline_finding` (migration 0025), which also writes the `declined`
+      // event with the reason and `learn_pending`, for the reconciler's outcome learning.
+      const result = (await db.execute(
+        sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${reason}) as done`,
+      )) as unknown as { rows: { done: unknown }[] };
+      return result.rows[0]?.done === true;
     },
     async recentRuns(repos, limit) {
       if (repos.length === 0) return [];
