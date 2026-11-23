@@ -1004,6 +1004,7 @@ export function controlDepsFor(parts: ControlParts): ControlDeps {
     findings: drizzleFindingStore(db),
     tokens: parts.tokens,
     ...(parts.commandAliases === undefined ? {} : { commandAliases: parts.commandAliases }),
+    shadow: parts.shadow,
     async github(installationId) {
       const token = installationTokenProvider({
         appId: app.appId,
