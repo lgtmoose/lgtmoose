@@ -7,6 +7,8 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
+import { MAX_DECLINE_REASON } from "@lgtmoose/core";
+import { redactSensitive } from "@lgtmoose/learnings";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { unpostedShadow } from "./shadow-findings.js";
@@ -69,7 +71,34 @@ export interface OpenFinding {
   /** Who raised it: LGTMoose, or another reviewer's login. */
   source: "self" | "bot" | "human";
   sourceLogin: string | undefined;
+  /**
+   * `open`, or `outdated` (its cited line has changed): only one pull request's list has those
+   * (NIC-1140).
+   */
+  status: "open" | "outdated";
+  /** When someone said it's fixed from the CLI or the dashboard (NIC-1140), and who. */
+  fixClaimedAt: string | undefined;
+  fixClaimedBy: string | undefined;
   createdAt: string;
+}
+
+/** A finding someone means to answer (NIC-1140), with what the answer's rules read. */
+export interface AnswerTarget {
+  id: string;
+  /** Lowercased owner/name. */
+  repo: string;
+  number: number;
+  status: string;
+  severity: "blocking" | "should_fix" | "nit";
+  ruleCategory: string;
+  source: "self" | "bot" | "human";
+  /** The pull request's author. */
+  prAuthor: string;
+  /**
+   * Whether the recheck can take it, so a fix claim means something: on a line (`path` and
+   * `line`) of the new side (RIGHT).
+   */
+  recheckable: boolean;
 }
 
 export interface RunSummary {
@@ -89,6 +118,35 @@ export interface RunSummary {
   createdAt: string;
 }
 
+/**
+ * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
+ * `lgtmoose_decline_finding` raised (SQLSTATE P0001) on its own checks. The API answers 400.
+ */
+export class AnswerRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AnswerRefusedError";
+  }
+}
+
+/** The answer functions' own refusals become `AnswerRefusedError`; anything else is rethrown. */
+async function answerCall<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const raised = error as { code?: unknown; message?: unknown; cause?: unknown };
+    const cause = raised.cause as { code?: unknown; message?: unknown } | undefined;
+    const code = raised.code ?? cause?.code;
+    const message = cause?.message ?? raised.message;
+    if (code === "P0001" && typeof message === "string") throw new AnswerRefusedError(message);
+    // Anything else is rethrown without the query or its parameters (a decline's reason, the
+    // login): a logged error never carries them.
+    throw new Error(
+      `answering a finding failed${typeof code === "string" ? ` (SQLSTATE ${code})` : ""}`,
+    );
+  }
+}
+
 export interface DashboardStore {
   createSession(tokenHash: string, session: DashboardSession): Promise<void>;
   /** The session for a token hash, while it hasn't expired. */
@@ -97,8 +155,25 @@ export interface DashboardStore {
   /** Removes sessions that have ended. */
   deleteExpired(now: Date): Promise<number>;
   repoSummaries(repos: readonly string[]): Promise<RepoSummary[]>;
-  /** Open findings in `repos`, most severe first, at most `limit`. */
-  openFindings(repos: readonly string[], limit: number): Promise<OpenFinding[]>;
+  /**
+   * Open findings in `repos`, most severe first, at most `limit`. With a pull request `number`
+   * (NIC-1140), only that PR's and only LGTMoose's own, its outdated ones too.
+   */
+  openFindings(repos: readonly string[], limit: number, number?: number): Promise<OpenFinding[]>;
+  /** A finding by ID, for an answer (NIC-1140); undefined when there's none, or the list hides it. */
+  answerTarget(id: string): Promise<AnswerTarget | undefined>;
+  /**
+   * Records that `login` says an open or outdated finding of ours is fixed (NIC-1140): it's
+   * rechecked first on the next run, which alone closes it. False when it isn't open or
+   * outdated, or the recheck can't take it (not on a line of the new side).
+   */
+  claimFix(id: string, login: string): Promise<boolean>;
+  /**
+   * Declines an open or outdated finding of ours for `login`, with their reason (NIC-1140), as an
+   * accepted decline on its thread would: closed, with a `declined` event that outcome learning
+   * reads later. False when it isn't open or outdated.
+   */
+  declineFinding(id: string, login: string, reason: string): Promise<boolean>;
   /** The newest review runs in `repos`, at most `limit`. */
   recentRuns(repos: readonly string[], limit: number): Promise<RunSummary[]>;
   /** Provider use by runs in `repos` since `since`, by provider. */
@@ -126,10 +201,9 @@ const iso = (value: Date | null): string | undefined => value?.toISOString();
  * stay in the database, so the shadow period's figures can still be read.
  */
 export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}): DashboardStore {
-  const open =
-    options.live === true
-      ? sql`${findings.status} = 'open' and not ${unpostedShadow()}`
-      : sql`${findings.status} = 'open'`;
+  // Live, an unposted shadow finding isn't listed, open or outdated.
+  const visible = options.live === true ? sql`not ${unpostedShadow()}` : sql`true`;
+  const open = sql`${findings.status} = 'open' and ${visible}`;
   const inRepos = (repos: readonly string[]) =>
     inArray(sql`lower(${pullRequests.repo})`, [...repos]);
   return {
@@ -197,7 +271,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         })
         .sort((a, b) => a.repo.localeCompare(b.repo));
     },
-    async openFindings(repos, limit) {
+    async openFindings(repos, limit, number) {
       if (repos.length === 0) return [];
       const rows = await db
         .select({
@@ -212,20 +286,81 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           line: findings.line,
           source: findings.source,
           sourceLogin: findings.sourceLogin,
+          status: findings.status,
+          fixClaimedAt: findings.fixClaimedAt,
+          fixClaimedBy: findings.fixClaimedBy,
           createdAt: findings.createdAt,
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
-        .where(and(open, inRepos(repos)))
+        .where(
+          and(
+            number === undefined
+              ? open
+              : and(inArray(findings.status, ["open", "outdated"]), visible),
+            inRepos(repos),
+            // One PR's list is for answering: only ours, filtered before the limit, so other
+            // reviewers' findings can't push ours out.
+            ...(number === undefined
+              ? []
+              : [eq(pullRequests.number, number), eq(findings.source, "self")]),
+          ),
+        )
         .orderBy(SEVERITY_ORDER, desc(findings.createdAt))
         .limit(limit);
       return rows.map((row) => ({
         ...row,
+        status: row.status === "outdated" ? ("outdated" as const) : ("open" as const),
         path: row.path ?? undefined,
         line: row.line ?? undefined,
         sourceLogin: row.sourceLogin ?? undefined,
+        fixClaimedAt: iso(row.fixClaimedAt),
+        fixClaimedBy: row.fixClaimedBy ?? undefined,
         createdAt: row.createdAt.toISOString(),
       }));
+    },
+    async answerTarget(id) {
+      const [row] = await db
+        .select({
+          id: findings.id,
+          repo: sql<string>`lower(${pullRequests.repo})`,
+          number: pullRequests.number,
+          status: findings.status,
+          severity: findings.severity,
+          ruleCategory: findings.ruleCategory,
+          source: findings.source,
+          prAuthor: pullRequests.author,
+          side: findings.side,
+          path: findings.path,
+          line: findings.line,
+        })
+        .from(findings)
+        .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
+        // Live, one the list hides (an unposted shadow finding) isn't there to answer either.
+        .where(and(eq(findings.id, id), visible))
+        .limit(1);
+      if (row === undefined) return undefined;
+      const { side, path, line, ...target } = row;
+      return { ...target, recheckable: side === "RIGHT" && path !== null && line !== null };
+    },
+    async claimFix(id, login) {
+      // Through `lgtmoose_claim_fix` (migration 0026): the dashboard's login may call it, not
+      // write findings or events itself. Null when the finding can't take a claim.
+      const result = (await answerCall(() =>
+        db.execute(sql`select lgtmoose_claim_fix(${id}::uuid, ${login}) as at`),
+      )) as unknown as { rows: { at: unknown }[] };
+      return result.rows[0]?.at !== null && result.rows[0]?.at !== undefined;
+    },
+    async declineFinding(id, login, reason) {
+      // Through `lgtmoose_decline_finding` (migration 0026), which also writes the `declined`
+      // event with the reason and `learn_pending`, for the reconciler's outcome learning. The
+      // reason is kept as a reply's body is, with secrets redacted, then capped to what the
+      // function takes: redaction can make it longer.
+      const stored = redactSensitive(reason).text.slice(0, MAX_DECLINE_REASON).trim();
+      const result = (await answerCall(() =>
+        db.execute(sql`select lgtmoose_decline_finding(${id}::uuid, ${login}, ${stored}) as done`),
+      )) as unknown as { rows: { done: unknown }[] };
+      return result.rows[0]?.done === true;
     },
     async recentRuns(repos, limit) {
       if (repos.length === 0) return [];

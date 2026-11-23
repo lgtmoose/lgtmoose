@@ -106,6 +106,7 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       ruleCategory: "correctness",
       severity: "blocking",
       path: "src/a.ts",
+      side: "RIGHT",
       line: 3,
       title: "Off by one",
       body: "The loop skips the last item.",
@@ -216,9 +217,21 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     expect(await get("/api/repos")).toMatchObject({
       repos: [{ repo: "acme/shop", openFindings: 1, blocking: 1 }],
     });
-    expect(await get("/api/findings", { repo: "acme/shop" })).toMatchObject({
-      findings: [{ title: "Off by one" }],
+    const listed = await get("/api/findings", { repo: "acme/shop" });
+    expect(listed).toMatchObject({ findings: [{ title: "Off by one" }] });
+    // Answering a finding (NIC-1140), through its function.
+    const findingId = (listed.findings as { id: string }[])[0]?.id ?? "";
+    const answered = await handleDashboardRequest(deps, {
+      ...request("POST", `/api/findings/${findingId}/ack`),
+      body: JSON.stringify({ outcome: "fixed" }),
     });
+    expect(answered.status).toBe(200);
+    const claims = await owner.query<{ fix_claimed_by: string; type: string }>(
+      `select f.fix_claimed_by, e.type from findings f
+         join finding_events e on e.finding_id = f.id where f.id = $1`,
+      [findingId],
+    );
+    expect(claims.rows).toEqual([{ fix_claimed_by: "dev", type: "fix_claimed" }]);
     // Live (shadow off), the counts leave out unposted shadow findings (NIC-1141): that reads
     // review runs and finding events, as the dashboard's login.
     const live = drizzleDashboardStore(drizzle({ client: dashboard }), { live: true });
@@ -284,6 +297,66 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
     expect(await deps.store.session(sha256Hex(token), new Date())).toBeUndefined();
   }, 30_000);
 
+  it("answers findings only through the functions, and only allowed transitions (NIC-1140)", async () => {
+    const pull = await owner.query<{ id: string }>(
+      "select id from pull_requests where repo = 'acme/shop' and number = 7",
+    );
+    const pullId = pull.rows[0]?.id ?? "";
+    const seed = async (values: Record<string, string>) => {
+      const row = await owner.query<{ id: string }>(
+        `insert into findings (pull_request_id, fingerprint, rule_category, severity, path, line,
+           side, title, body, raised_at_sha, source)
+         values ($1, $2, $3, $4, $5, $6, $7, 't', 'b', $8, $9) returning id`,
+        [
+          pullId,
+          `fp-${Math.random()}`,
+          values.category ?? "style",
+          values.severity ?? "nit",
+          values.path ?? "src/b.ts",
+          values.line ?? "4",
+          values.side ?? "RIGHT",
+          "a".repeat(40),
+          values.source ?? "self",
+        ],
+      );
+      return row.rows[0]?.id ?? "";
+    };
+    const claim = (id: string, login: string) =>
+      dashboard.query<{ at: Date | null }>("select lgtmoose_claim_fix($1, $2) as at", [id, login]);
+    const decline = (id: string, login: string, reason: string) =>
+      dashboard.query<{ done: boolean }>("select lgtmoose_decline_finding($1, $2, $3) as done", [
+        id,
+        login,
+        reason,
+      ]);
+
+    const nit = await seed({});
+    expect((await claim(nit, "erin")).rows[0]?.at).toBeInstanceOf(Date);
+    // An old-side finding, or another reviewer's, can't take a claim.
+    expect((await claim(await seed({ side: "LEFT" }), "erin")).rows[0]?.at).toBeNull();
+    expect((await claim(await seed({ source: "human" }), "erin")).rows[0]?.at).toBeNull();
+    expect((await decline(nit, "erin", "intended")).rows[0]?.done).toBe(true);
+    // Closed now: no more answers.
+    expect((await decline(nit, "erin", "again")).rows[0]?.done).toBe(false);
+    expect((await claim(nit, "erin")).rows[0]?.at).toBeNull();
+    const events = await owner.query<{ type: string; actor_login: string; learn_pending: boolean }>(
+      "select type, actor_login, learn_pending from finding_events where finding_id = $1 order by created_at",
+      [nit],
+    );
+    expect(events.rows).toEqual([
+      { type: "fix_claimed", actor_login: "erin", learn_pending: null },
+      { type: "declined", actor_login: "erin", learn_pending: true },
+    ]);
+    // The PR's author (dev) can't decline a blocking or protected one, nor anyone without a reason.
+    const blocking = await seed({ severity: "blocking" });
+    await expect(decline(blocking, "dev", "fine")).rejects.toThrow(/author/);
+    await expect(decline(await seed({ category: "money" }), "DEV", "fine")).rejects.toThrow(
+      /author/,
+    );
+    await expect(decline(blocking, "erin", " ")).rejects.toThrow(/reason/);
+    await expect(claim(blocking, "")).rejects.toThrow(/login/);
+  });
+
   it("is refused everything else", async () => {
     for (const statement of [
       // Other artifacts: transcripts, run data, credential leases.
@@ -309,8 +382,16 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "select actor, github_comment_id from finding_events",
       "update learning_events set actor = 'mallory'",
       "delete from learning_events",
+      // An answer to a finding (NIC-1140) goes through its two functions only.
       "update findings set status = 'outdated'",
+      "update findings set status = 'declined'",
+      "update findings set fix_claimed_at = now()",
+      "update findings set title = 'something else'",
       "delete from findings",
+      "select * from finding_events",
+      `insert into finding_events (finding_id, type, actor) values (gen_random_uuid(), 'fixed', 'self')`,
+      "update finding_events set actor_login = 'mallory'",
+      "delete from finding_events",
       "update review_runs set status = 'failed'",
       "update spend_ledger set settled = true",
       "delete from spend_ledger",

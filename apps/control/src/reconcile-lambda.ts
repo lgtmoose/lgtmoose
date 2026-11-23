@@ -33,7 +33,8 @@ import {
   readReconcileEnv,
   readRepeatThreshold,
 } from "./env.js";
-import { outcomeLearner } from "./outcome-learning-aws.js";
+import { drizzleAnswerLearningStore, outcomeLearner } from "./outcome-learning-aws.js";
+import { learnFromAnswers, type AnswerLearningDeps } from "./finding-answers.js";
 import { collectFeedback, type FeedbackDeps } from "./feedback.js";
 import { drizzleFeedbackStore, githubFeedback } from "./feedback-aws.js";
 import { log } from "./log.js";
@@ -66,6 +67,8 @@ type LambdaDeps = ReconcileDeps & {
    */
   spend: { store: SpendStore; budgets: Budgets };
   runOutputs: { getText(key: string): Promise<string | undefined> };
+  /** Findings declined from the CLI or the dashboard, for outcome learning (NIC-1140). */
+  answers: AnswerLearningDeps;
 };
 
 let deps: Promise<LambdaDeps> | undefined;
@@ -194,6 +197,13 @@ function reconcileDeps(): Promise<LambdaDeps> {
           };
     return {
       feedback,
+      answers: {
+        store: drizzleAnswerLearningStore(db),
+        rejected: (installationId: number, repo: string, rejected) =>
+          outcomes.rejectedResults?.(installationId, repo, rejected) ??
+          outcomes.rejected(installationId, repo, rejected),
+        log,
+      } satisfies AnswerLearningDeps,
       ...(bootstraps === undefined ? {} : { bootstraps }),
       spend: { store: postgresSpend(db), budgets: readBudgets(process.env) },
       runOutputs:
@@ -235,6 +245,16 @@ export async function handler(): Promise<ReconcileCounts> {
     counts.feedbackCommentsRead = feedback.feedbackCommentsRead;
     counts.categoriesFlagged = feedback.categoriesFlagged;
     counts.errors += feedback.errors;
+  }
+  // Findings declined from the CLI or the dashboard (NIC-1140): outcome learning, as a decline
+  // on a thread gets. A failure is logged and counted, never thrown.
+  try {
+    await learnFromAnswers(ready.answers);
+  } catch (error) {
+    counts.errors += 1;
+    log("reconcile: answers not learned from", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   // Spend caps (NIC-1079): runs a newer push stopped, or that failed after their batches ran,
   // are settled at what their batches reported. Logged, never thrown.

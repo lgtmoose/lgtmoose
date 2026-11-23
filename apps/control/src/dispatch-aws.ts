@@ -229,7 +229,12 @@ export function drizzleDispatchStore(db: Db, now: () => Date = () => new Date())
         if (moved.length > 0) {
           await tx
             .update(findings)
-            .set({ status: resolved ? "resolved_by_human" : "open", updatedAt: now() })
+            .set({
+              status: resolved ? "resolved_by_human" : "open",
+              // Open again (NIC-1140): any earlier fix claim is spent.
+              ...(resolved ? {} : { fixClaimedAt: null, fixClaimedBy: null }),
+              updatedAt: now(),
+            })
             .where(
               inArray(
                 findings.id,

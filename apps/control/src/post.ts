@@ -53,6 +53,8 @@ import {
   readVerdicts,
   recheckReply,
   recheckWritesSchema,
+  settledFixClaims,
+  verdictCounts,
   type RecheckWrites,
 } from "./recheck.js";
 import { JUDGE_REPLY_MARKER } from "./replies.js";
@@ -559,32 +561,19 @@ async function planRecheck(
   const unreviewed = new Set(
     manifest.review.files.map((file) => file.path).filter((path) => !reviewed.has(path)),
   );
-  // Each finding's file at head, followed from where it was raised (renames included).
-  const pathNow = new Map(open.map((entry) => [entry.id, entry.finding.path]));
-  const full = job.mode === "full";
+  const counts = verdictCounts({
+    mode: job.mode ?? "incremental",
+    // Each finding's file at head, followed from where it was raised (renames included).
+    pathNow: new Map(open.map((entry) => [entry.id, entry.finding.path])),
+    outdated,
+    reviewed,
+    unreviewed,
+  });
   const fixes = fixedByRecheck(job, verdicts, {
     reraised: new Set(report.reraised),
     open: new Set([...open.map((entry) => entry.id), ...outdated]),
-  }).filter((fix) => {
-    const path = pathNow.get(fix.entry.findingId);
-    if (path === undefined) {
-      // Its line is gone (NIC-1124): only a review of its file now says anything about it. Only
-      // when prepare saw the line gone too and told the recheck so: one this step can't place
-      // (its commit is gone) was never checked against the code that replaced its line.
-      return (
-        fix.entry.outdated === true &&
-        outdated.has(fix.entry.findingId) &&
-        reviewed.has(fix.entry.path)
-      );
-    }
-    if (unreviewed.has(path)) return false;
-    // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
-    // or not in the PR's change any more) says nothing about the finding.
-    if (full) return reviewed.has(path);
-    // Moved since it was raised: the recheck read it by its old name, which head doesn't
-    // have, so only a review of the file under its new name says anything about it.
-    return path === fix.entry.path || reviewed.has(path);
-  });
+  }).filter((fix) => counts(fix.entry));
+  const settledClaims = settledFixClaims(job.targets, verdicts, counts);
   return {
     writes: {
       version: 1,
@@ -595,6 +584,7 @@ async function planRecheck(
           : { githubCommentId: fix.entry.githubCommentId }),
         reason: fix.reason,
       })),
+      ...(settledClaims.length === 0 ? {} : { settledClaims }),
     },
     saved: false,
   };
@@ -642,6 +632,40 @@ async function applyRecheck(
       : {}),
   });
   return { ...writes, fixed: ours };
+}
+
+/**
+ * Clears the fix claims (NIC-1140) the run's recheck settled: those it closed, and the others it
+ * gave a verdict that counts on (`settledFixClaims`). Any other claim stays for the next run. A
+ * failure is only logged.
+ */
+export async function clearFixClaims(
+  deps: ControlDeps,
+  runId: string,
+  manifest: RunManifest,
+  writes: RecheckWrites,
+): Promise<void> {
+  const job = manifest.recheck;
+  const clear = deps.findings.clearFixClaims?.bind(deps.findings);
+  if (job === undefined || clear === undefined) return;
+  try {
+    const settled = new Set([
+      ...writes.fixed.map((fixed) => fixed.findingId),
+      ...(writes.settledClaims ?? []),
+    ]);
+    const claims = job.targets.flatMap((target) =>
+      target.fixClaimedAt === undefined || !settled.has(target.findingId)
+        ? []
+        : [{ findingId: target.findingId, fixClaimedAt: target.fixClaimedAt }],
+    );
+    if (claims.length === 0) return;
+    await clear(claims);
+  } catch (error) {
+    deps.log("fix claims not cleared", {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -2288,6 +2312,17 @@ export async function post(
       !progress.rechecks
     ) {
       recheckWrites = await applyRecheck(deps, runId, manifest, recheckPlan);
+    }
+    // The fix claims the recheck settled (NIC-1140): a finding still there goes back to its
+    // usual place in the order. Only once it gave verdicts and the run still counts (a stale
+    // run's recheck closed nothing, so its claims stay for the next run); each claim only while
+    // it's the one the run saw. Never fails the post.
+    if (
+      progress.coveredBy === undefined &&
+      recheckPlan !== undefined &&
+      staleReason(latest, pr.headSha) === undefined
+    ) {
+      await clearFixClaims(deps, runId, manifest, recheckPlan.writes);
     }
     // What the judged replies led to, now that this attempt holds the run's claim.
     if (replyWrites !== undefined && !progress.replies) {

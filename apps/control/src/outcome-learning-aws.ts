@@ -1,8 +1,9 @@
 import { feedback, findingEvents, findings, pendingReplies, pullRequests } from "@lgtmoose/db";
 import type { LearningDeps, LearningStore } from "@lgtmoose/learnings";
 import type { GitHubClient } from "@lgtmoose/poster";
-import { and, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
+import type { AnswerLearningStore } from "./finding-answers.js";
 import { collaboratorPermission, orgRole } from "./github-access.js";
 import {
   learnFromFixes,
@@ -67,6 +68,8 @@ export function drizzleOutcomeStore(db: Db): OutcomeStore {
           findingId: findingEvents.findingId,
           login: findingEvents.actorLogin,
           commentId: findingEvents.githubCommentId,
+          // A decline from the CLI or the dashboard (NIC-1140) has its reason here instead.
+          reason: findingEvents.reason,
         })
         .from(findingEvents)
         .where(
@@ -95,7 +98,10 @@ export function drizzleOutcomeStore(db: Db): OutcomeStore {
       return rows.map((row): RejectedFinding => {
         const mine = closes.filter((close) => close.findingId === row.findingId);
         const reasons = mine.flatMap((close) => {
-          const body = close.commentId === null ? undefined : bodyOf.get(close.commentId);
+          const body =
+            close.commentId === null
+              ? (close.reason ?? undefined)
+              : (bodyOf.get(close.commentId) ?? close.reason ?? undefined);
           return body === undefined || close.login === null ? [] : [{ author: close.login, body }];
         });
         const rejectors = [
@@ -114,6 +120,50 @@ export function drizzleOutcomeStore(db: Db): OutcomeStore {
           at: row.updatedAt,
         };
       });
+    },
+  };
+}
+
+/**
+ * Declines from the CLI or the dashboard that outcome learning hasn't read (NIC-1140), with the
+ * installation that reaches their repository.
+ */
+export function drizzleAnswerLearningStore(db: Db): AnswerLearningStore {
+  return {
+    async pendingAnswers(limit) {
+      const rows = await db
+        .select({
+          eventId: findingEvents.id,
+          findingId: findingEvents.findingId,
+          installationId: pullRequests.installationId,
+          repo: pullRequests.repo,
+        })
+        .from(findingEvents)
+        .innerJoin(findings, eq(findings.id, findingEvents.findingId))
+        .innerJoin(pullRequests, eq(pullRequests.id, findings.pullRequestId))
+        .where(eq(findingEvents.learnPending, true))
+        .orderBy(asc(findingEvents.learnAttempts), asc(findingEvents.createdAt))
+        .limit(limit);
+      return rows;
+    },
+    async answersLearned(eventIds) {
+      if (eventIds.length === 0) return;
+      await db
+        .update(findingEvents)
+        .set({ learnPending: false })
+        .where(inArray(findingEvents.id, [...eventIds]));
+    },
+    async answersFailed(eventIds, maxAttempts) {
+      if (eventIds.length === 0) return [];
+      const rows = await db
+        .update(findingEvents)
+        .set({
+          learnAttempts: sql`${findingEvents.learnAttempts} + 1`,
+          learnPending: sql`${findingEvents.learnAttempts} + 1 < ${maxAttempts}`,
+        })
+        .where(and(inArray(findingEvents.id, [...eventIds]), eq(findingEvents.learnPending, true)))
+        .returning({ id: findingEvents.id, pending: findingEvents.learnPending });
+      return rows.flatMap((row) => (row.pending === true ? [] : [row.id]));
     },
   };
 }
@@ -149,25 +199,31 @@ export function outcomeLearner(input: {
         : { maxPendingPerAuthor: input.maxPendingPerAuthor }),
     };
   };
+  const rejectedResults = async (
+    installationId: number,
+    repo: string,
+    rejected: readonly { findingId: string; commentId?: number }[],
+  ) => {
+    return learnFromRejections(
+      {
+        store,
+        learnings: policy(installationId, repo),
+        ...(input.repeatThreshold === undefined ? {} : { repeatThreshold: input.repeatThreshold }),
+        log,
+      },
+      rejected.map((entry) => entry.findingId),
+      new Map(
+        rejected.flatMap((entry) =>
+          entry.commentId === undefined ? [] : [[entry.findingId, entry.commentId] as const],
+        ),
+      ),
+    );
+  };
   return {
     async rejected(installationId, repo, rejected) {
-      await learnFromRejections(
-        {
-          store,
-          learnings: policy(installationId, repo),
-          ...(input.repeatThreshold === undefined
-            ? {}
-            : { repeatThreshold: input.repeatThreshold }),
-          log,
-        },
-        rejected.map((entry) => entry.findingId),
-        new Map(
-          rejected.flatMap((entry) =>
-            entry.commentId === undefined ? [] : [[entry.findingId, entry.commentId] as const],
-          ),
-        ),
-      );
+      await rejectedResults(installationId, repo, rejected);
     },
+    rejectedResults,
     async fixed(fixes) {
       await learnFromFixes({ store, learnings: { store: input.learnings }, log }, fixes);
     },

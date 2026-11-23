@@ -121,8 +121,39 @@ function sendResult(response: ServerResponse, result: DashboardResponse): void {
   send(response, result.status, result.headers, result.body, false, result.cookies);
 }
 
+/**
+ * A request's body as text, at most `MAX_BODY_BYTES` (NIC-1140: an answer to a finding);
+ * undefined when it's longer, which the handler then refuses.
+ */
+function readBody(request: IncomingMessage): Promise<string | undefined> {
+  // At most MAX_BODY_BYTES: past that it stops reading at once (undefined), and the caller
+  // answers 413 and closes the connection, rather than reading an endless chunked body.
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const onData = (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > MAX_BODY_BYTES) {
+        request.off("data", onData);
+        request.pause();
+        resolve(undefined);
+        return;
+      }
+      chunks.push(buffer);
+    };
+    request.on("data", onData);
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("error", reject);
+  });
+}
+
 /** The request as the dashboard handler takes it: lower-case headers, the first of a value. */
-export function toDashboardRequest(request: IncomingMessage, url: URL): DashboardRequest {
+export function toDashboardRequest(
+  request: IncomingMessage,
+  url: URL,
+  body?: string,
+): DashboardRequest {
   const headers: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(request.headers)) {
     headers[name.toLowerCase()] = Array.isArray(value) ? value[0] : value;
@@ -137,6 +168,7 @@ export function toDashboardRequest(request: IncomingMessage, url: URL): Dashboar
     query,
     headers,
     cookies: parseCookies(headers.cookie === undefined ? [] : [headers.cookie]),
+    ...(body === undefined ? {} : { body }),
   };
 }
 
@@ -152,10 +184,12 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
       request.destroy();
       return;
     }
-    // Nothing reads a body; let it drain.
-    request.resume();
+    const api = url.pathname === "/api" || url.pathname.startsWith("/api/");
+    // Only an API POST reads its body (an answer to a finding, NIC-1140), and only once the
+    // caller is within the rate limit; everything else is drained.
+    if (!(api && method === "POST")) request.resume();
 
-    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+    if (api) {
       if (method !== "GET" && method !== "POST") {
         const result = json(405, { error: "method" });
         sendResult(response, { ...result, headers: { ...result.headers, allow: "GET, POST" } });
@@ -167,10 +201,19 @@ export function createDashboardServer(options: DashboardServerOptions): Server {
         options.trustProxyHops,
       );
       if (!limited(caller)) {
+        if (method === "POST") request.resume();
         sendResult(response, json(429, { error: "slow-down" }));
         return;
       }
-      sendResult(response, await options.handle(toDashboardRequest(request, url)));
+      const body = method === "POST" ? await readBody(request) : undefined;
+      if (method === "POST" && body === undefined) {
+        const result = json(413, { error: "too-large" });
+        sendResult(response, { ...result, headers: { ...result.headers, connection: "close" } });
+        // Once the answer is out, drop the rest of the body with the connection.
+        response.once("finish", () => request.destroy());
+        return;
+      }
+      sendResult(response, await options.handle(toDashboardRequest(request, url, body)));
       return;
     }
 

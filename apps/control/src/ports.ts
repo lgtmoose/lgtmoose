@@ -68,6 +68,15 @@ export interface FileRecord {
   depth: "full" | "move" | "mechanical";
 }
 
+/**
+ * What outcome learning did for one rejected finding: `skipped: "failed"` when it failed on it
+ * and should be tried again (NIC-1140); any other skip, or a proposal, counts as done.
+ */
+export interface RejectionResult {
+  findingId: string;
+  skipped?: string;
+}
+
 /** One of our findings recorded on a PR. */
 export interface FindingRecord {
   id: string;
@@ -91,6 +100,11 @@ export interface FindingRecord {
    * line is in. Undefined for rows recorded before it was kept.
    */
   basePath: string | undefined;
+  /**
+   * When a person said it's fixed, from the CLI or the dashboard (NIC-1140), as an ISO time: the
+   * recheck takes it first. Left out when nobody has, or the recheck has looked since.
+   */
+  fixClaimedAt?: string;
   /**
    * Raised in shadow mode, never posted, and unanswered since (NIC-1141, `unpostedShadow`): a
    * live run retires it (`retireShadowFindings`). Left out when it isn't.
@@ -182,6 +196,12 @@ export interface FindingStore {
    * it was closed some other way (a person resolved or declined it, say).
    */
   closeFixed?(findingId: string, sha: string): Promise<"closed" | "ours" | "theirs">;
+  /**
+   * Clears the fix claims (NIC-1140) the run's recheck looked at, each only while it's still the
+   * claim the run saw (`fixClaimedAt`, an ISO time): a person who says it again meanwhile keeps
+   * theirs for the next run. Optional: without it, a claim stays until the finding closes.
+   */
+  clearFixClaims?(claims: readonly { findingId: string; fixClaimedAt: string }[]): Promise<void>;
   /** Records that we replied on a finding's thread (`replied` or `dispute_answered`). */
   recordReply?(
     findingId: string,
@@ -398,6 +418,15 @@ export interface ControlDeps {
       repo: string,
       rejected: readonly { findingId: string; commentId?: number }[],
     ): Promise<void>;
+    /**
+     * `rejected`, with what it did for each finding (NIC-1140), so a caller can try again the
+     * ones it failed on. Optional: without it, every finding counts as done.
+     */
+    rejectedResults?(
+      installationId: number,
+      repo: string,
+      rejected: readonly { findingId: string; commentId?: number }[],
+    ): Promise<readonly RejectionResult[]>;
     fixed(fixes: readonly { findingId: string; commentId?: number }[]): Promise<void>;
   };
   /**

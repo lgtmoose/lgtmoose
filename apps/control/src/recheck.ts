@@ -76,6 +76,11 @@ export const recheckEntrySchema = z.object({
    * when the recheck shows it's fixed. Left out: an open finding whose line is there.
    */
   outdated: z.boolean().optional(),
+  /**
+   * When a person said it's fixed (NIC-1140), as the run saw it: the post step clears that claim
+   * once the recheck has looked, whatever it found. Left out: nobody had.
+   */
+  fixClaimedAt: z.string().optional(),
 });
 
 export type RecheckEntry = z.infer<typeof recheckEntrySchema>;
@@ -158,6 +163,9 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
  * Where a finding comes in the recheck's order, or undefined when the recheck doesn't check it.
  * New side only:
  *
+ * - -1 (NIC-1140): someone said it's fixed, from the CLI or the dashboard: first, whatever its
+ *   severity or line. The claim changes only the order (a claimed nit is checked too): it's
+ *   picked by the same changed-file rules as the rest, and closes only by the recheck's rules;
  * - 0, 1: open blocking, then open should-fix, with its cited line still there;
  * - 2 to 4 (NIC-1124): open, any severity, nits included, its cited line gone at head
  *   (`lines`: edited or deleted, a committed suggestion among them), so it goes `outdated`
@@ -172,6 +180,7 @@ const SEVERITY_RANK = { blocking: 0, should_fix: 1, nit: 2 } as const;
 function tier(record: FindingRecord, lines: LineStates): number | undefined {
   if (record.side !== "RIGHT") return undefined;
   if (record.status !== "open" && record.status !== "outdated") return undefined;
+  if (record.fixClaimedAt !== undefined) return -1;
   const severity = SEVERITY_RANK[record.severity];
   if (lineGone(record, lines)) return (record.status === "outdated" ? 5 : 2) + severity;
   return severity < 2 ? severity : undefined;
@@ -275,6 +284,8 @@ export function selectRechecks(
   if (changed.length === 0 || limit <= 0) return [];
   const affected = records.filter((record) => {
     if (tier(record, lines) === undefined) return false;
+    // A fix claim (NIC-1140) only moves a finding up the order: it's picked by the same
+    // changed-file rules as any other, so a claim and an unrelated push can't close it.
     if (lineGone(record, lines)) return changed.includes(record.path);
     return changed.some((path) => isRelated(record.path, path, imports));
   });
@@ -624,12 +635,14 @@ export async function recheckJob(input: {
           : { githubCommentId: record.githubCommentId }),
         related: relatedOf(record),
         ...(lineGone(record, lines) ? { outdated: true } : {}),
+        ...(record.fixClaimedAt === undefined ? {} : { fixClaimedAt: record.fixClaimedAt }),
       },
     });
   }
   input.log("findings to recheck", {
     count: targets.length,
     outdated: targets.filter((target) => target.entry.outdated === true).length,
+    claimedFixed: targets.filter((target) => target.entry.fixClaimedAt !== undefined).length,
     changed: changed.length,
     mode,
   });
@@ -726,6 +739,64 @@ export function fixedByRecheck(
   return fixes;
 }
 
+/**
+ * Whether this run's review read a recheck target's file well enough for the recheck's verdict
+ * on it to count. Pure. The one rule for both closing a finding as fixed and settling a fix
+ * claim (NIC-1140), so the two can't disagree.
+ *
+ * - `pathNow`: each finding's file at head, followed from where it was raised (renames
+ *   included); none when its line is gone.
+ * - `outdated`: the findings whose cited line head doesn't have (NIC-1124).
+ * - `reviewed`: the files this review read; `unreviewed`: those it changed and didn't read (its
+ *   batch failed, timed out or was capped, or the planner skipped the file).
+ */
+export function verdictCounts(context: {
+  mode: RecheckMode;
+  pathNow: ReadonlyMap<string, string>;
+  outdated: ReadonlySet<string>;
+  reviewed: ReadonlySet<string>;
+  unreviewed: ReadonlySet<string>;
+}): (entry: RecheckEntry) => boolean {
+  const { mode, pathNow, outdated, reviewed, unreviewed } = context;
+  return (entry) => {
+    const path = pathNow.get(entry.findingId);
+    if (path === undefined) {
+      // Its line is gone: only a review of its file now says anything about it. Only when
+      // prepare saw the line gone too and told the recheck so: one this step can't place (its
+      // commit is gone) was never checked against the code that replaced its line.
+      return entry.outdated === true && outdated.has(entry.findingId) && reviewed.has(entry.path);
+    }
+    // A full review (NIC-1123) read every file it could: one it didn't read (skipped, failed,
+    // or not in the PR's change any more) says nothing about the finding.
+    if (mode === "full") return reviewed.has(path);
+    // Changed and not read: "not raised again" says nothing there.
+    if (unreviewed.has(path)) return false;
+    // Moved since it was raised: the recheck read it by its old name, which head doesn't have,
+    // so only a review of the file under its new name says anything about it.
+    return path === entry.path || reviewed.has(path);
+  };
+}
+
+/**
+ * The fix claims (NIC-1140) the recheck settled, by finding ID: each claimed target it gave a
+ * verdict on that `counts` (`verdictCounts`), whatever the verdict. Closed, still there, or gone
+ * but held open by a re-raise (the review saying it's still there) or by the protected-category
+ * rule (a real check that didn't pass): the claim has had its recheck. Pure. One with no verdict,
+ * or whose file wasn't read well enough, keeps its claim for the next run.
+ */
+export function settledFixClaims(
+  targets: readonly RecheckEntry[],
+  verdicts: readonly Verdict[],
+  counts: (entry: RecheckEntry) => boolean,
+): string[] {
+  const answered = new Set(verdicts.map((verdict) => verdict.id));
+  return targets.flatMap((entry) =>
+    entry.fixClaimedAt !== undefined && answered.has(entry.id) && counts(entry)
+      ? [entry.findingId]
+      : [],
+  );
+}
+
 /** What the post step decided about the run's recheck, saved once so a retry writes the same. */
 export const recheckWritesSchema = z.object({
   version: z.literal(1),
@@ -736,6 +807,8 @@ export const recheckWritesSchema = z.object({
       reason: z.string(),
     }),
   ),
+  /** The fix claims it settled (`settledFixClaims`). Left out by attempts from before it was kept. */
+  settledClaims: z.array(z.string()).optional(),
 });
 
 export type RecheckWrites = z.infer<typeof recheckWritesSchema>;

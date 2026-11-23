@@ -598,6 +598,9 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
+                ...(row.fixClaimedAt === null
+                  ? {}
+                  : { fixClaimedAt: row.fixClaimedAt.toISOString() }),
                 ...(row.unpostedShadow === true ? { unpostedShadow: true } : {}),
               },
             ],
@@ -654,6 +657,10 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 body: sql`excluded.body`,
                 raisedAtSha: headSha,
                 status: "open",
+                // A fix claim (NIC-1140) is about the finding as it stood: raised again from fixed
+                // or retired, it's a new finding nobody has said is fixed.
+                fixClaimedAt: sql`case when ${findings.status} in ('open', 'outdated') then ${findings.fixClaimedAt} end`,
+                fixClaimedBy: sql`case when ${findings.status} in ('open', 'outdated') then ${findings.fixClaimedBy} end`,
                 updatedAt: now(),
               },
               // A finding someone declined, disputed or resolved stays that way. One retired from
@@ -720,7 +727,12 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         return db.transaction(async (tx) => {
           const rows = await tx
             .update(findings)
-            .set({ status: to, updatedAt: now() })
+            .set({
+              status: to,
+              // Open again after a person resolved it (NIC-1140): any earlier fix claim is spent.
+              ...(to === "open" ? { fixClaimedAt: null, fixClaimedBy: null } : {}),
+              updatedAt: now(),
+            })
             .where(
               and(
                 eq(findings.pullRequestId, pullRequestId),
@@ -840,6 +852,19 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
       await db
         .insert(findingEvents)
         .values({ findingId, type, actor: "self", sha, githubCommentId: commentId });
+    },
+    async clearFixClaims(claims) {
+      for (const claim of claims) {
+        await db
+          .update(findings)
+          .set({ fixClaimedAt: null, fixClaimedBy: null, updatedAt: now() })
+          .where(
+            and(
+              eq(findings.id, claim.findingId),
+              eq(findings.fixClaimedAt, new Date(claim.fixClaimedAt)),
+            ),
+          );
+      }
     },
     async fixedCommentIds(pullRequestId) {
       const rows = await db

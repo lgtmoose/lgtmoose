@@ -39,6 +39,8 @@ function github(role: "admin" | "member"): DashboardGitHub {
     orgRole: async (_token, org) => (org === "acme" ? role : "none"),
     // Write on acme/api only; acme/web is read only.
     visibleRepos: async () => ({ repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] }),
+    repoAccess: async () => "none",
+    membership: async () => "none",
   };
 }
 

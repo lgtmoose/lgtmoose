@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -106,6 +106,68 @@ describe("the compose dashboard server", () => {
       cookies: { "__Host-lgtmoose_session": "token", other: "x" },
     });
     expect(request?.headers.origin).toBe("https://dash.test");
+  });
+
+  it("hands an API POST's body to the handler (NIC-1140)", async () => {
+    const response = await fetch(`${base}/api/findings/x/ack`, {
+      method: "POST",
+      body: JSON.stringify({ outcome: "fixed" }),
+      headers: { "x-forwarded-for": "198.51.100.7" },
+    });
+    expect(response.status).toBe(404);
+    expect(seen.at(-1)).toMatchObject({
+      method: "POST",
+      body: '{"outcome":"fixed"}',
+    });
+  });
+
+  it("answers an oversized chunked body with 413, without handing it on", async () => {
+    const before = seen.length;
+    const big = new TextEncoder().encode("x".repeat(20 * 1024));
+    const response = await fetch(`${base}/api/findings/x/ack`, {
+      method: "POST",
+      // A stream: sent chunked, with no Content-Length to refuse it up front.
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(big);
+          controller.close();
+        },
+      }),
+      duplex: "half",
+      headers: { "x-forwarded-for": "198.51.100.8" },
+    } as RequestInit);
+    expect(response.status).toBe(413);
+    expect(seen.length).toBe(before);
+  });
+
+  it("answers 413 to an endless chunked body without reading it to the end", async () => {
+    const url = new URL(`${base}/api/findings/x/ack`);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest({
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: { "x-forwarded-for": "198.51.100.9", "transfer-encoding": "chunked" },
+      });
+      const chunk = "x".repeat(1024);
+      let answered = false;
+      // Never ends: only the server's answer stops it.
+      const pump = () => {
+        if (answered) return;
+        req.write(chunk, () => setImmediate(pump));
+      };
+      req.on("response", (response) => {
+        answered = true;
+        resolve(response.statusCode ?? 0);
+        req.destroy();
+      });
+      req.on("error", (error) => {
+        if (!answered) reject(error);
+      });
+      pump();
+    });
+    expect(status).toBe(413);
   });
 
   it("allows only GET and POST on the API, and answers a handler's failure with 500", async () => {

@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import type { AuthDeps } from "./auth/auth.js";
 import type { DeployDeps } from "./deploy/deploy.js";
 import type { FeedbackDeps } from "./feedback/feedback.js";
+import type { FindingsDeps } from "./findings/findings.js";
 import type { LearningsDeps } from "./learnings/learnings.js";
 import type { ReviewEnvironmentFactory } from "./review/review.js";
 import type { SetupDeps } from "./setup/setup.js";
@@ -16,6 +17,7 @@ export const COMMANDS = {
   destroy: "Remove the stacks; keeps the database snapshot and bucket unless --purge",
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
   feedback: "Acceptance of findings per rule category: report, export-declined",
+  findings: "A PR's open findings for an agent, and answers: owner/repo#123, ack <id> fixed",
   learnings: "Learn from a repository's review history: bootstrap --repo owner/name",
 } as const;
 
@@ -46,6 +48,8 @@ export interface RunOptions {
   reviewEnvironment?: ReviewEnvironmentFactory;
   /** Builds feedback's I/O: the deploy config, AWS, GitHub and the disk by default. */
   feedbackDeps?: () => Promise<FeedbackDeps>;
+  /** Builds findings' I/O: the deploy config, CloudFormation, GitHub's token and fetch. */
+  findingsDeps?: () => Promise<FindingsDeps>;
   /** Builds learnings' I/O: the deploy config, CloudFormation and S3 by default. */
   learningsDeps?: () => Promise<LearningsDeps>;
 }
@@ -86,6 +90,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
       options.feedbackDeps ??
       (async () => (await import("./feedback/deps.js")).defaultFeedbackDeps());
     return runFeedback(argv.slice(1), getDeps);
+  }
+
+  if (argv[0] === "findings") {
+    const { runFindings } = await import("./findings/findings.js");
+    const getDeps =
+      options.findingsDeps ??
+      (async () => (await import("./findings/deps.js")).defaultFindingsDeps());
+    return runFindings(argv.slice(1), getDeps);
   }
 
   if (argv[0] === "learnings") {

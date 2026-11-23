@@ -60,8 +60,20 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
         line: 1,
         source: "self" as const,
         sourceLogin: undefined,
+        status: "open" as const,
+        fixClaimedAt: undefined,
+        fixClaimedBy: undefined,
         createdAt: NOW.toISOString(),
       }));
+    },
+    async answerTarget() {
+      return undefined;
+    },
+    async claimFix() {
+      return false;
+    },
+    async declineFinding() {
+      return false;
     },
     async recentRuns(repos) {
       return repos.map((repo) => ({
@@ -125,6 +137,12 @@ function fakeGitHub(overrides: Partial<DashboardGitHub> = {}): DashboardGitHub &
     },
     async visibleRepos() {
       return { repos: ["acme/api", "acme/web"], writeRepos: ["acme/api"] };
+    },
+    async repoAccess() {
+      return "none" as const;
+    },
+    async membership() {
+      return "none" as const;
     },
     ...overrides,
   };

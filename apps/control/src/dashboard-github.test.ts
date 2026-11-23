@@ -3,14 +3,19 @@ import { authorizeUrl, githubDashboard } from "./dashboard-github.js";
 
 type Call = { url: string; init: RequestInit };
 
-function fakeFetch(routes: Record<string, { status?: number; body: unknown }>) {
+function fakeFetch(
+  routes: Record<string, { status?: number; body: unknown; headers?: Record<string, string> }>,
+) {
   const calls: Call[] = [];
   const fetch = async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     const path = url.replace(/^https:\/\/[^/]+/, "");
     const route = routes[path];
     if (route === undefined) return new Response("{}", { status: 404 });
-    return new Response(JSON.stringify(route.body), { status: route.status ?? 200 });
+    return new Response(JSON.stringify(route.body), {
+      status: route.status ?? 200,
+      ...(route.headers === undefined ? {} : { headers: route.headers }),
+    });
   };
   return { fetch, calls };
 }
@@ -113,5 +118,176 @@ describe("githubDashboard", () => {
     await expect(github.login("gho_secret")).rejects.toThrow(
       /^GitHub refused reading the signed-in user \(HTTP 500\)\.$/,
     );
+  });
+});
+
+describe("membership (NIC-1140)", () => {
+  const PATH = "/user/memberships/orgs/acme";
+  const ask = (route: { status?: number; body: unknown; headers?: Record<string, string> }) =>
+    githubDashboard({ fetch: fakeFetch({ [PATH]: route }).fetch }).membership("t", "acme");
+
+  it("reads an active membership", async () => {
+    expect(await ask({ body: { state: "active", role: "member" } })).toBe("member");
+    expect(await ask({ body: { state: "pending", role: "member" } })).toBe("none");
+  });
+
+  it("says when the token can't be shown membership", async () => {
+    // A classic token with only repo: GitHub hides the membership.
+    expect(await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo" } })).toBe(
+      "unreadable",
+    );
+    // A 403 to a classic token whose scopes lack an org scope.
+    expect(await ask({ status: 403, body: {}, headers: { "x-oauth-scopes": "repo" } })).toBe(
+      "unreadable",
+    );
+  });
+
+  it("passes on any other 403 as GitHub's refusal, with its message", async () => {
+    const allowList = {
+      status: 403,
+      body: { message: "the `acme` organization has an IP allow list enabled" },
+    };
+    // A fine-grained token (no scopes header), or a classic one that has read:org.
+    for (const headers of [{}, { "x-oauth-scopes": "repo, read:org" }]) {
+      await expect(ask({ ...allowList, headers })).rejects.toMatchObject({
+        status: 403,
+        githubMessage: "the `acme` organization has an IP allow list enabled",
+      });
+    }
+  });
+
+  it("takes the user scope as able to read memberships", async () => {
+    expect(await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo, user" } })).toBe(
+      "none",
+    );
+    const refused = {
+      status: 403,
+      body: { message: "no" },
+      headers: { "x-oauth-scopes": "repo, user" },
+    };
+    await expect(ask(refused)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("is none when the token could see a membership and there isn't one", async () => {
+    expect(
+      await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo, read:org" } }),
+    ).toBe("none");
+    expect(await ask({ status: 404, body: {} })).toBe("none");
+  });
+
+  it("passes on SAML single sign-on and rate limits", async () => {
+    await expect(
+      ask({ status: 403, body: {}, headers: { "x-github-sso": "required" } }),
+    ).rejects.toMatchObject({ sso: true });
+    await expect(
+      ask({ status: 403, body: {}, headers: { "x-ratelimit-remaining": "0" } }),
+    ).rejects.toMatchObject({ rateLimited: true });
+  });
+});
+
+describe("repoAccess", () => {
+  const reply = (
+    permissions: Record<string, boolean>,
+    scopes: string | undefined,
+    isPrivate = true,
+  ) =>
+    githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": {
+          body: { private: isPrivate, permissions },
+          ...(scopes === undefined ? {} : { headers: { "x-oauth-scopes": scopes } }),
+        },
+      }).fetch,
+    });
+
+  it("gives write only when the person may write and the token's scopes allow it", async () => {
+    const writer = { pull: true, push: true };
+    expect(await reply(writer, "gist, read:org, repo").repoAccess("t", "acme/app")).toBe("write");
+    expect(await reply({ pull: true, maintain: true }, "repo").repoAccess("t", "acme/app")).toBe(
+      "write",
+    );
+    // public_repo is enough for a public repository only.
+    expect(await reply(writer, "public_repo", false).repoAccess("t", "acme/app")).toBe("write");
+    expect(await reply(writer, "public_repo", true).repoAccess("t", "acme/app")).toBe(
+      "token-read-only",
+    );
+    // A classic token with no scopes, or a fine-grained token (no scopes header).
+    expect(await reply(writer, "").repoAccess("t", "acme/app")).toBe("token-read-only");
+    expect(await reply(writer, undefined).repoAccess("t", "acme/app")).toBe("token-read-only");
+    expect(await reply({ pull: true }, "repo").repoAccess("t", "acme/app")).toBe("read");
+    expect(await reply({}, "repo").repoAccess("t", "acme/app")).toBe("none");
+  });
+
+  it("is none when GitHub doesn't show the repository to the token", async () => {
+    const github = githubDashboard({ fetch: fakeFetch({}).fetch });
+    expect(await github.repoAccess("t", "acme/app")).toBe("none");
+  });
+
+  it("refuses a token GitHub rejects", async () => {
+    const github = githubDashboard({
+      fetch: fakeFetch({ "/repos/acme/app": { status: 401, body: {} } }).fetch,
+    });
+    await expect(github.repoAccess("t", "acme/app")).rejects.toThrow("HTTP 401");
+  });
+
+  it("says when GitHub asks for SAML single sign-on, or can't be reached", async () => {
+    const sso = githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": {
+          status: 403,
+          body: {},
+          headers: { "x-github-sso": "required; url=https://github.com/orgs/acme/sso" },
+        },
+      }).fetch,
+    });
+    await expect(sso.repoAccess("t", "acme/app")).rejects.toMatchObject({
+      status: 403,
+      sso: true,
+    });
+    const down = githubDashboard({
+      fetch: async () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+    await expect(down.repoAccess("t", "acme/app")).rejects.toMatchObject({ status: 0 });
+  });
+
+  it("doesn't follow a redirect, and says the repository moved", async () => {
+    const { fetch, calls } = fakeFetch({
+      "/repos/acme/app": {
+        status: 301,
+        body: {},
+        headers: { location: "https://api.github.com/repositories/1" },
+      },
+    });
+    await expect(githubDashboard({ fetch }).repoAccess("t", "acme/app")).rejects.toMatchObject({
+      status: 301,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.init.redirect).toBe("manual");
+  });
+
+  it("tells GitHub's rate limit from a refusal", async () => {
+    const limited = githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": {
+          status: 403,
+          body: {},
+          headers: { "x-ratelimit-remaining": "0" },
+        },
+      }).fetch,
+    });
+    await expect(limited.repoAccess("t", "acme/app")).rejects.toMatchObject({
+      status: 403,
+      rateLimited: true,
+    });
+    const refused = githubDashboard({
+      fetch: fakeFetch({
+        "/repos/acme/app": { status: 403, body: {}, headers: { "x-ratelimit-remaining": "4000" } },
+      }).fetch,
+    });
+    await expect(refused.repoAccess("t", "acme/app")).rejects.toMatchObject({
+      rateLimited: false,
+    });
   });
 });

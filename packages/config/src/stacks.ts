@@ -77,6 +77,12 @@ export const FEEDBACK_REPORT_KEY = "reports/feedback/latest.json";
 export const BOOTSTRAP_REQUEST_PREFIX = "requests/learnings-bootstrap/";
 
 /**
+ * The header `lgtmoose findings` sends the person's GitHub token in (NIC-1140). Not
+ * `Authorization`, which CloudFront drops from a GET.
+ */
+export const DASHBOARD_TOKEN_HEADER = "x-lgtmoose-github-token";
+
+/**
  * The dashboard's Content-Security-Policy, on every response, the page and the API: scripts and
  * styles from its own origin only (the page has no inline script or style), no framing, no
  * plugins, and the API the only place it connects to. Sign-in leaves by navigation, which CSP
