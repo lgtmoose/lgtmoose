@@ -150,8 +150,8 @@ export class DashboardGitHubError extends Error {
   }
 }
 
-/** The classic token scopes that let GitHub show org memberships. */
-const ORG_SCOPES = ["read:org", "write:org", "admin:org"];
+/** The classic token scopes that let GitHub show org memberships (`user` includes them). */
+const ORG_SCOPES = ["read:org", "write:org", "admin:org", "user"];
 
 /** Whether `X-OAuth-Scopes` (a classic or OAuth token's) has an org scope. */
 function hasOrgScope(scopes: string): boolean {

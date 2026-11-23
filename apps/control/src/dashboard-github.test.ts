@@ -156,6 +156,18 @@ describe("membership (NIC-1140)", () => {
     }
   });
 
+  it("takes the user scope as able to read memberships", async () => {
+    expect(await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo, user" } })).toBe(
+      "none",
+    );
+    const refused = {
+      status: 403,
+      body: { message: "no" },
+      headers: { "x-oauth-scopes": "repo, user" },
+    };
+    await expect(ask(refused)).rejects.toMatchObject({ status: 403 });
+  });
+
   it("is none when the token could see a membership and there isn't one", async () => {
     expect(
       await ask({ status: 404, body: {}, headers: { "x-oauth-scopes": "repo, read:org" } }),

@@ -170,6 +170,19 @@ async function call(
   return body;
 }
 
+/**
+ * JSON with every control (C0 and C1), format (bidi, zero-width) and line-separator character
+ * written as a `\uXXXX` escape, so a terminal never sees one raw. Still the same JSON: these
+ * only occur inside strings, where an escape means the same thing. A raw newline is left alone:
+ * `JSON.stringify` escapes those in strings, so one in its output is layout.
+ */
+export function terminalSafeJson(json: string): string {
+  return json.replace(
+    /[^\P{Cc}\n]|[\p{Cf}\u2028\u2029]/gu,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 /** The findings as a short plain list, for a person at a terminal. */
 function formatText(repo: string, number: number, findings: readonly AgentFinding[]): string {
   if (findings.length === 0) return `No open findings on ${repo}#${number}.\n`;
@@ -205,7 +218,7 @@ async function list(
     return parsed.success && (parsed.data.source ?? "self") === "self" ? [parsed.data] : [];
   });
   const formats = {
-    json: () => `${JSON.stringify(findings, null, 2)}\n`,
+    json: () => `${terminalSafeJson(JSON.stringify(findings, null, 2))}\n`,
     text: () => formatText(repo, number, findings),
     md: () => agentFindingsMarkdown({ repo, number, findings, cli: CLI }),
   };

@@ -112,6 +112,19 @@ describe("lgtmoose findings <repo>#<pr>", () => {
     expect(clean.stdout).not.toContain("\u001b");
   });
 
+  it("escapes control, bidi and line-separator characters in JSON, keeping it the same JSON", async () => {
+    const title = "Bad\u009b31m\u202Etitle\u2028\u007f\u001b[2J";
+    const { deps: d } = deps({ reply: { body: { findings: [{ ...finding, title }] } } });
+    const json = await run(["findings", "acme/app#232", "--format", "json"], {
+      findingsDeps: async () => d,
+    });
+    // Nothing raw but the layout's newlines.
+    expect(json.stdout.replaceAll("\n", "")).not.toMatch(/[\p{Cc}\p{Cf}\u2028\u2029]/u);
+    expect(json.stdout).toContain("\\u009b");
+    expect(json.stdout).toContain("\\u202e");
+    expect(JSON.parse(json.stdout)).toMatchObject([{ title }]);
+  });
+
   it("takes the dashboard's URL from --url or the environment, localhost for compose", async () => {
     const { deps: d, calls } = deps({ env: { LGTMOOSE_DASHBOARD_URL: "http://localhost:8080/" } });
     await run(["findings", "acme/app#232"], { findingsDeps: async () => d });
