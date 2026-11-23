@@ -176,11 +176,13 @@ export const reviewRuns = pgTable(
      */
     spendCap: text("spend_cap"),
     /**
-     * Whether the run's post was in shadow mode, so wrote nothing to GitHub (NIC-1141). Set once,
-     * by the post step, before it saves findings. Runs from before it was kept were all marked
-     * shadow by the migration that added it.
+     * Whether the run's post was in shadow mode, so wrote nothing to GitHub (NIC-1141). The post
+     * step sets it, holding its claims, before it writes its review and saves findings. Shadow by
+     * default: runs from before it was kept, and runs of older control code still finishing during
+     * a deploy, were all in shadow mode (an install that went live sets its live ones, see
+     * docs/upgrading.md).
      */
-    shadow: boolean("shadow"),
+    shadow: boolean("shadow").notNull().default(true),
     /**
      * The run reviewed everything it set out to (NIC-1141): no failed or spend-capped batch and
      * no file left unreviewed. Set when it succeeds; null for runs from before it was kept. Only

@@ -1,5 +1,5 @@
 {
-  "id": "5bc31498-d39b-4d7a-adb5-bdc08dfcf55a",
+  "id": "e4ec25da-3755-4f96-a506-aa28711853f2",
   "prevId": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "version": "7",
   "dialect": "postgresql",
@@ -2238,7 +2238,8 @@
           "name": "shadow",
           "type": "boolean",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": true
         },
         "complete": {
           "name": "complete",

@@ -612,6 +612,17 @@ describe("drizzleFindingStore", () => {
       });
 
     it("records a run's mode, the latest attempt's", async () => {
+      // Shadow until its post says otherwise: older code finishing a run never records it.
+      const unrecorded = await store.startRun({
+        installationId: 5,
+        repo: "acme/shop",
+        number: 48,
+        author: "dev",
+        headSha: sha("1"),
+        baseSha: sha("b"),
+        executionArn: "arn:exec:shadow:default",
+      });
+      expect((await runRow(unrecorded.runId))?.shadow).toBe(true);
       const started = await run("arn:exec:shadow:mode", true);
       // A later attempt, before the review is out, records its own (a deploy changed it).
       await store.recordShadow?.(started.runId, false);

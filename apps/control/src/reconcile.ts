@@ -109,7 +109,7 @@ export interface PostedRun {
   reviewId: number | undefined;
   /**
    * Whether that run was in shadow mode, so its review and label were never on GitHub
-   * (NIC-1141). Undefined when it isn't recorded.
+   * (NIC-1141). Undefined (a store that doesn't keep it) counts as shadow.
    */
   shadow?: boolean;
 }

@@ -86,7 +86,7 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
             statusLabel: row.statusLabel ?? undefined,
             reviewEvent: row.reviewEvent ?? undefined,
             reviewId: row.reviewId ?? undefined,
-            ...(row.shadow === null ? {} : { shadow: row.shadow }),
+            shadow: row.shadow,
           };
     },
     async restore(pullRequestId, recordedHead, run) {

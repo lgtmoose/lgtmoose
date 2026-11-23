@@ -386,7 +386,9 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
             ...(result.complete === undefined ? {} : { complete: result.complete }),
-            finishedAt: now(),
+            // The database's clock, as the retire events' (NIC-1141): what a full review finished
+            // after is compared with when findings were retired.
+            finishedAt: sql`now()`,
           })
           .where(eq(reviewRuns.id, runId))
           .returning({ runId: reviewRuns.id, pullRequestId: reviewRuns.pullRequestId });

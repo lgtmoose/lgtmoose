@@ -9,7 +9,7 @@ import { sql, type SQL } from "drizzle-orm";
  * - **Never posted:** our own finding, open or outdated, with no comment. A comment deleted on
  *   GitHub since keeps its ID here, so a live finding whose comment is gone doesn't match.
  * - **Raised in shadow mode:** the run that last raised it (`findings.run_id`) was a shadow run
- *   (`review_runs.shadow`, set by its post step).
+ *   (`review_runs.shadow`: set by its post step, shadow by default).
  * - **Unanswered:** no event by a person (one with a login: a reply on its thread, a resolve, an
  *   answer from the findings CLI or dashboard) after its latest `raised` event. An answer from
  *   before it was raised again was about the earlier finding.
