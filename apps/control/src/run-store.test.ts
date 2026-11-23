@@ -611,10 +611,14 @@ describe("drizzleFindingStore", () => {
         createdAt: at,
       });
 
-    it("records a run's mode once", async () => {
+    it("records a run's mode until its review is out, then keeps it", async () => {
       const started = await run("arn:exec:shadow:mode", true);
+      // A later attempt that posted nothing yet records its own (a deploy changed it).
       await store.recordShadow?.(started.runId, false);
-      expect((await runRow(started.runId))?.shadow).toBe(true);
+      expect((await runRow(started.runId))?.shadow).toBe(false);
+      // Once the review is out, the mode it was posted in stays.
+      await store.recordShadow?.(started.runId, true, { final: true });
+      expect((await runRow(started.runId))?.shadow).toBe(false);
     });
 
     it("retires unposted, unanswered ones, and leaves the rest", async () => {
@@ -684,23 +688,29 @@ describe("drizzleFindingStore", () => {
       expect(await row("Shadow outdated")).toMatchObject({ status: "open", severity: "nit" });
       expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
 
-      // A full review a spend cap cut short doesn't count as one.
-      const capped = await run("arn:exec:shadow:capped", false);
+      // A full review that didn't review everything (a failed or capped batch, files left
+      // unreviewed) doesn't count as one.
+      const partial = await run("arn:exec:shadow:partial", false);
       await db
         .update(reviewRuns)
         .set({
           kind: "full",
           status: "succeeded",
-          spendCap: "pr_cost",
+          complete: false,
           finishedAt: new Date(Date.now() + 120_000),
         })
-        .where(eq(reviewRuns.id, capped.runId));
+        .where(eq(reviewRuns.id, partial.runId));
       expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
-      // A full review that finished since: none left to mention.
+      // A complete full review that finished since: none left to mention.
       const full = await run("arn:exec:shadow:full", false);
       await db
         .update(reviewRuns)
-        .set({ kind: "full", status: "succeeded", finishedAt: new Date(Date.now() + 120_000) })
+        .set({
+          kind: "full",
+          status: "succeeded",
+          complete: true,
+          finishedAt: new Date(Date.now() + 120_000),
+        })
         .where(eq(reviewRuns.id, full.runId));
       expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(0);
     });
@@ -721,6 +731,14 @@ describe("drizzleFindingStore", () => {
       const liveRun = await run("arn:exec:live:review", false);
       await succeed(liveRun.runId);
       expect((await loaded(liveRun.runId)).reviewLive).toBe(true);
+      // A label-only write (a covered run's) leaves it as the review it goes with.
+      const covered = await run("arn:exec:shadow:covered-label", true);
+      await store.coverRun(covered.runId, {
+        filesDone: 0,
+        costUsd: undefined,
+        pr: { headSha: sha("1"), statusLabel: "LGTMoose: approved", summaryCommentId: undefined },
+      });
+      expect((await loaded(covered.runId)).reviewLive).toBe(true);
     });
   });
 

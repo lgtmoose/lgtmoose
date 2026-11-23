@@ -1466,8 +1466,10 @@ export async function post(
     ...(await slugOf(github)),
   });
   // The mode this post runs in decides whether its findings reach GitHub (NIC-1141): recorded
-  // before they're saved, should a deploy have changed it since the prepare step.
-  await deps.runs.recordShadow?.(runId, deps.shadow === true);
+  // before they're saved. Until an attempt has posted its review, each records its own (a deploy
+  // may have changed it); after, the mode it posted in stays.
+  const reviewOut = readProgress(await deps.store.getText(keys.posted)).review === true;
+  await deps.runs.recordShadow?.(runId, deps.shadow === true, { final: reviewOut });
   // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
   // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
   // review that raises one again posts it as new. A retry finds none left to retire.
@@ -1866,6 +1868,9 @@ export async function post(
       summaryCommentId: progress.summaryCommentId ?? run.summaryCommentId,
       // The review it posted; a quiet run leaves the PR's last review as it is.
       review: quiet ? undefined : { event: decision.event, id: progress.reviewId },
+      // Whether it reviewed everything (NIC-1141): a complete full review clears the summary's
+      // note on findings retired from shadow mode, by the same test `finishReview` uses.
+      complete: report.complete && manifest.spendCap === undefined,
     });
   /**
    * Records the run's findings once its review is out (or skipped as quiet): outdated first (a

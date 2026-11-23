@@ -259,6 +259,11 @@ export interface RunStore {
       summaryCommentId: number | undefined;
       /** The review this run posted: its event and ID. Undefined when it posted none. */
       review?: { event: ReviewEvent; id: number | undefined } | undefined;
+      /**
+       * It reviewed everything it set out to (NIC-1141): no failed or spend-capped batch, no
+       * file left unreviewed, no spend cap from the prepare step.
+       */
+      complete?: boolean;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */
@@ -294,10 +299,11 @@ export interface RunStore {
   supersedeRun(runId: string): Promise<void>;
   /**
    * Records whether the run's post is in shadow mode (NIC-1141), which decides whether its
-   * findings were posted. Only the first call sets it: a retry after a deploy changed the mode
-   * keeps the one its findings were saved in.
+   * findings were posted. `final`: the post has written its review, so the mode is set only if
+   * none is recorded yet; otherwise an attempt that posted nothing yet records its own mode, so
+   * a retry after a deploy changed it goes by the mode it posts in.
    */
-  recordShadow?(runId: string, shadow: boolean): Promise<void>;
+  recordShadow?(runId: string, shadow: boolean, options?: { final?: boolean }): Promise<void>;
   /**
    * Succeeded automatic reviews of the pull request (`first` or `incremental`, not a full review
    * and not one a spend cap stopped) that started after `resume` or a review someone asked for.

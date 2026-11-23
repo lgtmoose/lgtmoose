@@ -304,7 +304,8 @@ describe.skipIf(adminUrl === undefined)("the dashboard's database login", () => 
       "delete from learnings",
       // Only which learning, what happened and when: not who.
       "select actor from learning_events",
-      // Finding events: whether a person answered, never what they wrote or who wrote it in full.
+      // Finding events: whether a person answered, never who or what they wrote.
+      "select actor_login from finding_events",
       "select actor, github_comment_id from finding_events",
       "update learning_events set actor = 'mallory'",
       "delete from learning_events",

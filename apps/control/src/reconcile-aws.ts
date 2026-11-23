@@ -39,6 +39,7 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
           lastReviewedSha: pullRequests.lastReviewedSha,
           statusLabel: pullRequests.statusLabel,
           commentsThrough: pullRequests.commentsThrough,
+          reviewShadow: pullRequests.reviewShadow,
         })
         .from(pullRequests)
         // GitHub names are case-insensitive; rows keep the spelling a job had.
@@ -52,6 +53,7 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
             lastReviewedSha: row.lastReviewedSha ?? undefined,
             statusLabel: row.statusLabel ?? undefined,
             commentsThrough: row.commentsThrough ?? undefined,
+            ...(row.reviewShadow === false ? { reviewLive: true } : {}),
           },
         ]),
       );

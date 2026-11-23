@@ -28,7 +28,7 @@ export function unpostedShadow(): SQL {
     and not exists (
       select 1 from "finding_events" as answer
       where answer.finding_id = "findings"."id"
-        and answer.actor_login is not null
+        and answer.human
         and answer.created_at > coalesce(
           (
             select max(raise.created_at) from "finding_events" as raise
@@ -43,8 +43,9 @@ export function unpostedShadow(): SQL {
 /**
  * Findings retired from shadow mode (status `shadow`) since the PR's last full review, as a
  * condition on `findings`: the summary asks for a full review to raise any still there. One raised
- * again is open again, so no longer counts; once a full review has run in full (no spend cap cut
- * it short), none do.
+ * again is open again, so no longer counts; once a full review has run in full (`complete`: no
+ * failed or spend-capped batch, nothing left unreviewed), none do. `finishReview` leaves the
+ * note off such a review's own summary by the same test.
  */
 export function retiredSinceFullReview(): SQL {
   return sql`(
@@ -58,7 +59,7 @@ export function retiredSinceFullReview(): SQL {
         where full_run.pull_request_id = "findings"."pull_request_id"
           and full_run.kind = 'full'
           and full_run.status = 'succeeded'
-          and full_run.spend_cap is null
+          and full_run.complete = true
       ),
       '-infinity'::timestamptz
     )

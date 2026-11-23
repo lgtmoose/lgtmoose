@@ -75,9 +75,9 @@ export async function ensureDashboardRole(
     `grant select (learning_id, type, created_at) on table learning_events to ${name}`,
   );
   // Whether a finding raised in shadow mode was answered since (NIC-1141): its events' kind,
-  // time, and whether a person was behind one. Not what they said.
+  // time, and whether a person was behind one (`human`). Not who, nor what they said.
   await client.query(
-    `grant select (finding_id, type, actor_login, created_at) on table finding_events to ${name}`,
+    `grant select (finding_id, type, human, created_at) on table finding_events to ${name}`,
   );
   await client.query(`grant select on table ${DASHBOARD_REPORT_VIEW} to ${name}`);
 }

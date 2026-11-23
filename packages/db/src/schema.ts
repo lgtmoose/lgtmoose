@@ -181,6 +181,13 @@ export const reviewRuns = pgTable(
      * shadow by the migration that added it.
      */
     shadow: boolean("shadow"),
+    /**
+     * The run reviewed everything it set out to (NIC-1141): no failed or spend-capped batch and
+     * no file left unreviewed. Set when it succeeds; null for runs from before it was kept. Only
+     * a complete full review counts as the full review that clears findings retired from shadow
+     * mode.
+     */
+    complete: boolean("complete"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -267,6 +274,11 @@ export const findingEvents = pgTable(
     actor: text("actor").notNull(),
     /** For a person's event: their GitHub login, when it's known (who resolved a thread, say). */
     actorLogin: text("actor_login"),
+    /**
+     * A person's event (it has a login), worked out by the database (NIC-1141): what the
+     * dashboard reads to tell an answered finding, without reading who answered it.
+     */
+    human: boolean("human").generatedAlwaysAs(sql`actor_login is not null`),
     /**
      * For a `resolved` event: false when the resolution didn't count, and the finding stayed
      * open (a blocking or protected finding resolved by the PR's author, or by someone whose

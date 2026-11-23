@@ -1389,15 +1389,16 @@ export async function finishReview(
 
   const unreviewed = unreviewedReasons(plan.skipped);
   const cappedBatches = batches.filter((batch) => batch.error === SPEND_CAP_ERROR).length;
-  // Retired from shadow mode and not raised again by this run (NIC-1141); none to mention on a
-  // full review a spend cap didn't cut short.
-  const raisedNow = new Set(posted.map((entry) => entry.fingerprint));
-  const shadowRetired =
-    prepared.kind === "full" && cappedBatches === 0 && options.spendCap === undefined
-      ? 0
-      : (options.shadowRetired ?? []).filter((fingerprint) => !raisedNow.has(fingerprint)).length;
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length - cappedBatches;
   const complete = failedBatches === 0 && cappedBatches === 0 && unreviewed.length === 0;
+  // Retired from shadow mode and not raised again by this run (NIC-1141); none to mention on a
+  // full review that reviewed everything: the one the note asks for. Post records the same test
+  // as the run's `complete`.
+  const raisedNow = new Set(posted.map((entry) => entry.fingerprint));
+  const shadowRetired =
+    prepared.kind === "full" && complete && options.spendCap === undefined
+      ? 0
+      : (options.shadowRetired ?? []).filter((fingerprint) => !raisedNow.has(fingerprint)).length;
 
   // A ticket's missing core requirements count as should-fix findings, capped: model judgement,
   // so they can hold approval but never block on their own.

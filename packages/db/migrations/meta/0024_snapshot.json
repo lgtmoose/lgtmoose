@@ -1,5 +1,5 @@
 {
-  "id": "7ea64a37-a161-4ca5-a5e6-14ca9e9f67a3",
+  "id": "5bc31498-d39b-4d7a-adb5-bdc08dfcf55a",
   "prevId": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "version": "7",
   "dialect": "postgresql",
@@ -417,6 +417,16 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "human": {
+          "name": "human",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "actor_login is not null",
+            "type": "stored"
+          }
         },
         "counted": {
           "name": "counted",
@@ -2226,6 +2236,12 @@
         },
         "shadow": {
           "name": "shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "complete": {
+          "name": "complete",
           "type": "boolean",
           "primaryKey": false,
           "notNull": false

@@ -1085,6 +1085,12 @@ describe("prepareReview and finishReview with earlier runs", () => {
       (await note("full", { spendCap: { batches: [1], reason: "a spend cap was reached" } }))
         .summary,
     ).toContain("from shadow mode");
+    // Nor one whose batch failed: it didn't review everything.
+    const failed = await finishReview(repo, { ...prepared, kind: "full" }, [], headSha, {
+      shadowRetired: retired,
+    });
+    expect(failed.complete).toBe(false);
+    expect(failed.summary).toContain("2 findings from shadow mode were never posted");
   });
 
   it("counts another reviewer's finding in the decision without posting it, and notes a miss", async () => {

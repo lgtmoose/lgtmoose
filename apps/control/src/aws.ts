@@ -181,9 +181,10 @@ async function recordOnPr(
     .where(eq(pullRequests.id, run.pullRequestId))
     .for("update");
   if (await newerRunPosted(tx, run)) return;
-  // Whether what it records was on GitHub (NIC-1141): a shadow run's review and label weren't.
+  // Whether the review it records was on GitHub (NIC-1141): a shadow run's wasn't. Only with a
+  // review: a label-only write (a covered run's) leaves it as the review it goes with.
   const [mode] =
-    pr.review === undefined && pr.statusLabel === undefined
+    pr.review === undefined
       ? []
       : await tx
           .select({ shadow: reviewRuns.shadow })
@@ -384,6 +385,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
               : { reviewEvent: result.review.event, reviewId: result.review.id ?? null }),
             filesDone: result.filesDone,
             costUsd: result.costUsd === undefined ? null : result.costUsd.toFixed(4),
+            ...(result.complete === undefined ? {} : { complete: result.complete }),
             finishedAt: now(),
           })
           .where(eq(reviewRuns.id, runId))
@@ -428,12 +430,16 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           ),
         );
     },
-    async recordShadow(runId, shadow) {
-      // Once: a retry after a deploy changed the mode keeps the mode its findings were saved in.
+    async recordShadow(runId, shadow, options) {
+      // Once its review is out, kept: the mode it posted (and saves findings) in.
       await db
         .update(reviewRuns)
         .set({ shadow })
-        .where(and(eq(reviewRuns.id, runId), isNull(reviewRuns.shadow)));
+        .where(
+          options?.final === true
+            ? and(eq(reviewRuns.id, runId), isNull(reviewRuns.shadow))
+            : eq(reviewRuns.id, runId),
+        );
     },
     async supersedeRun(runId) {
       // A run that already finished (or failed) keeps its status.

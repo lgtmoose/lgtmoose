@@ -317,9 +317,11 @@ function memoryRuns(): RunStore & {
       pause.noted.push(runId);
       pause.head = undefined;
     },
-    async recordShadow(runId, shadow) {
+    async recordShadow(runId, shadow, options) {
       const run = runs.get(runId);
-      if (run !== undefined) run.shadow ??= shadow;
+      if (run === undefined) return;
+      if (options?.final === true) run.shadow ??= shadow;
+      else run.shadow = shadow;
     },
     async supersedeRun(runId) {
       const run = runs.get(runId);
@@ -583,7 +585,9 @@ function harness(setup: Setup = {}) {
       Math.max(
         0,
         ...[...runs.runs.values()]
-          .filter((run) => run.kind === "full" && run.status === "succeeded")
+          .filter(
+            (run) => run.kind === "full" && run.status === "succeeded" && run.result?.complete,
+          )
           .map((run) => run.finishedAt ?? 0),
       ),
   );
