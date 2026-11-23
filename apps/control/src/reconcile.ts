@@ -102,6 +102,11 @@ export interface PostedRun {
   statusLabel: string | undefined;
   reviewEvent: string | undefined;
   reviewId: number | undefined;
+  /**
+   * Whether that run was in shadow mode, so its review and label were never on GitHub
+   * (NIC-1141). Undefined when it isn't recorded.
+   */
+  shadow?: boolean;
 }
 
 export interface ReconcileStore {

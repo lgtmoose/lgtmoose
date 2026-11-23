@@ -695,11 +695,11 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
       });
     },
     async retiredShadowFindings(pullRequestId) {
-      const [row] = await db
-        .select({ n: count() })
+      const rows = await db
+        .select({ fingerprint: findings.fingerprint })
         .from(findings)
         .where(and(eq(findings.pullRequestId, pullRequestId), retiredSinceFullReview()));
-      return row?.n ?? 0;
+      return rows.map((row) => row.fingerprint);
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),
     reopen: (ids, sha) => moveStatus(ids, "outdated", "open", "raised", sha),

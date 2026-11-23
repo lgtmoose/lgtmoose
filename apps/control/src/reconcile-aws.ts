@@ -64,6 +64,7 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
           statusLabel: reviewRuns.statusLabel,
           reviewEvent: reviewRuns.reviewEvent,
           reviewId: reviewRuns.reviewId,
+          shadow: reviewRuns.shadow,
         })
         .from(reviewRuns)
         .where(
@@ -83,6 +84,7 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
             statusLabel: row.statusLabel ?? undefined,
             reviewEvent: row.reviewEvent ?? undefined,
             reviewId: row.reviewId ?? undefined,
+            ...(row.shadow === null ? {} : { shadow: row.shadow }),
           };
     },
     async restore(pullRequestId, recordedHead, run) {
@@ -96,6 +98,8 @@ export function drizzleReconcileStore(db: Db, now: () => Date = () => new Date()
           // run then posts one rather than trust a review of another head.
           lastReviewEvent: run.reviewEvent ?? null,
           lastReviewId: run.reviewId ?? null,
+          // Whether that record was on GitHub (NIC-1141): not known, not trusted.
+          reviewShadow: run.shadow ?? null,
           updatedAt: now(),
         })
         .where(and(eq(pullRequests.id, pullRequestId), eq(pullRequests.headSha, recordedHead)))

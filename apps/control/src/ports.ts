@@ -137,10 +137,10 @@ export interface FindingStore {
    */
   retireShadowFindings?(pullRequestId: string, sha: string): Promise<number>;
   /**
-   * How many of the PR's findings were retired from shadow mode since its last full review
+   * The fingerprints of the PR's findings retired from shadow mode since its last full review
    * (`retiredSinceFullReview`), for the summary's note. Without it, no note.
    */
-  retiredShadowFindings?(pullRequestId: string): Promise<number>;
+  retiredShadowFindings?(pullRequestId: string): Promise<string[]>;
   /**
    * Follows what people did to our comments' review threads: an open or outdated finding whose
    * thread is resolved becomes `resolved_by_human`, and one resolved that way whose thread was

@@ -424,9 +424,9 @@ function memoryFindings(
       return retiring.length;
     },
     async retiredShadowFindings() {
-      return rows.filter(
-        (row) => row.status === "shadow" && (row.retiredAt ?? 0) > lastFullReview(),
-      ).length;
+      return rows
+        .filter((row) => row.status === "shadow" && (row.retiredAt ?? 0) > lastFullReview())
+        .map((row) => row.fingerprint);
     },
     async markOutdated(ids) {
       for (const row of rows)
@@ -4319,7 +4319,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       expect(writes).toEqual([]);
       // A retry retires none, and the note comes from what's stored: the same.
       expect(await h.findings.retireShadowFindings?.("pr-1", headSha)).toBe(0);
-      expect(await h.findings.retiredShadowFindings?.("pr-1")).toBe(1);
+      expect(await h.findings.retiredShadowFindings?.("pr-1")).toHaveLength(1);
 
       // Every summary says it until a full review: an incremental one at the next push too.
       headSha = await commit({ "src/other.ts": "export const other = 2;\n" }, "and another");
@@ -4327,12 +4327,13 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       expect(summaries(h, next.runId)).toContain("never posted and no longer counts");
 
       // `full review`, as the summary says: raised again, posted as new with a comment, and it
-      // counts. Afterwards no summary has the note.
-      const { posted: again } = await run(h, 5, [finding()], undefined, {
+      // counts. The full review's own summary has no note, nor does any after it.
+      const { prepared: full, posted: again } = await run(h, 5, [finding()], undefined, {
         ...JOB,
         requested: "full_review" as const,
       });
-      expect(await h.findings.retiredShadowFindings?.("pr-1")).toBe(0);
+      expect(summaries(h, full.runId)).not.toContain("from shadow mode");
+      expect(await h.findings.retiredShadowFindings?.("pr-1")).toEqual([]);
       expect(again).toMatchObject({ event: "REQUEST_CHANGES" });
       expect(h.findings.rows).toHaveLength(1);
       expect(h.findings.rows[0]).toMatchObject({ status: "open" });

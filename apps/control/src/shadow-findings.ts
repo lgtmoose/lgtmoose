@@ -43,7 +43,8 @@ export function unpostedShadow(): SQL {
 /**
  * Findings retired from shadow mode (status `shadow`) since the PR's last full review, as a
  * condition on `findings`: the summary asks for a full review to raise any still there. One raised
- * again is open again, so no longer counts; once a full review has run, none do.
+ * again is open again, so no longer counts; once a full review has run in full (no spend cap cut
+ * it short), none do.
  */
 export function retiredSinceFullReview(): SQL {
   return sql`(
@@ -57,6 +58,7 @@ export function retiredSinceFullReview(): SQL {
         where full_run.pull_request_id = "findings"."pull_request_id"
           and full_run.kind = 'full'
           and full_run.status = 'succeeded'
+          and full_run.spend_cap is null
       ),
       '-infinity'::timestamptz
     )

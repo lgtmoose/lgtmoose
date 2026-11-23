@@ -40,10 +40,14 @@ Migrations only add to the schema, so a review that's running while the Data sta
 - **Release images.** `images: { source: "release", … }` deploys a release's published images, pinned by digest, instead of building them. The default, `build`, is unchanged. See [Releasing](releasing.md#deploying-a-release).
 - **Shadow mode.** `shadow: true` is the default. Upgrading never turns it off; set `shadow: false` yourself when you want reviews posted.
 - **Going live retires shadow findings.** Once `shadow` is `false`, the first run on a PR retires the findings raised in shadow mode that have no comment and nobody answered (status `shadow`): they were never posted, so they no longer count towards the decision. Comment `@lgtmoose full review` on PRs still open from shadow mode to raise any that are still there. A finding someone answered after it was last raised (a reply, a resolve, an answer from the findings CLI or dashboard) isn't retired. Each PR's summary says how many were retired, until a full review runs. Once shadow mode is off, the dashboard also stops counting unanswered shadow findings on PRs that never get a live run, such as those merged during the shadow period; they stay in the database.
-- **Runs record whether they were in shadow mode.** The migration that adds this marks every existing run as a shadow run: LGTMoose is alpha, shadow mode is the default, and no install is known to have run live. If yours did run live before this version, mark those runs live after deploying, so their findings aren't retired. Live runs are the ones that posted a review:
+- **Runs record whether they were in shadow mode.** The migration that adds this marks every existing run as a shadow run: LGTMoose is alpha, shadow mode is the default, and no install is known to have run live. If yours did run live before this version, every run it made was live: after deploying, mark the runs from before the upgrade live, with the time you deployed in place of the placeholder, so their findings aren't retired, and mark the PRs' recorded reviews as posted ones:
 
   ```sql
-  UPDATE review_runs SET shadow = false WHERE review_id IS NOT NULL;
+  UPDATE review_runs SET shadow = false WHERE created_at < '<upgrade time>';
+  ```
+
+  ```sql
+  UPDATE pull_requests SET review_shadow = false WHERE last_review_id IS NOT NULL;
   ```
 
 ## Switching profile

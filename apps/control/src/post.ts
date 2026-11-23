@@ -1476,9 +1476,10 @@ export async function post(
       ? 0
       : await deps.findings.retireShadowFindings(run.pullRequestId, pr.headSha);
   if (retiredNow > 0) deps.log("shadow findings retired", { runId, count: retiredNow });
-  // The summary's note: those retired since the PR's last full review, from the stored state,
-  // so every summary says the same until a full review runs or they're raised again.
-  const shadowRetired = (await deps.findings.retiredShadowFindings?.(run.pullRequestId)) ?? 0;
+  // The summary's note: those retired since the PR's last full review, from the stored state.
+  // `finishReview` leaves out those this run raises again, so every summary says the same until
+  // a full review runs or they're raised again.
+  const shadowRetired = (await deps.findings.retiredShadowFindings?.(run.pullRequestId)) ?? [];
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
   let report: ReviewReport;
@@ -1624,7 +1625,7 @@ export async function post(
               spendCap: { batches: manifest.spendCap.batches, reason: manifest.spendCap.reason },
             }),
         ...(manifest.notices === undefined ? {} : { notices: manifest.notices }),
-        ...(shadowRetired > 0 ? { shadowRetired } : {}),
+        ...(shadowRetired.length > 0 ? { shadowRetired } : {}),
         ...(handle === undefined ? {} : { commandHandle: handle }),
         earlier: open.map(withoutId),
         closed,

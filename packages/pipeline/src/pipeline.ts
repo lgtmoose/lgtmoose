@@ -254,8 +254,13 @@ export interface FinishOptions {
    * the deployment's first alias (`SummaryInput.commandHandle`).
    */
   commandHandle?: string;
-  /** Findings retired from shadow mode since the PR's last full review (`SummaryInput`). */
-  shadowRetired?: number;
+  /**
+   * The fingerprints of the PR's findings retired from shadow mode since its last full review
+   * (NIC-1141). The summary counts those this run doesn't raise again (raised again, they're
+   * posted now), and says nothing on a full review that ran in full: it's the full review asked
+   * for.
+   */
+  shadowRetired?: readonly string[];
 }
 
 /** What a batch a spend cap kept from running reports as its error. */
@@ -1384,6 +1389,13 @@ export async function finishReview(
 
   const unreviewed = unreviewedReasons(plan.skipped);
   const cappedBatches = batches.filter((batch) => batch.error === SPEND_CAP_ERROR).length;
+  // Retired from shadow mode and not raised again by this run (NIC-1141); none to mention on a
+  // full review a spend cap didn't cut short.
+  const raisedNow = new Set(posted.map((entry) => entry.fingerprint));
+  const shadowRetired =
+    prepared.kind === "full" && cappedBatches === 0 && options.spendCap === undefined
+      ? 0
+      : (options.shadowRetired ?? []).filter((fingerprint) => !raisedNow.has(fingerprint)).length;
   const failedBatches = batches.filter((batch) => batch.error !== undefined).length - cappedBatches;
   const complete = failedBatches === 0 && cappedBatches === 0 && unreviewed.length === 0;
 
@@ -1452,9 +1464,7 @@ export async function finishReview(
         ? {}
         : { notices: options.notices }),
       ...(options.commandHandle === undefined ? {} : { commandHandle: options.commandHandle }),
-      ...(options.shadowRetired === undefined || options.shadowRetired <= 0
-        ? {}
-        : { shadowRetired: options.shadowRetired }),
+      ...(shadowRetired > 0 ? { shadowRetired } : {}),
     },
     { maxLength: GITHUB_COMMENT_LIMIT - SUMMARY_MARKER_ROOM },
   );

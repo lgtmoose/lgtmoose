@@ -646,8 +646,8 @@ describe("drizzleFindingStore", () => {
       // A retry retires none.
       expect(await findingStore.retireShadowFindings?.(pr, sha("3"))).toBe(0);
       // The note's count comes from what's stored: the same however often it's asked.
-      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(3);
-      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(3);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(3);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(3);
 
       for (const title of ["Shadow", "Shadow outdated", "Answered before"]) {
         expect((await row(title))?.status).toBe("shadow");
@@ -672,7 +672,7 @@ describe("drizzleFindingStore", () => {
       await save(liveRun.runId, pr, "Shadow", 902);
       expect(await row("Shadow")).toMatchObject({ status: "open", githubCommentId: 902 });
       expect(await unposted()).toEqual([]);
-      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(2);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(2);
       // A retired one was never shown: raised again less severely, it takes the new severity.
       await findingStore.saveFindings(pr, liveRun.runId, sha("3"), [
         {
@@ -682,15 +682,27 @@ describe("drizzleFindingStore", () => {
         },
       ]);
       expect(await row("Shadow outdated")).toMatchObject({ status: "open", severity: "nit" });
-      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(1);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
 
+      // A full review a spend cap cut short doesn't count as one.
+      const capped = await run("arn:exec:shadow:capped", false);
+      await db
+        .update(reviewRuns)
+        .set({
+          kind: "full",
+          status: "succeeded",
+          spendCap: "pr_cost",
+          finishedAt: new Date(Date.now() + 120_000),
+        })
+        .where(eq(reviewRuns.id, capped.runId));
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(1);
       // A full review that finished since: none left to mention.
       const full = await run("arn:exec:shadow:full", false);
       await db
         .update(reviewRuns)
         .set({ kind: "full", status: "succeeded", finishedAt: new Date(Date.now() + 120_000) })
         .where(eq(reviewRuns.id, full.runId));
-      expect(await findingStore.retiredShadowFindings?.(pr)).toBe(0);
+      expect(await findingStore.retiredShadowFindings?.(pr)).toHaveLength(0);
     });
 
     it("records whether the PR's review came from a live run", async () => {
