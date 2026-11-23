@@ -651,6 +651,7 @@ export async function prepare(
     baseSha: pr.baseSha,
     executionArn,
     ...(job.eventAt === undefined ? {} : { eventAt: new Date(job.eventAt) }),
+    shadow: deps.shadow === true,
   });
   if (job.headSha !== undefined && job.headSha !== pr.headSha) {
     // A newer push has its own execution; this one reviews nothing.
@@ -755,11 +756,9 @@ export async function prepare(
       recheckJob({
         repo,
         // A live run's post retires unanswered shadow findings (NIC-1141): not worth a recheck.
+        // One someone answered stays, so the recheck can still close it.
         records: (await deps.findings.trackedFindings(run.pullRequestId)).filter(
-          (record) =>
-            deps.shadow === true ||
-            record.raisedInShadow !== true ||
-            record.githubCommentId !== undefined,
+          (record) => deps.shadow === true || record.unpostedShadow !== true,
         ),
         skip: new Set(taken.pending.map((reply) => reply.findingId)),
         sinceSha: lastReviewed,

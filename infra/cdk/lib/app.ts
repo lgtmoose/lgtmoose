@@ -147,6 +147,7 @@ export function buildApp(config: DeployConfig, app: App = new App()): LgtmooseSt
       artifactBucket: data.artifactBucket,
       allowedOrgs: config.allowedOrgs,
       budgets: config.budgets,
+      shadow: config.shadow,
       logRetention: config.profile === "lean" ? RetentionDays.ONE_WEEK : RetentionDays.ONE_MONTH,
     });
     // It reads the database, so it deploys after the migrations.

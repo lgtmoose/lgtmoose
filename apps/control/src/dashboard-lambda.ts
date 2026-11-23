@@ -40,6 +40,8 @@ export interface DashboardEnv {
   allowedOrgs: string[];
   /** Where the feedback report is (`FEEDBACK_REPORT_KEY`); the Lambda may read that key only. */
   artifactBucket: string;
+  /** `LGTMOOSE_SHADOW`: reviews are in shadow mode. Anything but "false" is on (NIC-1141). */
+  shadow: boolean;
 }
 
 export function readDashboardEnv(
@@ -62,6 +64,7 @@ export function readDashboardEnv(
     originParameterName: value("ORIGIN_PARAMETER_NAME"),
     allowedOrgs,
     artifactBucket: value("ARTIFACT_BUCKET"),
+    shadow: env.LGTMOOSE_SHADOW?.trim() !== "false",
   };
 }
 
@@ -95,7 +98,7 @@ function dashboardDeps(): Promise<DashboardDeps> {
     let oauth: { clientId: string; clientSecret: string } | undefined;
     const db = drizzle({ client: pool });
     return {
-      store: drizzleDashboardStore(db),
+      store: drizzleDashboardStore(db, { live: !env.shadow }),
       learnings: drizzleLearningStore(db),
       bootstraps: { store: drizzleBootstrapStore(db), maxPrs: BOOTSTRAP_DEFAULTS.maxPrs },
       async feedbackReport() {

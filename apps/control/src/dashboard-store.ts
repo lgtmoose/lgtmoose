@@ -9,6 +9,7 @@ import {
 } from "@lgtmoose/db";
 import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
+import { unpostedShadow } from "./shadow-findings.js";
 
 /**
  * The dashboard's reads and its sessions (NIC-840). Every read takes the repositories the
@@ -118,7 +119,17 @@ const SEVERITY_ORDER = sql`case ${findings.severity} when 'blocking' then 0 when
 
 const iso = (value: Date | null): string | undefined => value?.toISOString();
 
-export function drizzleDashboardStore(db: Db): DashboardStore {
+/**
+ * `live`: the deployment is out of shadow mode. Then findings raised in shadow mode that were never
+ * posted and nobody answered (`unpostedShadow`) don't count as open: nobody can see them, and a
+ * PR that never gets a live run (merged during the shadow period, say) never retires them. They
+ * stay in the database, so the shadow period's figures can still be read.
+ */
+export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}): DashboardStore {
+  const open =
+    options.live === true
+      ? sql`${findings.status} = 'open' and not ${unpostedShadow()}`
+      : sql`${findings.status} = 'open'`;
   const inRepos = (repos: readonly string[]) =>
     inArray(sql`lower(${pullRequests.repo})`, [...repos]);
   return {
@@ -160,8 +171,8 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
       const counts = await db
         .select({
           repo,
-          openFindings: sql<number>`count(${findings.id}) filter (where ${findings.status} = 'open')`,
-          blocking: sql<number>`count(${findings.id}) filter (where ${findings.status} = 'open' and ${findings.severity} = 'blocking')`,
+          openFindings: sql<number>`count(${findings.id}) filter (where ${open})`,
+          blocking: sql<number>`count(${findings.id}) filter (where ${open} and ${findings.severity} = 'blocking')`,
         })
         .from(pullRequests)
         .leftJoin(findings, eq(findings.pullRequestId, pullRequests.id))
@@ -205,7 +216,7 @@ export function drizzleDashboardStore(db: Db): DashboardStore {
         })
         .from(findings)
         .innerJoin(pullRequests, eq(findings.pullRequestId, pullRequests.id))
-        .where(and(eq(findings.status, "open"), inRepos(repos)))
+        .where(and(open, inRepos(repos)))
         .orderBy(SEVERITY_ORDER, desc(findings.createdAt))
         .limit(limit);
       return rows.map((row) => ({

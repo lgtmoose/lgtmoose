@@ -571,81 +571,126 @@ describe("drizzleFindingStore", () => {
     expect(await stored()).toEqual([["blocking", 503]]);
   });
 
-  it("retires unanswered shadow findings without a comment, once, and posts one raised again", async () => {
-    const run = await start("arn:exec:findings:shadow", 47);
-    const save = (title: string, fingerprint: string, shadow: boolean, githubCommentId?: number) =>
-      findingStore.saveFindings(
-        run.pullRequestId,
-        run.runId,
-        sha("1"),
-        [
-          {
-            finding: finding(title),
-            fingerprint,
-            ...(githubCommentId === undefined ? {} : { githubCommentId }),
-          },
-        ],
-        { shadow },
+  describe("findings raised in shadow mode (NIC-1141)", () => {
+    const number = 47;
+    const run = (arn: string, shadow?: boolean) =>
+      store.startRun({
+        installationId: 5,
+        repo: "acme/shop",
+        number,
+        author: "dev",
+        headSha: sha("1"),
+        baseSha: sha("b"),
+        executionArn: arn,
+        ...(shadow === undefined ? {} : { shadow }),
+      });
+    const save = (runId: string, pr: string, title: string, githubCommentId?: number) =>
+      findingStore.saveFindings(pr, runId, sha("1"), [
+        {
+          finding: finding(title),
+          fingerprint: `fp:${title}`,
+          ...(githubCommentId === undefined ? {} : { githubCommentId }),
+        },
+      ]);
+    const row = async (title: string) =>
+      (
+        await db
+          .select()
+          .from(findings)
+          .where(eq(findings.fingerprint, `fp:${title}`))
+      )[0];
+    const answer = (findingId: string, at: Date) =>
+      db.insert(findingEvents).values({
+        findingId,
+        type: "replied",
+        actor: "human",
+        actorLogin: "dev",
+        sha: sha("2"),
+        createdAt: at,
+      });
+
+    it("retires unposted, unanswered ones once per run, and leaves the rest", async () => {
+      const shadowRun = await run("arn:exec:shadow:1", true);
+      const pr = shadowRun.pullRequestId;
+      await save(shadowRun.runId, pr, "Shadow");
+      await save(shadowRun.runId, pr, "Shadow outdated");
+      await save(shadowRun.runId, pr, "Shadow answered");
+      // Answered, then raised again in shadow mode: the answer was about the earlier finding.
+      await save(shadowRun.runId, pr, "Answered before");
+      // Recorded by control code older than the run's column: a succeeded run with no review ID.
+      const oldShadow = await run("arn:exec:shadow:old");
+      await db
+        .update(reviewRuns)
+        .set({ status: "succeeded" })
+        .where(eq(reviewRuns.id, oldShadow.runId));
+      await save(oldShadow.runId, pr, "Old shadow");
+      // Live: outside the diff (no comment), or with one deleted on GitHub since (ID kept).
+      const liveRun = await run("arn:exec:shadow:live", false);
+      await save(liveRun.runId, pr, "Live outside diff");
+      await save(liveRun.runId, pr, "Live", 901);
+      // An old live run: it posted a review.
+      const oldLive = await run("arn:exec:shadow:old-live");
+      await db
+        .update(reviewRuns)
+        .set({ status: "succeeded", reviewId: 77 })
+        .where(eq(reviewRuns.id, oldLive.runId));
+      await save(oldLive.runId, pr, "Old live outside diff");
+
+      const id = async (title: string) => (await row(title))?.id ?? "";
+      await findingStore.markOutdated([await id("Shadow outdated")], sha("2"));
+      await answer(await id("Shadow answered"), new Date(Date.now() + 60_000));
+      const before = await id("Answered before");
+      await answer(before, new Date(Date.now() - 60_000));
+
+      const unposted = async () =>
+        (await findingStore.trackedFindings(pr))
+          .filter((record) => record.unpostedShadow === true)
+          .map((record) => record.title)
+          .toSorted();
+      expect(await unposted()).toEqual([
+        "Answered before",
+        "Old shadow",
+        "Shadow",
+        "Shadow outdated",
+      ]);
+
+      const live = await run("arn:exec:shadow:going-live", false);
+      expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
+      // A retry of the same run says the same and retires nothing more.
+      expect(await findingStore.retireShadowFindings?.(pr, live.runId, sha("3"))).toBe(4);
+      // Another run at the same head retired nothing itself.
+      const next = await run("arn:exec:shadow:next", false);
+      expect(await findingStore.retireShadowFindings?.(pr, next.runId, sha("3"))).toBe(0);
+
+      for (const title of ["Shadow", "Shadow outdated", "Answered before", "Old shadow"]) {
+        expect((await row(title))?.status).toBe("shadow");
+      }
+      for (const title of [
+        "Shadow answered",
+        "Live outside diff",
+        "Live",
+        "Old live outside diff",
+      ]) {
+        expect((await row(title))?.status).toBe("open");
+      }
+      const events = await db
+        .select({ type: findingEvents.type })
+        .from(findingEvents)
+        .where(eq(findingEvents.findingId, await id("Shadow")));
+      expect(events.map((event) => event.type).toSorted()).toEqual(["raised", "shadow_retired"]);
+      // The answered one is still tracked, and a recheck may close it.
+      expect(await unposted()).toEqual([]);
+      expect((await findingStore.trackedFindings(pr)).map((record) => record.title)).toContain(
+        "Shadow answered",
       );
-    await save("Shadow", "fp:shadow", true);
-    await save("Shadow outdated", "fp:shadow-outdated", true);
-    await save("Shadow answered", "fp:shadow-answered", true);
-    // Live, outside the diff (no comment), or with a comment deleted on GitHub since: not shadow.
-    await save("Live without comment", "fp:live", false);
-    await save("Live", "fp:live-comment", false, 901);
-    const tracked = await findingStore.trackedFindings(run.pullRequestId);
-    const id = (fingerprint: string) =>
-      tracked.find((record) => record.fingerprint === fingerprint)?.id ?? "";
-    expect(
-      tracked.filter((record) => record.raisedInShadow === true).map((r) => r.fingerprint),
-    ).toEqual(["fp:shadow", "fp:shadow-outdated", "fp:shadow-answered"]);
-    await findingStore.markOutdated([id("fp:shadow-outdated")], sha("2"));
-    // A person's event on it: their answer stands.
-    await db.insert(findingEvents).values({
-      findingId: id("fp:shadow-answered"),
-      type: "replied",
-      actor: "human",
-      actorLogin: "dev",
-      sha: sha("2"),
+      // Retired isn't closed by a person: a review raising one again isn't dropped.
+      expect(await findingStore.closedFindings(pr)).toEqual([]);
+
+      // Raised again by a live run: open, with its comment, and no longer a shadow finding.
+      await save(live.runId, pr, "Shadow", 902);
+      expect(await row("Shadow")).toMatchObject({ status: "open", githubCommentId: 902 });
+      expect(await unposted()).toEqual([]);
     });
-
-    expect(await findingStore.retireShadowFindings?.(run.pullRequestId, sha("3"))).toBe(2);
-    // A retry retires nothing more and reports the same.
-    expect(await findingStore.retireShadowFindings?.(run.pullRequestId, sha("3"))).toBe(2);
-    const status = async (fingerprint: string) =>
-      (await db.select().from(findings).where(eq(findings.fingerprint, fingerprint)))[0]?.status;
-    expect(await status("fp:shadow")).toBe("shadow");
-    expect(await status("fp:shadow-outdated")).toBe("shadow");
-    expect(await status("fp:shadow-answered")).toBe("open");
-    expect(await status("fp:live")).toBe("open");
-    expect(await status("fp:live-comment")).toBe("open");
-    const events = await db
-      .select({ type: findingEvents.type })
-      .from(findingEvents)
-      .where(eq(findingEvents.findingId, id("fp:shadow")));
-    expect(events.map((event) => event.type).toSorted()).toEqual(["raised", "shadow_retired"]);
-    expect(
-      (await findingStore.trackedFindings(run.pullRequestId)).map((r) => r.fingerprint),
-    ).toEqual(["fp:shadow-answered", "fp:live", "fp:live-comment"]);
-    // Retired findings aren't closed by a person: a review raising one again isn't dropped.
-    expect(
-      (await findingStore.closedFindings(run.pullRequestId)).map((r) => r.fingerprint),
-    ).toEqual([]);
-
-    // Raised again by a live run: open, posted, and no longer a shadow finding.
-    await save("Shadow", "fp:shadow", false, 902);
-    const [again] = (await findingStore.trackedFindings(run.pullRequestId)).filter(
-      (record) => record.fingerprint === "fp:shadow",
-    );
-    expect(again).toMatchObject({ status: "open", githubCommentId: 902 });
-    expect(again?.raisedInShadow).toBeUndefined();
-    // Still open in shadow mode and then posted live: it has its comment now.
-    await save("Shadow answered", "fp:shadow-answered", false, 903);
-    const [posted] = (await findingStore.trackedFindings(run.pullRequestId)).filter(
-      (record) => record.fingerprint === "fp:shadow-answered",
-    );
-    expect(posted).toMatchObject({ githubCommentId: 903 });
-    expect(posted?.raisedInShadow).toBeUndefined();
   });
 
   it("keeps a finding's base-side name, unless a new one is given", async () => {

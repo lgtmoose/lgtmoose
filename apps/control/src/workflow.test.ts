@@ -151,6 +151,8 @@ interface Run extends RunRecord {
   error?: string;
   result?: Parameters<RunStore["succeedRun"]>[1];
   files: FileRecord[];
+  /** Started in shadow mode (NIC-1141). */
+  shadow?: boolean;
   covered?: boolean;
   coverResult?: Parameters<RunStore["coverRun"]>[1];
 }
@@ -225,6 +227,7 @@ function memoryRuns(): RunStore & {
         status: "running",
         executionArn: input.executionArn,
         files: [],
+        ...(input.shadow === true ? { shadow: true } : {}),
       });
       runs.set(run.runId, run);
       return run;
@@ -317,29 +320,43 @@ function memoryRuns(): RunStore & {
 }
 
 /** A stored finding: tracked while open or outdated, kept once a person resolves or declines it. */
-type StoredFinding = Omit<FindingRecord, "status"> & {
+type StoredFinding = Omit<FindingRecord, "status" | "unpostedShadow"> & {
   status:
     FindingRecord["status"] | "resolved_by_human" | "declined" | "fixed" | "disputed" | "shadow";
-  /** Retired from shadow mode at this commit (NIC-1141). */
-  retiredAt?: string;
+  /** Last raised by a run in shadow mode (NIC-1141). */
+  shadowRun?: boolean;
 };
 
-/** `findings` for one PR, like `drizzleFindingStore`. */
-function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
+/** Raised in shadow mode and never posted (`unpostedShadow`; no person's answers here). */
+function unposted(row: StoredFinding): boolean {
+  return (
+    (row.status === "open" || row.status === "outdated") &&
+    row.shadowRun === true &&
+    row.githubCommentId === undefined
+  );
+}
+
+/** `findings` for one PR, like `drizzleFindingStore`; `shadowRun` says which runs were shadow. */
+function memoryFindings(
+  shadowRun: (runId: string) => boolean = () => false,
+): FindingStore & { rows: StoredFinding[] } {
   const rows: StoredFinding[] = [];
+  const retiredBy = new Map<string, number>();
   return {
     rows,
     async trackedFindings() {
-      return rows.flatMap((row) =>
-        row.status === "open" || row.status === "outdated" ? [{ ...row, status: row.status }] : [],
-      );
+      return rows.flatMap((stored) => {
+        const { status, ...row } = stored;
+        if (status !== "open" && status !== "outdated") return [];
+        return [{ ...row, status, ...(unposted(stored) ? { unpostedShadow: true } : {}) }];
+      });
     },
     async closedFindings() {
       return rows.flatMap(({ status, ...row }) =>
         status === "resolved_by_human" || status === "declined" ? [row] : [],
       );
     },
-    async saveFindings(_pr, _run, headSha, posted, options) {
+    async saveFindings(_pr, runId, headSha, posted) {
       for (const { finding, fingerprint, githubCommentId, basePath } of posted) {
         const row: StoredFinding = {
           id: `f${rows.length}`,
@@ -356,16 +373,14 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
           status: "open",
           githubCommentId,
           basePath,
-          ...(options?.shadow === true ? { raisedInShadow: true } : {}),
+          ...(shadowRun(runId) ? { shadowRun: true } : {}),
         };
         const at = rows.findIndex((known) => known.fingerprint === fingerprint);
         const known = rows[at];
         if (known === undefined) rows.push(row);
         else if (known.status !== "resolved_by_human" && known.status !== "declined") {
-          const fresh: StoredFinding = { ...row };
-          delete fresh.raisedInShadow;
           rows[at] = {
-            ...fresh,
+            ...row,
             id: known.id,
             // Never lowered; the comment ID kept unless there's a new one.
             severity:
@@ -378,32 +393,15 @@ function memoryFindings(): FindingStore & { rows: StoredFinding[] } {
               known.status === "open"
                 ? (githubCommentId ?? known.githubCommentId)
                 : githubCommentId,
-            // Still open: a shadow one until it has a comment; raised again: as this run says.
-            ...((
-              known.status === "open"
-                ? known.raisedInShadow === true &&
-                  githubCommentId === undefined &&
-                  known.githubCommentId === undefined
-                : options?.shadow === true
-            )
-              ? { raisedInShadow: true }
-              : {}),
           };
         }
       }
     },
-    async retireShadowFindings(_pr, sha) {
-      for (const row of rows) {
-        if (
-          (row.status === "open" || row.status === "outdated") &&
-          row.raisedInShadow === true &&
-          row.githubCommentId === undefined
-        ) {
-          row.status = "shadow";
-          row.retiredAt = sha;
-        }
-      }
-      return rows.filter((row) => row.status === "shadow" && row.retiredAt === sha).length;
+    async retireShadowFindings(_pr, runId) {
+      const retiring = rows.filter((row) => unposted(row));
+      for (const row of retiring) row.status = "shadow";
+      retiredBy.set(runId, (retiredBy.get(runId) ?? 0) + retiring.length);
+      return retiredBy.get(runId) ?? 0;
     },
     async markOutdated(ids) {
       for (const row of rows)
@@ -554,7 +552,7 @@ function harness(setup: Setup = {}) {
     },
   };
   const runs = memoryRuns();
-  const findings = memoryFindings();
+  const findings = memoryFindings((id) => runs.runs.get(id)?.shadow === true);
   /** The review IDs read from GitHub. */
   const reviewReads: number[] = [];
   const logFields: Record<string, unknown>[] = [];
@@ -4224,8 +4222,18 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
   });
 
   describe("going live after shadow mode (NIC-1141)", () => {
-    const summaries = (h: ReturnType<typeof harness>) =>
-      JSON.stringify(shadowRecords(h.objects, "summary-comment"));
+    /** The summaries recorded, all or one run's. */
+    const summaries = (h: ReturnType<typeof harness>, runId?: string) =>
+      JSON.stringify(
+        [...h.objects]
+          .filter(
+            ([key]) =>
+              key.startsWith("shadow/") &&
+              key.endsWith("-summary-comment.json") &&
+              (runId === undefined || key.includes(`/${runId}/`)),
+          )
+          .map(([, body]) => body),
+      );
 
     it("retires unanswered shadow findings on the first live run, and posts one raised again", async () => {
       const setup: Setup = {};
@@ -4235,37 +4243,40 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       h.deps.shadow = true;
       const { posted: shadowRun } = await run(h, 1, [finding()]);
       expect(shadowRun).toMatchObject({ event: "REQUEST_CHANGES" });
-      expect(h.findings.rows).toMatchObject([{ status: "open", raisedInShadow: true }]);
+      expect(h.findings.rows).toMatchObject([{ status: "open", shadowRun: true }]);
       expect(h.findings.rows[0]?.githubCommentId).toBeUndefined();
 
       // A second shadow run retires nothing.
       await fixElsewhere();
       await run(h, 2, []);
-      expect(h.findings.rows).toMatchObject([{ status: "open", raisedInShadow: true }]);
+      expect(h.findings.rows).toMatchObject([{ status: "open", shadowRun: true }]);
 
       // Live: retired before the decision, so it doesn't count, and isn't rechecked.
       h.deps.shadow = false;
       setup.commentIds = true;
       headSha = await commit({ "src/other.ts": "export const other = 1;\n" }, "another change");
-      const { manifest, posted: live } = await run(h, 3, []);
+      const { prepared: first, manifest, posted: live } = await run(h, 3, []);
       expect(manifest.recheck).toBeUndefined();
       expect(h.findings.rows).toMatchObject([{ status: "shadow" }]);
       expect(live).toMatchObject({ event: "APPROVE" });
-      expect(summaries(h)).toContain("1 finding from shadow mode was retired");
-      expect(summaries(h)).toContain("full review");
+      expect(summaries(h, first.runId)).toContain("1 finding from shadow mode was retired");
+      expect(summaries(h, first.runId)).toContain("full review");
       expect(writes).toEqual([]);
+      // A retry of that run's post says the same.
+      expect(await h.findings.retireShadowFindings?.("pr-1", first.runId, headSha)).toBe(1);
 
-      // `full review`, as the summary says: raised again, posted as new with a comment, and it
-      // counts.
-      const { posted: again } = await run(h, 4, [finding()], undefined, {
+      // `full review` at the same head, as the summary says: raised again, posted as new with a
+      // comment, and it counts. This run retired nothing, so its summary doesn't repeat the note.
+      const { prepared: second, posted: again } = await run(h, 4, [finding()], undefined, {
         ...JOB,
         requested: "full_review" as const,
       });
+      expect(summaries(h, second.runId)).not.toContain("from shadow mode");
       expect(again).toMatchObject({ event: "REQUEST_CHANGES" });
       expect(h.findings.rows).toHaveLength(1);
       expect(h.findings.rows[0]).toMatchObject({ status: "open" });
       expect(h.findings.rows[0]?.githubCommentId).toEqual(expect.any(Number));
-      expect(h.findings.rows[0]?.raisedInShadow).toBeUndefined();
+      expect(h.findings.rows[0]?.shadowRun).toBeUndefined();
     });
 
     it("leaves a live finding without a comment open", async () => {
@@ -4279,7 +4290,7 @@ describe("carried findings rechecked (NIC-1120)", { timeout: 30_000 }, () => {
       headSha = await commit({ "src/other.ts": "export const other = 1;\n" }, "another change");
       const { posted: next } = await run(h, 2, []);
       expect(h.findings.rows).toMatchObject([{ status: "open" }]);
-      expect(h.findings.rows[0]?.raisedInShadow).toBeUndefined();
+      expect(h.findings.rows[0]?.shadowRun).toBeUndefined();
       expect(next).toMatchObject({ event: "REQUEST_CHANGES" });
       expect(summaries(h)).not.toContain("from shadow mode");
     });

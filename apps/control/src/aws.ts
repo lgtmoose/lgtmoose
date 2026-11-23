@@ -35,13 +35,12 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   gt,
   inArray,
-  isNotNull,
   isNull,
   max,
   ne,
-  notExists,
   sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -55,6 +54,7 @@ import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import { githubBootstrap } from "./bootstrap-github.js";
 import { drizzleBootstrapStore } from "./bootstrap-store.js";
 import { databaseTls } from "./database.js";
+import { unpostedShadow } from "./shadow-findings.js";
 import type { ControlEnv, EmbeddingsSettings, TicketSettings } from "./env.js";
 import { ticketSourceFor } from "./tickets.js";
 import { embedderFor, learningsRetriever } from "./learnings.js";
@@ -288,6 +288,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
           status: "running",
           executionArn: input.executionArn,
           eventAt: input.eventAt ?? null,
+          ...(input.shadow === undefined ? {} : { shadow: input.shadow }),
           startedAt: now(),
         })
         .returning({ id: reviewRuns.id });
@@ -548,7 +549,7 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
     },
     async trackedFindings(pullRequestId) {
       const rows = await db
-        .select()
+        .select({ ...getTableColumns(findings), unpostedShadow: unpostedShadow() })
         .from(findings)
         .where(
           and(
@@ -580,13 +581,12 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 status: row.status,
                 githubCommentId: row.githubCommentId ?? undefined,
                 basePath: row.basePath ?? undefined,
-                ...(row.raisedInShadow ? { raisedInShadow: true } : {}),
+                ...(row.unpostedShadow === true ? { unpostedShadow: true } : {}),
               },
             ],
       );
     },
-    async saveFindings(pullRequestId, runId, headSha, posted, options) {
-      const raisedInShadow = options?.shadow === true;
+    async saveFindings(pullRequestId, runId, headSha, posted) {
       if (posted.length === 0) return;
       await db.transaction(async (tx) => {
         for (let i = 0; i < posted.length; i += INSERT_CHUNK) {
@@ -612,7 +612,6 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                   basePath: basePath ?? null,
                   learningIds:
                     learningIds === undefined || learningIds.length === 0 ? null : [...learningIds],
-                  raisedInShadow,
                 })),
             )
             .onConflictDoUpdate({
@@ -626,10 +625,6 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
                 // inline, since the old comment is on code that's gone. Still open: kept unless
                 // there's a new one.
                 githubCommentId: sql`case when ${findings.status} = 'open' then coalesce(excluded.github_comment_id, ${findings.githubCommentId}) else excluded.github_comment_id end`,
-                // Like the comment ID: raised again from closed or outdated, the run raising it
-                // now says whether it was posted (NIC-1141). Still open, it stays a shadow one
-                // until a live run gives it a comment.
-                raisedInShadow: sql`case when ${findings.status} = 'open' then ${findings.raisedInShadow} and excluded.github_comment_id is null and ${findings.githubCommentId} is null else excluded.raised_in_shadow end`,
                 path: sql`excluded.path`,
                 basePath: sql`coalesce(excluded.base_path, ${findings.basePath})`,
                 // The batch that raised it this time: its learnings are the ones that count.
@@ -661,32 +656,12 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
         }
       });
     },
-    async retireShadowFindings(pullRequestId, sha) {
+    async retireShadowFindings(pullRequestId, runId, sha) {
       return db.transaction(async (tx) => {
         const rows = await tx
           .update(findings)
           .set({ status: "shadow", updatedAt: now() })
-          .where(
-            and(
-              eq(findings.pullRequestId, pullRequestId),
-              eq(findings.source, "self"),
-              inArray(findings.status, ["open", "outdated"]),
-              eq(findings.raisedInShadow, true),
-              isNull(findings.githubCommentId),
-              // A person answered it: their answer stands.
-              notExists(
-                tx
-                  .select({ id: findingEvents.id })
-                  .from(findingEvents)
-                  .where(
-                    and(
-                      eq(findingEvents.findingId, findings.id),
-                      isNotNull(findingEvents.actorLogin),
-                    ),
-                  ),
-              ),
-            ),
-          )
+          .where(and(eq(findings.pullRequestId, pullRequestId), unpostedShadow()))
           .returning({ id: findings.id });
         if (rows.length > 0) {
           await tx.insert(findingEvents).values(
@@ -698,20 +673,14 @@ export function drizzleFindingStore(db: Db, now: () => Date = () => new Date()):
             })),
           );
         }
-        // All retired at `sha`, by this call or an earlier one: a retried post says the same.
-        const [retired] = await tx
-          .select({ n: count() })
-          .from(findingEvents)
-          .innerJoin(findings, eq(findings.id, findingEvents.findingId))
-          .where(
-            and(
-              eq(findings.pullRequestId, pullRequestId),
-              eq(findings.status, "shadow"),
-              eq(findingEvents.type, "shadow_retired"),
-              eq(findingEvents.sha, sha),
-            ),
-          );
-        return retired?.n ?? 0;
+        // This run's count, kept on it: a retry adds none and says the same; another run at the
+        // same head keeps its own.
+        const [run] = await tx
+          .update(reviewRuns)
+          .set({ shadowRetired: sql`coalesce(${reviewRuns.shadowRetired}, 0) + ${rows.length}` })
+          .where(eq(reviewRuns.id, runId))
+          .returning({ retired: reviewRuns.shadowRetired });
+        return run?.retired ?? rows.length;
       });
     },
     markOutdated: (ids, sha) => moveStatus(ids, "open", "outdated", "outdated", sha),

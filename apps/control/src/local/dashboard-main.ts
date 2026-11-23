@@ -64,10 +64,14 @@ async function main(): Promise<void> {
   const site = await readSite(process.env.LGTMOOSE_SITE_DIR?.trim() || "/app/site");
   // The spend caps, for the Usage page: from the runner's deploy config, mounted read-only.
   const configPath = process.env.LGTMOOSE_CONFIG?.trim();
-  const budgets =
-    configPath === undefined || configPath === ""
-      ? readBudgets(process.env)
-      : (await readLocalSettings(configPath)).config.budgets;
+  const settings =
+    configPath === undefined || configPath === "" ? undefined : await readLocalSettings(configPath);
+  const budgets = settings === undefined ? readBudgets(process.env) : settings.config.budgets;
+  // Live (shadow off): findings raised in shadow mode and never posted stop counting (NIC-1141).
+  const shadow =
+    settings === undefined
+      ? process.env.LGTMOOSE_SHADOW?.trim() !== "false"
+      : settings.config.shadow;
   const key = await signingKey(secretsDir);
 
   const databaseUrl = required("DATABASE_URL");
@@ -79,7 +83,7 @@ async function main(): Promise<void> {
   const db = drizzle({ client: pool });
 
   const deps: DashboardDeps = {
-    store: drizzleDashboardStore(db),
+    store: drizzleDashboardStore(db, { live: !shadow }),
     learnings: drizzleLearningStore(db),
     bootstraps: { store: drizzleBootstrapStore(db), maxPrs: BOOTSTRAP_DEFAULTS.maxPrs },
     feedbackReport: viewFeedbackReport(pool),

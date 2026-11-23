@@ -169,6 +169,16 @@ export const reviewRuns = pgTable(
      * `@lgtmoose review` or the next push reviews it.
      */
     spendCap: text("spend_cap"),
+    /**
+     * Whether the run was in shadow mode, so posted nothing to GitHub (NIC-1141). Null for runs
+     * recorded before it was kept: then a succeeded run without a review ID was a shadow one.
+     */
+    shadow: boolean("shadow"),
+    /**
+     * How many findings raised in shadow mode this live run retired (NIC-1141), for its summary:
+     * a retry says the same, and another run at the same head doesn't repeat it.
+     */
+    shadowRetired: integer("shadow_retired"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -223,12 +233,6 @@ export const findings = pgTable(
     status: findingStatus("status").notNull().default("open"),
     githubCommentId: bigint("github_comment_id", { mode: "number" }),
     githubThreadId: text("github_thread_id"),
-    /**
-     * Raised by a run in shadow mode, so it was never posted (NIC-1141). A live run retires such a
-     * finding while it has no comment: nobody could see it, so it can't count towards a decision.
-     * Not the same as having no comment: a live finding outside the diff has none either.
-     */
-    raisedInShadow: boolean("raised_in_shadow").notNull().default(false),
     /**
      * When the reactions on this finding's inline comment were last read into `feedback`
      * (NIC-841). The reconciler reads the least recently checked first, a few per run.

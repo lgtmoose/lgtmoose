@@ -1,5 +1,5 @@
 {
-  "id": "7cdf09d8-89d2-4238-b40e-c4ec54314b6e",
+  "id": "1fe7be2d-4897-4388-a4a0-3347b3468120",
   "prevId": "97d6b70e-0361-4744-aeb9-51064251af2f",
   "version": "7",
   "dialect": "postgresql",
@@ -608,13 +608,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "raised_in_shadow": {
-          "name": "raised_in_shadow",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "feedback_checked_at": {
           "name": "feedback_checked_at",
@@ -2222,6 +2215,18 @@
         "spend_cap": {
           "name": "spend_cap",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shadow": {
+          "name": "shadow",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shadow_retired": {
+          "name": "shadow_retired",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },

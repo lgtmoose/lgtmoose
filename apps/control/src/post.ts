@@ -1479,11 +1479,12 @@ export async function post(
   });
   // Findings raised in shadow mode that nobody answered have no thread anyone could see, reply
   // to or resolve (NIC-1141). A live run retires them before deciding, so they don't count; a
-  // review that raises one again posts it as new. Idempotent: a retry finds none left.
+  // review that raises one again posts it as new. A retry retires none more and
+  // reports this run's count again; another run at the same head reports only its own.
   const shadowRetired =
     deps.shadow === true || deps.findings.retireShadowFindings === undefined
       ? 0
-      : await deps.findings.retireShadowFindings(run.pullRequestId, pr.headSha);
+      : await deps.findings.retireShadowFindings(run.pullRequestId, runId, pr.headSha);
   if (shadowRetired > 0) deps.log("shadow findings retired", { runId, count: shadowRetired });
   const records = await deps.findings.trackedFindings(run.pullRequestId);
   const work = await deps.workDir();
@@ -1909,8 +1910,6 @@ export async function post(
           ...(learningIds.length === 0 ? {} : { learningIds }),
         };
       }),
-      // In shadow mode none of them was posted: a live run retires those left unanswered.
-      { shadow: deps.shadow === true },
     );
     // A failed batch's files have no record at this head, so the next run reviews them however
     // far the incremental range has moved on.
