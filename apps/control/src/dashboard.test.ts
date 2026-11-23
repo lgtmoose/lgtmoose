@@ -405,8 +405,10 @@ describe("dashboard API", () => {
     const { deps, cookies } = await signedIn();
     const all = JSON.parse(
       (await handleDashboardRequest(deps, request("GET", "/api/findings", { cookies }))).body,
-    ) as { findings: { repo: string }[] };
+    ) as { findings: { repo: string; canAnswer: boolean }[] };
     expect(all.findings.map((f) => f.repo)).toEqual(["acme/api", "acme/web"]);
+    // The page's hint for Fixed and Decline (NIC-1142): write access at sign-in.
+    expect(all.findings.map((f) => f.canAnswer)).toEqual([true, false]);
     const one = JSON.parse(
       (
         await handleDashboardRequest(

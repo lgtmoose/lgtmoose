@@ -630,16 +630,22 @@ export async function handleDashboardRequest(
       const repos = scope(session, request.query.repo);
       if (repos === undefined) return json(404, { error: "no such repository" });
       // One pull request's (NIC-1140): `pr` needs `repo`.
+      let number: number | undefined;
       if (request.query.pr !== undefined) {
-        const params = prParams(request.query);
-        if (params?.number === undefined) {
+        number = prParams(request.query)?.number;
+        if (number === undefined) {
           return json(400, { error: "give repo=owner/name and pr=<number>" });
         }
-        return json(200, {
-          findings: await deps.store.openFindings(repos, FINDINGS_LIMIT, params.number),
-        });
       }
-      return json(200, { findings: await deps.store.openFindings(repos, FINDINGS_LIMIT) });
+      const findings = await deps.store.openFindings(repos, FINDINGS_LIMIT, number);
+      // Whether the page shows Fixed and Decline (NIC-1142): LGTMoose's own, in a repository the
+      // person could write to at sign-in. Only a hint for the buttons; the answer route checks.
+      return json(200, {
+        findings: findings.map((finding) => ({
+          ...finding,
+          canAnswer: finding.source === "self" && session.writeRepos.includes(finding.repo),
+        })),
+      });
     }
     case "GET /api/runs": {
       const repos = scope(session, request.query.repo);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PROTECTED_CATEGORIES, isProtectedCategory } from "./categories.js";
 
 /**
  * Finding fingerprints: a stable identity for "this problem at this code", so a finding that's
@@ -19,18 +20,9 @@ import { createHash } from "node:crypto";
  * fingerprints never match by accident.
  */
 
-export const FINGERPRINT_VERSION = "fp1";
+export { PROTECTED_CATEGORIES, isProtectedCategory };
 
-/**
- * Categories where a wrongly dropped finding is expensive. They're only dropped on an exact
- * fingerprint match, never a fuzzy one.
- */
-export const PROTECTED_CATEGORIES: readonly string[] = [
-  "authz",
-  "tenant_scoping",
-  "money",
-  "secrets",
-];
+export const FINGERPRINT_VERSION = "fp1";
 
 /**
  * Whole words for those four topics. A suppressing learning with no category that uses one is
@@ -71,10 +63,6 @@ export function mentionsProtectedTopic(text: string): boolean {
     .match(/[a-z0-9]+/g);
   if (words === null) return false;
   return words.some((word) => PROTECTED_TOPIC_WORD.has(word));
-}
-
-export function isProtectedCategory(category: string): boolean {
-  return PROTECTED_CATEGORIES.includes(category);
 }
 
 /**
