@@ -12,9 +12,12 @@ FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23f
 RUN corepack enable
 WORKDIR /repo
 COPY . .
-RUN pnpm install --frozen-lockfile --filter "@lgtmoose/sandbox..." \
+# The deploy step installs prod dependencies from the lockfile. A filtered install
+# leaves some of those packages out of the store, and the deploy then resolves them
+# again. minimumReleaseAge rejects a locked package that is still inside that window.
+RUN pnpm install --frozen-lockfile \
   && pnpm --filter "@lgtmoose/sandbox..." run build \
-  && pnpm --filter @lgtmoose/sandbox deploy --legacy --prod /out
+  && pnpm --filter @lgtmoose/sandbox --frozen-lockfile deploy --legacy --prod /out
 
 # The Cursor CLI, installed only when the Workflow stack passes INSTALL_CURSOR_AGENT=1 (some
 # provider uses cursor-agent), with CURSOR_AGENT_VERSION and the target platform's
