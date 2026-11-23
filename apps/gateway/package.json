@@ -28,8 +28,8 @@
     "dist"
   ],
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.1167.0",
-    "@aws-sdk/client-sqs": "^3.1167.0",
+    "@aws-sdk/client-secrets-manager": "^3.1169.0",
+    "@aws-sdk/client-sqs": "^3.1169.0",
     "@codegenie/serverless-express": "^5.0.0",
     "@lgtmoose/core": "workspace:*",
     "@lgtmoose/db": "workspace:*",

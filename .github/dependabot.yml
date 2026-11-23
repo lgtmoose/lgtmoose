@@ -15,6 +15,11 @@ updates:
     groups:
       dev-tooling:
         dependency-type: development
+    ignore:
+      # @types/node stays on the runtime's major (Node 24, see engines and the images). Newer
+      # types would let code use Node APIs that the runtime doesn't have. Move it with the runtime.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   # The Postgres image the integration tests use.
   - package-ecosystem: docker
     directory: /tools/test-postgres
