@@ -148,6 +148,33 @@ export interface RunSummary {
 const outcomeOf = (value: string | null): RunOutcome | undefined =>
   runOutcomes.find((outcome) => outcome === value);
 
+/** A run's decision fields for a list, all of them only when its decision is one we know. */
+function decidedFields(row: {
+  decision: string | null;
+  blocking: number | null;
+  shouldFix: number | null;
+  nits: number | null;
+  shadow: boolean;
+}): Pick<RunSummary, "decision" | "blocking" | "shouldFix" | "nits" | "shadow"> {
+  const decision = outcomeOf(row.decision);
+  if (decision === undefined) {
+    return {
+      decision: undefined,
+      blocking: undefined,
+      shouldFix: undefined,
+      nits: undefined,
+      shadow: undefined,
+    };
+  }
+  return {
+    decision,
+    blocking: row.blocking ?? undefined,
+    shouldFix: row.shouldFix ?? undefined,
+    nits: row.nits ?? undefined,
+    shadow: row.shadow,
+  };
+}
+
 const HOLDS: readonly RunHold[] = ["incomplete", "prompt_injection", "approve_disabled"];
 
 /** Stored holds we know; undefined when none were kept (a run from before they were). */
@@ -469,11 +496,9 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         startedAt: iso(row.startedAt),
         finishedAt: iso(row.finishedAt),
         createdAt: row.createdAt.toISOString(),
-        decision: outcomeOf(row.decision),
-        blocking: row.blocking ?? undefined,
-        shouldFix: row.shouldFix ?? undefined,
-        nits: row.nits ?? undefined,
-        shadow: outcomeOf(row.decision) === undefined ? undefined : row.shadow,
+        // A decision we don't know (none, or a stored value we can't read) takes its counts and
+        // mode with it: they'd describe a decision nobody can show.
+        ...decidedFields(row),
       }));
     },
     async latestDecision(repo, number) {
@@ -506,24 +531,24 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           desc(reviewRuns.createdAt),
           desc(reviewRuns.id),
         )
-        .limit(5);
-      for (const row of rows) {
-        const decision = outcomeOf(row.decision);
-        if (decision === undefined) continue;
-        return {
-          runId: row.runId,
-          headSha: row.headSha,
-          decision,
-          // Undefined for a run from before the counts were kept (its decision was backfilled).
-          ...(row.blocking === null ? {} : { blocking: row.blocking }),
-          ...(row.shouldFix === null ? {} : { shouldFix: row.shouldFix }),
-          ...(row.nits === null ? {} : { nits: row.nits }),
-          ...(holdsOf(row.holds) === undefined ? {} : { holds: holdsOf(row.holds) }),
-          shadow: row.shadow,
-          ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt.toISOString() }),
-        };
-      }
-      return undefined;
+        .limit(1);
+      // Only the newest run that recorded a decision: if that's one we can't read, the PR's
+      // decision isn't known, and an older run's would be stale.
+      const [row] = rows;
+      const decision = row === undefined ? undefined : outcomeOf(row.decision);
+      if (row === undefined || decision === undefined) return undefined;
+      return {
+        runId: row.runId,
+        headSha: row.headSha,
+        decision,
+        // Undefined for a run from before the counts were kept (its decision was backfilled).
+        ...(row.blocking === null ? {} : { blocking: row.blocking }),
+        ...(row.shouldFix === null ? {} : { shouldFix: row.shouldFix }),
+        ...(row.nits === null ? {} : { nits: row.nits }),
+        ...(holdsOf(row.holds) === undefined ? {} : { holds: holdsOf(row.holds) }),
+        shadow: row.shadow,
+        ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt.toISOString() }),
+      };
     },
     async providerUse(repos, since) {
       if (repos.length === 0) return [];

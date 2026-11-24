@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { findingEvents, findings, pullRequests } from "@lgtmoose/db";
+import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { drizzleLearningStore } from "@lgtmoose/learnings";
 import { eq } from "drizzle-orm";
@@ -284,6 +284,28 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
     expect(again.runs[0]).toMatchObject({ id: covered.runId, status: "covered" });
     expect(again.runs[0]).not.toHaveProperty("decision");
     expect(again.runs[0]).not.toHaveProperty("shadow");
+  });
+
+  it("knows no decision when the newest one isn't readable, and shows no counts for it", async () => {
+    await decidedRun("arn:u:1", "c".repeat(40), { outcome: "approve", blocking: 0 }, NOW);
+    const newest = await decidedRun(
+      "arn:u:2",
+      "d".repeat(40),
+      { outcome: "request_changes", blocking: 3 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    // A stored value no version writes: not a decision we can show, so the older one isn't either.
+    await db.update(reviewRuns).set({ decision: "merge" }).where(eq(reviewRuns.id, newest));
+    const findings = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(JSON.parse(findings.body)).toMatchObject({ decision: null });
+    const listed = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(listed.runs[0]).toMatchObject({ id: newest });
+    for (const key of ["decision", "blocking", "shouldFix", "nits", "shadow"]) {
+      expect(listed.runs[0]).not.toHaveProperty(key);
+    }
+    expect(listed.runs[1]).toMatchObject({ decision: "approve", blocking: 0 });
   });
 
   it("refuses runs as it refuses findings: a PR is needed, and outsiders see nothing", async () => {
