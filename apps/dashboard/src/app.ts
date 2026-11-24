@@ -413,7 +413,11 @@ function copyButton(label: string, text: () => string, status: HTMLElement): HTM
   return button;
 }
 
-async function renderFindings(repo: string | undefined, pr: number | undefined): Promise<void> {
+async function renderFindings(
+  repo: string | undefined,
+  pr: number | undefined,
+  login: string,
+): Promise<void> {
   const { findings } = await api<{ findings: Finding[] }>(
     `/api/findings${findingsQuery(repo, pr)}`,
   );
@@ -421,9 +425,16 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
   // Answers given on this page, so Copy for agent matches what the page now shows without
   // fetching the list again: a declined finding is left out, a fixed one is marked claimed.
   const declined = new Set<string>();
-  const answered = (finding: Finding) => (outcome: Answer["outcome"]) => {
-    if (outcome === "declined") declined.add(finding.id);
-    else finding.fixClaimedAt = new Date().toISOString();
+  // `state` is the row's earlier answer line, which the new answer replaces.
+  const answered = (finding: Finding, state: HTMLElement) => (outcome: Answer["outcome"]) => {
+    replace(state);
+    if (outcome === "declined") {
+      declined.add(finding.id);
+      return;
+    }
+    // As the API records it: the claim is now this person's.
+    finding.fixClaimedAt = new Date().toISOString();
+    finding.fixClaimedBy = login;
   };
   const copied = el("div", { role: "status", class: "muted" });
   let heading = "Open findings";
@@ -464,7 +475,12 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
       : table(
           ["Severity", "Pull request", "Where", "Finding", "Raised by", ""],
           findings.map((finding) => {
-            const state = answerState(finding);
+            const said = answerState(finding);
+            const state = el(
+              "div",
+              {},
+              said === undefined ? undefined : el("p", { class: "muted" }, said),
+            );
             return [
               el("span", { class: `sev-${finding.severity}` }, severityLabel(finding.severity)),
               // The PR view lists only LGTMoose's own, so only those link to it.
@@ -494,9 +510,9 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
               el(
                 "div",
                 {},
-                state === undefined ? undefined : el("p", { class: "muted" }, state),
+                state,
                 onePr && finding.canAnswer === true
-                  ? answerControls(finding, answered(finding))
+                  ? answerControls(finding, answered(finding, state))
                   : undefined,
               ),
             ];
@@ -1024,7 +1040,7 @@ async function render(): Promise<void> {
   try {
     const me = await api<Me>("/api/me");
     renderNav(me);
-    if (route.page === "findings") await renderFindings(route.repo, route.pr);
+    if (route.page === "findings") await renderFindings(route.repo, route.pr, me.login);
     else if (route.page === "runs") await renderRuns(route.repo);
     else if (route.page === "learnings") await renderLearnings(route.status);
     else if (route.page === "usage") await renderUsage();
