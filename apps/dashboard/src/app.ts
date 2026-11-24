@@ -272,6 +272,12 @@ function repoQuery(repo: string | undefined): string {
   return repo === undefined ? "" : `?repo=${encodeURIComponent(repo)}`;
 }
 
+/**
+ * Decline reasons typed but not sent, by finding ID. An answer to one finding shows the page again,
+ * and this keeps what someone is writing for another finding across that.
+ */
+const unsentReasons = new Map<string, string>();
+
 /** Sends an answer, then shows the page again, or says why not in `status`. */
 async function sendAnswer(
   finding: Finding,
@@ -285,7 +291,10 @@ async function sendAnswer(
       `/api/findings/${encodeURIComponent(finding.id)}/ack`,
       payload,
     );
-    if (code === 200) return render();
+    if (code === 200) {
+      unsentReasons.delete(finding.id);
+      return render();
+    }
     replace(status, answerRefusal(code, typeof body.error === "string" ? body.error : undefined));
   } catch (error) {
     if (error instanceof SignedOut) return render();
@@ -315,7 +324,7 @@ function answerControls(finding: Finding): HTMLElement {
   const send = el("button", { type: "button" }, "Send decline");
   const cancel = el("button", { type: "button" }, "Cancel");
   form.append(reason, el("div", {}, send, " ", cancel, " ", counter));
-  reason.addEventListener("input", () => {
+  const showLength = (): void => {
     const length = reason.value.trim().length;
     replace(
       counter,
@@ -323,7 +332,17 @@ function answerControls(finding: Finding): HTMLElement {
         ? el("span", { class: "sev-blocking" }, `${length} / ${DECLINE_REASON_LIMIT}: too long`)
         : `${length} / ${DECLINE_REASON_LIMIT}`,
     );
+  };
+  reason.addEventListener("input", () => {
+    unsentReasons.set(finding.id, reason.value);
+    showLength();
   });
+  const draft = unsentReasons.get(finding.id);
+  if (draft !== undefined) {
+    reason.value = draft;
+    form.hidden = false;
+    showLength();
+  }
   // Every control for this finding, all held while either answer is being sent.
   const controls = [fixed, decline, send, cancel, reason];
   fixed.addEventListener("click", () => {
@@ -335,6 +354,7 @@ function answerControls(finding: Finding): HTMLElement {
   });
   cancel.addEventListener("click", () => {
     form.hidden = true;
+    unsentReasons.delete(finding.id);
     replace(status);
   });
   send.addEventListener("click", () => {
