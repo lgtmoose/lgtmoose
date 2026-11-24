@@ -413,6 +413,14 @@ describe("answering a finding with a token", () => {
     expect(event?.reason).not.toContain("hunter22");
   });
 
+  it("takes a reason of control characters, which JSON-encoding makes six times longer", async () => {
+    const id = await finding({ fingerprint: "escaped" });
+    const reason = `${"\u001b".repeat(1999)}x`;
+    expect(JSON.stringify({ outcome: "declined", reason }).length).toBeGreaterThan(8192);
+    const answered = await ack(id, WRITER, { outcome: "declined", reason });
+    expect(answered.status).toBe(200);
+  });
+
   it("turns the database's own refusal of an answer into AnswerRefusedError", async () => {
     const id = await finding({ fingerprint: "refused" });
     await expect(deps.store.declineFinding(id, "", "a reason")).rejects.toBeInstanceOf(
