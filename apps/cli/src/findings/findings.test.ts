@@ -74,6 +74,115 @@ const finding = {
   createdAt: "2026-11-23T10:00:00.000Z",
 };
 
+const DECISION = {
+  runId: "5eba8380-1111-4222-8333-444455556666",
+  headSha: "abc1234def5678abc1234def5678abc1234def56",
+  decision: "request_changes",
+  blocking: 1,
+  shouldFix: 2,
+  nits: 0,
+  shadow: true,
+  finishedAt: "2026-11-23T10:00:00.000Z",
+};
+
+describe("lgtmoose findings: the PR's decision (NIC-1145)", () => {
+  it("starts every format with the PR's latest decision", async () => {
+    const { deps: d } = deps({ reply: { body: { findings: [finding], decision: DECISION } } });
+    const line =
+      "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380";
+    const md = await run(["findings", "acme/app#232"], { findingsDeps: async () => d });
+    expect(md.stdout).toContain(line);
+    expect(md.stdout).toContain("It requests changes");
+    const text = await run(["findings", "acme/app#232", "--format", "text"], {
+      findingsDeps: async () => d,
+    });
+    expect(text.stdout.split("\n")[0]).toBe(line);
+    const json = await run(["findings", "acme/app#232", "--format", "json"], {
+      findingsDeps: async () => d,
+    });
+    expect(JSON.parse(json.stdout)).toMatchObject({ decision: DECISION, findings: [{ id: ID }] });
+  });
+
+  it("says when none is recorded, and claims nothing when the dashboard gives none at all", async () => {
+    const { deps: none } = deps({ reply: { body: { findings: [], decision: null } } });
+    const said = await run(["findings", "acme/app#232", "--format", "text"], {
+      findingsDeps: async () => none,
+    });
+    expect(said.stdout).toContain("Latest decision: none recorded yet.");
+    // An older dashboard, or a decision it can't read (a bad commit): no line either way.
+    for (const body of [
+      { findings: [] },
+      { findings: [], decision: { ...DECISION, headSha: "x`" } },
+    ]) {
+      const { deps: old } = deps({ reply: { body } });
+      const quiet = await run(["findings", "acme/app#232"], { findingsDeps: async () => old });
+      expect(quiet.stdout).not.toContain("Latest decision");
+    }
+  });
+});
+
+describe("lgtmoose runs <repo>#<pr> (NIC-1145)", () => {
+  const RUN = {
+    id: "5eba8380-1111-4222-8333-444455556666",
+    headSha: "abc1234def5678abc1234def5678abc1234def56",
+    kind: "incremental",
+    status: "succeeded",
+    decision: "comment",
+    blocking: 0,
+    shouldFix: 1,
+    nits: 2,
+    shadow: true,
+    costUsd: 0.27,
+    createdAt: "2026-11-23T09:54:00.000Z",
+  };
+
+  it("lists the PR's runs with what each decided, through the same token path", async () => {
+    const covered = {
+      ...RUN,
+      id: "24ee07af-1111-4222-8333-444455556666",
+      status: "covered",
+      decision: undefined,
+      blocking: undefined,
+      shouldFix: undefined,
+      nits: undefined,
+      shadow: false,
+      costUsd: undefined,
+    };
+    const { deps: d, calls } = deps({ reply: { body: { runs: [RUN, covered, { id: "bad" }] } } });
+    const result = await run(["runs", "Acme/App#232"], { findingsDeps: async () => d });
+    expect(result.exitCode).toBe(0);
+    expect(calls[0]?.url).toBe(`${DASHBOARD}/api/runs?repo=acme%2Fapp&pr=232`);
+    expect(calls[0]?.headers[TOKEN_HEADER]).toBe("ghp_token_from_gh");
+    expect(calls[0]?.redirect).toBe("error");
+    expect(result.stdout.split("\n")).toEqual([
+      "2026-11-23T09:54:00.000Z  abc1234  incremental  succeeded  Comment (0 blocking · 1 should-fix · 2 nits)  $0.27  shadow  run 5eba8380",
+      "2026-11-23T09:54:00.000Z  abc1234  incremental  covered  —  run 24ee07af",
+      "",
+    ]);
+    const json = await run(["runs", "acme/app#232", "--format", "json"], {
+      findingsDeps: async () => d,
+    });
+    expect(JSON.parse(json.stdout)).toEqual([RUN, expect.objectContaining({ status: "covered" })]);
+  });
+
+  it("passes on a refusal, and says what it needs", async () => {
+    const { deps: refused } = deps({
+      reply: { status: 404, body: { error: "no such repository" } },
+    });
+    const result = await run(["runs", "acme/app#232"], { findingsDeps: async () => refused });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("no such repository");
+    const { deps: d } = deps();
+    expect((await run(["runs", "acme/app"], { findingsDeps: async () => d })).stderr).toContain(
+      "owner/repo#123",
+    );
+    expect(
+      (await run(["runs", "acme/app#1", "--format", "md"], { findingsDeps: async () => d })).stderr,
+    ).toContain("text or json");
+    expect((await run(["runs"], { findingsDeps: async () => d })).stdout).toContain("Usage:");
+  });
+});
+
 describe("lgtmoose findings <repo>#<pr>", () => {
   it("lists the PR's findings as markdown for an agent, with the token in its header", async () => {
     const { deps: d, calls } = deps({
@@ -97,7 +206,7 @@ describe("lgtmoose findings <repo>#<pr>", () => {
     const json = await run(["findings", "acme/app#232", "--format", "json"], {
       findingsDeps: async () => d,
     });
-    expect(JSON.parse(json.stdout)).toMatchObject([{ id: ID, path: "src/cart.ts" }]);
+    expect(JSON.parse(json.stdout)).toMatchObject({ findings: [{ id: ID, path: "src/cart.ts" }] });
     const text = await run(["findings", "acme/app#232", "--format", "text"], {
       findingsDeps: async () => d,
     });
@@ -122,7 +231,7 @@ describe("lgtmoose findings <repo>#<pr>", () => {
     expect(json.stdout.replaceAll("\n", "")).not.toMatch(/[\p{Cc}\p{Cf}\u2028\u2029]/u);
     expect(json.stdout).toContain("\\u009b");
     expect(json.stdout).toContain("\\u202e");
-    expect(JSON.parse(json.stdout)).toMatchObject([{ title }]);
+    expect(JSON.parse(json.stdout)).toMatchObject({ findings: [{ title }] });
   });
 
   it("escapes both halves of a format character above U+FFFF", async () => {
@@ -132,7 +241,7 @@ describe("lgtmoose findings <repo>#<pr>", () => {
       findingsDeps: async () => d,
     });
     expect(json.stdout).toContain("ok\\udb40\\udc41\\udb40\\udc42x");
-    expect(JSON.parse(json.stdout)).toMatchObject([{ title }]);
+    expect(JSON.parse(json.stdout)).toMatchObject({ findings: [{ title }] });
   });
 
   it("takes the dashboard's URL from --url or the environment, localhost for compose", async () => {

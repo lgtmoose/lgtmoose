@@ -33,6 +33,77 @@ export interface AgentFinding {
   recheckable?: boolean | undefined;
 }
 
+/** What a review run decided (NIC-1145). */
+export type RunOutcome = "approve" | "request_changes" | "comment";
+
+/**
+ * A pull request's latest decision: the newest succeeded run that recorded one, as the findings
+ * API gives it (NIC-1145).
+ */
+export interface RunDecision {
+  /** The run's ID: a UUID. */
+  runId: string;
+  /** The commit it reviewed. */
+  headSha: string;
+  decision: RunOutcome;
+  /**
+   * The open findings it counted, by severity. Undefined for a run from before they were kept,
+   * whose decision was read from the review it posted.
+   */
+  blocking?: number | undefined;
+  shouldFix?: number | undefined;
+  nits?: number | undefined;
+  /** In shadow mode: nothing was posted to GitHub. */
+  shadow: boolean;
+  finishedAt?: string | undefined;
+}
+
+const OUTCOME_LABEL: Record<RunOutcome, string> = {
+  approve: "Approve",
+  request_changes: "Changes requested",
+  comment: "Comment",
+};
+
+/** A decision in words: "Changes requested", with "(shadow)" when nothing was posted. */
+export function outcomeLabel(decision: RunOutcome, shadow: boolean): string {
+  return `${OUTCOME_LABEL[decision]}${shadow ? " (shadow)" : ""}`;
+}
+
+/**
+ * The open findings a decision counted: "1 blocking · 2 should-fix · 0 nits". Undefined when they
+ * weren't kept (a run from before they were).
+ */
+export function decisionCounts(counts: {
+  blocking?: number | undefined;
+  shouldFix?: number | undefined;
+  nits?: number | undefined;
+}): string | undefined {
+  const { blocking, shouldFix, nits } = counts;
+  if (blocking === undefined || shouldFix === undefined || nits === undefined) return undefined;
+  return `${blocking} blocking · ${shouldFix} should-fix · ${nits} ${nits === 1 ? "nit" : "nits"}`;
+}
+
+/**
+ * A PR's latest decision on one line: "Latest decision: Changes requested (shadow) at abc1234 ·
+ * 1 blocking · 2 should-fix · 0 nits · run 5eba8380". The dashboard and the CLI both show it.
+ */
+export function decisionLine(decision: RunDecision | undefined): string {
+  if (decision === undefined) return "Latest decision: none recorded yet.";
+  const counts = decisionCounts(decision);
+  return `Latest decision: ${outcomeLabel(decision.decision, decision.shadow)} at ${plainLine(decision.headSha).slice(0, 7)}${counts === undefined ? "" : ` · ${counts}`} · run ${plainLine(decision.runId).slice(0, 8)}`;
+}
+
+/** What the decision means for a coding agent: what holds the pull request up. */
+function decisionMeaning(decision: RunDecision): string {
+  if (decision.decision === "request_changes") {
+    return "It requests changes: every blocking finding below must be fixed, or declined, before it can approve.";
+  }
+  if (decision.decision === "comment") {
+    return "It holds back approval: no finding blocks, but the should-fix findings below must be fixed, or declined, before it can approve.";
+  }
+  return "It approves: nothing below holds the pull request up. Nits never block.";
+}
+
 const SEVERITY_LABEL = { blocking: "Blocking", should_fix: "Should fix", nit: "Nit" } as const;
 
 /**
@@ -72,12 +143,21 @@ export function agentFindingsMarkdown(input: {
   repo: string;
   number: number;
   findings: readonly AgentFinding[];
+  /**
+   * The PR's latest decision (NIC-1145), shown first; undefined says none is recorded yet. Left
+   * out (by a caller from before it existed), no decision line is written.
+   */
+  decision?: RunDecision | undefined;
   cli?: string;
 }): string {
   const cli = input.cli ?? "lgtmoose";
   // Only LGTMoose's own: another reviewer's are on GitHub, and answered there.
   const findings = input.findings.filter((finding) => (finding.source ?? "self") === "self");
   const lines = [`# LGTMoose findings on ${input.repo}#${input.number}`, ""];
+  if ("decision" in input) {
+    lines.push(decisionLine(input.decision), "");
+    if (input.decision !== undefined) lines.push(decisionMeaning(input.decision), "");
+  }
   if (findings.length === 0) {
     lines.push("No open findings.", "");
     return lines.join("\n");

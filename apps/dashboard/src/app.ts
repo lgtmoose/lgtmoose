@@ -1,4 +1,12 @@
-import { agentFindingsMarkdown, type AgentFinding } from "@lgtmoose/core/agent-markdown";
+import {
+  agentFindingsMarkdown,
+  decisionCounts,
+  decisionLine,
+  outcomeLabel,
+  type AgentFinding,
+  type RunDecision,
+  type RunOutcome,
+} from "@lgtmoose/core/agent-markdown";
 import { el, replace, table } from "./dom.js";
 import {
   answerRefusal,
@@ -151,6 +159,12 @@ interface Run {
   startedAt: string | undefined;
   finishedAt: string | undefined;
   createdAt: string;
+  /** What it decided (NIC-1145); absent for a run that decided nothing (covered, failed). */
+  decision?: RunOutcome | undefined;
+  blocking?: number | undefined;
+  shouldFix?: number | undefined;
+  nits?: number | undefined;
+  shadow: boolean;
 }
 
 class SignedOut extends Error {}
@@ -266,10 +280,6 @@ async function renderRepos(): Promise<void> {
           ]),
         ),
   );
-}
-
-function repoQuery(repo: string | undefined): string {
-  return repo === undefined ? "" : `?repo=${encodeURIComponent(repo)}`;
 }
 
 type Answer = { outcome: "fixed" } | { outcome: "declined"; reason: string };
@@ -418,10 +428,14 @@ async function renderFindings(
   pr: number | undefined,
   login: string,
 ): Promise<void> {
-  const { findings } = await api<{ findings: Finding[] }>(
+  const reply = await api<{ findings: Finding[]; decision?: RunDecision | null }>(
     `/api/findings${findingsQuery(repo, pr)}`,
   );
+  const { findings } = reply;
   const onePr = repo !== undefined && pr !== undefined;
+  // One PR's latest decision (NIC-1145): null when none is recorded; absent from an older API.
+  const knowsDecision = reply.decision !== undefined;
+  const decision = reply.decision ?? undefined;
   // Answers given on this page, so Copy for agent matches what the page now shows without
   // fetching the list again: a declined finding is left out, a fixed one is marked claimed.
   const declined = new Set<string>();
@@ -443,6 +457,15 @@ async function renderFindings(
   replace(
     main(),
     el("h1", {}, heading),
+    onePr && knowsDecision
+      ? el(
+          "p",
+          {},
+          el("strong", {}, decisionLine(decision)),
+          " ",
+          link({ page: "runs", repo, pr }, "All runs"),
+        )
+      : undefined,
     onePr
       ? el(
           "p",
@@ -455,6 +478,7 @@ async function renderFindings(
                 repo,
                 number: pr,
                 findings: findings.filter((finding) => !declined.has(finding.id)),
+                ...(knowsDecision ? { decision } : {}),
               }),
             copied,
           ),
@@ -521,20 +545,64 @@ async function renderFindings(
   );
 }
 
-async function renderRuns(repo: string | undefined): Promise<void> {
-  const { runs } = await api<{ runs: Run[] }>(`/api/runs${repoQuery(repo)}`);
+/** A run's decision for its row (NIC-1145): "Comment (shadow)" and its counts, or "—". */
+function decisionCell(run: Run): HTMLElement | string {
+  if (run.decision === undefined) return "—";
+  const counts = decisionCounts(run);
+  return el(
+    "div",
+    {},
+    el("span", {}, outcomeLabel(run.decision, run.shadow)),
+    counts === undefined ? undefined : el("div", { class: "muted" }, counts),
+  );
+}
+
+async function renderRuns(repo: string | undefined, pr: number | undefined): Promise<void> {
+  const { runs } = await api<{ runs: Run[] }>(`/api/runs${findingsQuery(repo, pr)}`);
+  const onePr = repo !== undefined && pr !== undefined;
+  let heading = "Review runs";
+  if (onePr) heading = `Review runs on ${repo}#${pr}`;
+  else if (repo !== undefined) heading = `Review runs in ${repo}`;
   replace(
     main(),
-    el("h1", {}, repo === undefined ? "Review runs" : `Review runs in ${repo}`),
+    el("h1", {}, heading),
+    onePr
+      ? el(
+          "p",
+          {},
+          link({ page: "findings", repo, pr }, "Findings on this PR"),
+          " ",
+          link({ page: "runs", repo }, `All of ${repo}`),
+        )
+      : undefined,
     runs.length === 0
       ? el("p", { class: "muted" }, "No review runs yet.")
       : table(
-          ["Started", "Pull request", "Kind", "Status", "Files", "Took", "Cost", "Providers"],
+          [
+            "Started",
+            "Pull request",
+            "Kind",
+            "Status",
+            "Decision",
+            "Files",
+            "Took",
+            "Cost",
+            "Providers",
+          ],
           runs.map((run) => [
             when(run.startedAt ?? run.createdAt),
-            prLink(run.repo, run.number),
+            onePr
+              ? prLink(run.repo, run.number)
+              : el(
+                  "span",
+                  {},
+                  prLink(run.repo, run.number),
+                  " ",
+                  link({ page: "runs", repo: run.repo, pr: run.number }, "Just this PR"),
+                ),
             run.kind,
             run.status,
+            decisionCell(run),
             run.filesTotal === undefined
               ? String(run.filesDone)
               : `${run.filesDone}/${run.filesTotal}`,
@@ -1041,7 +1109,7 @@ async function render(): Promise<void> {
     const me = await api<Me>("/api/me");
     renderNav(me);
     if (route.page === "findings") await renderFindings(route.repo, route.pr, me.login);
-    else if (route.page === "runs") await renderRuns(route.repo);
+    else if (route.page === "runs") await renderRuns(route.repo, route.pr);
     else if (route.page === "learnings") await renderLearnings(route.status);
     else if (route.page === "usage") await renderUsage();
     else if (route.page === "acceptance") await renderAcceptance();

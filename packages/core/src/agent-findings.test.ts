@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   agentFindingSchema,
   agentFindingsMarkdown,
+  agentRunSchema,
   answerRequestSchema,
+  decisionLine,
   plainLine,
+  runDecisionSchema,
   type AgentFinding,
+  type RunDecision,
 } from "./agent-findings.js";
 
 const finding = (over: Partial<AgentFinding> = {}): AgentFinding => ({
@@ -179,5 +183,82 @@ describe("answerRequestSchema", () => {
 
   it("refuses any other outcome", () => {
     expect(answerRequestSchema.safeParse({ outcome: "resolved" }).success).toBe(false);
+  });
+});
+
+describe("a PR's decision (NIC-1145)", () => {
+  const decision = (over: Partial<RunDecision> = {}): RunDecision => ({
+    runId: "5eba8380-1111-4222-8333-444455556666",
+    headSha: "abc1234def5678abc1234def5678abc1234def56",
+    decision: "request_changes",
+    blocking: 1,
+    shouldFix: 2,
+    nits: 0,
+    shadow: true,
+    ...over,
+  });
+
+  it("says it on one line, with the commit, the counts and the run", () => {
+    expect(decisionLine(decision())).toBe(
+      "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380",
+    );
+    expect(decisionLine(decision({ decision: "approve", shadow: false, nits: 1 }))).toContain(
+      "Approve at abc1234 · 1 blocking · 2 should-fix · 1 nit ·",
+    );
+    expect(decisionLine(undefined)).toBe("Latest decision: none recorded yet.");
+  });
+
+  it("leaves out counts that weren't kept (a run from before they were)", () => {
+    const old = decision({ blocking: undefined, shouldFix: undefined, nits: undefined });
+    expect(decisionLine(old)).toBe(
+      "Latest decision: Changes requested (shadow) at abc1234 · run 5eba8380",
+    );
+  });
+
+  it("starts the agent's markdown with it, and what it means for the PR", () => {
+    const requested = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [finding()],
+      decision: decision(),
+    });
+    expect(requested.split("\n").slice(2, 5)).toEqual([
+      "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380",
+      "",
+      "It requests changes: every blocking finding below must be fixed, or declined, before it can approve.",
+    ]);
+    const none = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [],
+      decision: undefined,
+    });
+    expect(none).toContain("Latest decision: none recorded yet.");
+    // A caller that gives no decision at all gets no line.
+    expect(agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [] })).not.toContain(
+      "Latest decision",
+    );
+  });
+
+  it("parses only a well-formed decision: a UUID run, a hex commit, a known outcome", () => {
+    expect(runDecisionSchema.safeParse(decision()).success).toBe(true);
+    for (const bad of [
+      { runId: "not-a-uuid" },
+      { headSha: "abc`\n## injected" },
+      { decision: "merge" },
+      { blocking: -1 },
+    ]) {
+      expect(runDecisionSchema.safeParse({ ...decision(), ...bad }).success).toBe(false);
+    }
+    expect(
+      agentRunSchema.safeParse({
+        id: "5eba8380-1111-4222-8333-444455556666",
+        headSha: "a".repeat(40),
+        kind: "incremental",
+        status: "covered",
+        shadow: true,
+        createdAt: "2026-11-24T00:00:00.000Z",
+      }).success,
+    ).toBe(true);
   });
 });

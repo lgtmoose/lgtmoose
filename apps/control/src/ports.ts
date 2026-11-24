@@ -11,6 +11,12 @@ import type { BootstrapDeps } from "./bootstrap.js";
 import type { SpendStore } from "./spend.js";
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
+/** A run's decision as it's stored on the run (NIC-1145). */
+export interface RunDecisionRecord {
+  outcome: "approve" | "request_changes" | "comment";
+  counts: { blocking: number; should_fix: number; nit: number };
+}
+
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
   /**
@@ -284,6 +290,12 @@ export interface RunStore {
        * file left unreviewed, no spend cap from the prepare step.
        */
       complete?: boolean;
+      /**
+       * What the run decided, and the open findings it counted (NIC-1145). Every run that
+       * succeeds has one, a quiet run included: it posted no new review, but it decided. Left
+       * out only when the decision was skipped (the head moved).
+       */
+      decision?: RunDecisionRecord | undefined;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */

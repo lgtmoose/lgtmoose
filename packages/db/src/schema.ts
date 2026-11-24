@@ -193,6 +193,17 @@ export const reviewRuns = pgTable(
      * mode.
      */
     complete: boolean("complete"),
+    /**
+     * What the run decided (NIC-1145): `approve`, `request_changes` or `comment`, and the open
+     * findings it counted, by severity. Set by every run that succeeds, a quiet one included (it
+     * posts no new review, but still decides); unlike `review_event`, which is only the review a
+     * run posted or recorded. Null for a covered, superseded or failed run, and for runs from
+     * before it was kept that recorded no review.
+     */
+    decision: text("decision"),
+    decisionBlocking: integer("decision_blocking"),
+    decisionShouldFix: integer("decision_should_fix"),
+    decisionNits: integer("decision_nits"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

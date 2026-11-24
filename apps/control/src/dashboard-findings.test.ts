@@ -182,6 +182,102 @@ beforeEach(async () => {
   pullId = pull?.id ?? "";
 });
 
+describe("a PR's decision and runs with a token (NIC-1145)", () => {
+  const runs = drizzleRunStore(db);
+
+  async function decidedRun(
+    arn: string,
+    headSha: string,
+    decision: { outcome: "approve" | "request_changes" | "comment"; blocking: number },
+    eventAt: Date,
+  ): Promise<string> {
+    const run = await runs.startRun({
+      installationId: 1,
+      repo: "acme/api",
+      number: 232,
+      author: "bob",
+      headSha,
+      baseSha: "b".repeat(40),
+      executionArn: arn,
+      eventAt,
+    });
+    await runs.succeedRun(run.runId, {
+      filesDone: 1,
+      costUsd: 0.25,
+      headSha,
+      statusLabel: undefined,
+      summaryCommentId: undefined,
+      decision: {
+        outcome: decision.outcome,
+        counts: { blocking: decision.blocking, should_fix: 1, nit: 0 },
+      },
+    });
+    return run.runId;
+  }
+
+  const get = (path: string, token: string, query: Record<string, string>) =>
+    handleDashboardRequest(deps, request("GET", path, withToken(token, { query })));
+
+  it("gives the findings with the PR's latest decision, or null before there is one", async () => {
+    await finding();
+    const before = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(JSON.parse(before.body)).toMatchObject({ decision: null });
+
+    await decidedRun("arn:d:1", "c".repeat(40), { outcome: "request_changes", blocking: 2 }, NOW);
+    const newest = await decidedRun(
+      "arn:d:2",
+      "d".repeat(40),
+      { outcome: "comment", blocking: 0 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    const after = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body)).toMatchObject({
+      decision: {
+        runId: newest,
+        headSha: "d".repeat(40),
+        decision: "comment",
+        blocking: 0,
+        shouldFix: 1,
+        nits: 0,
+        shadow: true,
+      },
+    });
+  });
+
+  it("lists the PR's runs, newest first, each with what it decided", async () => {
+    const first = await decidedRun(
+      "arn:r:1",
+      "c".repeat(40),
+      { outcome: "request_changes", blocking: 1 },
+      NOW,
+    );
+    const second = await decidedRun(
+      "arn:r:2",
+      "d".repeat(40),
+      { outcome: "approve", blocking: 0 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    const response = await get("/api/runs", READER, { repo: "acme/api", pr: "232" });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { runs: { id: string; decision?: string }[] };
+    expect(body.runs.map((run) => run.id)).toEqual([second, first]);
+    expect(body.runs[0]).toMatchObject({ decision: "approve", blocking: 0, shadow: true });
+    expect(body.runs[1]).toMatchObject({ decision: "request_changes", blocking: 1 });
+  });
+
+  it("refuses runs as it refuses findings: a PR is needed, and outsiders see nothing", async () => {
+    await decidedRun("arn:x:1", "c".repeat(40), { outcome: "approve", blocking: 0 }, NOW);
+    expect((await get("/api/runs", READER, { repo: "acme/api" })).status).toBe(400);
+    expect((await get("/api/runs", READER, { repo: "acme/api", pr: "2147483648" })).status).toBe(
+      400,
+    );
+    expect((await get("/api/runs", STRANGER, { repo: "acme/api", pr: "232" })).status).toBe(404);
+    expect((await get("/api/runs", OUTSIDER, { repo: "acme/api", pr: "232" })).status).toBe(404);
+    expect((await get("/api/runs", NO_READ_ORG, { repo: "acme/api", pr: "232" })).status).toBe(403);
+  });
+});
+
 describe("listing a PR's findings with a token", () => {
   it("lists the PR's open findings for someone who can read the repository", async () => {
     const id = await finding();

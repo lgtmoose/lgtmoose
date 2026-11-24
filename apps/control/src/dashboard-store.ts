@@ -7,9 +7,9 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { MAX_DECLINE_REASON } from "@lgtmoose/core";
+import { MAX_DECLINE_REASON, runOutcomes, type RunDecision, type RunOutcome } from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
-import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { unpostedShadow } from "./shadow-findings.js";
 
@@ -123,7 +123,21 @@ export interface RunSummary {
   startedAt: string | undefined;
   finishedAt: string | undefined;
   createdAt: string;
+  /**
+   * What it decided, and the open findings it counted (NIC-1145). Undefined for a run that
+   * recorded no decision: covered, superseded, failed, or older than the column.
+   */
+  decision: RunOutcome | undefined;
+  blocking: number | undefined;
+  shouldFix: number | undefined;
+  nits: number | undefined;
+  /** In shadow mode: nothing it decided was posted to GitHub. */
+  shadow: boolean;
 }
+
+/** A stored decision, if it's one we know: a bad value reads as none, never as an approval. */
+const outcomeOf = (value: string | null): RunOutcome | undefined =>
+  runOutcomes.find((outcome) => outcome === value);
 
 /**
  * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
@@ -181,8 +195,16 @@ export interface DashboardStore {
    * reads later. False when it isn't open or outdated.
    */
   declineFinding(id: string, login: string, reason: string): Promise<boolean>;
-  /** The newest review runs in `repos`, at most `limit`. */
-  recentRuns(repos: readonly string[], limit: number): Promise<RunSummary[]>;
+  /**
+   * The newest review runs in `repos`, at most `limit`. With a pull request `number` (NIC-1145),
+   * only that PR's.
+   */
+  recentRuns(repos: readonly string[], limit: number, number?: number): Promise<RunSummary[]>;
+  /**
+   * A pull request's latest decision (NIC-1145): the newest succeeded run of it that recorded
+   * one, newest by the event it reviewed, as the PR's own record goes. Undefined when none has.
+   */
+  latestDecision(repo: string, number: number): Promise<RunDecision | undefined>;
   /** Provider use by runs in `repos` since `since`, by provider. */
   providerUse(repos: readonly string[], since: Date): Promise<ProviderUse[]>;
   /** Providers cooling down at `now`. */
@@ -372,7 +394,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
       )) as unknown as { rows: { done: unknown }[] };
       return result.rows[0]?.done === true;
     },
-    async recentRuns(repos, limit) {
+    async recentRuns(repos, limit, number) {
       if (repos.length === 0) return [];
       const rows = await db
         .select({
@@ -388,10 +410,17 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           startedAt: reviewRuns.startedAt,
           finishedAt: reviewRuns.finishedAt,
           createdAt: reviewRuns.createdAt,
+          decision: reviewRuns.decision,
+          blocking: reviewRuns.decisionBlocking,
+          shouldFix: reviewRuns.decisionShouldFix,
+          nits: reviewRuns.decisionNits,
+          shadow: reviewRuns.shadow,
         })
         .from(reviewRuns)
         .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
-        .where(inRepos(repos))
+        .where(
+          and(inRepos(repos), number === undefined ? undefined : eq(pullRequests.number, number)),
+        )
         .orderBy(desc(reviewRuns.createdAt))
         .limit(limit);
       const providers = new Map<string, Set<string>>();
@@ -425,7 +454,55 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         startedAt: iso(row.startedAt),
         finishedAt: iso(row.finishedAt),
         createdAt: row.createdAt.toISOString(),
+        decision: outcomeOf(row.decision),
+        blocking: row.blocking ?? undefined,
+        shouldFix: row.shouldFix ?? undefined,
+        nits: row.nits ?? undefined,
+        shadow: row.shadow,
       }));
+    },
+    async latestDecision(repo, number) {
+      const rows = await db
+        .select({
+          runId: reviewRuns.id,
+          headSha: reviewRuns.headSha,
+          decision: reviewRuns.decision,
+          blocking: reviewRuns.decisionBlocking,
+          shouldFix: reviewRuns.decisionShouldFix,
+          nits: reviewRuns.decisionNits,
+          shadow: reviewRuns.shadow,
+          finishedAt: reviewRuns.finishedAt,
+        })
+        .from(reviewRuns)
+        .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
+        .where(
+          and(
+            inRepos([repo]),
+            eq(pullRequests.number, number),
+            eq(reviewRuns.status, "succeeded"),
+            isNotNull(reviewRuns.decision),
+          ),
+        )
+        // Newest by the event it reviewed, as the PR's own record goes (`newerRunPosted`): an
+        // older run that finished later doesn't stand for the PR.
+        .orderBy(desc(sql`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`))
+        .limit(5);
+      for (const row of rows) {
+        const decision = outcomeOf(row.decision);
+        if (decision === undefined) continue;
+        return {
+          runId: row.runId,
+          headSha: row.headSha,
+          decision,
+          // Undefined for a run from before the counts were kept (its decision was backfilled).
+          ...(row.blocking === null ? {} : { blocking: row.blocking }),
+          ...(row.shouldFix === null ? {} : { shouldFix: row.shouldFix }),
+          ...(row.nits === null ? {} : { nits: row.nits }),
+          shadow: row.shadow,
+          ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt.toISOString() }),
+        };
+      }
+      return undefined;
     },
     async providerUse(repos, since) {
       if (repos.length === 0) return [];

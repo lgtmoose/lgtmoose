@@ -16,6 +16,7 @@ import {
   answerFinding,
   handleTokenRequest,
   PR_FINDINGS_LIMIT,
+  PR_RUNS_LIMIT,
   prParams,
   sessionAsker,
 } from "./dashboard-findings.js";
@@ -647,6 +648,11 @@ export async function handleDashboardRequest(
         number === undefined ? FINDINGS_LIMIT : PR_FINDINGS_LIMIT,
         number,
       );
+      // One PR's comes with its latest decision (NIC-1145), as the CLI's does.
+      const decision =
+        number === undefined || repos[0] === undefined
+          ? undefined
+          : await deps.store.latestDecision(repos[0], number);
       // Whether the page shows Fixed and Decline (NIC-1142): LGTMoose's own, in a repository the
       // person could write to at sign-in. Only a hint for the buttons; the answer route checks.
       return json(200, {
@@ -654,12 +660,27 @@ export async function handleDashboardRequest(
           ...finding,
           canAnswer: finding.source === "self" && session.writeRepos.includes(finding.repo),
         })),
+        ...(number === undefined ? {} : { decision: decision ?? null }),
       });
     }
     case "GET /api/runs": {
       const repos = scope(session, request.query.repo);
       if (repos === undefined) return json(404, { error: "no such repository" });
-      return json(200, { runs: await deps.store.recentRuns(repos, RUNS_LIMIT) });
+      // One pull request's (NIC-1145): `pr` needs `repo`, as for findings.
+      let number: number | undefined;
+      if (request.query.pr !== undefined) {
+        number = prParams(request.query)?.number;
+        if (number === undefined) {
+          return json(400, { error: "give repo=owner/name and pr=<number>" });
+        }
+      }
+      return json(200, {
+        runs: await deps.store.recentRuns(
+          repos,
+          number === undefined ? RUNS_LIMIT : PR_RUNS_LIMIT,
+          number,
+        ),
+      });
     }
     case "GET /api/learnings":
       return listLearnings(deps, session, request.query.status);
