@@ -166,10 +166,14 @@ describe("drizzleDashboardStore", () => {
     const id = before[0]?.id ?? "";
     expect((await store.answerTarget(id))?.recheckable).toBe(false);
     await db.update(findings).set({ side: "RIGHT" }).where(eq(findings.id, id));
-    const after = await store.openFindings(["acme/api"], 10);
-    expect(after.find((row) => row.id === id)?.recheckable).toBe(true);
-    expect((await store.answerTarget(id))?.recheckable).toBe(true);
-    await db.update(findings).set({ side: null }).where(eq(findings.id, id));
+    try {
+      const after = await store.openFindings(["acme/api"], 10);
+      expect(after.find((row) => row.id === id)?.recheckable).toBe(true);
+      expect((await store.answerTarget(id))?.recheckable).toBe(true);
+    } finally {
+      // The fixtures are shared by the tests after this one.
+      await db.update(findings).set({ side: null }).where(eq(findings.id, id));
+    }
   });
 
   it("stops counting unposted shadow findings once live, and keeps them stored (NIC-1141)", async () => {

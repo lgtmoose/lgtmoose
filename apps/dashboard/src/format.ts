@@ -119,7 +119,7 @@ export function answerRefusal(status: number, error: string | undefined): string
     case 409:
       return error ?? "That finding can't take this answer now.";
     case 503:
-      return "GitHub couldn't be asked just now. Try again in a moment.";
+      return "The dashboard couldn't answer just now. Try again in a moment.";
     default:
       return `The dashboard API answered ${status}${said}.`;
   }
