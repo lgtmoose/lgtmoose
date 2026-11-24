@@ -501,7 +501,11 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         )
         // Newest by the event it reviewed, as the PR's own record goes (`newerRunPosted`): an
         // older run that finished later doesn't stand for the PR.
-        .orderBy(desc(sql`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`))
+        .orderBy(
+          desc(sql`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`),
+          desc(reviewRuns.createdAt),
+          desc(reviewRuns.id),
+        )
         .limit(5);
       for (const row of rows) {
         const decision = outcomeOf(row.decision);

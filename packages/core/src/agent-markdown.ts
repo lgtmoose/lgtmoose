@@ -101,50 +101,48 @@ export function decisionLine(decision: RunDecision | undefined): string {
   return `Latest decision: ${outcomeLabel(decision.decision, decision.shadow)} at ${plainLine(decision.headSha).slice(0, 7)}${counts === undefined ? "" : ` · ${counts}`} · run ${plainLine(decision.runId).slice(0, 8)}`;
 }
 
-const HOLD_MEANING: Record<RunHold, string> = {
+/** What a hold that kept a run from approving means, for the holds that do (not approve-off). */
+const HOLD_MEANING: Record<Exclude<RunHold, "approve_disabled">, string> = {
   incomplete:
     "Approval is held: the review didn't finish (some files weren't reviewed), so it can't approve until a review does.",
   prompt_injection:
     "A person must look: something in this pull request may have tried to steer the review (possible prompt injection), so it won't approve.",
-  approve_disabled:
-    "Approving is turned off for this repository (gate.approve: false), so it comments instead.",
 };
 
 /**
  * What the decision means for a coding agent: only what the run recorded. Its holds first (a run
- * that didn't finish, a possible prompt injection), then the findings it counted. A run from before
- * holds and counts were kept says a comment held approval back, and no more.
+ * that didn't finish, a possible prompt injection), then the findings it counted. `decide` names
+ * approving turned off (`approve_disabled`) on every decision of such a repository, but it only
+ * changes an approval, which then posts a comment: so it's said with `approve` alone. A run from
+ * before holds and counts were kept says only what its outcome was.
  */
 function decisionMeaning(decision: RunDecision): string[] {
   const { holds, blocking, shouldFix } = decision;
   const requested =
     "It requests changes: every blocking finding must be fixed, or declined, before it can approve.";
-  const approves = "It approves: nothing holds the pull request up. Nits never block.";
   if (holds === undefined || blocking === undefined || shouldFix === undefined) {
     if (decision.decision === "request_changes") return [requested];
-    if (decision.decision === "approve") return [approves];
+    // Whether it posted an approval or (approving off) a comment isn't known for an older run.
+    if (decision.decision === "approve") {
+      return ["Nothing holds the pull request up. Nits never block."];
+    }
     return ["It holds back approval; this older run didn't record why."];
   }
   const lines: string[] = [];
   if (holds.includes("incomplete")) lines.push(HOLD_MEANING.incomplete);
   if (holds.includes("prompt_injection")) lines.push(HOLD_MEANING.prompt_injection);
-  // Approving turned off explains a comment only when nothing else did: no other hold, and no
-  // blocking or should-fix finding. It never explains changes requested.
-  if (
-    holds.includes("approve_disabled") &&
-    decision.decision === "comment" &&
-    !holds.some((hold) => hold !== "approve_disabled") &&
-    blocking === 0 &&
-    shouldFix === 0
-  ) {
-    lines.push(HOLD_MEANING.approve_disabled);
-  }
   if (decision.decision === "request_changes") lines.push(requested);
   else if (decision.decision === "comment" && shouldFix > 0) {
     lines.push(
       "It holds back approval: no finding blocks, but the should-fix findings must be fixed, or declined, before it can approve.",
     );
-  } else if (decision.decision === "approve") lines.push(approves);
+  } else if (decision.decision === "approve") {
+    lines.push(
+      holds.includes("approve_disabled")
+        ? "Nothing holds it up, but approving is turned off for this repository (gate.approve: false), so it posts a comment instead of approving."
+        : "It approves: nothing holds the pull request up. Nits never block.",
+    );
+  }
   return lines;
 }
 

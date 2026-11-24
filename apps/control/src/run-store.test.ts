@@ -338,6 +338,23 @@ describe("drizzleRunStore", () => {
     const reviewed = await start("arn:exec:backfill-1", 44);
     const quiet = await start("arn:exec:backfill-2", 45);
     const failed = await start("arn:exec:backfill-3", 46);
+    // COMMENT, by its label: a comment, an approval with approving off, a skipped decision, and
+    // a repository's own label (which can't be told apart).
+    const commented = await start("arn:exec:backfill-4", 47);
+    const approvedOff = await start("arn:exec:backfill-5", 48);
+    const skipped = await start("arn:exec:backfill-6", 49);
+    const custom = await start("arn:exec:backfill-7", 50);
+    for (const [run, statusLabel] of [
+      [commented, "Requires Changes"],
+      [approvedOff, "Approved"],
+      [skipped, null],
+      [custom, "lgtm: needs work"],
+    ] as const) {
+      await db
+        .update(reviewRuns)
+        .set({ status: "succeeded", reviewEvent: "COMMENT", statusLabel })
+        .where(eq(reviewRuns.id, run.runId));
+    }
     await db
       .update(reviewRuns)
       .set({ status: "succeeded", reviewEvent: "REQUEST_CHANGES" })
@@ -361,6 +378,10 @@ describe("drizzleRunStore", () => {
     });
     expect(await runRow(quiet.runId)).toMatchObject({ decision: null });
     expect(await runRow(failed.runId)).toMatchObject({ decision: null });
+    expect(await runRow(commented.runId)).toMatchObject({ decision: "comment" });
+    expect(await runRow(approvedOff.runId)).toMatchObject({ decision: "approve" });
+    expect(await runRow(skipped.runId)).toMatchObject({ decision: null });
+    expect(await runRow(custom.runId)).toMatchObject({ decision: null });
   });
 
   it("marks a covered run covered, without touching its PR", async () => {

@@ -1,4 +1,6 @@
+import { parseRepoConfig } from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
+import { decide } from "./decision.js";
 import {
   agentFindingSchema,
   agentFindingsMarkdown,
@@ -281,36 +283,72 @@ describe("why a decision held (NIC-1145)", () => {
   const markdown = (decision: RunDecision) =>
     agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [], decision });
 
+  // From what `decide` really returns, as post records it, so the wording can't drift from it.
+  const fromDecide = (
+    severities: readonly ("blocking" | "should_fix" | "nit")[],
+    context: { complete?: boolean; injectionFlagged?: boolean } = {},
+    repo: Record<string, unknown> = {},
+  ): RunDecision => {
+    const { gate, labels } = parseRepoConfig(repo);
+    const made = decide(
+      severities.map((severity) => ({ severity })),
+      {
+        complete: context.complete ?? true,
+        injectionFlagged: context.injectionFlagged ?? false,
+        headMoved: false,
+      },
+      { gate, labels },
+    );
+    if (made.outcome === "skipped") throw new Error("not a recorded decision");
+    return {
+      ...base,
+      decision: made.outcome,
+      blocking: made.counts.blocking,
+      shouldFix: made.counts.should_fix,
+      nits: made.counts.nit,
+      holds: [...made.holds],
+    };
+  };
+  const approveOff = { gate: { approve: false } };
+
+  it("says approving is turned off on the approval it turned into a comment, and not that it approves", () => {
+    const off = fromDecide([], {}, approveOff);
+    expect(off.decision).toBe("approve");
+    const text = markdown(off);
+    expect(text).toContain(
+      "Nothing holds it up, but approving is turned off for this repository (gate.approve: false), so it posts a comment instead of approving.",
+    );
+    expect(text).not.toContain("It approves");
+    expect(markdown(fromDecide(["nit"]))).toContain(
+      "It approves: nothing holds the pull request up.",
+    );
+  });
+
+  it("never names approving off with findings or other holds that decided it", () => {
+    const blocked = markdown(fromDecide(["blocking"], {}, approveOff));
+    expect(blocked).toContain("It requests changes");
+    expect(blocked).not.toContain("approving is turned off");
+    const shouldFix = markdown(fromDecide(["should_fix"], {}, approveOff));
+    expect(shouldFix).toContain("the should-fix findings must be fixed");
+    expect(shouldFix).not.toContain("approving is turned off");
+    const unfinished = markdown(fromDecide([], { complete: false }, approveOff));
+    expect(unfinished).toContain("Approval is held: the review didn't finish");
+    expect(unfinished).not.toContain("approving is turned off");
+  });
+
   it("says a comment came from an unfinished run or a possible prompt injection, not findings", () => {
-    const incomplete = markdown({ ...base, holds: ["incomplete", "approve_disabled"] });
+    const incomplete = markdown(fromDecide([], { complete: false }));
     expect(incomplete).toContain("Approval is held: the review didn't finish");
     expect(incomplete).not.toContain("should-fix findings must be fixed");
-    // Approving off doesn't explain it when another hold did.
-    expect(incomplete).not.toContain("Approving is turned off");
-    const injected = markdown({ ...base, holds: ["prompt_injection"] });
-    expect(injected).toContain("A person must look");
-    expect(markdown({ ...base, holds: ["approve_disabled"] })).toContain(
-      "Approving is turned off for this repository",
+    expect(markdown(fromDecide(["nit"], { injectionFlagged: true }))).toContain(
+      "A person must look",
     );
   });
 
   it("keeps the findings' wording when nothing else held it", () => {
-    expect(markdown({ ...base, shouldFix: 1, holds: [] })).toContain(
+    expect(markdown(fromDecide(["should_fix"]))).toContain(
       "It holds back approval: no finding blocks, but the should-fix findings must be fixed",
     );
-  });
-
-  it("says approving is off only when that alone made it a comment, never with changes requested", () => {
-    const blocked = markdown({
-      ...base,
-      decision: "request_changes",
-      blocking: 1,
-      holds: ["approve_disabled"],
-    });
-    expect(blocked).not.toContain("Approving is turned off");
-    expect(blocked).toContain("It requests changes");
-    const withShouldFix = markdown({ ...base, shouldFix: 1, holds: ["approve_disabled"] });
-    expect(withShouldFix).not.toContain("Approving is turned off");
   });
 
   it("claims no reason an older run didn't record", () => {
@@ -324,6 +362,10 @@ describe("why a decision held (NIC-1145)", () => {
     expect(old).toContain("It holds back approval; this older run didn't record why.");
     expect(old).not.toContain("should-fix");
     expect(markdown({ ...base, holds: undefined })).toContain("this older run didn't record why");
+    // An older approval may have posted a comment (approving off): it says only that nothing holds.
+    const oldApprove = markdown({ ...base, decision: "approve", holds: undefined });
+    expect(oldApprove).toContain("Nothing holds the pull request up.");
+    expect(oldApprove).not.toContain("It approves");
   });
 
   it("notes counts beyond the open findings listed, and only then", () => {
