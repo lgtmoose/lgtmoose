@@ -137,6 +137,11 @@ describe("lgtmoose runs <repo>#<pr> (NIC-1145)", () => {
   };
 
   it("lists the PR's runs with what each decided, through the same token path", async () => {
+    const started = {
+      ...RUN,
+      id: "85f137e3-1111-4222-8333-444455556666",
+      startedAt: "2026-11-23T09:55:30.000Z",
+    };
     const covered = {
       ...RUN,
       id: "24ee07af-1111-4222-8333-444455556666",
@@ -148,7 +153,9 @@ describe("lgtmoose runs <repo>#<pr> (NIC-1145)", () => {
       shadow: false,
       costUsd: undefined,
     };
-    const { deps: d, calls } = deps({ reply: { body: { runs: [RUN, covered, { id: "bad" }] } } });
+    const { deps: d, calls } = deps({
+      reply: { body: { runs: [RUN, started, covered, { id: "bad" }] } },
+    });
     const result = await run(["runs", "Acme/App#232"], { findingsDeps: async () => d });
     expect(result.exitCode).toBe(0);
     expect(calls[0]?.url).toBe(`${DASHBOARD}/api/runs?repo=acme%2Fapp&pr=232`);
@@ -156,13 +163,19 @@ describe("lgtmoose runs <repo>#<pr> (NIC-1145)", () => {
     expect(calls[0]?.redirect).toBe("error");
     expect(result.stdout.split("\n")).toEqual([
       "2026-11-23T09:54:00.000Z  abc1234  incremental  succeeded  Comment (0 blocking · 1 should-fix · 2 nits)  $0.27  shadow  run 5eba8380",
+      // When it started, where it did.
+      "2026-11-23T09:55:30.000Z  abc1234  incremental  succeeded  Comment (0 blocking · 1 should-fix · 2 nits)  $0.27  shadow  run 85f137e3",
       "2026-11-23T09:54:00.000Z  abc1234  incremental  covered  —  run 24ee07af",
       "",
     ]);
     const json = await run(["runs", "acme/app#232", "--format", "json"], {
       findingsDeps: async () => d,
     });
-    expect(JSON.parse(json.stdout)).toEqual([RUN, expect.objectContaining({ status: "covered" })]);
+    expect(JSON.parse(json.stdout)).toEqual([
+      RUN,
+      started,
+      expect.objectContaining({ status: "covered" }),
+    ]);
   });
 
   it("passes on a refusal, and says what it needs", async () => {

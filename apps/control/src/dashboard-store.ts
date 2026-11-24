@@ -15,7 +15,7 @@ import {
   type RunOutcome,
 } from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
-import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { unpostedShadow } from "./shadow-findings.js";
 
@@ -187,8 +187,15 @@ function decidedFields(row: {
 const HOLDS: readonly RunHold[] = ["incomplete", "prompt_injection", "approve_disabled"];
 
 /** Stored holds we know; undefined when none were kept (a run from before they were). */
-const holdsOf = (value: string[] | null): RunHold[] | undefined =>
-  value === null ? undefined : HOLDS.filter((hold) => value.includes(hold));
+/**
+ * Stored holds, when every one is a hold we know; undefined when none were kept (a run from
+ * before they were) or one isn't known, so the wording claims no reason it can't read.
+ */
+const holdsOf = (value: string[] | null): RunHold[] | undefined => {
+  if (value === null) return undefined;
+  const known = value.flatMap((stored) => HOLDS.filter((hold) => hold === stored));
+  return known.length === value.length ? known : undefined;
+};
 
 /**
  * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
@@ -531,7 +538,15 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
             inRepos([repo]),
             eq(pullRequests.number, number),
             eq(reviewRuns.status, "succeeded"),
-            isNotNull(reviewRuns.decision),
+            // A run that decided, or one that wrote the PR's state without a decision we kept
+            // (older code, or a COMMENT the backfill couldn't place): that one is the PR's
+            // newest, and its decision isn't known, rather than an older run's standing in.
+            or(
+              isNotNull(reviewRuns.decision),
+              eq(reviewRuns.wrotePr, true),
+              isNotNull(reviewRuns.reviewEvent),
+              isNotNull(reviewRuns.statusLabel),
+            ),
           ),
         )
         // Newest by the event it reviewed, as the PR's own record goes (`newerRunPosted`): an

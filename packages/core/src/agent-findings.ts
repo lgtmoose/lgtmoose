@@ -121,6 +121,8 @@ export const agentRunSchema = z.object({
   /** In shadow mode; absent for a run that decided nothing, whose mode may not be its own. */
   shadow: z.boolean().optional(),
   costUsd: z.number().optional(),
+  /** When it started; absent for one that never did (queued, or superseded first). */
+  startedAt: z.string().optional(),
   createdAt: z.string(),
   finishedAt: z.string().optional(),
 });

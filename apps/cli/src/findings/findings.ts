@@ -385,7 +385,8 @@ function runLine(run: AgentRun): string {
   const counts = decisionCounts(run);
   const cost = run.costUsd === undefined ? "" : `  $${run.costUsd.toFixed(2)}`;
   return [
-    plainLine(run.createdAt),
+    // When it started, as the dashboard shows it, else when it was queued.
+    plainLine(run.startedAt ?? run.createdAt),
     run.headSha.slice(0, 7),
     plainLine(run.kind),
     plainLine(run.status),
