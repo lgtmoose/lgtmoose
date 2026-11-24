@@ -1,5 +1,5 @@
 import type { Budgets } from "@lgtmoose/config";
-import type { Finding, ReviewEvent } from "@lgtmoose/core";
+import type { Finding, HoldReason, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { LearningsForBatch, PullReader, PullTarget } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
@@ -10,13 +10,16 @@ import type { ReplyStore } from "./replies.js";
 import type { BootstrapDeps } from "./bootstrap.js";
 import type { SpendStore } from "./spend.js";
 
-/** The artifact bucket, as the control task uses it. Keys are full object keys. */
 /** A run's decision as it's stored on the run (NIC-1145). */
 export interface RunDecisionRecord {
   outcome: "approve" | "request_changes" | "comment";
+  /** The open findings `decide` counted: ours, other reviewers' verified ones and ticket gaps. */
   counts: { blocking: number; should_fix: number; nit: number };
+  /** What kept it from approving, apart from findings (`decide`'s holds). */
+  holds: readonly HoldReason[];
 }
 
+/** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
   putText(key: string, body: string): Promise<void>;
   /**

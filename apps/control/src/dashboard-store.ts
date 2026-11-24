@@ -7,7 +7,13 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { MAX_DECLINE_REASON, runOutcomes, type RunDecision, type RunOutcome } from "@lgtmoose/core";
+import {
+  MAX_DECLINE_REASON,
+  runOutcomes,
+  type RunDecision,
+  type RunHold,
+  type RunOutcome,
+} from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
 import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
@@ -131,13 +137,22 @@ export interface RunSummary {
   blocking: number | undefined;
   shouldFix: number | undefined;
   nits: number | undefined;
-  /** In shadow mode: nothing it decided was posted to GitHub. */
-  shadow: boolean;
+  /**
+   * In shadow mode: nothing it decided was posted to GitHub. Undefined for a run that decided
+   * nothing: its mode is the column's default, not one it recorded.
+   */
+  shadow: boolean | undefined;
 }
 
 /** A stored decision, if it's one we know: a bad value reads as none, never as an approval. */
 const outcomeOf = (value: string | null): RunOutcome | undefined =>
   runOutcomes.find((outcome) => outcome === value);
+
+const HOLDS: readonly RunHold[] = ["incomplete", "prompt_injection", "approve_disabled"];
+
+/** Stored holds we know; undefined when none were kept (a run from before they were). */
+const holdsOf = (value: string[] | null): RunHold[] | undefined =>
+  value === null ? undefined : HOLDS.filter((hold) => value.includes(hold));
 
 /**
  * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
@@ -458,7 +473,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         blocking: row.blocking ?? undefined,
         shouldFix: row.shouldFix ?? undefined,
         nits: row.nits ?? undefined,
-        shadow: row.shadow,
+        shadow: outcomeOf(row.decision) === undefined ? undefined : row.shadow,
       }));
     },
     async latestDecision(repo, number) {
@@ -470,6 +485,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           blocking: reviewRuns.decisionBlocking,
           shouldFix: reviewRuns.decisionShouldFix,
           nits: reviewRuns.decisionNits,
+          holds: reviewRuns.decisionHolds,
           shadow: reviewRuns.shadow,
           finishedAt: reviewRuns.finishedAt,
         })
@@ -498,6 +514,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           ...(row.blocking === null ? {} : { blocking: row.blocking }),
           ...(row.shouldFix === null ? {} : { shouldFix: row.shouldFix }),
           ...(row.nits === null ? {} : { nits: row.nits }),
+          ...(holdsOf(row.holds) === undefined ? {} : { holds: holdsOf(row.holds) }),
           shadow: row.shadow,
           ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt.toISOString() }),
         };

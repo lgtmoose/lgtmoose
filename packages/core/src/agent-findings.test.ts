@@ -4,6 +4,7 @@ import {
   agentFindingsMarkdown,
   agentRunSchema,
   answerRequestSchema,
+  countsNote,
   decisionLine,
   plainLine,
   runDecisionSchema,
@@ -225,8 +226,12 @@ describe("a PR's decision (NIC-1145)", () => {
     expect(requested.split("\n").slice(2, 5)).toEqual([
       "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380",
       "",
-      "It requests changes: every blocking finding below must be fixed, or declined, before it can approve.",
+      "It requests changes: every blocking finding must be fixed, or declined, before it can approve.",
     ]);
+    // It counted a blocking finding the list doesn't show (another reviewer's, a ticket's).
+    expect(requested).toContain(
+      "Its counts include other reviewers' findings and unmet ticket requirements; only LGTMoose's own are listed here.",
+    );
     const none = agentFindingsMarkdown({
       repo: "acme/app",
       number: 7,
@@ -260,5 +265,43 @@ describe("a PR's decision (NIC-1145)", () => {
         createdAt: "2026-11-24T00:00:00.000Z",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("why a decision held (NIC-1145)", () => {
+  const base: RunDecision = {
+    runId: "5eba8380-1111-4222-8333-444455556666",
+    headSha: "abc1234def5678abc1234def5678abc1234def56",
+    decision: "comment",
+    blocking: 0,
+    shouldFix: 0,
+    nits: 0,
+    shadow: false,
+  };
+  const markdown = (decision: RunDecision) =>
+    agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [], decision });
+
+  it("says a comment came from an unfinished run or a possible prompt injection, not findings", () => {
+    const incomplete = markdown({ ...base, holds: ["incomplete"] });
+    expect(incomplete).toContain("Approval is held: the review didn't finish");
+    expect(incomplete).not.toContain("should-fix findings must be fixed");
+    const injected = markdown({ ...base, holds: ["prompt_injection"] });
+    expect(injected).toContain("A person must look");
+    expect(markdown({ ...base, holds: ["approve_disabled"] })).toContain(
+      "Approving is turned off for this repository",
+    );
+  });
+
+  it("keeps the findings' wording when nothing else held it", () => {
+    expect(markdown({ ...base, shouldFix: 1, holds: [] })).toContain(
+      "It holds back approval: no finding blocks, but the should-fix findings must be fixed",
+    );
+  });
+
+  it("notes counts the list doesn't show, and only then", () => {
+    const listed = [{ severity: "blocking" as const, source: "self" as const }];
+    expect(countsNote({ ...base, blocking: 1 }, listed)).toBeUndefined();
+    expect(countsNote({ ...base, blocking: 2 }, listed)).toContain("other reviewers' findings");
+    expect(countsNote(undefined, listed)).toBeUndefined();
   });
 });

@@ -204,6 +204,11 @@ export const reviewRuns = pgTable(
     decisionBlocking: integer("decision_blocking"),
     decisionShouldFix: integer("decision_should_fix"),
     decisionNits: integer("decision_nits"),
+    /**
+     * What kept the decision from approving, apart from findings: `incomplete`,
+     * `prompt_injection` or `approve_disabled`. Empty when nothing did; null when not kept.
+     */
+    decisionHolds: text("decision_holds").array(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: createdAt(),

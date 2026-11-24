@@ -1,5 +1,6 @@
 import {
   agentFindingsMarkdown,
+  countsNote,
   decisionCounts,
   decisionLine,
   outcomeLabel,
@@ -164,7 +165,8 @@ interface Run {
   blocking?: number | undefined;
   shouldFix?: number | undefined;
   nits?: number | undefined;
-  shadow: boolean;
+  /** In shadow mode; absent for a run that decided nothing. */
+  shadow?: boolean | undefined;
 }
 
 class SignedOut extends Error {}
@@ -466,6 +468,9 @@ async function renderFindings(
           link({ page: "runs", repo, pr }, "All runs"),
         )
       : undefined,
+    onePr && knowsDecision && countsNote(decision, findings) !== undefined
+      ? el("p", { class: "muted" }, countsNote(decision, findings))
+      : undefined,
     onePr
       ? el(
           "p",
@@ -552,7 +557,7 @@ function decisionCell(run: Run): HTMLElement | string {
   return el(
     "div",
     {},
-    el("span", {}, outcomeLabel(run.decision, run.shadow)),
+    el("span", {}, outcomeLabel(run.decision, run.shadow === true)),
     counts === undefined ? undefined : el("div", { class: "muted" }, counts),
   );
 }

@@ -9,6 +9,7 @@ import {
   agentFindingSchema,
   agentFindingsMarkdown,
   agentRunSchema,
+  countsNote,
   decisionCounts,
   decisionLine,
   outcomeLabel,
@@ -213,7 +214,10 @@ function formatText(
   findings: readonly AgentFinding[],
   decision: ReplyDecision,
 ): string {
-  const head = decision.known ? `${decisionLine(decision.decision)}\n` : "";
+  const note = decision.known ? countsNote(decision.decision, findings) : undefined;
+  const head = decision.known
+    ? `${decisionLine(decision.decision)}\n${note === undefined ? "" : `${note}\n`}`
+    : "";
   if (findings.length === 0) return `${head}No open findings on ${repo}#${number}.\n`;
   const lines = findings.map((finding) => {
     const where =
@@ -260,8 +264,12 @@ async function list(
     return parsed.success && (parsed.data.source ?? "self") === "self" ? [parsed.data] : [];
   });
   const formats = {
-    json: () =>
-      `${terminalSafeJson(JSON.stringify({ decision: decision.decision ?? null, findings }, null, 2))}\n`,
+    json: () => {
+      // The decision only when the reply gave one we can read: null is "none recorded yet";
+      // left out, nothing is claimed (an older dashboard, or one that didn't parse).
+      const out = decision.known ? { decision: decision.decision ?? null, findings } : { findings };
+      return `${terminalSafeJson(JSON.stringify(out, null, 2))}\n`;
+    },
     text: () => formatText(repo, number, findings, decision),
     md: () =>
       agentFindingsMarkdown({

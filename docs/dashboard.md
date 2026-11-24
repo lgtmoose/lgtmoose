@@ -30,7 +30,7 @@ Findings, runs and repositories can be filtered to one repository. Findings' and
 
 Each review run decides: approve, changes requested or comment, from the open findings it counted. **Review runs** shows that in a Decision column, with "(shadow)" when the run was in shadow mode and nothing was posted, and the counts of open blocking, should-fix and nit findings. A covered, superseded or failed run decided nothing and shows `—`. **Just this PR** next to a pull request lists only its runs.
 
-A pull request's findings page starts with its latest decision, the newest run's that decided anything, with a link to all its runs: for example, "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380". "Copy for agent" starts with the same line, as `lgtmoose findings --format md` does.
+A pull request's findings page starts with its latest decision, the newest run's that decided anything, with a link to all its runs: for example, "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380". When the decision counted more findings than the page lists (other reviewers' verified findings and unmet ticket requirements count towards it, and only LGTMoose's own are listed), the page says so. "Copy for agent" starts with the same line, followed by what held approval back, as `lgtmoose findings --format md` does.
 
 ### Answering findings
 

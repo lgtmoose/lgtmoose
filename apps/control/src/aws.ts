@@ -395,6 +395,7 @@ export function drizzleRunStore(db: Db, now: () => Date = () => new Date()): Run
                   decisionBlocking: result.decision.counts.blocking,
                   decisionShouldFix: result.decision.counts.should_fix,
                   decisionNits: result.decision.counts.nit,
+                  decisionHolds: [...result.decision.holds],
                 }),
             // The database's clock, as the retire events' (NIC-1141): what a full review finished
             // after is compared with when findings were retired.

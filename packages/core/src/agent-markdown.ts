@@ -37,6 +37,12 @@ export interface AgentFinding {
 export type RunOutcome = "approve" | "request_changes" | "comment";
 
 /**
+ * What kept a decision from approving, apart from findings (`decide`'s holds): the run didn't
+ * review everything, something in the PR may have tried to steer the review, or approving is off.
+ */
+export type RunHold = "incomplete" | "prompt_injection" | "approve_disabled";
+
+/**
  * A pull request's latest decision: the newest succeeded run that recorded one, as the findings
  * API gives it (NIC-1145).
  */
@@ -55,6 +61,8 @@ export interface RunDecision {
   nits?: number | undefined;
   /** In shadow mode: nothing was posted to GitHub. */
   shadow: boolean;
+  /** What kept it from approving, apart from findings; undefined when that wasn't kept. */
+  holds?: RunHold[] | undefined;
   finishedAt?: string | undefined;
 }
 
@@ -93,15 +101,55 @@ export function decisionLine(decision: RunDecision | undefined): string {
   return `Latest decision: ${outcomeLabel(decision.decision, decision.shadow)} at ${plainLine(decision.headSha).slice(0, 7)}${counts === undefined ? "" : ` · ${counts}`} · run ${plainLine(decision.runId).slice(0, 8)}`;
 }
 
-/** What the decision means for a coding agent: what holds the pull request up. */
-function decisionMeaning(decision: RunDecision): string {
+const HOLD_MEANING: Record<RunHold, string> = {
+  incomplete:
+    "Approval is held: the review didn't finish (some files weren't reviewed), so it can't approve until a review does.",
+  prompt_injection:
+    "A person must look: something in this pull request may have tried to steer the review (possible prompt injection), so it won't approve.",
+  approve_disabled:
+    "Approving is turned off for this repository (gate.approve: false), so it comments instead.",
+};
+
+/**
+ * What the decision means for a coding agent: what holds the pull request up. Its holds first
+ * (a run that didn't finish, a possible prompt injection), then the findings, by what it counted.
+ */
+function decisionMeaning(decision: RunDecision): string[] {
+  const lines = (decision.holds ?? []).map((hold) => HOLD_MEANING[hold]);
   if (decision.decision === "request_changes") {
-    return "It requests changes: every blocking finding below must be fixed, or declined, before it can approve.";
+    lines.push(
+      "It requests changes: every blocking finding must be fixed, or declined, before it can approve.",
+    );
+  } else if (decision.decision === "comment" && (decision.shouldFix ?? 1) > 0) {
+    lines.push(
+      "It holds back approval: no finding blocks, but the should-fix findings must be fixed, or declined, before it can approve.",
+    );
+  } else if (decision.decision === "approve") {
+    lines.push("It approves: nothing holds the pull request up. Nits never block.");
   }
-  if (decision.decision === "comment") {
-    return "It holds back approval: no finding blocks, but the should-fix findings below must be fixed, or declined, before it can approve.";
-  }
-  return "It approves: nothing below holds the pull request up. Nits never block.";
+  return lines;
+}
+
+/**
+ * Said when the decision counted findings this list doesn't show (NIC-1145): `decide` counts other
+ * reviewers' verified findings and unmet ticket requirements too, and only LGTMoose's own are
+ * listed. Undefined when the counts match what's listed, or weren't kept.
+ */
+export function countsNote(
+  decision: RunDecision | undefined,
+  listed: readonly Pick<AgentFinding, "severity" | "source">[],
+): string | undefined {
+  if (decision === undefined) return undefined;
+  const ours = listed.filter((finding) => (finding.source ?? "self") === "self");
+  const of = (severity: AgentFinding["severity"]) =>
+    ours.filter((finding) => finding.severity === severity).length;
+  const more =
+    (decision.blocking ?? 0) > of("blocking") ||
+    (decision.shouldFix ?? 0) > of("should_fix") ||
+    (decision.nits ?? 0) > of("nit");
+  return more
+    ? "Its counts include other reviewers' findings and unmet ticket requirements; only LGTMoose's own are listed here."
+    : undefined;
 }
 
 const SEVERITY_LABEL = { blocking: "Blocking", should_fix: "Should fix", nit: "Nit" } as const;
@@ -156,7 +204,11 @@ export function agentFindingsMarkdown(input: {
   const lines = [`# LGTMoose findings on ${input.repo}#${input.number}`, ""];
   if ("decision" in input) {
     lines.push(decisionLine(input.decision), "");
-    if (input.decision !== undefined) lines.push(decisionMeaning(input.decision), "");
+    if (input.decision !== undefined) {
+      for (const line of decisionMeaning(input.decision)) lines.push(line, "");
+      const note = countsNote(input.decision, findings);
+      if (note !== undefined) lines.push(note, "");
+    }
   }
   if (findings.length === 0) {
     lines.push("No open findings.", "");

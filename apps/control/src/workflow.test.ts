@@ -2276,11 +2276,19 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(results).toEqual([
       expect.objectContaining({
         review: expect.objectContaining({ event: "REQUEST_CHANGES" }),
-        decision: { outcome: "request_changes", counts: { blocking: 1, should_fix: 0, nit: 0 } },
+        decision: {
+          outcome: "request_changes",
+          counts: { blocking: 1, should_fix: 0, nit: 0 },
+          holds: [],
+        },
       }),
       expect.objectContaining({
         review: undefined,
-        decision: { outcome: "request_changes", counts: { blocking: 1, should_fix: 0, nit: 0 } },
+        decision: {
+          outcome: "request_changes",
+          counts: { blocking: 1, should_fix: 0, nit: 0 },
+          holds: [],
+        },
       }),
     ]);
   });

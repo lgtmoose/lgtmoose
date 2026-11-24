@@ -298,13 +298,18 @@ describe("drizzleRunStore", () => {
       statusLabel: "lgtmoose: changes requested",
       summaryCommentId: undefined,
       review: { event: "COMMENT", id: 9 },
-      decision: { outcome: "comment", counts: { blocking: 0, should_fix: 2, nit: 1 } },
+      decision: {
+        outcome: "comment",
+        counts: { blocking: 0, should_fix: 2, nit: 1 },
+        holds: ["incomplete"],
+      },
     });
     expect(await runRow(posted.runId)).toMatchObject({
       decision: "comment",
       decisionBlocking: 0,
       decisionShouldFix: 2,
       decisionNits: 1,
+      decisionHolds: ["incomplete"],
       reviewEvent: "COMMENT",
     });
     // A quiet run posts no review but still decided: the decision, without a review event.
@@ -315,11 +320,12 @@ describe("drizzleRunStore", () => {
       headSha: "a".repeat(40),
       statusLabel: "lgtmoose: approved",
       summaryCommentId: undefined,
-      decision: { outcome: "approve", counts: { blocking: 0, should_fix: 0, nit: 3 } },
+      decision: { outcome: "approve", counts: { blocking: 0, should_fix: 0, nit: 3 }, holds: [] },
     });
     expect(await runRow(quiet.runId)).toMatchObject({
       decision: "approve",
       decisionNits: 3,
+      decisionHolds: [],
       reviewEvent: null,
       statusLabel: "lgtmoose: approved",
     });

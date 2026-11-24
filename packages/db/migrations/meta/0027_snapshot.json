@@ -1,5 +1,5 @@
 {
-  "id": "80fa713c-c4c2-4a8d-82ef-275521ad2c26",
+  "id": "50bff3a6-bbfe-4526-b79a-14b99c4d2136",
   "prevId": "68ea954d-eb72-4a31-bf5d-b7c0e7782c1b",
   "version": "7",
   "dialect": "postgresql",
@@ -2315,6 +2315,12 @@
         "decision_nits": {
           "name": "decision_nits",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decision_holds": {
+          "name": "decision_holds",
+          "type": "text[]",
           "primaryKey": false,
           "notNull": false
         },

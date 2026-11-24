@@ -135,6 +135,7 @@ export {
   agentFindingSchema,
   agentFindingsMarkdown,
   agentRunSchema,
+  countsNote,
   decisionCounts,
   decisionLine,
   outcomeLabel,
@@ -148,5 +149,6 @@ export {
   type AnswerOutcome,
   type AnswerRequest,
   type RunDecision,
+  type RunHold,
   type RunOutcome,
 } from "./agent-findings.js";

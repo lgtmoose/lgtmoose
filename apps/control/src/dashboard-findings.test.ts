@@ -210,6 +210,7 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
       decision: {
         outcome: decision.outcome,
         counts: { blocking: decision.blocking, should_fix: 1, nit: 0 },
+        holds: decision.outcome === "comment" ? ["incomplete"] : [],
       },
     });
     return run.runId;
@@ -241,6 +242,7 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
         shouldFix: 1,
         nits: 0,
         shadow: true,
+        holds: ["incomplete"],
       },
     });
   });
@@ -264,6 +266,24 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
     expect(body.runs.map((run) => run.id)).toEqual([second, first]);
     expect(body.runs[0]).toMatchObject({ decision: "approve", blocking: 0, shadow: true });
     expect(body.runs[1]).toMatchObject({ decision: "request_changes", blocking: 1 });
+    // A run that decided nothing has no mode either: its column's default isn't one it recorded.
+    const covered = await runs.startRun({
+      installationId: 1,
+      repo: "acme/api",
+      number: 232,
+      author: "bob",
+      headSha: "e".repeat(40),
+      baseSha: "b".repeat(40),
+      executionArn: "arn:r:3",
+      eventAt: new Date(NOW.getTime() + 120_000),
+    });
+    await runs.coverRun(covered.runId, { filesDone: 0, costUsd: undefined });
+    const again = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(again.runs[0]).toMatchObject({ id: covered.runId, status: "covered" });
+    expect(again.runs[0]).not.toHaveProperty("decision");
+    expect(again.runs[0]).not.toHaveProperty("shadow");
   });
 
   it("refuses runs as it refuses findings: a PR is needed, and outsiders see nothing", async () => {

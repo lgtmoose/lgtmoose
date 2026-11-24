@@ -1894,7 +1894,7 @@ export async function post(
       decision:
         decision.outcome === "skipped"
           ? undefined
-          : { outcome: decision.outcome, counts: decision.counts },
+          : { outcome: decision.outcome, counts: decision.counts, holds: decision.holds },
     });
   /**
    * Records the run's findings once its review is out (or skipped as quiet): outdated first (a

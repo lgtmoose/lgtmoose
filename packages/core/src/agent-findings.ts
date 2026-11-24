@@ -9,12 +9,14 @@ import type { AgentFinding, RunDecision } from "./agent-markdown.js";
 
 export {
   agentFindingsMarkdown,
+  countsNote,
   decisionCounts,
   decisionLine,
   outcomeLabel,
   plainLine,
   type AgentFinding,
   type RunDecision,
+  type RunHold,
   type RunOutcome,
 } from "./agent-markdown.js";
 
@@ -93,6 +95,8 @@ export const runDecisionSchema = z.object({
   nits: count.optional(),
   /** In shadow mode: nothing was posted to GitHub. */
   shadow: z.boolean(),
+  /** What kept it from approving, apart from findings; absent when that wasn't kept. */
+  holds: z.array(z.enum(["incomplete", "prompt_injection", "approve_disabled"])).optional(),
   finishedAt: z.string().optional(),
 });
 
@@ -114,7 +118,8 @@ export const agentRunSchema = z.object({
   blocking: count.optional(),
   shouldFix: count.optional(),
   nits: count.optional(),
-  shadow: z.boolean(),
+  /** In shadow mode; absent for a run that decided nothing, whose mode may not be its own. */
+  shadow: z.boolean().optional(),
   costUsd: z.number().optional(),
   createdAt: z.string(),
   finishedAt: z.string().optional(),
