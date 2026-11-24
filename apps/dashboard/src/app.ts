@@ -272,18 +272,19 @@ function repoQuery(repo: string | undefined): string {
   return repo === undefined ? "" : `?repo=${encodeURIComponent(repo)}`;
 }
 
-/**
- * Decline reasons typed but not sent, by finding ID. An answer to one finding shows the page again,
- * and this keeps what someone is writing for another finding across that.
- */
-const unsentReasons = new Map<string, string>();
+type Answer = { outcome: "fixed" } | { outcome: "declined"; reason: string };
 
-/** Sends an answer, then shows the page again, or says why not in `status`. */
+/**
+ * Sends an answer. On success it updates only this finding's row (`done`), never the whole page,
+ * so another finding's answer in flight, its message and a reason being typed are left alone.
+ * Otherwise it says why in `status`.
+ */
 async function sendAnswer(
   finding: Finding,
-  payload: { outcome: "fixed" } | { outcome: "declined"; reason: string },
+  payload: Answer,
   status: HTMLElement,
   controls: readonly (HTMLButtonElement | HTMLTextAreaElement)[],
+  done: (outcome: Answer["outcome"]) => void,
 ): Promise<void> {
   for (const control of controls) control.disabled = true;
   try {
@@ -292,8 +293,8 @@ async function sendAnswer(
       payload,
     );
     if (code === 200) {
-      unsentReasons.delete(finding.id);
-      return render();
+      done(payload.outcome);
+      return undefined;
     }
     replace(status, answerRefusal(code, typeof body.error === "string" ? body.error : undefined));
   } catch (error) {
@@ -308,7 +309,10 @@ async function sendAnswer(
  * Fixed and Decline for one of LGTMoose's findings (NIC-1142). Fixed doesn't close it: the next
  * review's recheck does, if the problem is gone. Decline asks for a reason and closes it at once.
  */
-function answerControls(finding: Finding): HTMLElement {
+function answerControls(
+  finding: Finding,
+  answered: (outcome: Answer["outcome"]) => void,
+): HTMLElement {
   const status = el("span", { role: "status", class: "muted" });
   const fixed = el("button", { type: "button" }, "Fixed");
   const decline = el("button", { type: "button" }, "Decline");
@@ -333,20 +337,25 @@ function answerControls(finding: Finding): HTMLElement {
         : `${length} / ${DECLINE_REASON_LIMIT}`,
     );
   };
-  reason.addEventListener("input", () => {
-    unsentReasons.set(finding.id, reason.value);
-    showLength();
-  });
-  const draft = unsentReasons.get(finding.id);
-  if (draft !== undefined) {
-    reason.value = draft;
-    form.hidden = false;
-    showLength();
-  }
+  reason.addEventListener("input", showLength);
   // Every control for this finding, all held while either answer is being sent.
   const controls = [fixed, decline, send, cancel, reason];
+  const container = el("div", { class: "answer" });
+  const done = (outcome: Answer["outcome"]): void => {
+    answered(outcome);
+    replace(
+      container,
+      el(
+        "p",
+        { class: "muted" },
+        outcome === "fixed"
+          ? "Fixed: waiting for recheck. The next review checks it again."
+          : "Declined: it no longer counts.",
+      ),
+    );
+  };
   fixed.addEventListener("click", () => {
-    void sendAnswer(finding, { outcome: "fixed" }, status, controls);
+    void sendAnswer(finding, { outcome: "fixed" }, status, controls, done);
   });
   decline.addEventListener("click", () => {
     form.hidden = false;
@@ -354,7 +363,6 @@ function answerControls(finding: Finding): HTMLElement {
   });
   cancel.addEventListener("click", () => {
     form.hidden = true;
-    unsentReasons.delete(finding.id);
     replace(status);
   });
   send.addEventListener("click", () => {
@@ -368,17 +376,17 @@ function answerControls(finding: Finding): HTMLElement {
       { outcome: "declined", reason: reason.value.trim() },
       status,
       controls,
+      done,
     );
   });
   // Fixed only where a recheck can check it: the API refuses a claim on anything else.
   const canClaim = finding.recheckable === true;
-  return el(
-    "div",
-    { class: "answer" },
+  container.append(
     el("div", {}, canClaim ? fixed : undefined, canClaim ? " " : undefined, decline),
     form,
     status,
   );
+  return container;
 }
 
 /** Copies `text`; where the Clipboard API isn't allowed, shows it selected to copy by hand. */
@@ -410,6 +418,13 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
     `/api/findings${findingsQuery(repo, pr)}`,
   );
   const onePr = repo !== undefined && pr !== undefined;
+  // Answers given on this page, so Copy for agent matches what the page now shows without
+  // fetching the list again: a declined finding is left out, a fixed one is marked claimed.
+  const declined = new Set<string>();
+  const answered = (finding: Finding) => (outcome: Answer["outcome"]) => {
+    if (outcome === "declined") declined.add(finding.id);
+    else finding.fixClaimedAt = new Date().toISOString();
+  };
   const copied = el("div", { role: "status", class: "muted" });
   let heading = "Open findings";
   if (onePr) heading = `Findings on ${repo}#${pr}`;
@@ -424,7 +439,12 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
           copyButton(
             "Copy for agent",
             // The same markdown as `lgtmoose findings <repo>#<pr> --format md`.
-            () => agentFindingsMarkdown({ repo, number: pr, findings }),
+            () =>
+              agentFindingsMarkdown({
+                repo,
+                number: pr,
+                findings: findings.filter((finding) => !declined.has(finding.id)),
+              }),
             copied,
           ),
           " ",
@@ -475,7 +495,9 @@ async function renderFindings(repo: string | undefined, pr: number | undefined):
                 "div",
                 {},
                 state === undefined ? undefined : el("p", { class: "muted" }, state),
-                onePr && finding.canAnswer === true ? answerControls(finding) : undefined,
+                onePr && finding.canAnswer === true
+                  ? answerControls(finding, answered(finding))
+                  : undefined,
               ),
             ];
           }),
