@@ -8,7 +8,7 @@ import {
   type DashboardResponse,
 } from "./dashboard-http.js";
 import type { DashboardDeps } from "./dashboard.js";
-import { AnswerRefusedError } from "./dashboard-store.js";
+import { AnswerRefusedError, decisionReply } from "./dashboard-store.js";
 import { resolutionHeld } from "./thread-policy.js";
 
 /**
@@ -279,7 +279,7 @@ async function listForToken(
   if ("status" in pr) return pr;
   return json(200, {
     findings: await deps.store.openFindings([pr.repo], PR_FINDINGS_LIMIT, pr.number),
-    decision: (await deps.store.latestDecision(pr.repo, pr.number)) ?? null,
+    ...decisionReply(await deps.store.latestDecision(pr.repo, pr.number)),
   });
 }
 

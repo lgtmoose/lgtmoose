@@ -144,6 +144,15 @@ export interface RunSummary {
   shadow: boolean | undefined;
 }
 
+/** A PR's latest decision, or that none was recorded, or that the newest isn't readable. */
+export type LatestDecision = RunDecision | "none" | "unknown";
+
+/** The findings reply's `decision` for one: null is "none recorded"; left out, "not known". */
+export function decisionReply(latest: LatestDecision): { decision?: RunDecision | null } {
+  if (latest === "unknown") return {};
+  return { decision: latest === "none" ? null : latest };
+}
+
 /** A stored decision, if it's one we know: a bad value reads as none, never as an approval. */
 const outcomeOf = (value: string | null): RunOutcome | undefined =>
   runOutcomes.find((outcome) => outcome === value);
@@ -244,9 +253,10 @@ export interface DashboardStore {
   recentRuns(repos: readonly string[], limit: number, number?: number): Promise<RunSummary[]>;
   /**
    * A pull request's latest decision (NIC-1145): the newest succeeded run of it that recorded
-   * one, newest by the event it reviewed, as the PR's own record goes. Undefined when none has.
+   * one, newest by the event it reviewed, as the PR's own record goes. `none` when no run has
+   * decided; `unknown` when the newest recorded a value this version can't read.
    */
-  latestDecision(repo: string, number: number): Promise<RunDecision | undefined>;
+  latestDecision(repo: string, number: number): Promise<LatestDecision>;
   /** Provider use by runs in `repos` since `since`, by provider. */
   providerUse(repos: readonly string[], since: Date): Promise<ProviderUse[]>;
   /** Providers cooling down at `now`. */
@@ -535,8 +545,9 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
       // Only the newest run that recorded a decision: if that's one we can't read, the PR's
       // decision isn't known, and an older run's would be stale.
       const [row] = rows;
-      const decision = row === undefined ? undefined : outcomeOf(row.decision);
-      if (row === undefined || decision === undefined) return undefined;
+      if (row === undefined) return "none";
+      const decision = outcomeOf(row.decision);
+      if (decision === undefined) return "unknown";
       return {
         runId: row.runId,
         headSha: row.headSha,

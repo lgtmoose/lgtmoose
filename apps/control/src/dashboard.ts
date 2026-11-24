@@ -37,7 +37,7 @@ import {
   type DashboardRequest,
   type DashboardResponse,
 } from "./dashboard-http.js";
-import type { DashboardSession, DashboardStore } from "./dashboard-store.js";
+import { decisionReply, type DashboardSession, type DashboardStore } from "./dashboard-store.js";
 import { BOOTSTRAP_DEFAULTS } from "./bootstrap.js";
 import type { Bootstrap, BootstrapStore } from "./bootstrap-store.js";
 
@@ -652,7 +652,7 @@ export async function handleDashboardRequest(
       const decision =
         number === undefined || repos[0] === undefined
           ? undefined
-          : await deps.store.latestDecision(repos[0], number);
+          : decisionReply(await deps.store.latestDecision(repos[0], number));
       // Whether the page shows Fixed and Decline (NIC-1142): LGTMoose's own, in a repository the
       // person could write to at sign-in. Only a hint for the buttons; the answer route checks.
       return json(200, {
@@ -660,7 +660,7 @@ export async function handleDashboardRequest(
           ...finding,
           canAnswer: finding.source === "self" && session.writeRepos.includes(finding.repo),
         })),
-        ...(number === undefined ? {} : { decision: decision ?? null }),
+        ...decision,
       });
     }
     case "GET /api/runs": {

@@ -297,7 +297,8 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
     // A stored value no version writes: not a decision we can show, so the older one isn't either.
     await db.update(reviewRuns).set({ decision: "merge" }).where(eq(reviewRuns.id, newest));
     const findings = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
-    expect(JSON.parse(findings.body)).toMatchObject({ decision: null });
+    // Recorded, but not a decision this version can read: left out, not "none recorded".
+    expect(JSON.parse(findings.body)).not.toHaveProperty("decision");
     const listed = JSON.parse(
       (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
     ) as { runs: Record<string, unknown>[] };

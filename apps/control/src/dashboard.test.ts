@@ -81,7 +81,10 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
       return false;
     },
     async latestDecision(repo, number) {
-      return repo === "acme/web" && number === 1
+      if (repo !== "acme/web") return "none";
+      // PR 2's newest run recorded a decision this version can't read.
+      if (number === 2) return "unknown";
+      return number === 1
         ? {
             runId: "5eba8380-0000-4000-8000-000000000000",
             headSha: "b".repeat(40),
@@ -91,7 +94,7 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
             nits: 0,
             shadow: true,
           }
-        : undefined;
+        : "none";
     },
     async recentRuns(repos, limit, number) {
       runsCalls.push({ limit, number });
@@ -484,6 +487,9 @@ describe("dashboard API", () => {
     expect(decided).toMatchObject({ decision: { decision: "request_changes", blocking: 1 } });
     const none = JSON.parse((await get("/api/findings", { repo: "acme/api", pr: "1" })).body);
     expect(none).toMatchObject({ decision: null });
+    // Recorded but not readable by this version: left out, so nothing is claimed.
+    const unknown = JSON.parse((await get("/api/findings", { repo: "acme/web", pr: "2" })).body);
+    expect(unknown).not.toHaveProperty("decision");
     // The repository-wide list has none.
     expect(JSON.parse((await get("/api/findings", {})).body)).not.toHaveProperty("decision");
     // Runs filter by PR, each with what it decided; a bad number is a bad request.
