@@ -15,6 +15,7 @@
     "dist"
   ],
   "devDependencies": {
+    "@lgtmoose/core": "workspace:*",
     "esbuild": "^0.28.2",
     "typescript": "catalog:"
   }

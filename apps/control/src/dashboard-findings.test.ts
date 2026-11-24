@@ -413,6 +413,14 @@ describe("answering a finding with a token", () => {
     expect(event?.reason).not.toContain("hunter22");
   });
 
+  it("takes a reason of control characters, which JSON-encoding makes six times longer", async () => {
+    const id = await finding({ fingerprint: "escaped" });
+    const reason = `${"\u001b".repeat(1999)}x`;
+    expect(JSON.stringify({ outcome: "declined", reason }).length).toBeGreaterThan(8192);
+    const answered = await ack(id, WRITER, { outcome: "declined", reason });
+    expect(answered.status).toBe(200);
+  });
+
   it("turns the database's own refusal of an answer into AnswerRefusedError", async () => {
     const id = await finding({ fingerprint: "refused" });
     await expect(deps.store.declineFinding(id, "", "a reason")).rejects.toBeInstanceOf(
@@ -656,6 +664,25 @@ describe("review round 1 (NIC-1140)", () => {
       ),
     );
     expect(JSON.parse(response.body)).toMatchObject({ findings: [{ status: "outdated" }] });
+  });
+
+  it("says which findings can be marked fixed, so the CLI's markdown can say so (NIC-1142)", async () => {
+    const right = await finding({ fingerprint: "right" });
+    const left = await finding({ side: "LEFT", fingerprint: "left-listed" });
+    const response = await handleDashboardRequest(
+      deps,
+      request(
+        "GET",
+        "/api/findings",
+        withToken(READER, { query: { repo: "acme/api", pr: "232" } }),
+      ),
+    );
+    const { findings: listed } = JSON.parse(response.body) as {
+      findings: { id: string; recheckable: boolean }[];
+    };
+    const flag = (id: string) => listed.find((entry) => entry.id === id)?.recheckable;
+    expect(flag(right)).toBe(true);
+    expect(flag(left)).toBe(false);
   });
 });
 

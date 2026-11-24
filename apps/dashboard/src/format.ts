@@ -2,7 +2,8 @@
 
 export type Route =
   | { page: "repos" }
-  | { page: "findings"; repo: string | undefined }
+  /** `pr` only with `repo`: one pull request's findings (NIC-1142). */
+  | { page: "findings"; repo: string | undefined; pr?: number | undefined }
   | { page: "runs"; repo: string | undefined }
   | { page: "learnings"; status: LearningStatus }
   | { page: "usage" }
@@ -21,6 +22,16 @@ function learningStatus(value: string | null): LearningStatus {
 
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+/** The largest pull request number the API takes: Postgres's `int4`, as the server checks. */
+export const MAX_PR_NUMBER = 2_147_483_647;
+
+/** A pull request number from the location: digits only, from 1 to `MAX_PR_NUMBER`. */
+function pullNumber(value: string | null): number | undefined {
+  if (value === null || !/^[1-9][0-9]{0,9}$/.test(value)) return undefined;
+  const number = Number(value);
+  return number <= MAX_PR_NUMBER ? number : undefined;
+}
+
 /** The page a location hash names, such as `#/findings?repo=acme/api`. Anything else: repos. */
 export function parseRoute(hash: string): Route {
   const [path = "", search = ""] = hash.replace(/^#/, "").split("?", 2);
@@ -28,8 +39,10 @@ export function parseRoute(hash: string): Route {
   const repoParam = params.get("repo") ?? undefined;
   const repo = repoParam !== undefined && REPO.test(repoParam) ? repoParam : undefined;
   switch (path) {
-    case "/findings":
-      return { page: "findings", repo };
+    case "/findings": {
+      const pr = repo === undefined ? undefined : pullNumber(params.get("pr"));
+      return pr === undefined ? { page: "findings", repo } : { page: "findings", repo, pr };
+    }
     case "/runs":
       return { page: "runs", repo };
     case "/learnings":
@@ -56,9 +69,60 @@ export function routeHash(route: Route): string {
   if (route.page === "learnings") {
     return route.status === "pending" ? "#/learnings" : `#/learnings?status=${route.status}`;
   }
-  return route.repo === undefined
-    ? `#/${route.page}`
-    : `#/${route.page}?repo=${encodeURIComponent(route.repo)}`;
+  if (route.repo === undefined) return `#/${route.page}`;
+  const repo = `#/${route.page}?repo=${encodeURIComponent(route.repo)}`;
+  return route.page === "findings" && route.pr !== undefined ? `${repo}&pr=${route.pr}` : repo;
+}
+
+/** The findings API's query for a page: all, one repository's, or one pull request's. */
+export function findingsQuery(repo: string | undefined, pr: number | undefined): string {
+  if (repo === undefined) return "";
+  const query = `?repo=${encodeURIComponent(repo)}`;
+  return pr === undefined ? query : `${query}&pr=${pr}`;
+}
+
+/** What a finding's answer is, if it has one, such as "Fixed: waiting for recheck by octocat". */
+export function answerState(finding: {
+  fixClaimedAt?: string | undefined;
+  fixClaimedBy?: string | undefined;
+}): string | undefined {
+  if (finding.fixClaimedAt === undefined) return undefined;
+  return finding.fixClaimedBy === undefined
+    ? "Fixed: waiting for recheck"
+    : `Fixed: waiting for recheck by ${finding.fixClaimedBy}`;
+}
+
+/** The longest decline reason the API keeps (`MAX_DECLINE_REASON` in @lgtmoose/core). */
+export const DECLINE_REASON_LIMIT = 2000;
+
+/** Why a decline reason can't be sent as it is, or undefined when it can. */
+export function declineReasonProblem(reason: string): string | undefined {
+  const trimmed = reason.trim();
+  if (trimmed.length === 0) return "A decline needs a reason.";
+  if (trimmed.length > DECLINE_REASON_LIMIT) {
+    return `The reason is ${trimmed.length} characters; at most ${DECLINE_REASON_LIMIT}.`;
+  }
+  if (trimmed.includes("\u0000")) return "The reason can't contain a NUL character.";
+  return undefined;
+}
+
+/** Why the API refused an answer to a finding, in words for the page. */
+export function answerRefusal(status: number, error: string | undefined): string {
+  const said = error === undefined ? "" : `: ${error}`;
+  switch (status) {
+    case 400:
+      return `The answer wasn't accepted${said}.`;
+    case 403:
+      return error ?? "You can't answer this finding.";
+    case 404:
+      return "That finding isn't there any more, or isn't yours to see.";
+    case 409:
+      return error ?? "That finding can't take this answer now.";
+    case 503:
+      return "The dashboard couldn't answer just now. Try again in a moment.";
+    default:
+      return `The dashboard API answered ${status}${said}.`;
+  }
 }
 
 /** What the sign-in page says for the API's error codes; unknown codes get a generic line. */

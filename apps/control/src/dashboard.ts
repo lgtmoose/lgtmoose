@@ -15,6 +15,7 @@ import {
   ANSWER_PATH,
   answerFinding,
   handleTokenRequest,
+  PR_FINDINGS_LIMIT,
   prParams,
   sessionAsker,
 } from "./dashboard-findings.js";
@@ -603,7 +604,10 @@ export async function handleDashboardRequest(
   }
   const answer = request.method === "POST" ? ANSWER_PATH.exec(request.path) : null;
   if (answer?.[1] !== undefined) {
-    // What GitHub said about the person at sign-in, as for learnings.
+    // What GitHub said about the person at sign-in, as for learnings: the session keeps no
+    // GitHub token to ask again, so access taken away counts until the session ends (8 hours at
+    // most). The CLI's token path asks GitHub each time (`tokenAsker`). Documented in
+    // docs/dashboard.md and SECURITY.md row 20.
     return answerFinding(deps, sessionAsker(session), answer[1], request.body);
   }
   const bulk = request.method === "POST" ? BOOTSTRAP_ACTION.exec(request.path) : null;
@@ -630,16 +634,27 @@ export async function handleDashboardRequest(
       const repos = scope(session, request.query.repo);
       if (repos === undefined) return json(404, { error: "no such repository" });
       // One pull request's (NIC-1140): `pr` needs `repo`.
+      let number: number | undefined;
       if (request.query.pr !== undefined) {
-        const params = prParams(request.query);
-        if (params?.number === undefined) {
+        number = prParams(request.query)?.number;
+        if (number === undefined) {
           return json(400, { error: "give repo=owner/name and pr=<number>" });
         }
-        return json(200, {
-          findings: await deps.store.openFindings(repos, FINDINGS_LIMIT, params.number),
-        });
       }
-      return json(200, { findings: await deps.store.openFindings(repos, FINDINGS_LIMIT) });
+      // One PR's list is capped as the CLI's is, so Copy for agent gives what the CLI would.
+      const findings = await deps.store.openFindings(
+        repos,
+        number === undefined ? FINDINGS_LIMIT : PR_FINDINGS_LIMIT,
+        number,
+      );
+      // Whether the page shows Fixed and Decline (NIC-1142): LGTMoose's own, in a repository the
+      // person could write to at sign-in. Only a hint for the buttons; the answer route checks.
+      return json(200, {
+        findings: findings.map((finding) => ({
+          ...finding,
+          canAnswer: finding.source === "self" && session.writeRepos.includes(finding.repo),
+        })),
+      });
     }
     case "GET /api/runs": {
       const repos = scope(session, request.query.repo);

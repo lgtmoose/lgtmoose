@@ -56,8 +56,12 @@ const REFUSED_TTL_MS = 10 * 60_000;
 const ACCESS_ENTRIES = 500;
 /** The most findings one pull request's list returns. */
 const PR_FINDINGS_LIMIT = 200;
-/** The longest body an answer may have. */
-const MAX_BODY = 8192;
+/**
+ * The longest body an answer may have, in characters of the JSON sent. A 2,000-character reason
+ * of control characters is up to 12,000 once JSON-encoded (each one is a 6-character `\uXXXX`), so
+ * this allows that with room to spare, the same 16 KiB the compose server reads.
+ */
+const MAX_BODY = 16 * 1024;
 
 const ANSWER_PATH =
   /^\/api\/findings\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/ack$/;
@@ -228,9 +232,13 @@ function prParams(
   if (!REPO_PARAM.test(repo)) return undefined;
   if (query.pr === undefined || query.pr === "") return { repo, number: undefined };
   const number = Number(query.pr);
-  if (!Number.isSafeInteger(number) || number < 1) return undefined;
+  // At most Postgres's integer: a bigger one is a bad request, not a failed query.
+  if (!Number.isSafeInteger(number) || number < 1 || number > MAX_PR_NUMBER) return undefined;
   return { repo, number };
 }
+
+/** The largest pull request number the database holds (`int4`). */
+export const MAX_PR_NUMBER = 2_147_483_647;
 
 /** `GET /api/findings?repo=owner/name&pr=N` with a token: one PR's open and outdated findings. */
 async function listForToken(
@@ -356,4 +364,4 @@ export async function handleTokenRequest(
   }
 }
 
-export { ANSWER_PATH, prParams };
+export { ANSWER_PATH, PR_FINDINGS_LIMIT, prParams };

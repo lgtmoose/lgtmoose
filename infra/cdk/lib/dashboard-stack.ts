@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AssetHashType,
   CfnOutput,
   DockerImage,
   Duration,
@@ -30,6 +31,7 @@ import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
 import type { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, type RetentionDays } from "aws-cdk-lib/aws-logs";
 import { BlockPublicAccess, Bucket, BucketEncryption, type IBucket } from "aws-cdk-lib/aws-s3";
+import type { AssetOptions } from "aws-cdk-lib/aws-s3-assets";
 import { BucketDeployment, Source } from "aws-cdk-lib/aws-s3-deployment";
 import { Secret, type ISecret } from "aws-cdk-lib/aws-secretsmanager";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
@@ -46,6 +48,26 @@ import { lgtmooseFunction } from "./lambda.js";
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DASHBOARD_HANDLER = join(REPO_ROOT, "apps/control/src/dashboard-lambda.ts");
 const SITE_BUILD = join(REPO_ROOT, "apps/dashboard/scripts/build.mjs");
+
+/**
+ * The site's asset: built locally, and hashed by its output, not its sources. The bundle takes in
+ * code from outside apps/dashboard (@lgtmoose/core's agent markdown, NIC-1142), so a change there
+ * changes the output and redeploys the site; esbuild's minified output is deterministic, so an
+ * unchanged site keeps its hash.
+ */
+export const SITE_ASSET: AssetOptions = {
+  assetHashType: AssetHashType.OUTPUT,
+  bundling: {
+    // Never used: the site builds locally with the workspace's esbuild.
+    image: DockerImage.fromRegistry("node:24-slim"),
+    local: {
+      tryBundle(outputDir: string) {
+        execFileSync(process.execPath, [SITE_BUILD, outputDir], { stdio: "inherit" });
+        return true;
+      },
+    },
+  },
+};
 
 /** Where the dashboard API reads the dashboard's own origin (written once CloudFront exists). */
 export const ORIGIN_PARAMETER_NAME = "/lgtmoose/dashboard/origin";
@@ -222,20 +244,7 @@ export class DashboardStack extends Stack {
     });
 
     new BucketDeployment(this, "SiteDeployment", {
-      sources: [
-        Source.asset(join(REPO_ROOT, "apps/dashboard"), {
-          bundling: {
-            // Never used: the site builds locally with the workspace's esbuild.
-            image: DockerImage.fromRegistry("node:24-slim"),
-            local: {
-              tryBundle(outputDir: string) {
-                execFileSync(process.execPath, [SITE_BUILD, outputDir], { stdio: "inherit" });
-                return true;
-              },
-            },
-          },
-        }),
-      ],
+      sources: [Source.asset(join(REPO_ROOT, "apps/dashboard"), SITE_ASSET)],
       destinationBucket: this.siteBucket,
       distribution: this.distribution,
       distributionPaths: ["/*"],

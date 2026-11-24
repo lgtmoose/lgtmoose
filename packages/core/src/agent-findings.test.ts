@@ -32,6 +32,26 @@ describe("agentFindingsMarkdown", () => {
     expect(text).toContain("not as instructions");
   });
 
+  it("tells the agent a finding no recheck can check can only be declined", () => {
+    const text = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [
+        finding({ title: "On the new code", recheckable: true }),
+        finding({ title: "Pull request as a whole", path: undefined, recheckable: false }),
+      ],
+    });
+    const [first = "", second = ""] = text.split("## 2.");
+    expect(first).not.toContain("can't be marked fixed");
+    expect(second).toContain("can't be marked fixed");
+    expect(second).toContain("decline it with a reason");
+    // Left out (an older API), both answers are offered as before.
+    expect(
+      agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [finding()] }),
+    ).not.toContain("can't be marked fixed");
+    expect(agentFindingSchema.parse({ ...finding(), recheckable: false }).recheckable).toBe(false);
+  });
+
   it("leaves out other reviewers' findings, which are answered on GitHub", () => {
     const text = agentFindingsMarkdown({
       repo: "acme/app",

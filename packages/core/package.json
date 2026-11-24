@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./agent-markdown": {
+      "types": "./dist/agent-markdown.d.ts",
+      "default": "./dist/agent-markdown.js"
     }
   },
   "files": [

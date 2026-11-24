@@ -1,6 +1,12 @@
+import { agentFindingsMarkdown, type AgentFinding } from "@lgtmoose/core/agent-markdown";
 import { el, replace, table } from "./dom.js";
 import {
+  answerRefusal,
+  answerState,
   count,
+  DECLINE_REASON_LIMIT,
+  declineReasonProblem,
+  findingsQuery,
   duration,
   LEARNING_STATUSES,
   learningRefusal,
@@ -121,18 +127,14 @@ interface RepoSummary {
   lastRunAt: string | undefined;
 }
 
-interface Finding {
-  id: string;
-  repo: string;
-  number: number;
-  severity: string;
-  ruleCategory: string;
-  title: string;
-  body: string;
-  path: string | undefined;
-  line: number | undefined;
-  source: string;
+/** One finding as `/api/findings` lists it: the agent markdown's fields, and the page's. */
+interface Finding extends AgentFinding {
+  source: "self" | "bot" | "human";
   sourceLogin: string | undefined;
+  /** Whether the page offers Fixed and Decline: a hint only, the answer route checks. */
+  canAnswer?: boolean;
+  /** Whether it can take Fixed: on a line of the new code, which a recheck can check. */
+  recheckable?: boolean;
 }
 
 interface Run {
@@ -164,12 +166,15 @@ async function api<T>(path: string): Promise<T> {
 }
 
 /** A change the API makes: same origin, JSON, and the session cookie. */
-async function post(path: string): Promise<{ status: number; body: Record<string, unknown> }> {
+async function post(
+  path: string,
+  payload: Record<string, unknown> = {},
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await fetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: { accept: "application/json", "content-type": "application/json" },
-    body: "{}",
+    body: JSON.stringify(payload),
   });
   if (response.status === 401) throw new SignedOut();
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -267,30 +272,251 @@ function repoQuery(repo: string | undefined): string {
   return repo === undefined ? "" : `?repo=${encodeURIComponent(repo)}`;
 }
 
-async function renderFindings(repo: string | undefined): Promise<void> {
-  const { findings } = await api<{ findings: Finding[] }>(`/api/findings${repoQuery(repo)}`);
+type Answer = { outcome: "fixed" } | { outcome: "declined"; reason: string };
+
+/**
+ * Sends an answer. On success it updates only this finding's row (`done`), never the whole page,
+ * so another finding's answer in flight, its message and a reason being typed are left alone.
+ * Otherwise it says why in `status`.
+ */
+async function sendAnswer(
+  finding: Finding,
+  payload: Answer,
+  status: HTMLElement,
+  controls: readonly (HTMLButtonElement | HTMLTextAreaElement)[],
+  done: (outcome: Answer["outcome"]) => void,
+): Promise<void> {
+  for (const control of controls) control.disabled = true;
+  try {
+    const { status: code, body } = await post(
+      `/api/findings/${encodeURIComponent(finding.id)}/ack`,
+      payload,
+    );
+    if (code === 200) {
+      done(payload.outcome);
+      return undefined;
+    }
+    replace(status, answerRefusal(code, typeof body.error === "string" ? body.error : undefined));
+  } catch (error) {
+    if (error instanceof SignedOut) return render();
+    replace(status, error instanceof Error ? error.message : "Something went wrong.");
+  }
+  for (const control of controls) control.disabled = false;
+  return undefined;
+}
+
+/**
+ * Fixed and Decline for one of LGTMoose's findings (NIC-1142). Fixed doesn't close it: the next
+ * review's recheck does, if the problem is gone. Decline asks for a reason and closes it at once.
+ */
+function answerControls(
+  finding: Finding,
+  answered: (outcome: Answer["outcome"]) => void,
+): HTMLElement {
+  const status = el("span", { role: "status", class: "muted" });
+  const fixed = el("button", { type: "button" }, "Fixed");
+  const decline = el("button", { type: "button" }, "Decline");
+  const form = el("div", { class: "decline", hidden: "" });
+  // No maxlength: a pasted reason is never cut short. `declineReasonProblem` refuses one that's
+  // too long, by the same trimmed length the counter shows.
+  const reason = el("textarea", {
+    rows: "3",
+    "aria-label": "Why this isn't a problem",
+    placeholder: "Why this isn't a problem",
+  });
+  const counter = el("span", { class: "muted" }, `0 / ${DECLINE_REASON_LIMIT}`);
+  const send = el("button", { type: "button" }, "Send decline");
+  const cancel = el("button", { type: "button" }, "Cancel");
+  form.append(reason, el("div", {}, send, " ", cancel, " ", counter));
+  const showLength = (): void => {
+    const length = reason.value.trim().length;
+    replace(
+      counter,
+      length > DECLINE_REASON_LIMIT
+        ? el("span", { class: "sev-blocking" }, `${length} / ${DECLINE_REASON_LIMIT}: too long`)
+        : `${length} / ${DECLINE_REASON_LIMIT}`,
+    );
+  };
+  reason.addEventListener("input", showLength);
+  // Every control for this finding, all held while either answer is being sent.
+  const controls = [fixed, decline, send, cancel, reason];
+  const container = el("div", { class: "answer" });
+  const done = (outcome: Answer["outcome"]): void => {
+    answered(outcome);
+    replace(
+      container,
+      el(
+        "p",
+        { class: "muted" },
+        outcome === "fixed"
+          ? "Fixed: waiting for recheck. The next review checks it again."
+          : "Declined: it no longer counts.",
+      ),
+    );
+  };
+  fixed.addEventListener("click", () => {
+    void sendAnswer(finding, { outcome: "fixed" }, status, controls, done);
+  });
+  decline.addEventListener("click", () => {
+    form.hidden = false;
+    reason.focus();
+  });
+  cancel.addEventListener("click", () => {
+    form.hidden = true;
+    replace(status);
+  });
+  send.addEventListener("click", () => {
+    const problem = declineReasonProblem(reason.value);
+    if (problem !== undefined) {
+      replace(status, problem);
+      return;
+    }
+    void sendAnswer(
+      finding,
+      { outcome: "declined", reason: reason.value.trim() },
+      status,
+      controls,
+      done,
+    );
+  });
+  // Fixed only where a recheck can check it: the API refuses a claim on anything else.
+  const canClaim = finding.recheckable === true;
+  container.append(
+    el("div", {}, canClaim ? fixed : undefined, canClaim ? " " : undefined, decline),
+    form,
+    status,
+  );
+  return container;
+}
+
+/** Copies `text`; where the Clipboard API isn't allowed, shows it selected to copy by hand. */
+function copyButton(label: string, text: () => string, status: HTMLElement): HTMLButtonElement {
+  const button = el("button", { type: "button" }, label);
+  button.addEventListener("click", () => {
+    const value = text();
+    const fallback = () => {
+      const area = el("textarea", { rows: "12", readonly: "", class: "copy" });
+      area.value = value;
+      replace(status, "Select all and copy:", area);
+      area.focus();
+      area.select();
+    };
+    if (navigator.clipboard === undefined) {
+      fallback();
+      return;
+    }
+    navigator.clipboard.writeText(value).then(
+      () => replace(status, "Copied."),
+      () => fallback(),
+    );
+  });
+  return button;
+}
+
+async function renderFindings(
+  repo: string | undefined,
+  pr: number | undefined,
+  login: string,
+): Promise<void> {
+  const { findings } = await api<{ findings: Finding[] }>(
+    `/api/findings${findingsQuery(repo, pr)}`,
+  );
+  const onePr = repo !== undefined && pr !== undefined;
+  // Answers given on this page, so Copy for agent matches what the page now shows without
+  // fetching the list again: a declined finding is left out, a fixed one is marked claimed.
+  const declined = new Set<string>();
+  // `state` is the row's earlier answer line, which the new answer replaces.
+  const answered = (finding: Finding, state: HTMLElement) => (outcome: Answer["outcome"]) => {
+    replace(state);
+    if (outcome === "declined") {
+      declined.add(finding.id);
+      return;
+    }
+    // As the API records it: the claim is now this person's.
+    finding.fixClaimedAt = new Date().toISOString();
+    finding.fixClaimedBy = login;
+  };
+  const copied = el("div", { role: "status", class: "muted" });
+  let heading = "Open findings";
+  if (onePr) heading = `Findings on ${repo}#${pr}`;
+  else if (repo !== undefined) heading = `Open findings in ${repo}`;
   replace(
     main(),
-    el("h1", {}, repo === undefined ? "Open findings" : `Open findings in ${repo}`),
+    el("h1", {}, heading),
+    onePr
+      ? el(
+          "p",
+          {},
+          copyButton(
+            "Copy for agent",
+            // The same markdown as `lgtmoose findings <repo>#<pr> --format md`.
+            () =>
+              agentFindingsMarkdown({
+                repo,
+                number: pr,
+                findings: findings.filter((finding) => !declined.has(finding.id)),
+              }),
+            copied,
+          ),
+          " ",
+          link({ page: "findings", repo }, `All of ${repo}`),
+          copied,
+        )
+      : undefined,
+    onePr
+      ? el(
+          "p",
+          { class: "muted" },
+          "Fixed doesn't close a finding: the next review checks it again and closes it if the problem is gone. Decline closes it at once, with your reason; a pull request's author can't decline a blocking or protected finding. Answering needs write access to the repository.",
+        )
+      : undefined,
     findings.length === 0
       ? el("p", { class: "muted" }, "No open findings.")
       : table(
-          ["Severity", "Pull request", "Where", "Finding", "Raised by"],
-          findings.map((finding) => [
-            el("span", { class: `sev-${finding.severity}` }, severityLabel(finding.severity)),
-            prLink(finding.repo, finding.number),
-            finding.path === undefined
-              ? "—"
-              : `${finding.path}${finding.line === undefined ? "" : `:${finding.line}`}`,
-            el(
+          ["Severity", "Pull request", "Where", "Finding", "Raised by", ""],
+          findings.map((finding) => {
+            const said = answerState(finding);
+            const state = el(
               "div",
               {},
-              el("strong", {}, finding.title),
-              el("span", { class: "muted" }, ` (${finding.ruleCategory})`),
-              el("pre", { class: "body" }, finding.body),
-            ),
-            finding.source === "self" ? "LGTMoose" : (finding.sourceLogin ?? finding.source),
-          ]),
+              said === undefined ? undefined : el("p", { class: "muted" }, said),
+            );
+            return [
+              el("span", { class: `sev-${finding.severity}` }, severityLabel(finding.severity)),
+              // The PR view lists only LGTMoose's own, so only those link to it.
+              onePr || finding.source !== "self"
+                ? prLink(finding.repo, finding.number)
+                : el(
+                    "span",
+                    {},
+                    prLink(finding.repo, finding.number),
+                    " ",
+                    link(
+                      { page: "findings", repo: finding.repo, pr: finding.number },
+                      "Just this PR",
+                    ),
+                  ),
+              finding.path === undefined
+                ? "—"
+                : `${finding.path}${finding.line === undefined ? "" : `:${finding.line}`}${finding.status === "outdated" ? " (changed since)" : ""}`,
+              el(
+                "div",
+                {},
+                el("strong", {}, finding.title),
+                el("span", { class: "muted" }, ` (${finding.ruleCategory})`),
+                el("pre", { class: "body" }, finding.body),
+              ),
+              finding.source === "self" ? "LGTMoose" : (finding.sourceLogin ?? finding.source),
+              el(
+                "div",
+                {},
+                state,
+                onePr && finding.canAnswer === true
+                  ? answerControls(finding, answered(finding, state))
+                  : undefined,
+              ),
+            ];
+          }),
         ),
   );
 }
@@ -814,7 +1040,7 @@ async function render(): Promise<void> {
   try {
     const me = await api<Me>("/api/me");
     renderNav(me);
-    if (route.page === "findings") await renderFindings(route.repo);
+    if (route.page === "findings") await renderFindings(route.repo, route.pr, me.login);
     else if (route.page === "runs") await renderRuns(route.repo);
     else if (route.page === "learnings") await renderLearnings(route.status);
     else if (route.page === "usage") await renderUsage();

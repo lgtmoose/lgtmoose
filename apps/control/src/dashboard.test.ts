@@ -19,6 +19,8 @@ import type { DashboardSession, DashboardStore } from "./dashboard-store.js";
 const ORIGIN = "https://d123.cloudfront.net";
 const KEY = Buffer.from("k".repeat(64));
 const NOW = new Date("2026-11-15T10:00:00Z");
+/** What `openFindings` was last asked for: its limit and pull request. */
+const findingsCalls: { limit: number; number: number | undefined }[] = [];
 
 function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSession> } {
   const sessions = new Map<string, DashboardSession>();
@@ -47,7 +49,8 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
     async repoSummaries(repos) {
       return repos.map((repo) => ({ repo, openFindings: 1, blocking: 0, lastRunAt: undefined }));
     },
-    async openFindings(repos) {
+    async openFindings(repos, limit, number) {
+      findingsCalls.push({ limit, number });
       return repos.map((repo) => ({
         id: `f-${repo}`,
         repo,
@@ -64,6 +67,7 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
         fixClaimedAt: undefined,
         fixClaimedBy: undefined,
         createdAt: NOW.toISOString(),
+        recheckable: true,
       }));
     },
     async answerTarget() {
@@ -405,8 +409,34 @@ describe("dashboard API", () => {
     const { deps, cookies } = await signedIn();
     const all = JSON.parse(
       (await handleDashboardRequest(deps, request("GET", "/api/findings", { cookies }))).body,
-    ) as { findings: { repo: string }[] };
+    ) as { findings: { repo: string; canAnswer: boolean }[] };
     expect(all.findings.map((f) => f.repo)).toEqual(["acme/api", "acme/web"]);
+    // The page's hint for Fixed and Decline (NIC-1142): write access at sign-in.
+    expect(all.findings.map((f) => f.canAnswer)).toEqual([true, false]);
+    // One PR's list is capped as the CLI's is (200), the repository-wide one at 500.
+    expect(findingsCalls.at(-1)).toEqual({ limit: 500, number: undefined });
+    const pr = await handleDashboardRequest(
+      deps,
+      request("GET", "/api/findings", { cookies, query: { repo: "acme/api", pr: "7" } }),
+    );
+    expect(pr.status).toBe(200);
+    expect(findingsCalls.at(-1)).toEqual({ limit: 200, number: 7 });
+    expect((JSON.parse(pr.body) as { findings: { recheckable: boolean }[] }).findings).toEqual([
+      expect.objectContaining({ recheckable: true, canAnswer: true }),
+    ]);
+    // A number past Postgres's integer is a bad request, not a failed query.
+    for (const number of ["2147483648", "0", "x"]) {
+      const response = await handleDashboardRequest(
+        deps,
+        request("GET", "/api/findings", { cookies, query: { repo: "acme/api", pr: number } }),
+      );
+      expect(response.status).toBe(400);
+    }
+    const largest = await handleDashboardRequest(
+      deps,
+      request("GET", "/api/findings", { cookies, query: { repo: "acme/api", pr: "2147483647" } }),
+    );
+    expect(largest.status).toBe(200);
     const one = JSON.parse(
       (
         await handleDashboardRequest(
