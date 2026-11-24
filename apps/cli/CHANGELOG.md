@@ -1,5 +1,50 @@
 # lgtmoose
 
+## 0.2.0
+
+### Minor Changes
+
+- a3dfd5f: Answer findings from the dashboard. A pull request's findings page has Fixed and Decline buttons (the same answers as `lgtmoose findings ack`), shows a finding waiting for its recheck, and has Copy for agent, which copies the same markdown as `lgtmoose findings --format md`.
+- b10eec9: Add `lgtmoose findings`: list a pull request's open findings for a coding agent (`--format md`), and answer them with `lgtmoose findings ack <id> fixed` or `declined --reason "…"`, in shadow mode or live. The CLI uses your GitHub token through the dashboard API, which checks with GitHub that you're a member of the org and what you can do on the repository: the token needs `read:org` (or a fine-grained token's Members permission), and answering needs one that can write (`gh auth token`, or a classic token with `repo` and `read:org`). A fine-grained token can list, never answer. "Fixed" moves the finding up the next run's recheck, which alone closes it; "declined" closes it as an accepted decline on its thread would, and the reconciler learns from it. Adds migrations 0025 and 0026.
+- ff7f6f6: Show what each review run decided (NIC-1145). Every succeeded run now records its decision (approve, changes requested or comment) and the open findings it counted, a quiet run included; migration 0027 adds the columns and backfills older runs' decision from the review they posted. The dashboard's Review runs page has a Decision column and filters by pull request, and a pull request's findings page starts with its latest decision. `lgtmoose findings` starts with the same line (its `--format json` output is now `{ "decision", "findings" }`), and the new `lgtmoose runs owner/repo#123` lists a pull request's runs with what each decided.
+
+### Patch Changes
+
+- a4e23dc: Pause automatic reviews of a pull request after `review.auto_pause_after` of them
+- 881c810: Update the AWS SDK clients for SQS, Secrets Manager and STS from 3.1167.0 to 3.1169.0 or later.
+- cfbde51: Cap a provider's thinking tokens per tier, off unless `providers[].thinkingTokens` is set
+- 2d89fac: Commands can use a deployment's aliases as well as the App's own handle. With `commandAliases: ["lgtmoose"]`, `@lgtmoose review` works on an App called `lgtmoose-<org>`, and which handle is used never changes what a command may do.
+
+  Without the alias, a comment that mentions `@lgtmoose` followed by a whole command gets one reply per PR naming the handle that works. A whole command is the command with nothing else on the line. Later wrong-handle comments on that PR get a 😕. Shadow mode only logs the reply, and `commandHint: false` turns it off for a repository where another App called `lgtmoose` answers. A wrong-handle comment in one of LGTMoose's findings' threads still goes to the reply judge.
+
+  `help`, the summary's footer, the check runs that wait for a trigger or for CI, and `lgtmoose setup` show the real handle, and they never fall back to a guessed `@lgtmoose`.
+
+  Adds migration 0023, with three new columns on `pull_request_dispatches`:
+
+  - `handle_hint_at`: when the PR's hint was claimed;
+  - `handle_hint_posted`: whether it was posted;
+  - `handle_hint_claimant`: which comment or review holds the claim, so that comment's retry can still post the hint.
+
+- 3b90bf8: Install the control and gateway images from the whole lockfile, as the sandbox image does since #120, so a locked package under 3 days old no longer fails the image build.
+- d4beebc: The control task's database client trusts a pinned RDS certificate bundle, so it can verify the database. The bundle is not added to Node's trust store. A review's prepare step failed before it could record the run because the RDS root is not in the public trust store.
+- 7441f2c: Control Lambdas, the egress proxy and the dashboard API can reach the Secrets Manager, ECR and Logs VPC endpoints, so the database migrations no longer time out on the first deploy. `destroy` also turns off deletion protection when an earlier deploy failed to create the Data stack and left it without outputs.
+- e4654c8: The review tasks keep only the three default capabilities Fargate allows them to hold, then the entrypoint clears those too. Adding SETUID is rejected on Fargate, so the previous task definition never updated.
+- 8348226: Imported secrets are read by name. A partial ARN whose name ends in a hyphen and six characters is resolved as a different secret, which made every webhook fail before its signature was checked. A provider id that would produce such a name is refused for the sandbox, which can only be given an ARN.
+- 3ca82fe: List each failure from a later eval run, instead of counting those runs
+- 4498330: Check that the configured models can be called before the first review. `lgtmoose deploy` checks every pinned model and warns, naming the provider, tiers, model ID, region and fix, but still deploys. It checks Bedrock inference profiles and model IDs, model access and agreements in the deploy region, and API keys against `GET /v1/models/<model>` on the Anthropic and OpenAI APIs. The 6-hourly health check asks Bedrock again, with a role that may only describe the pinned models, and sets the new `ModelUnavailable` metric with a `ModelAlarm-<provider>` alarm. Under docker compose it checks API-key models too. Aliases, ARNs, Vertex, Cursor and subscription sign-ins aren't checked.
+- c5c5c54: The lean NAT instance is a t4g.micro with swap, and its boot script retries the iptables install and masquerades with `ip route`. A t4g.nano runs out of memory installing iptables, and Amazon Linux 2023 has no `route` command, so the default script never masquerades. The AWS smoke test looks for the dispatcher forwarding the comment, which is what a comment job does.
+- c4d1722: Close a carried finding that was fixed in another file. On an incremental review, our open blocking and should-fix findings whose file the new commits changed, or whose file is in the same directory as or imports or is imported by a changed one, are checked again against the head: one recheck batch per run on the fast tier, at most 10 findings, blocking first. A finding is closed as fixed only when the recheck says the problem is gone, the run's review didn't raise it again, and (for authz, tenant_scoping, money and secrets) the recheck names, by its full path, the changed file related to the finding that fixes it. Its thread gets a reply saying where, and is resolved, and the decision is made again without it. Before, such a finding stayed open and kept the review at "changes requested" until someone replied.
+- 866368c: A full review checks our carried blocking and should-fix findings again too, wherever the fix is, and closes those it shows are fixed. A finding whose cited line was edited or deleted (such as by a committed suggestion), whatever its severity, is checked again as well: when the edit fixed it, it's closed and its thread gets a reply and is resolved, instead of staying unresolved as outdated.
+- 2488568: Report how often a repeated eval run finds each seeded bug
+- 6749462: Add up the cost of repeated eval runs, and keep a later failure off the recall gate
+- ba99d66: Going live retires shadow findings. A finding raised in shadow mode was never posted, so it has no comment anyone could see, reply to or resolve. Once `shadow` is `false`, a run retires those nobody answered since they were last raised (status `shadow`), so they no longer count towards the decision; each summary says how many until a full review runs, and the dashboard stops counting them. The first live run also posts its own review even when a shadow run recorded the same decision. Runs now record whether they were in shadow mode; the migration marks existing runs as shadow runs (see Upgrading if you ran live before).
+- c3d16fd: A review batch sends only the comments on its own files, and identical convention files once. Claude Code sends the shared context as its own turn and resumes with the diff, and batches after the first wait `batchStaggerSeconds` (30 by default) so they can read the first batch's prompt cache.
+- bdfa201: The sandbox image installs the whole lockfile before it deploys the package. A package already pinned in the lockfile is no longer resolved again and rejected for being less than 3 days old.
+- 950a7fc: Count the public saved-card fixture in the golden set
+- 69c8ca8: In shadow mode, a finding a recheck closes now logs the reply and thread resolve it would have had (`shadow: would reply and resolve`). Each provider's model alarm now has a fixed name, `Lgtmoose-Workflow-ModelAlarm-<provider id>`; the next deploy replaces it.
+- f74a286: A review with one batch sends its shared context in the batch's prompt instead of a separate turn, since no other batch would read the cache. A convention file that copies one already read, with only its own title or a few lines of its own, is sent once.
+- 6c972b6: The review tasks can write their mounted /tmp and /work, then run as uid 10001 with no capabilities. Fargate mounts those volumes owned by root, so prepare failed before it could check out a pull request. The process that runs the review is unprivileged, including the init that reaps its children.
+
 ## 0.1.0
 
 ### Minor Changes
