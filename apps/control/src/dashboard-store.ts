@@ -15,7 +15,7 @@ import {
   type RunOutcome,
 } from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
-import { and, desc, eq, gt, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { unpostedShadow } from "./shadow-findings.js";
 
@@ -186,7 +186,6 @@ function decidedFields(row: {
 
 const HOLDS: readonly RunHold[] = ["incomplete", "prompt_injection", "approve_disabled"];
 
-/** Stored holds we know; undefined when none were kept (a run from before they were). */
 /**
  * Stored holds, when every one is a hold we know; undefined when none were kept (a run from
  * before they were) or one isn't known, so the wording claims no reason it can't read.
@@ -538,14 +537,21 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
             inRepos([repo]),
             eq(pullRequests.number, number),
             eq(reviewRuns.status, "succeeded"),
-            // A run that decided, or one that wrote the PR's state without a decision we kept
-            // (older code, or a COMMENT the backfill couldn't place): that one is the PR's
-            // newest, and its decision isn't known, rather than an older run's standing in.
             or(
-              isNotNull(reviewRuns.decision),
-              eq(reviewRuns.wrotePr, true),
-              isNotNull(reviewRuns.reviewEvent),
-              isNotNull(reviewRuns.statusLabel),
+              // A run that decided. A skipped one (its head moved) decided nothing about the PR,
+              // and never stands for it.
+              and(isNotNull(reviewRuns.decision), ne(reviewRuns.decision, "skipped")),
+              // A run from before decisions were kept (every newer run records one, `skipped`
+              // included) that wrote the PR's state: the PR's newest, and its decision isn't
+              // known, rather than an older run's standing in.
+              and(
+                isNull(reviewRuns.decision),
+                or(
+                  eq(reviewRuns.wrotePr, true),
+                  isNotNull(reviewRuns.reviewEvent),
+                  isNotNull(reviewRuns.statusLabel),
+                ),
+              ),
             ),
           ),
         )

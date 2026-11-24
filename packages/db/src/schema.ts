@@ -195,7 +195,8 @@ export const reviewRuns = pgTable(
     complete: boolean("complete"),
     /**
      * What the run decided (NIC-1145): `approve`, `request_changes` or `comment`, and the open
-     * findings it counted, by severity. Set by every run that succeeds, a quiet one included (it
+     * findings it counted, by severity. `skipped` when its head moved before it decided, which
+     * is never shown as a decision: it tells a run of this version from an older one. Set by every run that succeeds, a quiet one included (it
      * posts no new review, but still decides); unlike `review_event`, which is only the review a
      * run posted or recorded. Null for a covered, superseded or failed run, and for runs from
      * before it was kept that recorded no review.

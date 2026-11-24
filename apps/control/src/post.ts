@@ -1891,10 +1891,8 @@ export async function post(
       // note on findings retired from shadow mode, by the same test `finishReview` uses.
       complete: report.complete && manifest.spendCap === undefined,
       // What it decided (NIC-1145), recorded even when quiet: the dashboard and the CLI show it.
-      decision:
-        decision.outcome === "skipped"
-          ? undefined
-          : { outcome: decision.outcome, counts: decision.counts, holds: decision.holds },
+      // A skipped decision is recorded as `skipped`, which they never show as one.
+      decision: { outcome: decision.outcome, counts: decision.counts, holds: decision.holds },
     });
   /**
    * Records the run's findings once its review is out (or skipped as quiet): outdated first (a

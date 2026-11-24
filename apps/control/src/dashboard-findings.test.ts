@@ -188,7 +188,7 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
   async function decidedRun(
     arn: string,
     headSha: string,
-    decision: { outcome: "approve" | "request_changes" | "comment"; blocking: number },
+    decision: { outcome: "approve" | "request_changes" | "comment" | "skipped"; blocking: number },
     eventAt: Date,
   ): Promise<string> {
     const run = await runs.startRun({
@@ -307,6 +307,33 @@ describe("a PR's decision and runs with a token (NIC-1145)", () => {
       expect(listed.runs[0]).not.toHaveProperty(key);
     }
     expect(listed.runs[1]).toMatchObject({ decision: "approve", blocking: 0 });
+  });
+
+  it("passes over a skipped run: its head moved, so it decided nothing about the PR", async () => {
+    const decided = await decidedRun(
+      "arn:s:1",
+      "c".repeat(40),
+      { outcome: "request_changes", blocking: 1 },
+      NOW,
+    );
+    const skipped = await decidedRun(
+      "arn:s:2",
+      "d".repeat(40),
+      { outcome: "skipped", blocking: 1 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    // A skipped run posts a COMMENT, as it always has: still not the PR's decision.
+    await db.update(reviewRuns).set({ reviewEvent: "COMMENT" }).where(eq(reviewRuns.id, skipped));
+    const body = JSON.parse(
+      (await get("/api/findings", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { decision: Record<string, unknown> };
+    expect(body.decision).toMatchObject({ runId: decided, decision: "request_changes" });
+    // Listed, it shows no decision.
+    const runs = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(runs.runs[0]).toMatchObject({ id: skipped });
+    expect(runs.runs[0]).not.toHaveProperty("decision");
   });
 
   it("knows no decision when the newest run wrote the PR's state without one", async () => {

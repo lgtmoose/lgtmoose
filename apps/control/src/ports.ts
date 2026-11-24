@@ -12,7 +12,11 @@ import type { SpendStore } from "./spend.js";
 
 /** A run's decision as it's stored on the run (NIC-1145). */
 export interface RunDecisionRecord {
-  outcome: "approve" | "request_changes" | "comment";
+  /**
+   * `skipped` when its head moved before it decided: recorded so every run of this version has
+   * a decision, telling it from a run from before decisions were kept. Never shown as one.
+   */
+  outcome: "approve" | "request_changes" | "comment" | "skipped";
   /** The open findings `decide` counted: ours, other reviewers' verified ones and ticket gaps. */
   counts: { blocking: number; should_fix: number; nit: number };
   /** What kept it from approving, apart from findings (`decide`'s holds). */
@@ -296,7 +300,7 @@ export interface RunStore {
       /**
        * What the run decided, and the open findings it counted (NIC-1145). Every run that
        * succeeds has one, a quiet run included: it posted no new review, but it decided. Left
-       * out only when the decision was skipped (the head moved).
+       * out by older callers: a skipped decision (the head moved) is recorded as `skipped`.
        */
       decision?: RunDecisionRecord | undefined;
     },
