@@ -2270,6 +2270,27 @@ describe("later runs", { timeout: 30_000 }, () => {
     expect(h.runs.pr).toMatchObject({ lastReviewedSha: headSha, statusLabel: expect.any(String) });
     expect(shadowRecords(h.objects, "summary-comment")).toHaveLength(2);
     expect(h.findings.rows).toMatchObject([{ status: "open" }]);
+    // Both runs record what they decided (NIC-1145), the quiet one too, though it posted no
+    // review: the first with its review, the second with none.
+    const results = [...h.runs.runs.values()].map((run) => run.result);
+    expect(results).toEqual([
+      expect.objectContaining({
+        review: expect.objectContaining({ event: "REQUEST_CHANGES" }),
+        decision: {
+          outcome: "request_changes",
+          counts: { blocking: 1, should_fix: 0, nit: 0 },
+          holds: [],
+        },
+      }),
+      expect.objectContaining({
+        review: undefined,
+        decision: {
+          outcome: "request_changes",
+          counts: { blocking: 1, should_fix: 0, nit: 0 },
+          holds: [],
+        },
+      }),
+    ]);
   });
 
   it("posts a review on the first live run even when a shadow run recorded the same decision (NIC-1141)", async () => {

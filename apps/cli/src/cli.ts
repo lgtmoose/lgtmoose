@@ -18,6 +18,7 @@ export const COMMANDS = {
   review: "Review one PR on this machine and print the result: review owner/repo#123 --dry-run",
   feedback: "Acceptance of findings per rule category: report, export-declined",
   findings: "A PR's open findings for an agent, and answers: owner/repo#123, ack <id> fixed",
+  runs: "A PR's review runs and what each decided: owner/repo#123",
   learnings: "Learn from a repository's review history: bootstrap --repo owner/name",
 } as const;
 
@@ -90,6 +91,14 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
       options.feedbackDeps ??
       (async () => (await import("./feedback/deps.js")).defaultFeedbackDeps());
     return runFeedback(argv.slice(1), getDeps);
+  }
+
+  if (argv[0] === "runs") {
+    const { runRuns } = await import("./findings/findings.js");
+    const getDeps =
+      options.findingsDeps ??
+      (async () => (await import("./findings/deps.js")).defaultFindingsDeps());
+    return runRuns(argv.slice(1), getDeps);
   }
 
   if (argv[0] === "findings") {

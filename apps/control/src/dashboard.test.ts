@@ -21,6 +21,7 @@ const KEY = Buffer.from("k".repeat(64));
 const NOW = new Date("2026-11-15T10:00:00Z");
 /** What `openFindings` was last asked for: its limit and pull request. */
 const findingsCalls: { limit: number; number: number | undefined }[] = [];
+const runsCalls: { limit: number; number: number | undefined }[] = [];
 
 function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSession> } {
   const sessions = new Map<string, DashboardSession>();
@@ -79,7 +80,24 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
     async declineFinding() {
       return false;
     },
-    async recentRuns(repos) {
+    async latestDecision(repo, number) {
+      if (repo !== "acme/web") return "none";
+      // PR 2's newest run recorded a decision this version can't read.
+      if (number === 2) return "unknown";
+      return number === 1
+        ? {
+            runId: "5eba8380-0000-4000-8000-000000000000",
+            headSha: "b".repeat(40),
+            decision: "request_changes" as const,
+            blocking: 1,
+            shouldFix: 2,
+            nits: 0,
+            shadow: true,
+          }
+        : "none";
+    },
+    async recentRuns(repos, limit, number) {
+      runsCalls.push({ limit, number });
       return repos.map((repo) => ({
         id: `r-${repo}`,
         repo,
@@ -94,6 +112,11 @@ function memoryStore(): DashboardStore & { sessions: Map<string, DashboardSessio
         startedAt: undefined,
         finishedAt: undefined,
         createdAt: NOW.toISOString(),
+        decision: "comment" as const,
+        blocking: 0,
+        shouldFix: 1,
+        nits: 2,
+        shadow: true,
       }));
     },
     async providerUse(repos) {
@@ -453,6 +476,30 @@ describe("dashboard API", () => {
       );
       expect(response.status).toBe(404);
     }
+  });
+
+  it("gives one PR's latest decision with its findings, and its runs (NIC-1145)", async () => {
+    const { deps, cookies } = await signedIn();
+    const get = async (path: string, query: Record<string, string>) =>
+      handleDashboardRequest(deps, request("GET", path, { cookies, query }));
+    // One PR's findings come with its latest decision, null when it has none.
+    const decided = JSON.parse((await get("/api/findings", { repo: "acme/web", pr: "1" })).body);
+    expect(decided).toMatchObject({ decision: { decision: "request_changes", blocking: 1 } });
+    const none = JSON.parse((await get("/api/findings", { repo: "acme/api", pr: "1" })).body);
+    expect(none).toMatchObject({ decision: null });
+    // Recorded but not readable by this version: left out, so nothing is claimed.
+    const unknown = JSON.parse((await get("/api/findings", { repo: "acme/web", pr: "2" })).body);
+    expect(unknown).not.toHaveProperty("decision");
+    // The repository-wide list has none.
+    expect(JSON.parse((await get("/api/findings", {})).body)).not.toHaveProperty("decision");
+    // Runs filter by PR, each with what it decided; a bad number is a bad request.
+    const runs = JSON.parse((await get("/api/runs", { repo: "acme/web", pr: "1" })).body) as {
+      runs: { decision: string; shadow: boolean }[];
+    };
+    expect(runsCalls.at(-1)).toEqual({ limit: 50, number: 1 });
+    expect(runs.runs).toEqual([expect.objectContaining({ decision: "comment", shadow: true })]);
+    expect((await get("/api/runs", { repo: "acme/web", pr: "2147483648" })).status).toBe(400);
+    expect((await get("/api/runs", { repo: "acme/secret", pr: "1" })).status).toBe(404);
   });
 
   it("refuses a state-changing request from another origin", async () => {

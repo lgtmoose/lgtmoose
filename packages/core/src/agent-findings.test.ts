@@ -1,10 +1,17 @@
+import { parseRepoConfig } from "@lgtmoose/config";
 import { describe, expect, it } from "vitest";
+import { decide } from "./decision.js";
 import {
   agentFindingSchema,
   agentFindingsMarkdown,
+  agentRunSchema,
   answerRequestSchema,
+  countsNote,
+  decisionLine,
   plainLine,
+  runDecisionSchema,
   type AgentFinding,
+  type RunDecision,
 } from "./agent-findings.js";
 
 const finding = (over: Partial<AgentFinding> = {}): AgentFinding => ({
@@ -179,5 +186,199 @@ describe("answerRequestSchema", () => {
 
   it("refuses any other outcome", () => {
     expect(answerRequestSchema.safeParse({ outcome: "resolved" }).success).toBe(false);
+  });
+});
+
+describe("a PR's decision (NIC-1145)", () => {
+  const decision = (over: Partial<RunDecision> = {}): RunDecision => ({
+    runId: "5eba8380-1111-4222-8333-444455556666",
+    headSha: "abc1234def5678abc1234def5678abc1234def56",
+    decision: "request_changes",
+    blocking: 1,
+    shouldFix: 2,
+    nits: 0,
+    shadow: true,
+    ...over,
+  });
+
+  it("says it on one line, with the commit, the counts and the run", () => {
+    expect(decisionLine(decision())).toBe(
+      "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380",
+    );
+    expect(decisionLine(decision({ decision: "approve", shadow: false, nits: 1 }))).toContain(
+      "Approve at abc1234 · 1 blocking · 2 should-fix · 1 nit ·",
+    );
+    expect(decisionLine(undefined)).toBe("Latest decision: none recorded yet.");
+  });
+
+  it("leaves out counts that weren't kept (a run from before they were)", () => {
+    const old = decision({ blocking: undefined, shouldFix: undefined, nits: undefined });
+    expect(decisionLine(old)).toBe(
+      "Latest decision: Changes requested (shadow) at abc1234 · run 5eba8380",
+    );
+  });
+
+  it("starts the agent's markdown with it, and what it means for the PR", () => {
+    const requested = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [finding()],
+      decision: decision(),
+    });
+    expect(requested.split("\n").slice(2, 5)).toEqual([
+      "Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380",
+      "",
+      "It requests changes: every blocking finding must be fixed, or declined, before it can approve.",
+    ]);
+    // It counted a blocking finding the list doesn't show (another reviewer's, a ticket's).
+    expect(requested).toContain(
+      "The decision counted more findings than are listed here (it can include other reviewers' findings, unmet ticket requirements, or findings answered since).",
+    );
+    const none = agentFindingsMarkdown({
+      repo: "acme/app",
+      number: 7,
+      findings: [],
+      decision: undefined,
+    });
+    expect(none).toContain("Latest decision: none recorded yet.");
+    // A caller that gives no decision at all gets no line.
+    expect(agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [] })).not.toContain(
+      "Latest decision",
+    );
+  });
+
+  it("parses only a well-formed decision: a UUID run, a hex commit, a known outcome", () => {
+    expect(runDecisionSchema.safeParse(decision()).success).toBe(true);
+    for (const bad of [
+      { runId: "not-a-uuid" },
+      { headSha: "abc`\n## injected" },
+      { decision: "merge" },
+      { blocking: -1 },
+    ]) {
+      expect(runDecisionSchema.safeParse({ ...decision(), ...bad }).success).toBe(false);
+    }
+    expect(
+      agentRunSchema.safeParse({
+        id: "5eba8380-1111-4222-8333-444455556666",
+        headSha: "a".repeat(40),
+        kind: "incremental",
+        status: "covered",
+        shadow: true,
+        createdAt: "2026-11-24T00:00:00.000Z",
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("why a decision held (NIC-1145)", () => {
+  const base: RunDecision = {
+    runId: "5eba8380-1111-4222-8333-444455556666",
+    headSha: "abc1234def5678abc1234def5678abc1234def56",
+    decision: "comment",
+    blocking: 0,
+    shouldFix: 0,
+    nits: 0,
+    shadow: false,
+  };
+  const markdown = (decision: RunDecision) =>
+    agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [], decision });
+
+  // From what `decide` really returns, as post records it, so the wording can't drift from it.
+  const fromDecide = (
+    severities: readonly ("blocking" | "should_fix" | "nit")[],
+    context: { complete?: boolean; injectionFlagged?: boolean } = {},
+    repo: Record<string, unknown> = {},
+  ): RunDecision => {
+    const { gate, labels } = parseRepoConfig(repo);
+    const made = decide(
+      severities.map((severity) => ({ severity })),
+      {
+        complete: context.complete ?? true,
+        injectionFlagged: context.injectionFlagged ?? false,
+        headMoved: false,
+      },
+      { gate, labels },
+    );
+    if (made.outcome === "skipped") throw new Error("not a recorded decision");
+    return {
+      ...base,
+      decision: made.outcome,
+      blocking: made.counts.blocking,
+      shouldFix: made.counts.should_fix,
+      nits: made.counts.nit,
+      holds: [...made.holds],
+    };
+  };
+  const approveOff = { gate: { approve: false } };
+
+  it("says approving is turned off on the approval it turned into a comment, and not that it approves", () => {
+    const off = fromDecide([], {}, approveOff);
+    expect(off.decision).toBe("approve");
+    const text = markdown(off);
+    expect(text).toContain(
+      "Nothing holds it up, but approving is turned off for this repository (gate.approve: false), so it posts a comment instead of approving.",
+    );
+    expect(text).not.toContain("It approves");
+    expect(markdown(fromDecide(["nit"]))).toContain(
+      "It approves: nothing holds the pull request up.",
+    );
+  });
+
+  it("never names approving off with findings or other holds that decided it", () => {
+    const blocked = markdown(fromDecide(["blocking"], {}, approveOff));
+    expect(blocked).toContain("It requests changes");
+    expect(blocked).not.toContain("approving is turned off");
+    const shouldFix = markdown(fromDecide(["should_fix"], {}, approveOff));
+    expect(shouldFix).toContain("the should-fix findings must be fixed");
+    expect(shouldFix).not.toContain("approving is turned off");
+    const unfinished = markdown(fromDecide([], { complete: false }, approveOff));
+    expect(unfinished).toContain("Approval is held: the review didn't finish");
+    expect(unfinished).not.toContain("approving is turned off");
+  });
+
+  it("says a comment came from an unfinished run or a possible prompt injection, not findings", () => {
+    const incomplete = markdown(fromDecide([], { complete: false }));
+    expect(incomplete).toContain("Approval is held: the review didn't finish");
+    expect(incomplete).not.toContain("should-fix findings must be fixed");
+    expect(markdown(fromDecide(["nit"], { injectionFlagged: true }))).toContain(
+      "A person must look",
+    );
+  });
+
+  it("keeps the findings' wording when nothing else held it", () => {
+    expect(markdown(fromDecide(["should_fix"]))).toContain(
+      "It holds back approval: no finding blocks, but the should-fix findings must be fixed",
+    );
+  });
+
+  it("claims no reason an older run didn't record", () => {
+    const old = markdown({
+      ...base,
+      blocking: undefined,
+      shouldFix: undefined,
+      nits: undefined,
+      holds: undefined,
+    });
+    expect(old).toContain("It holds back approval; this older run didn't record why.");
+    expect(old).not.toContain("should-fix");
+    expect(markdown({ ...base, holds: undefined })).toContain("this older run didn't record why");
+    // An older approval may have posted a comment (approving off): it says only that nothing holds.
+    const oldApprove = markdown({ ...base, decision: "approve", holds: undefined });
+    expect(oldApprove).toContain("Nothing holds the pull request up.");
+    expect(oldApprove).not.toContain("It approves");
+  });
+
+  it("notes counts beyond the open findings listed, and only then", () => {
+    const listed = [{ severity: "blocking" as const, source: "self" as const }];
+    expect(countsNote({ ...base, blocking: 1 }, listed)).toBeUndefined();
+    expect(countsNote({ ...base, blocking: 2 }, listed)).toBe(
+      "The decision counted more findings than are listed here (it can include other reviewers' findings, unmet ticket requirements, or findings answered since).",
+    );
+    // An outdated one is listed, but it isn't open: it doesn't count towards the decision.
+    const outdated = [
+      { severity: "blocking" as const, source: "self" as const, status: "outdated" as const },
+    ];
+    expect(countsNote({ ...base, blocking: 1 }, outdated)).toBeDefined();
+    expect(countsNote(undefined, listed)).toBeUndefined();
   });
 });

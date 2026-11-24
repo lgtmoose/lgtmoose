@@ -102,6 +102,43 @@ describe("routes", () => {
     expect(findingsQuery("acme/api", undefined)).toBe("?repo=acme%2Fapi");
     expect(findingsQuery("acme/api", 12)).toBe("?repo=acme%2Fapi&pr=12");
   });
+
+  it("reads one pull request's runs the same way (NIC-1145)", () => {
+    expect(parseRoute("#/runs?repo=acme/api&pr=12")).toEqual({
+      page: "runs",
+      repo: "acme/api",
+      pr: 12,
+    });
+    expect(routeHash({ page: "runs", repo: "acme/api", pr: 12 })).toBe(
+      "#/runs?repo=acme%2Fapi&pr=12",
+    );
+    expect(parseRoute("#/runs?repo=acme/api&pr=2147483648")).toEqual({
+      page: "runs",
+      repo: "acme/api",
+    });
+    expect(parseRoute("#/runs?pr=12")).toEqual({ page: "runs", repo: undefined });
+  });
+});
+
+describe("a run's decision (NIC-1145)", () => {
+  it("is the CLI's decision line, from the browser-safe entry point", async () => {
+    const browser = await import("@lgtmoose/core/agent-markdown");
+    const core = await import("@lgtmoose/core");
+    const decision = {
+      runId: "5eba8380-1111-4222-8333-444455556666",
+      headSha: "abc1234def5678abc1234def5678abc1234def56",
+      decision: "comment" as const,
+      blocking: 0,
+      shouldFix: 1,
+      nits: 2,
+      shadow: true,
+    };
+    expect(browser.decisionLine(decision)).toBe(core.decisionLine(decision));
+    expect(browser.outcomeLabel("comment", true)).toBe("Comment (shadow)");
+    expect(browser.decisionCounts({ blocking: 0, shouldFix: 1, nits: 2 })).toBe(
+      "0 blocking · 1 should-fix · 2 nits",
+    );
+  });
 });
 
 describe("copy for agent", () => {

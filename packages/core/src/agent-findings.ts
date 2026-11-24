@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentFinding } from "./agent-markdown.js";
+import type { AgentFinding, RunDecision } from "./agent-markdown.js";
 
 /**
  * A pull request's open findings as the findings API returns them (NIC-1140), and answers to
@@ -7,7 +7,18 @@ import type { AgentFinding } from "./agent-markdown.js";
  * dashboard can bundle it for the browser.
  */
 
-export { agentFindingsMarkdown, plainLine, type AgentFinding } from "./agent-markdown.js";
+export {
+  agentFindingsMarkdown,
+  countsNote,
+  decisionCounts,
+  decisionLine,
+  outcomeLabel,
+  plainLine,
+  type AgentFinding,
+  type RunDecision,
+  type RunHold,
+  type RunOutcome,
+} from "./agent-markdown.js";
 
 export const answerOutcomes = ["fixed", "declined"] as const;
 export type AnswerOutcome = (typeof answerOutcomes)[number];
@@ -63,3 +74,56 @@ const sameKeys: Same<keyof Parsed, keyof AgentFinding> = true;
 const parsedIsFinding = (value: Parsed): AgentFinding => value;
 const findingIsParsed = (value: AgentFinding): Parsed => value;
 void [sameKeys, parsedIsFinding, findingIsParsed];
+
+/** What a review run decided (NIC-1145). */
+export const runOutcomes = ["approve", "request_changes", "comment"] as const;
+
+/** A commit SHA: hex only, so it can't carry anything else into the output. */
+const commitSha = z.string().regex(/^[0-9a-f]{7,40}$/);
+const count = z.number().int().nonnegative();
+
+/** A pull request's latest decision, as the findings API gives it (NIC-1145). */
+export const runDecisionSchema = z.object({
+  /** The run's ID: a UUID. */
+  runId: z.uuid(),
+  /** The commit it reviewed. */
+  headSha: commitSha,
+  decision: z.enum(runOutcomes),
+  /** The open findings it counted, by severity; absent for a run from before they were kept. */
+  blocking: count.optional(),
+  shouldFix: count.optional(),
+  nits: count.optional(),
+  /** In shadow mode: nothing was posted to GitHub. */
+  shadow: z.boolean(),
+  /** What kept it from approving, apart from findings; absent when that wasn't kept. */
+  holds: z.array(z.enum(["incomplete", "prompt_injection", "approve_disabled"])).optional(),
+  finishedAt: z.string().optional(),
+});
+
+// As for findings: the schema and the plain `RunDecision` the browser bundle uses must match.
+type ParsedDecision = z.infer<typeof runDecisionSchema>;
+const sameDecisionKeys: Same<keyof ParsedDecision, keyof RunDecision> = true;
+const parsedIsDecision = (value: ParsedDecision): RunDecision => value;
+const decisionIsParsed = (value: RunDecision): ParsedDecision => value;
+void [sameDecisionKeys, parsedIsDecision, decisionIsParsed];
+
+/** One review run of a pull request, as `GET /api/runs` lists it (NIC-1145). */
+export const agentRunSchema = z.object({
+  id: z.uuid(),
+  headSha: commitSha,
+  kind: z.string(),
+  status: z.string(),
+  /** What it decided; absent for a run that recorded no decision (covered, failed, older). */
+  decision: z.enum(runOutcomes).optional(),
+  blocking: count.optional(),
+  shouldFix: count.optional(),
+  nits: count.optional(),
+  /** In shadow mode; absent for a run that decided nothing, whose mode may not be its own. */
+  shadow: z.boolean().optional(),
+  costUsd: z.number().optional(),
+  /** When it started; absent for one that never did (queued, or superseded first). */
+  startedAt: z.string().optional(),
+  createdAt: z.string(),
+  finishedAt: z.string().optional(),
+});
+export type AgentRun = z.infer<typeof agentRunSchema>;

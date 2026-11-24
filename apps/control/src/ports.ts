@@ -1,5 +1,5 @@
 import type { Budgets } from "@lgtmoose/config";
-import type { Finding, ReviewEvent } from "@lgtmoose/core";
+import type { Finding, HoldReason, ReviewEvent } from "@lgtmoose/core";
 import type { CloneOptions, Repo } from "@lgtmoose/git";
 import type { LearningsForBatch, PullReader, PullTarget } from "@lgtmoose/pipeline";
 import type { Poster, PullRef } from "@lgtmoose/poster";
@@ -9,6 +9,19 @@ import type { Permission } from "./thread-policy.js";
 import type { ReplyStore } from "./replies.js";
 import type { BootstrapDeps } from "./bootstrap.js";
 import type { SpendStore } from "./spend.js";
+
+/** A run's decision as it's stored on the run (NIC-1145). */
+export interface RunDecisionRecord {
+  /**
+   * `skipped` when its head moved before it decided: recorded so every run of this version has
+   * a decision, telling it from a run from before decisions were kept. Never shown as one.
+   */
+  outcome: "approve" | "request_changes" | "comment" | "skipped";
+  /** The open findings `decide` counted: ours, other reviewers' verified ones and ticket gaps. */
+  counts: { blocking: number; should_fix: number; nit: number };
+  /** What kept it from approving, apart from findings (`decide`'s holds). */
+  holds: readonly HoldReason[];
+}
 
 /** The artifact bucket, as the control task uses it. Keys are full object keys. */
 export interface ArtifactStore {
@@ -284,6 +297,12 @@ export interface RunStore {
        * file left unreviewed, no spend cap from the prepare step.
        */
       complete?: boolean;
+      /**
+       * What the run decided, and the open findings it counted (NIC-1145). Every run that
+       * succeeds has one, a quiet run included: it posted no new review, but it decided. Left
+       * out by older callers: a skipped decision (the head moved) is recorded as `skipped`.
+       */
+      decision?: RunDecisionRecord | undefined;
     },
   ): Promise<void>;
   /** Marks the execution's run failed, if it got as far as having one. */

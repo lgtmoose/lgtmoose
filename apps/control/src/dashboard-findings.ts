@@ -8,7 +8,7 @@ import {
   type DashboardResponse,
 } from "./dashboard-http.js";
 import type { DashboardDeps } from "./dashboard.js";
-import { AnswerRefusedError } from "./dashboard-store.js";
+import { AnswerRefusedError, decisionReply } from "./dashboard-store.js";
 import { resolutionHeld } from "./thread-policy.js";
 
 /**
@@ -240,12 +240,17 @@ function prParams(
 /** The largest pull request number the database holds (`int4`). */
 export const MAX_PR_NUMBER = 2_147_483_647;
 
-/** `GET /api/findings?repo=owner/name&pr=N` with a token: one PR's open and outdated findings. */
-async function listForToken(
-  deps: DashboardDeps,
+/** The most runs one pull request's list returns (NIC-1145). */
+const PR_RUNS_LIMIT = 50;
+
+/**
+ * The pull request a token request asks about, once `asker` may read its repository: the same
+ * checks for findings and runs. Otherwise the reply that says why not.
+ */
+async function readablePr(
   asker: Asker,
   query: DashboardRequest["query"],
-): Promise<DashboardResponse> {
+): Promise<{ repo: string; number: number } | DashboardResponse> {
   const params = prParams(query);
   if (params?.number === undefined) {
     return json(400, { error: "give repo=owner/name and pr=<number>" });
@@ -258,9 +263,35 @@ async function listForToken(
       error: `no such repository, or you're not a member of ${params.repo.split("/")[0] ?? ""} that this token can show`,
     });
   }
+  return { repo: params.repo, number: params.number };
+}
+
+/**
+ * `GET /api/findings?repo=owner/name&pr=N` with a token: one PR's open and outdated findings, and
+ * its latest decision (NIC-1145), null when none is recorded.
+ */
+async function listForToken(
+  deps: DashboardDeps,
+  asker: Asker,
+  query: DashboardRequest["query"],
+): Promise<DashboardResponse> {
+  const pr = await readablePr(asker, query);
+  if ("status" in pr) return pr;
   return json(200, {
-    findings: await deps.store.openFindings([params.repo], PR_FINDINGS_LIMIT, params.number),
+    findings: await deps.store.openFindings([pr.repo], PR_FINDINGS_LIMIT, pr.number),
+    ...decisionReply(await deps.store.latestDecision(pr.repo, pr.number)),
   });
+}
+
+/** `GET /api/runs?repo=owner/name&pr=N` with a token: one PR's recent runs (NIC-1145). */
+async function runsForToken(
+  deps: DashboardDeps,
+  asker: Asker,
+  query: DashboardRequest["query"],
+): Promise<DashboardResponse> {
+  const pr = await readablePr(asker, query);
+  if ("status" in pr) return pr;
+  return json(200, { runs: await deps.store.recentRuns([pr.repo], PR_RUNS_LIMIT, pr.number) });
 }
 
 /** `POST /api/findings/:id/ack`: answers one of our findings for `asker`. */
@@ -348,11 +379,13 @@ export async function handleTokenRequest(
   if (token === undefined) return undefined;
   const answer = request.method === "POST" ? ANSWER_PATH.exec(request.path) : null;
   const listing = request.method === "GET" && request.path === "/api/findings";
-  if (answer === null && !listing) return json(404, { error: "not found" });
+  const runs = request.method === "GET" && request.path === "/api/runs";
+  if (answer === null && !listing && !runs) return json(404, { error: "not found" });
   try {
     const asker = await tokenAsker(deps, token.trim());
     if ("status" in asker) return asker;
     if (answer?.[1] !== undefined) return await answerFinding(deps, asker, answer[1], request.body);
+    if (runs) return await runsForToken(deps, asker, request.query);
     return await listForToken(deps, asker, request.query);
   } catch (error) {
     const failure = githubFailure(error);
@@ -364,4 +397,4 @@ export async function handleTokenRequest(
   }
 }
 
-export { ANSWER_PATH, PR_FINDINGS_LIMIT, prParams };
+export { ANSWER_PATH, PR_FINDINGS_LIMIT, PR_RUNS_LIMIT, prParams };

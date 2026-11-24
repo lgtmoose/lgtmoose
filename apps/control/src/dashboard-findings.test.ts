@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import { findingEvents, findings, pullRequests } from "@lgtmoose/db";
+import { findingEvents, findings, pullRequests, reviewRuns } from "@lgtmoose/db";
 import { MIGRATIONS_FOLDER } from "@lgtmoose/db/migrate";
 import { drizzleLearningStore } from "@lgtmoose/learnings";
 import { eq } from "drizzle-orm";
@@ -180,6 +180,207 @@ beforeEach(async () => {
     })
     .returning({ id: pullRequests.id });
   pullId = pull?.id ?? "";
+});
+
+describe("a PR's decision and runs with a token (NIC-1145)", () => {
+  const runs = drizzleRunStore(db);
+
+  async function decidedRun(
+    arn: string,
+    headSha: string,
+    decision: { outcome: "approve" | "request_changes" | "comment" | "skipped"; blocking: number },
+    eventAt: Date,
+  ): Promise<string> {
+    const run = await runs.startRun({
+      installationId: 1,
+      repo: "acme/api",
+      number: 232,
+      author: "bob",
+      headSha,
+      baseSha: "b".repeat(40),
+      executionArn: arn,
+      eventAt,
+    });
+    await runs.succeedRun(run.runId, {
+      filesDone: 1,
+      costUsd: 0.25,
+      headSha,
+      statusLabel: undefined,
+      summaryCommentId: undefined,
+      decision: {
+        outcome: decision.outcome,
+        counts: { blocking: decision.blocking, should_fix: 1, nit: 0 },
+        holds: decision.outcome === "comment" ? ["incomplete"] : [],
+      },
+    });
+    return run.runId;
+  }
+
+  const get = (path: string, token: string, query: Record<string, string>) =>
+    handleDashboardRequest(deps, request("GET", path, withToken(token, { query })));
+
+  it("gives the findings with the PR's latest decision, or null before there is one", async () => {
+    await finding();
+    const before = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(JSON.parse(before.body)).toMatchObject({ decision: null });
+
+    await decidedRun("arn:d:1", "c".repeat(40), { outcome: "request_changes", blocking: 2 }, NOW);
+    const newest = await decidedRun(
+      "arn:d:2",
+      "d".repeat(40),
+      { outcome: "comment", blocking: 0 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    const after = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body)).toMatchObject({
+      decision: {
+        runId: newest,
+        headSha: "d".repeat(40),
+        decision: "comment",
+        blocking: 0,
+        shouldFix: 1,
+        nits: 0,
+        shadow: true,
+        holds: ["incomplete"],
+      },
+    });
+  });
+
+  it("lists the PR's runs, newest first, each with what it decided", async () => {
+    const first = await decidedRun(
+      "arn:r:1",
+      "c".repeat(40),
+      { outcome: "request_changes", blocking: 1 },
+      NOW,
+    );
+    const second = await decidedRun(
+      "arn:r:2",
+      "d".repeat(40),
+      { outcome: "approve", blocking: 0 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    const response = await get("/api/runs", READER, { repo: "acme/api", pr: "232" });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { runs: { id: string; decision?: string }[] };
+    expect(body.runs.map((run) => run.id)).toEqual([second, first]);
+    expect(body.runs[0]).toMatchObject({ decision: "approve", blocking: 0, shadow: true });
+    expect(body.runs[1]).toMatchObject({ decision: "request_changes", blocking: 1 });
+    // A run that decided nothing has no mode either: its column's default isn't one it recorded.
+    const covered = await runs.startRun({
+      installationId: 1,
+      repo: "acme/api",
+      number: 232,
+      author: "bob",
+      headSha: "e".repeat(40),
+      baseSha: "b".repeat(40),
+      executionArn: "arn:r:3",
+      eventAt: new Date(NOW.getTime() + 120_000),
+    });
+    await runs.coverRun(covered.runId, { filesDone: 0, costUsd: undefined });
+    const again = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(again.runs[0]).toMatchObject({ id: covered.runId, status: "covered" });
+    expect(again.runs[0]).not.toHaveProperty("decision");
+    expect(again.runs[0]).not.toHaveProperty("shadow");
+  });
+
+  it("knows no decision when the newest one isn't readable, and shows no counts for it", async () => {
+    await decidedRun("arn:u:1", "c".repeat(40), { outcome: "approve", blocking: 0 }, NOW);
+    const newest = await decidedRun(
+      "arn:u:2",
+      "d".repeat(40),
+      { outcome: "request_changes", blocking: 3 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    // A stored value no version writes: not a decision we can show, so the older one isn't either.
+    await db.update(reviewRuns).set({ decision: "merge" }).where(eq(reviewRuns.id, newest));
+    const findings = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    // Recorded, but not a decision this version can read: left out, not "none recorded".
+    expect(JSON.parse(findings.body)).not.toHaveProperty("decision");
+    const listed = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(listed.runs[0]).toMatchObject({ id: newest });
+    for (const key of ["decision", "blocking", "shouldFix", "nits", "shadow"]) {
+      expect(listed.runs[0]).not.toHaveProperty(key);
+    }
+    expect(listed.runs[1]).toMatchObject({ decision: "approve", blocking: 0 });
+  });
+
+  it("passes over a skipped run: its head moved, so it decided nothing about the PR", async () => {
+    const decided = await decidedRun(
+      "arn:s:1",
+      "c".repeat(40),
+      { outcome: "request_changes", blocking: 1 },
+      NOW,
+    );
+    const skipped = await decidedRun(
+      "arn:s:2",
+      "d".repeat(40),
+      { outcome: "skipped", blocking: 1 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    // A skipped run posts a COMMENT, as it always has: still not the PR's decision.
+    await db.update(reviewRuns).set({ reviewEvent: "COMMENT" }).where(eq(reviewRuns.id, skipped));
+    const body = JSON.parse(
+      (await get("/api/findings", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { decision: Record<string, unknown> };
+    expect(body.decision).toMatchObject({ runId: decided, decision: "request_changes" });
+    // Listed, it shows no decision.
+    const runs = JSON.parse(
+      (await get("/api/runs", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { runs: Record<string, unknown>[] };
+    expect(runs.runs[0]).toMatchObject({ id: skipped });
+    expect(runs.runs[0]).not.toHaveProperty("decision");
+  });
+
+  it("knows no decision when the newest run wrote the PR's state without one", async () => {
+    await decidedRun("arn:p:1", "c".repeat(40), { outcome: "approve", blocking: 0 }, NOW);
+    // Older code finished this one during a deploy: it posted a review, and recorded no decision.
+    const older = await decidedRun(
+      "arn:p:2",
+      "d".repeat(40),
+      { outcome: "comment", blocking: 0 },
+      new Date(NOW.getTime() + 60_000),
+    );
+    await db
+      .update(reviewRuns)
+      .set({ decision: null, decisionBlocking: null, reviewEvent: "COMMENT" })
+      .where(eq(reviewRuns.id, older));
+    const findings = await get("/api/findings", READER, { repo: "acme/api", pr: "232" });
+    expect(JSON.parse(findings.body)).not.toHaveProperty("decision");
+  });
+
+  it("claims no reason when a stored hold isn't one it knows", async () => {
+    const run = await decidedRun(
+      "arn:h:1",
+      "c".repeat(40),
+      { outcome: "comment", blocking: 0 },
+      NOW,
+    );
+    await db
+      .update(reviewRuns)
+      .set({ decisionHolds: ["incomplete", "a_hold_from_later"] })
+      .where(eq(reviewRuns.id, run));
+    const body = JSON.parse(
+      (await get("/api/findings", READER, { repo: "acme/api", pr: "232" })).body,
+    ) as { decision: Record<string, unknown> };
+    expect(body.decision).toMatchObject({ runId: run, decision: "comment" });
+    expect(body.decision).not.toHaveProperty("holds");
+  });
+
+  it("refuses runs as it refuses findings: a PR is needed, and outsiders see nothing", async () => {
+    await decidedRun("arn:x:1", "c".repeat(40), { outcome: "approve", blocking: 0 }, NOW);
+    expect((await get("/api/runs", READER, { repo: "acme/api" })).status).toBe(400);
+    expect((await get("/api/runs", READER, { repo: "acme/api", pr: "2147483648" })).status).toBe(
+      400,
+    );
+    expect((await get("/api/runs", STRANGER, { repo: "acme/api", pr: "232" })).status).toBe(404);
+    expect((await get("/api/runs", OUTSIDER, { repo: "acme/api", pr: "232" })).status).toBe(404);
+    expect((await get("/api/runs", NO_READ_ORG, { repo: "acme/api", pr: "232" })).status).toBe(403);
+  });
 });
 
 describe("listing a PR's findings with a token", () => {

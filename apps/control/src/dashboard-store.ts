@@ -7,9 +7,15 @@ import {
   pullRequests,
   reviewRuns,
 } from "@lgtmoose/db";
-import { MAX_DECLINE_REASON } from "@lgtmoose/core";
+import {
+  MAX_DECLINE_REASON,
+  runOutcomes,
+  type RunDecision,
+  type RunHold,
+  type RunOutcome,
+} from "@lgtmoose/core";
 import { redactSensitive } from "@lgtmoose/learnings";
-import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "./database.js";
 import { unpostedShadow } from "./shadow-findings.js";
 
@@ -123,7 +129,72 @@ export interface RunSummary {
   startedAt: string | undefined;
   finishedAt: string | undefined;
   createdAt: string;
+  /**
+   * What it decided, and the open findings it counted (NIC-1145). Undefined for a run that
+   * recorded no decision: covered, superseded, failed, or older than the column.
+   */
+  decision: RunOutcome | undefined;
+  blocking: number | undefined;
+  shouldFix: number | undefined;
+  nits: number | undefined;
+  /**
+   * In shadow mode: nothing it decided was posted to GitHub. Undefined for a run that decided
+   * nothing: its mode is the column's default, not one it recorded.
+   */
+  shadow: boolean | undefined;
 }
+
+/** A PR's latest decision, or that none was recorded, or that the newest isn't readable. */
+export type LatestDecision = RunDecision | "none" | "unknown";
+
+/** The findings reply's `decision` for one: null is "none recorded"; left out, "not known". */
+export function decisionReply(latest: LatestDecision): { decision?: RunDecision | null } {
+  if (latest === "unknown") return {};
+  return { decision: latest === "none" ? null : latest };
+}
+
+/** A stored decision, if it's one we know: a bad value reads as none, never as an approval. */
+const outcomeOf = (value: string | null): RunOutcome | undefined =>
+  runOutcomes.find((outcome) => outcome === value);
+
+/** A run's decision fields for a list, all of them only when its decision is one we know. */
+function decidedFields(row: {
+  decision: string | null;
+  blocking: number | null;
+  shouldFix: number | null;
+  nits: number | null;
+  shadow: boolean;
+}): Pick<RunSummary, "decision" | "blocking" | "shouldFix" | "nits" | "shadow"> {
+  const decision = outcomeOf(row.decision);
+  if (decision === undefined) {
+    return {
+      decision: undefined,
+      blocking: undefined,
+      shouldFix: undefined,
+      nits: undefined,
+      shadow: undefined,
+    };
+  }
+  return {
+    decision,
+    blocking: row.blocking ?? undefined,
+    shouldFix: row.shouldFix ?? undefined,
+    nits: row.nits ?? undefined,
+    shadow: row.shadow,
+  };
+}
+
+const HOLDS: readonly RunHold[] = ["incomplete", "prompt_injection", "approve_disabled"];
+
+/**
+ * Stored holds, when every one is a hold we know; undefined when none were kept (a run from
+ * before they were) or one isn't known, so the wording claims no reason it can't read.
+ */
+const holdsOf = (value: string[] | null): RunHold[] | undefined => {
+  if (value === null) return undefined;
+  const known = value.flatMap((stored) => HOLDS.filter((hold) => hold === stored));
+  return known.length === value.length ? known : undefined;
+};
 
 /**
  * An answer the database refused as invalid (NIC-1140): `lgtmoose_claim_fix` or
@@ -181,8 +252,17 @@ export interface DashboardStore {
    * reads later. False when it isn't open or outdated.
    */
   declineFinding(id: string, login: string, reason: string): Promise<boolean>;
-  /** The newest review runs in `repos`, at most `limit`. */
-  recentRuns(repos: readonly string[], limit: number): Promise<RunSummary[]>;
+  /**
+   * The newest review runs in `repos`, at most `limit`. With a pull request `number` (NIC-1145),
+   * only that PR's.
+   */
+  recentRuns(repos: readonly string[], limit: number, number?: number): Promise<RunSummary[]>;
+  /**
+   * A pull request's latest decision (NIC-1145): the newest succeeded run of it that recorded
+   * one, newest by the event it reviewed, as the PR's own record goes. `none` when no run has
+   * decided; `unknown` when the newest recorded a value this version can't read.
+   */
+  latestDecision(repo: string, number: number): Promise<LatestDecision>;
   /** Provider use by runs in `repos` since `since`, by provider. */
   providerUse(repos: readonly string[], since: Date): Promise<ProviderUse[]>;
   /** Providers cooling down at `now`. */
@@ -372,7 +452,7 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
       )) as unknown as { rows: { done: unknown }[] };
       return result.rows[0]?.done === true;
     },
-    async recentRuns(repos, limit) {
+    async recentRuns(repos, limit, number) {
       if (repos.length === 0) return [];
       const rows = await db
         .select({
@@ -388,10 +468,17 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
           startedAt: reviewRuns.startedAt,
           finishedAt: reviewRuns.finishedAt,
           createdAt: reviewRuns.createdAt,
+          decision: reviewRuns.decision,
+          blocking: reviewRuns.decisionBlocking,
+          shouldFix: reviewRuns.decisionShouldFix,
+          nits: reviewRuns.decisionNits,
+          shadow: reviewRuns.shadow,
         })
         .from(reviewRuns)
         .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
-        .where(inRepos(repos))
+        .where(
+          and(inRepos(repos), number === undefined ? undefined : eq(pullRequests.number, number)),
+        )
         .orderBy(desc(reviewRuns.createdAt))
         .limit(limit);
       const providers = new Map<string, Set<string>>();
@@ -425,7 +512,75 @@ export function drizzleDashboardStore(db: Db, options: { live?: boolean } = {}):
         startedAt: iso(row.startedAt),
         finishedAt: iso(row.finishedAt),
         createdAt: row.createdAt.toISOString(),
+        // A decision we don't know (none, or a stored value we can't read) takes its counts and
+        // mode with it: they'd describe a decision nobody can show.
+        ...decidedFields(row),
       }));
+    },
+    async latestDecision(repo, number) {
+      const rows = await db
+        .select({
+          runId: reviewRuns.id,
+          headSha: reviewRuns.headSha,
+          decision: reviewRuns.decision,
+          blocking: reviewRuns.decisionBlocking,
+          shouldFix: reviewRuns.decisionShouldFix,
+          nits: reviewRuns.decisionNits,
+          holds: reviewRuns.decisionHolds,
+          shadow: reviewRuns.shadow,
+          finishedAt: reviewRuns.finishedAt,
+        })
+        .from(reviewRuns)
+        .innerJoin(pullRequests, eq(reviewRuns.pullRequestId, pullRequests.id))
+        .where(
+          and(
+            inRepos([repo]),
+            eq(pullRequests.number, number),
+            eq(reviewRuns.status, "succeeded"),
+            or(
+              // A run that decided. A skipped one (its head moved) decided nothing about the PR,
+              // and never stands for it.
+              and(isNotNull(reviewRuns.decision), ne(reviewRuns.decision, "skipped")),
+              // A run from before decisions were kept (every newer run records one, `skipped`
+              // included) that wrote the PR's state: the PR's newest, and its decision isn't
+              // known, rather than an older run's standing in.
+              and(
+                isNull(reviewRuns.decision),
+                or(
+                  eq(reviewRuns.wrotePr, true),
+                  isNotNull(reviewRuns.reviewEvent),
+                  isNotNull(reviewRuns.statusLabel),
+                ),
+              ),
+            ),
+          ),
+        )
+        // Newest by the event it reviewed, as the PR's own record goes (`newerRunPosted`): an
+        // older run that finished later doesn't stand for the PR.
+        .orderBy(
+          desc(sql`coalesce(${reviewRuns.eventAt}, ${reviewRuns.createdAt})`),
+          desc(reviewRuns.createdAt),
+          desc(reviewRuns.id),
+        )
+        .limit(1);
+      // Only the newest run that recorded a decision: if that's one we can't read, the PR's
+      // decision isn't known, and an older run's would be stale.
+      const [row] = rows;
+      if (row === undefined) return "none";
+      const decision = outcomeOf(row.decision);
+      if (decision === undefined) return "unknown";
+      return {
+        runId: row.runId,
+        headSha: row.headSha,
+        decision,
+        // Undefined for a run from before the counts were kept (its decision was backfilled).
+        ...(row.blocking === null ? {} : { blocking: row.blocking }),
+        ...(row.shouldFix === null ? {} : { shouldFix: row.shouldFix }),
+        ...(row.nits === null ? {} : { nits: row.nits }),
+        ...(holdsOf(row.holds) === undefined ? {} : { holds: holdsOf(row.holds) }),
+        shadow: row.shadow,
+        ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt.toISOString() }),
+      };
     },
     async providerUse(repos, since) {
       if (repos.length === 0) return [];

@@ -8,8 +8,16 @@ import {
 import {
   agentFindingSchema,
   agentFindingsMarkdown,
+  agentRunSchema,
+  countsNote,
+  decisionCounts,
+  decisionLine,
+  outcomeLabel,
   plainLine,
+  runDecisionSchema,
   type AgentFinding,
+  type AgentRun,
+  type RunDecision,
 } from "@lgtmoose/core";
 import { z } from "zod";
 import type { StackLookup } from "../deploy/aws-cloudformation.js";
@@ -24,8 +32,10 @@ export const FINDINGS_HELP = `Usage:
 A pull request's open findings, and answers to them, through the deployment's dashboard API.
 This works in shadow mode too, where findings aren't on GitHub. Nothing is posted to GitHub.
 
-  <owner/repo>#<n>  List the PR's open findings. --format md is written for a coding agent:
-                    paste it into its prompt. Needs read access to the repository.
+  <owner/repo>#<n>  List the PR's open findings, after the PR's latest decision (approve,
+                    changes requested or comment, and whether it was in shadow mode). --format
+                    md is written for a coding agent: paste it into its prompt. Needs read access
+                    to the repository.
   ack <id> fixed    Say a finding is fixed. The next review checks it again first, and closes it
                     only if the problem is gone.
   ack <id> declined Say it isn't a problem, with --reason. It closes the finding at once, and
@@ -188,9 +198,27 @@ export function terminalSafeJson(json: string): string {
   );
 }
 
-/** The findings as a short plain list, for a person at a terminal. */
-function formatText(repo: string, number: number, findings: readonly AgentFinding[]): string {
-  if (findings.length === 0) return `No open findings on ${repo}#${number}.\n`;
+/**
+ * The PR's latest decision as the findings reply gives it: `known` false when the dashboard gave
+ * none at all (one from before it did), so nothing is claimed either way.
+ */
+interface ReplyDecision {
+  known: boolean;
+  decision: RunDecision | undefined;
+}
+
+/** The findings as a short plain list, for a person at a terminal, after the PR's decision. */
+function formatText(
+  repo: string,
+  number: number,
+  findings: readonly AgentFinding[],
+  decision: ReplyDecision,
+): string {
+  const note = decision.known ? countsNote(decision.decision, findings) : undefined;
+  const head = decision.known
+    ? `${decisionLine(decision.decision)}\n${note === undefined ? "" : `${note}\n`}`
+    : "";
+  if (findings.length === 0) return `${head}No open findings on ${repo}#${number}.\n`;
   const lines = findings.map((finding) => {
     const where =
       finding.path === undefined
@@ -199,7 +227,19 @@ function formatText(repo: string, number: number, findings: readonly AgentFindin
     const claimed = finding.fixClaimedAt === undefined ? "" : " (fixed: waiting for recheck)";
     return `${plainLine(finding.id)}  ${finding.severity}${where}  ${plainLine(finding.title)}${claimed}`;
   });
-  return `${lines.join("\n")}\n`;
+  return `${head}${lines.join("\n")}\n`;
+}
+
+/**
+ * The PR's latest decision from a findings reply. Null is "none recorded yet"; a missing or
+ * unreadable one (a dashboard from before it was given) claims nothing either way.
+ */
+function replyDecision(reply: { decision?: unknown }): ReplyDecision {
+  if (reply.decision === null) return { known: true, decision: undefined };
+  const parsed = runDecisionSchema.safeParse(reply.decision);
+  return parsed.success
+    ? { known: true, decision: parsed.data }
+    : { known: false, decision: undefined };
 }
 
 async function list(
@@ -215,17 +255,30 @@ async function list(
   const base = await dashboardUrl(deps, url);
   const query = new URLSearchParams({ repo, pr: String(number) });
   const reply = z
-    .object({ findings: z.array(z.unknown()) })
+    .object({ findings: z.array(z.unknown()), decision: z.unknown().optional() })
     .parse(await call(deps, base, `/api/findings?${query.toString()}`, { method: "GET" }));
+  const decision = replyDecision(reply);
   // Only LGTMoose's own: other reviewers' are on GitHub, answered there.
   const findings = reply.findings.flatMap((entry) => {
     const parsed = agentFindingSchema.safeParse(entry);
     return parsed.success && (parsed.data.source ?? "self") === "self" ? [parsed.data] : [];
   });
   const formats = {
-    json: () => `${terminalSafeJson(JSON.stringify(findings, null, 2))}\n`,
-    text: () => formatText(repo, number, findings),
-    md: () => agentFindingsMarkdown({ repo, number, findings, cli: CLI }),
+    json: () => {
+      // The decision only when the reply gave one we can read: null is "none recorded yet";
+      // left out, nothing is claimed (an older dashboard, or one that didn't parse).
+      const out = decision.known ? { decision: decision.decision ?? null, findings } : { findings };
+      return `${terminalSafeJson(JSON.stringify(out, null, 2))}\n`;
+    },
+    text: () => formatText(repo, number, findings, decision),
+    md: () =>
+      agentFindingsMarkdown({
+        repo,
+        number,
+        findings,
+        ...(decision.known ? { decision: decision.decision } : {}),
+        cli: CLI,
+      }),
   };
   return { exitCode: 0, stdout: formats[format](), stderr: "" };
 }
@@ -302,6 +355,110 @@ export async function runFindings(
       throw new UsageError("--format is md, json or text.");
     }
     return await list(await getDeps(), first, format, values.url);
+  } catch (error) {
+    if (error instanceof UsageError) return fail(error.message);
+    return fail(errorMessage(error));
+  }
+}
+
+export const RUNS_HELP = `Usage:
+  ${CLI} runs <owner/repo>#<number> [--format text|json]
+
+A pull request's recent review runs, newest first, through the deployment's dashboard API: when
+each ran, the commit, the kind of review, how it ended, what it decided (approve, changes
+requested or comment), the open findings it counted, its cost, and whether it was in shadow
+mode, where nothing is posted to GitHub. A covered, superseded or failed run decided nothing.
+
+Your GitHub token and the access it needs are as for \`${CLI} findings\`: read access to the
+repository, as a member of the org that owns it.
+
+Options:
+  --format <f>   text (default) or json
+  --url <url>    The dashboard's URL. Default: LGTMOOSE_DASHBOARD_URL, or the deployed
+                 ${STACK_NAMES.dashboard} stack's output (docker compose: http://localhost:<port>)
+  -h, --help
+`;
+
+/** One run on a line: when, commit, kind, status, decision and counts, cost, shadow. */
+function runLine(run: AgentRun): string {
+  const decided = run.decision === undefined ? "—" : outcomeLabel(run.decision, false);
+  const counts = decisionCounts(run);
+  const cost = run.costUsd === undefined ? "" : `  $${run.costUsd.toFixed(2)}`;
+  return [
+    // When it started, as the dashboard shows it, else when it was queued.
+    plainLine(run.startedAt ?? run.createdAt),
+    run.headSha.slice(0, 7),
+    plainLine(run.kind),
+    plainLine(run.status),
+    `${decided}${counts === undefined ? "" : ` (${counts})`}`,
+  ]
+    .join("  ")
+    .concat(cost, run.shadow ? "  shadow" : "", `  run ${run.id.slice(0, 8)}`);
+}
+
+async function listRuns(
+  deps: FindingsDeps,
+  target: string,
+  format: "text" | "json",
+  url: string | undefined,
+): Promise<CommandResult> {
+  const match = PR_TARGET.exec(target);
+  if (match === null) throw new UsageError(`Give the pull request as owner/repo#123.`);
+  const repo = (match[1] ?? "").toLowerCase();
+  const number = Number(match[2]);
+  const base = await dashboardUrl(deps, url);
+  const query = new URLSearchParams({ repo, pr: String(number) });
+  const reply = z
+    .object({ runs: z.array(z.unknown()) })
+    .parse(await call(deps, base, `/api/runs?${query.toString()}`, { method: "GET" }));
+  // Only runs we can read: a malformed one is left out rather than shown half-right.
+  const runs = reply.runs.flatMap((entry) => {
+    const parsed = agentRunSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+  if (format === "json") {
+    return {
+      exitCode: 0,
+      stdout: `${terminalSafeJson(JSON.stringify(runs, null, 2))}\n`,
+      stderr: "",
+    };
+  }
+  const text =
+    runs.length === 0
+      ? `No review runs on ${repo}#${number}.\n`
+      : `${runs.map(runLine).join("\n")}\n`;
+  return { exitCode: 0, stdout: text, stderr: "" };
+}
+
+export async function runRuns(
+  argv: readonly string[],
+  getDeps: () => Promise<FindingsDeps>,
+): Promise<CommandResult> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: [...argv],
+      strict: true,
+      allowPositionals: true,
+      options: {
+        format: { type: "string" },
+        url: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+  } catch (error) {
+    return fail(`${errorMessage(error)}\n\n${RUNS_HELP}`);
+  }
+  const { values, positionals } = parsed;
+  const [target, ...rest] = positionals;
+  if (values.help === true || target === undefined) {
+    return { exitCode: 0, stdout: RUNS_HELP, stderr: "" };
+  }
+  try {
+    if (rest.length > 0) throw new UsageError(`Unexpected: ${rest.join(" ")}`);
+    const format = values.format ?? "text";
+    if (format !== "text" && format !== "json") throw new UsageError("--format is text or json.");
+    return await listRuns(await getDeps(), target, format, values.url);
   } catch (error) {
     if (error instanceof UsageError) return fail(error.message);
     return fail(errorMessage(error));

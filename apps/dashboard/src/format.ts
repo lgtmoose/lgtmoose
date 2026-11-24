@@ -4,7 +4,8 @@ export type Route =
   | { page: "repos" }
   /** `pr` only with `repo`: one pull request's findings (NIC-1142). */
   | { page: "findings"; repo: string | undefined; pr?: number | undefined }
-  | { page: "runs"; repo: string | undefined }
+  /** `pr` only with `repo`: one pull request's runs (NIC-1145). */
+  | { page: "runs"; repo: string | undefined; pr?: number | undefined }
   | { page: "learnings"; status: LearningStatus }
   | { page: "usage" }
   | { page: "acceptance" }
@@ -43,8 +44,10 @@ export function parseRoute(hash: string): Route {
       const pr = repo === undefined ? undefined : pullNumber(params.get("pr"));
       return pr === undefined ? { page: "findings", repo } : { page: "findings", repo, pr };
     }
-    case "/runs":
-      return { page: "runs", repo };
+    case "/runs": {
+      const pr = repo === undefined ? undefined : pullNumber(params.get("pr"));
+      return pr === undefined ? { page: "runs", repo } : { page: "runs", repo, pr };
+    }
     case "/learnings":
       return { page: "learnings", status: learningStatus(params.get("status")) };
     case "/usage":
@@ -71,10 +74,12 @@ export function routeHash(route: Route): string {
   }
   if (route.repo === undefined) return `#/${route.page}`;
   const repo = `#/${route.page}?repo=${encodeURIComponent(route.repo)}`;
-  return route.page === "findings" && route.pr !== undefined ? `${repo}&pr=${route.pr}` : repo;
+  return route.pr !== undefined ? `${repo}&pr=${route.pr}` : repo;
 }
 
-/** The findings API's query for a page: all, one repository's, or one pull request's. */
+/**
+ * The findings or runs API's query for a page: all, one repository's, or one pull request's.
+ */
 export function findingsQuery(repo: string | undefined, pr: number | undefined): string {
   if (repo === undefined) return "";
   const query = `?repo=${encodeURIComponent(repo)}`;

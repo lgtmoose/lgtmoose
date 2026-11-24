@@ -152,6 +152,8 @@ In shadow mode a finding has no thread to reply in. `lgtmoose findings` lists LG
 pnpm lgtmoose findings acme/shop#42 --format md
 ```
 
+Every format starts with the pull request's latest decision (NIC-1145): what the newest review run that decided anything came to, on which commit, the open findings it counted, and whether it was in shadow mode, where nothing is posted to GitHub. For example: `Latest decision: Changes requested (shadow) at abc1234 · 1 blocking · 2 should-fix · 0 nits · run 5eba8380`. Before any run has decided, it says `Latest decision: none recorded yet.` In `md` it's followed by what the decision means for the pull request: what held approval back besides findings (the review didn't finish, or a possible prompt injection that needs a person to look), then which findings hold it up. With approving turned off for the repository (`gate.approve: false`), a clean review's decision is still approve, and it says nothing holds the pull request up but that a comment is posted instead of an approval. The counts are what the decision counted, which can include other reviewers' findings, unmet ticket requirements, or findings answered since; when a count is more than the open findings listed at that severity, it says so. For a run from before holds and counts were kept, a comment says only that approval was held back, and an approval only that nothing holds the pull request up. In `json`, the output is `{ "decision": …, "findings": [ … ] }`, with `decision` null when no run has decided yet, and left out when the decision isn't known: an older dashboard gives none, or the newest run recorded a decision this version can't read. Then md and text print no decision line either.
+
 The `md` format is written for a coding agent: paste it into the agent's prompt. It lists each of LGTMoose's open findings, and outdated ones (whose line has changed), with its ID, severity, `path:line` and text, quotes each finding's text as data rather than instructions, and says how to answer each one. `--format json` and `--format text` are there too. Other reviewers' findings aren't listed: they're on GitHub, and answered there.
 
 ```bash
@@ -168,3 +170,19 @@ pnpm lgtmoose findings ack <id> declined --reason "The note is kept by the calle
 - **When GitHub says no:** a token not authorized for the organization's SAML single sign-on gets a 403 saying so; GitHub being unreachable or busy is a 503, and the command says to try again, as is GitHub's rate limit.
 - **Where:** the dashboard's URL comes from `--url`, `LGTMOOSE_DASHBOARD_URL`, or the deployed `Lgtmoose-Dashboard` stack. Under docker compose, use the dashboard's local address, such as `http://localhost:8080`. The dashboard must be deployed (`dashboard: true`, the default).
 - **Reasons are untrusted:** a decline's reason is stored as a reply's body is, and handled the same way where it reaches a learning proposal.
+
+## A pull request's runs: `lgtmoose runs`
+
+`lgtmoose runs` lists a pull request's recent review runs, newest first: when each ran, the commit, the kind of review, how it ended, what it decided (approve, changes requested or comment), the open findings it counted, its cost, and whether it was in shadow mode. It works in shadow mode, where the decision is never posted, and live.
+
+```bash
+pnpm lgtmoose runs acme/shop#42
+```
+
+```bash
+pnpm lgtmoose runs acme/shop#42 --format json
+```
+
+Every run that succeeds records its decision, a quiet one included: one that posts no new review because GitHub's already says the same still decided. A covered, superseded or failed run decided nothing and shows `—`, without a shadow mark: only a run that decided records its mode. So does a run whose head moved before it decided (skipped), and it never counts as the pull request's latest decision. Runs from before decisions were kept show the decision of the review they posted, without counts, where that's certain: an approval, changes requested, or a comment with one of the default status labels (a comment labelled "Approved" was an approval with approving turned off). A comment with a repository's own labels, a skipped decision, or a run that posted no review shows `—`.
+
+It uses the same token, the same access rules and the same dashboard URL as `lgtmoose findings` (above): read access to the repository, as an active member of the allowed org that owns it.

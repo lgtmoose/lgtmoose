@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import type { Finding } from "@lgtmoose/core";
@@ -285,6 +287,101 @@ describe("drizzleRunStore", () => {
     const newest = await start("arn:exec:12", 10);
     await store.succeedRun(newest.runId, posted("c".repeat(40), 7));
     expect(await prRow(newer.pullRequestId)).toMatchObject({ lastReviewedSha: "c".repeat(40) });
+  });
+
+  it("records what a run decided, quiet or not, and nothing for a covered run (NIC-1145)", async () => {
+    const posted = await start("arn:exec:decided-1", 41);
+    await store.succeedRun(posted.runId, {
+      filesDone: 1,
+      costUsd: undefined,
+      headSha: "a".repeat(40),
+      statusLabel: "lgtmoose: changes requested",
+      summaryCommentId: undefined,
+      review: { event: "COMMENT", id: 9 },
+      decision: {
+        outcome: "comment",
+        counts: { blocking: 0, should_fix: 2, nit: 1 },
+        holds: ["incomplete"],
+      },
+    });
+    expect(await runRow(posted.runId)).toMatchObject({
+      decision: "comment",
+      decisionBlocking: 0,
+      decisionShouldFix: 2,
+      decisionNits: 1,
+      decisionHolds: ["incomplete"],
+      reviewEvent: "COMMENT",
+    });
+    // A quiet run posts no review but still decided: the decision, without a review event.
+    const quiet = await start("arn:exec:decided-2", 42);
+    await store.succeedRun(quiet.runId, {
+      filesDone: 0,
+      costUsd: undefined,
+      headSha: "a".repeat(40),
+      statusLabel: "lgtmoose: approved",
+      summaryCommentId: undefined,
+      decision: { outcome: "approve", counts: { blocking: 0, should_fix: 0, nit: 3 }, holds: [] },
+    });
+    expect(await runRow(quiet.runId)).toMatchObject({
+      decision: "approve",
+      decisionNits: 3,
+      decisionHolds: [],
+      reviewEvent: null,
+      statusLabel: "lgtmoose: approved",
+    });
+    const covered = await start("arn:exec:decided-3", 43);
+    await store.coverRun(covered.runId, { filesDone: 0, costUsd: undefined });
+    expect(await runRow(covered.runId)).toMatchObject({ decision: null, decisionBlocking: null });
+  });
+
+  it("backfills an older run's decision from the review it recorded (NIC-1145)", async () => {
+    const reviewed = await start("arn:exec:backfill-1", 44);
+    const quiet = await start("arn:exec:backfill-2", 45);
+    const failed = await start("arn:exec:backfill-3", 46);
+    // COMMENT, by its label: a comment, an approval with approving off, a skipped decision, and
+    // a repository's own label (which can't be told apart).
+    const commented = await start("arn:exec:backfill-4", 47);
+    const approvedOff = await start("arn:exec:backfill-5", 48);
+    const skipped = await start("arn:exec:backfill-6", 49);
+    const custom = await start("arn:exec:backfill-7", 50);
+    for (const [run, statusLabel] of [
+      [commented, "Requires Changes"],
+      [approvedOff, "Approved"],
+      [skipped, null],
+      [custom, "lgtm: needs work"],
+    ] as const) {
+      await db
+        .update(reviewRuns)
+        .set({ status: "succeeded", reviewEvent: "COMMENT", statusLabel })
+        .where(eq(reviewRuns.id, run.runId));
+    }
+    await db
+      .update(reviewRuns)
+      .set({ status: "succeeded", reviewEvent: "REQUEST_CHANGES" })
+      .where(eq(reviewRuns.id, reviewed.runId));
+    await db.update(reviewRuns).set({ status: "succeeded" }).where(eq(reviewRuns.id, quiet.runId));
+    await db
+      .update(reviewRuns)
+      .set({ status: "failed", reviewEvent: "APPROVE" })
+      .where(eq(reviewRuns.id, failed.runId));
+    // The migration's own backfill statement, run again on these rows.
+    const migration = await readFile(join(MIGRATIONS_FOLDER, "0027_run-decisions.sql"), "utf8");
+    const backfill = migration
+      .split("--> statement-breakpoint")
+      .map((part) => part.replace(/^--.*$/gm, "").trim())
+      .find((part) => part.startsWith("UPDATE"));
+    expect(backfill).toBeDefined();
+    await db.execute(sql.raw(backfill ?? ""));
+    expect(await runRow(reviewed.runId)).toMatchObject({
+      decision: "request_changes",
+      decisionBlocking: null,
+    });
+    expect(await runRow(quiet.runId)).toMatchObject({ decision: null });
+    expect(await runRow(failed.runId)).toMatchObject({ decision: null });
+    expect(await runRow(commented.runId)).toMatchObject({ decision: "comment" });
+    expect(await runRow(approvedOff.runId)).toMatchObject({ decision: "approve" });
+    expect(await runRow(skipped.runId)).toMatchObject({ decision: null });
+    expect(await runRow(custom.runId)).toMatchObject({ decision: null });
   });
 
   it("marks a covered run covered, without touching its PR", async () => {
