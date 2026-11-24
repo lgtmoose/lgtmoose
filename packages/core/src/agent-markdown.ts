@@ -111,44 +111,64 @@ const HOLD_MEANING: Record<RunHold, string> = {
 };
 
 /**
- * What the decision means for a coding agent: what holds the pull request up. Its holds first
- * (a run that didn't finish, a possible prompt injection), then the findings, by what it counted.
+ * What the decision means for a coding agent: only what the run recorded. Its holds first (a run
+ * that didn't finish, a possible prompt injection), then the findings it counted. A run from before
+ * holds and counts were kept says a comment held approval back, and no more.
  */
 function decisionMeaning(decision: RunDecision): string[] {
-  const lines = (decision.holds ?? []).map((hold) => HOLD_MEANING[hold]);
-  if (decision.decision === "request_changes") {
-    lines.push(
-      "It requests changes: every blocking finding must be fixed, or declined, before it can approve.",
-    );
-  } else if (decision.decision === "comment" && (decision.shouldFix ?? 1) > 0) {
+  const { holds, blocking, shouldFix } = decision;
+  const requested =
+    "It requests changes: every blocking finding must be fixed, or declined, before it can approve.";
+  const approves = "It approves: nothing holds the pull request up. Nits never block.";
+  if (holds === undefined || blocking === undefined || shouldFix === undefined) {
+    if (decision.decision === "request_changes") return [requested];
+    if (decision.decision === "approve") return [approves];
+    return ["It holds back approval; this older run didn't record why."];
+  }
+  const lines: string[] = [];
+  if (holds.includes("incomplete")) lines.push(HOLD_MEANING.incomplete);
+  if (holds.includes("prompt_injection")) lines.push(HOLD_MEANING.prompt_injection);
+  // Approving turned off explains a comment only when nothing else did: no other hold, and no
+  // blocking or should-fix finding. It never explains changes requested.
+  if (
+    holds.includes("approve_disabled") &&
+    decision.decision === "comment" &&
+    !holds.some((hold) => hold !== "approve_disabled") &&
+    blocking === 0 &&
+    shouldFix === 0
+  ) {
+    lines.push(HOLD_MEANING.approve_disabled);
+  }
+  if (decision.decision === "request_changes") lines.push(requested);
+  else if (decision.decision === "comment" && shouldFix > 0) {
     lines.push(
       "It holds back approval: no finding blocks, but the should-fix findings must be fixed, or declined, before it can approve.",
     );
-  } else if (decision.decision === "approve") {
-    lines.push("It approves: nothing holds the pull request up. Nits never block.");
-  }
+  } else if (decision.decision === "approve") lines.push(approves);
   return lines;
 }
 
 /**
- * Said when the decision counted findings this list doesn't show (NIC-1145): `decide` counts other
- * reviewers' verified findings and unmet ticket requirements too, and only LGTMoose's own are
- * listed. Undefined when the counts match what's listed, or weren't kept.
+ * Said when the decision counted more findings, at some severity, than are listed here open
+ * (NIC-1145): its counts can include other reviewers' findings, unmet ticket requirements, or
+ * findings answered since. Undefined when they don't exceed what's listed, or weren't kept.
  */
 export function countsNote(
   decision: RunDecision | undefined,
-  listed: readonly Pick<AgentFinding, "severity" | "source">[],
+  listed: readonly Pick<AgentFinding, "severity" | "source" | "status">[],
 ): string | undefined {
   if (decision === undefined) return undefined;
-  const ours = listed.filter((finding) => (finding.source ?? "self") === "self");
+  const open = listed.filter(
+    (finding) => (finding.source ?? "self") === "self" && finding.status !== "outdated",
+  );
   const of = (severity: AgentFinding["severity"]) =>
-    ours.filter((finding) => finding.severity === severity).length;
+    open.filter((finding) => finding.severity === severity).length;
   const more =
     (decision.blocking ?? 0) > of("blocking") ||
     (decision.shouldFix ?? 0) > of("should_fix") ||
     (decision.nits ?? 0) > of("nit");
   return more
-    ? "Its counts include other reviewers' findings and unmet ticket requirements; only LGTMoose's own are listed here."
+    ? "The decision counted more findings than are listed here (it can include other reviewers' findings, unmet ticket requirements, or findings answered since)."
     : undefined;
 }
 

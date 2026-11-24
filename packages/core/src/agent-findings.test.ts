@@ -230,7 +230,7 @@ describe("a PR's decision (NIC-1145)", () => {
     ]);
     // It counted a blocking finding the list doesn't show (another reviewer's, a ticket's).
     expect(requested).toContain(
-      "Its counts include other reviewers' findings and unmet ticket requirements; only LGTMoose's own are listed here.",
+      "The decision counted more findings than are listed here (it can include other reviewers' findings, unmet ticket requirements, or findings answered since).",
     );
     const none = agentFindingsMarkdown({
       repo: "acme/app",
@@ -282,9 +282,11 @@ describe("why a decision held (NIC-1145)", () => {
     agentFindingsMarkdown({ repo: "acme/app", number: 7, findings: [], decision });
 
   it("says a comment came from an unfinished run or a possible prompt injection, not findings", () => {
-    const incomplete = markdown({ ...base, holds: ["incomplete"] });
+    const incomplete = markdown({ ...base, holds: ["incomplete", "approve_disabled"] });
     expect(incomplete).toContain("Approval is held: the review didn't finish");
     expect(incomplete).not.toContain("should-fix findings must be fixed");
+    // Approving off doesn't explain it when another hold did.
+    expect(incomplete).not.toContain("Approving is turned off");
     const injected = markdown({ ...base, holds: ["prompt_injection"] });
     expect(injected).toContain("A person must look");
     expect(markdown({ ...base, holds: ["approve_disabled"] })).toContain(
@@ -298,10 +300,43 @@ describe("why a decision held (NIC-1145)", () => {
     );
   });
 
-  it("notes counts the list doesn't show, and only then", () => {
+  it("says approving is off only when that alone made it a comment, never with changes requested", () => {
+    const blocked = markdown({
+      ...base,
+      decision: "request_changes",
+      blocking: 1,
+      holds: ["approve_disabled"],
+    });
+    expect(blocked).not.toContain("Approving is turned off");
+    expect(blocked).toContain("It requests changes");
+    const withShouldFix = markdown({ ...base, shouldFix: 1, holds: ["approve_disabled"] });
+    expect(withShouldFix).not.toContain("Approving is turned off");
+  });
+
+  it("claims no reason an older run didn't record", () => {
+    const old = markdown({
+      ...base,
+      blocking: undefined,
+      shouldFix: undefined,
+      nits: undefined,
+      holds: undefined,
+    });
+    expect(old).toContain("It holds back approval; this older run didn't record why.");
+    expect(old).not.toContain("should-fix");
+    expect(markdown({ ...base, holds: undefined })).toContain("this older run didn't record why");
+  });
+
+  it("notes counts beyond the open findings listed, and only then", () => {
     const listed = [{ severity: "blocking" as const, source: "self" as const }];
     expect(countsNote({ ...base, blocking: 1 }, listed)).toBeUndefined();
-    expect(countsNote({ ...base, blocking: 2 }, listed)).toContain("other reviewers' findings");
+    expect(countsNote({ ...base, blocking: 2 }, listed)).toBe(
+      "The decision counted more findings than are listed here (it can include other reviewers' findings, unmet ticket requirements, or findings answered since).",
+    );
+    // An outdated one is listed, but it isn't open: it doesn't count towards the decision.
+    const outdated = [
+      { severity: "blocking" as const, source: "self" as const, status: "outdated" as const },
+    ];
+    expect(countsNote({ ...base, blocking: 1 }, outdated)).toBeDefined();
     expect(countsNote(undefined, listed)).toBeUndefined();
   });
 });
